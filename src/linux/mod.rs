@@ -50,7 +50,7 @@ pub(crate) fn is_apparmor_userns_denial(rootless: bool, errno: Option<i32>, labe
 }
 
 /// The AppArmor label of a process, or "" when AppArmor is not in use.
-fn apparmor_label(pid: Option<u32>) -> String {
+pub(crate) fn apparmor_label(pid: Option<u32>) -> String {
     let base = pid.map_or_else(|| "/proc/self".to_string(), |p| format!("/proc/{p}"));
     ["attr/apparmor/current", "attr/current"]
         .iter()

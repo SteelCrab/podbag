@@ -15,6 +15,14 @@ pub enum Cmd {
     Pull { image: String },
     /// List stored images
     Images,
+    /// Find programs in an image that cannot run (wrong C library or CPU)
+    CheckImage { image: String },
+    /// Check that this system can run openpod containers
+    Check {
+        /// Print the AppArmor profile that lets openpod use user namespaces
+        #[arg(long)]
+        apparmor_profile: bool,
+    },
     /// Remove images
     Rmi {
         #[arg(required = true)]

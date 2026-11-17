@@ -20,6 +20,34 @@ pub fn pull(name: &str) -> i32 {
     }
 }
 
+pub fn check_image(name: &str) -> i32 {
+    let report = match Image::check(name) {
+        Ok(r) => r,
+        Err(e) => return report(&e),
+    };
+    let libc = match report.image_libc.as_slice() {
+        [] => "no C library".to_string(),
+        list => list
+            .iter()
+            .map(|l| l.name())
+            .collect::<Vec<_>>()
+            .join(" and "),
+    };
+    println!(
+        "{name}: {} programs and libraries checked; the image has {libc}",
+        report.files_checked
+    );
+    for f in &report.findings {
+        let level = if f.is_error() { "error" } else { "warning" };
+        println!("{level}: {} {}", f.path, f.text());
+        println!("  fix: {}", f.fix);
+    }
+    if report.findings.is_empty() {
+        println!("no problems found");
+    }
+    i32::from(report.has_problems())
+}
+
 pub fn images() -> i32 {
     match Image::list() {
         Ok(list) => {

@@ -4,7 +4,7 @@ A daemonless, rootless container engine that runs Docker/OCI images from a singl
 
 ## Status
 
-Early development (milestone M6). What works:
+Early development (milestone M7). What works:
 
 ```sh
 openpod run alpine echo hello            # pulls the image if needed; the container stays
@@ -24,6 +24,8 @@ openpod stop web && openpod rm web
 openpod pull alpine | openpod images | openpod rmi alpine
 openpod system df | openpod system prune -f
 openpod run --rootfs ./rootfs sh         # a plain directory instead of an image
+openpod check                            # is this system ready? (exit 1 if not)
+openpod check-image myapp:1              # programs that cannot run in the image (exit 1)
 ```
 
 There is no daemon: each container has a small `openpod __shim` process that keeps its
@@ -32,7 +34,28 @@ cgroup namespaces, plus a user namespace when run without root. Identical files 
 different images are stored once and share page cache. The store keeps at most 10 GiB by
 default.
 
-Not yet: `openpod check`, image libc checks, macOS and Windows.
+Not yet: macOS and Windows.
+
+## Checks
+
+`openpod check` lists what openpod needs on this system, one line each: the kernel,
+cgroup v2 and, without root, `newuidmap`/`newgidmap`, subordinate IDs, `pasta`, the systemd
+user session, AppArmor, linger and the lowest port a user may publish. Each problem comes
+with the command that fixes it. As root, it warns when Docker's firewall blocks bridge
+networks. `openpod check --apparmor-profile` prints the profile described under "AppArmor".
+
+`openpod check-image IMAGE` reads every program and library in a pulled image (it never
+runs them) and reports the ones that cannot run there: built for another C library (a
+glibc program in a musl image such as Alpine, or the reverse), built for another CPU, or
+needing a library the image does not have (a warning). It exits with 1 when it finds an
+error, for use in CI.
+
+When a container's program cannot start for one of these reasons, `run` and `exec` say
+which, instead of "no such file": for example, that the program needs
+`/lib/ld-linux-aarch64.so.1` (glibc) and the image has no such file, or that a script's
+first line names an interpreter the image lacks.
+
+Measurements against Docker and Podman are in [docs/benchmarks.md](docs/benchmarks.md).
 
 ## Volumes
 
@@ -148,6 +171,9 @@ namespaces that rootless containers need. openpod then stops with
    sudo install -m 0644 openpod.apparmor /etc/apparmor.d/openpod
    sudo apparmor_parser -r /etc/apparmor.d/openpod
    ```
+
+`openpod check --apparmor-profile > openpod.apparmor` writes the same file with the path
+already filled in.
 
 If you move openpod to another path, update the profile.
 

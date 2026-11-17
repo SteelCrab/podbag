@@ -1,4 +1,5 @@
 mod args;
+mod check;
 #[cfg(unix)]
 mod container;
 mod image;
@@ -21,6 +22,8 @@ fn dispatch(cmd: Cmd) -> i32 {
         Cmd::Run(a) => run::run(a),
         Cmd::Pull { image } => image::pull(&image),
         Cmd::Images => image::images(),
+        Cmd::CheckImage { image } => image::check_image(&image),
+        Cmd::Check { apparmor_profile } => check::run(apparmor_profile),
         Cmd::Rmi { images } => image::rmi(&images),
         Cmd::System { cmd } => image::system(cmd),
         Cmd::Ps { all, quiet } => container::ps(all, quiet),
@@ -52,6 +55,8 @@ fn dispatch(cmd: Cmd) -> i32 {
     match cmd {
         Cmd::Pull { image } => image::pull(&image),
         Cmd::Images => image::images(),
+        Cmd::CheckImage { image } => image::check_image(&image),
+        Cmd::Check { apparmor_profile } => check::run(apparmor_profile),
         Cmd::Rmi { images } => image::rmi(&images),
         Cmd::System { cmd } => image::system(cmd),
         Cmd::Volume { cmd } => volume::run(cmd),

@@ -301,7 +301,21 @@ pub(super) fn exec(
     unsafe { libc::execve(c_program.as_ptr(), argv_ptrs.as_ptr(), env_ptrs.as_ptr()) };
 
     let e = std::io::Error::last_os_error();
-    if e.raw_os_error() == Some(libc::ENOENT) {
+    let errno = e.raw_os_error().unwrap_or(0);
+    if let Some((why, next)) = explain(errno, program) {
+        let kind = if errno == libc::ENOENT {
+            ErrorKind::CommandNotFound
+        } else {
+            ErrorKind::CommandNotExecutable
+        };
+        return Err(Error::new(
+            kind,
+            format!("cannot execute {}", argv[0]),
+            why,
+            next,
+        ));
+    }
+    if errno == libc::ENOENT {
         return Err(not_found(&argv[0], None));
     }
     Err(Error::new(
@@ -310,6 +324,36 @@ pub(super) fn exec(
         e.to_string(),
         "check that the file is a program for this CPU and has execute permission",
     ))
+}
+
+/// Why a program that is there could not start (missing loader or script interpreter,
+/// another CPU), from the start of the file. Paths are the container's.
+fn explain(errno: i32, program: &Path) -> Option<(String, String)> {
+    // Only regular files are read, and opening never waits (a FIFO would).
+    let read_head = |p: &Path| {
+        use std::io::Read;
+        use std::os::unix::fs::OpenOptionsExt;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(p)
+            .ok()?;
+        if !file.metadata().ok()?.is_file() {
+            return None;
+        }
+        let mut buf = Vec::new();
+        file.take(crate::diagnose::HEAD as u64)
+            .read_to_end(&mut buf)
+            .ok()?;
+        Some(buf)
+    };
+    crate::diagnose::diagnose_exec(
+        errno,
+        program,
+        read_head,
+        |p| p.exists(),
+        crate::elf::Machine::host(),
+    )
 }
 
 fn not_found(name: &str, searched_path: Option<&str>) -> Error {

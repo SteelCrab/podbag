@@ -565,3 +565,56 @@ fn kill_tree(child: &mut std::process::Child) {
     let _ = child.kill();
     let _ = child.wait();
 }
+
+#[test]
+fn check_image_passes_a_clean_image() {
+    let reg = FakeRegistry::start(false);
+    reg.push(
+        "clean",
+        "v1",
+        &alpine_with(vec![], serde_json::json!({"Env": [PATH]})),
+    );
+    let sb = Sandbox::new();
+    ok(&openpod(&sb, &["pull", &name(&reg, "clean")]));
+    let out = ok(&openpod(&sb, &["check-image", &name(&reg, "clean")]));
+    assert!(out.contains("the image has musl"), "{out}");
+    assert!(out.contains("no problems found"), "{out}");
+}
+
+#[test]
+fn check_image_finds_a_glibc_program_in_a_musl_image() {
+    // The VM's own programs are built for glibc.
+    let glibc_program = std::fs::read("/usr/bin/true").unwrap();
+    let reg = FakeRegistry::start(false);
+    let image = alpine_with(
+        vec![TarEntry::File {
+            path: "usr/local/bin/app".into(),
+            data: glibc_program,
+            mode: 0o755,
+            uid: 0,
+            gid: 0,
+        }],
+        serde_json::json!({"Env": [PATH]}),
+    );
+    reg.push("mixed", "v1", &image);
+    let sb = Sandbox::new();
+    ok(&openpod(&sb, &["pull", &name(&reg, "mixed")]));
+    let out = openpod(&sb, &["check-image", &name(&reg, "mixed")]);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    let text = stdout(&out);
+    let errors: Vec<&str> = text.lines().filter(|l| l.starts_with("error:")).collect();
+    assert_eq!(errors.len(), 1, "{text}");
+    assert!(
+        errors[0].contains("/usr/local/bin/app") && errors[0].contains("glibc"),
+        "{text}"
+    );
+    assert!(text.contains("fix: ") && text.contains("musl"), "{text}");
+}
+
+#[test]
+fn check_image_needs_a_pulled_image() {
+    let sb = Sandbox::new();
+    let out = openpod(&sb, &["check-image", "nothere:v1"]);
+    assert_ne!(out.status.code(), Some(0));
+    assert!(stderr(&out).contains("pull"), "{}", stderr(&out));
+}

@@ -81,3 +81,69 @@ fn failed_setup_leaves_nothing_behind() {
         .collect();
     assert!(left.is_empty(), "{left:?}");
 }
+
+/// The line of `openpod check` output for one item: `<level> <name> ...`.
+fn check_line<'a>(out: &'a str, name: &str) -> &'a str {
+    out.lines()
+        .find(|l| {
+            l.split_whitespace()
+                .skip(1)
+                .collect::<Vec<_>>()
+                .join(" ")
+                .starts_with(name)
+        })
+        .unwrap_or_else(|| panic!("no {name} line in:\n{out}"))
+}
+
+#[test]
+fn check_passes_on_the_test_system() {
+    let sb = Sandbox::new();
+    let out = sb.openpod().arg("check").output().unwrap();
+    let text = stdout(&out);
+    assert_eq!(out.status.code(), Some(0), "{text}{}", stderr(&out));
+    assert!(check_line(&text, "kernel").starts_with("ok"), "{text}");
+    assert!(check_line(&text, "cgroup v2").starts_with("ok"), "{text}");
+    if root_mode() {
+        assert!(check_line(&text, "pasta").starts_with("n/a"), "{text}");
+    } else {
+        assert!(check_line(&text, "pasta").starts_with("ok"), "{text}");
+        assert!(check_line(&text, "apparmor").starts_with("ok"), "{text}");
+    }
+}
+
+#[test]
+fn check_reports_a_missing_pasta() {
+    if root_mode() {
+        return;
+    }
+    let sb = Sandbox::new();
+    let out = sb
+        .openpod()
+        .arg("check")
+        .env("OPENPOD_PASTA", "/nonexistent/pasta")
+        .output()
+        .unwrap();
+    let text = stdout(&out);
+    assert_eq!(out.status.code(), Some(1), "{text}");
+    assert!(check_line(&text, "pasta").starts_with("fail"), "{text}");
+    assert!(text.contains("fix:") && text.contains("passt"), "{text}");
+}
+
+#[test]
+fn check_prints_the_apparmor_profile() {
+    let sb = Sandbox::new();
+    let out = sb
+        .openpod()
+        .args(["check", "--apparmor-profile"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("  userns,"), "{text}");
+    // The profile names this binary's real path.
+    let bin = std::fs::canonicalize(env!("CARGO_BIN_EXE_openpod")).unwrap();
+    assert!(
+        text.contains(&format!("profile openpod {} ", bin.display())),
+        "{text}"
+    );
+}

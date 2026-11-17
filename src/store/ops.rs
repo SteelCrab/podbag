@@ -4,11 +4,24 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum StoreOp {
-    Pull { name: String, progress: bool },
-    RemoveImage { name: String },
+    Pull {
+        name: String,
+        progress: bool,
+    },
+    RemoveImage {
+        name: String,
+    },
     Prune,
-    RemoveContainer { id: String },
-    RemoveVolume { name: String },
+    RemoveContainer {
+        id: String,
+    },
+    RemoveVolume {
+        name: String,
+    },
+    /// Read an image's files for `check-image` (as the owner, who can read them all).
+    CheckImage {
+        name: String,
+    },
 }
 
 /// Entry point of `openpod __store '<json>'`. Returns the process exit code.
@@ -93,6 +106,25 @@ mod linux_ops {
             ),
             StoreOp::Prune => {
                 to_json(&Store::open(dirs, !rootless)?.prune(&|| images_in_use(dirs))?)
+            }
+            StoreOp::CheckImage { name } => {
+                let store =
+                    Store::open_existing(dirs).ok_or_else(|| crate::image::not_pulled(&name))?;
+                let _lock = store.lock_shared()?;
+                let (_, record) = store.find(&name)?;
+                let ld_paths: Vec<String> = record
+                    .config
+                    .env
+                    .iter()
+                    .filter(|(k, _)| k == "LD_LIBRARY_PATH")
+                    .flat_map(|(_, v)| v.split(':').map(String::from).collect::<Vec<_>>())
+                    .filter(|d| d.starts_with('/'))
+                    .collect();
+                to_json(&crate::libc_check::check_tree(
+                    &store.rootfs_path(&record.digest),
+                    crate::elf::Machine::host(),
+                    &ld_paths,
+                ))
             }
             StoreOp::RemoveVolume { name } => {
                 crate::volume::check_name(&name)?;

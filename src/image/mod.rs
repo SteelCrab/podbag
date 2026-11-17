@@ -22,6 +22,17 @@ pub struct Image {
 }
 
 impl Image {
+    /// Find programs and libraries in a stored image that cannot run: built for another
+    /// C library or CPU, or missing a library. Files are read, never run.
+    pub fn check(name: &str) -> Result<crate::libc_check::Report> {
+        from_output(store_op(
+            &crate::store::ops::StoreOp::CheckImage {
+                name: name.to_string(),
+            },
+            false,
+        )?)
+    }
+
     /// Pull an image from its registry, or reuse it if it is already stored.
     pub fn pull(name: &str) -> Result<Image> {
         pull(name, false)
@@ -122,7 +133,7 @@ fn from_output<T: serde::de::DeserializeOwned>(v: serde_json::Value) -> Result<T
     })
 }
 
-fn not_pulled(name: &str) -> Error {
+pub(crate) fn not_pulled(name: &str) -> Error {
     Error::new(
         ErrorKind::NotFound,
         format!("cannot find image {name}"),

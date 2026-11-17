@@ -27,4 +27,12 @@ if [ ! -x "$HOME/openpod-fixtures/alpine/bin/busybox" ]; then
   "$repo/dev/fetch-rootfs.sh" "$HOME/openpod-fixtures/alpine"
 fi
 
+# Docker and Podman for the comparison in docs/benchmarks.md (dev/bench/run.sh).
+if [ "${1:-}" = "--bench" ]; then
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq docker.io podman >/dev/null
+  # Docker runs only while it is measured.
+  sudo systemctl disable docker.service docker.socket containerd.service >/dev/null 2>&1 || true
+  "$repo/dev/bench/docker-off.sh"
+fi
+
 echo "provisioned openpod-dev"

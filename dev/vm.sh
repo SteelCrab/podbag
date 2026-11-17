@@ -28,6 +28,7 @@ case "${1:-}" in
     fi
     limactl shell --workdir "$repo" "$name" bash "$repo/dev/provision.sh"
     ;;
+  bench-setup) limactl shell --workdir "$repo" "$name" bash "$repo/dev/provision.sh" --bench ;;
   shell) limactl shell --workdir "$repo" "$name" ;;
   run) shift; vm_run "$@" ;;
   test) shift; vm_run cargo test "$@" ;;
@@ -41,7 +42,7 @@ case "${1:-}" in
     ;;
   down) limactl stop "$name" ;;
   *)
-    echo "usage: dev/vm.sh up|shell|run <cmd...>|test [args]|test-root [args]|static|down" >&2
+    echo "usage: dev/vm.sh up|bench-setup|shell|run <cmd...>|test [args]|test-root [args]|static|down" >&2
     exit 2
     ;;
 esac

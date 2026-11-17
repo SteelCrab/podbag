@@ -136,7 +136,7 @@ fn stop(dirs: &Dirs) {
 }
 
 /// The pasta program: `OPENPOD_PASTA`, or `pasta` in PATH.
-fn pasta() -> Option<PathBuf> {
+pub(crate) fn pasta() -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     let executable = |p: &std::path::Path| {
         std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)

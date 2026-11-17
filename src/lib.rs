@@ -12,6 +12,12 @@ pub(crate) mod container;
 #[cfg(unix)]
 mod containers;
 mod credentials;
+#[doc(hidden)]
+pub mod diagnose;
+#[doc(hidden)]
+pub mod elf;
+#[doc(hidden)]
+pub mod envcheck;
 mod error;
 #[cfg(unix)]
 #[doc(hidden)]
@@ -22,6 +28,8 @@ pub mod id;
 pub mod idmap;
 #[doc(hidden)]
 pub mod image;
+#[doc(hidden)]
+pub mod libc_check;
 #[cfg(target_os = "linux")]
 #[doc(hidden)]
 pub mod linux;

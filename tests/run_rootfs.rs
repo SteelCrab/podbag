@@ -166,3 +166,95 @@ fn nothing_is_left_behind() {
         .collect();
     assert!(left.is_empty(), "{left:?}");
 }
+
+/// A directory with a glibc program (the VM's own `true`) and a script for a missing
+/// interpreter, to mount into the musl test root.
+fn foreign_programs() -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy("/usr/bin/true", dir.path().join("app")).unwrap();
+    std::fs::write(
+        dir.path().join("run.py"),
+        "#!/nonexistent/python3\nprint(1)\n",
+    )
+    .unwrap();
+    for f in ["app", "run.py"] {
+        std::fs::set_permissions(dir.path().join(f), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+    }
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    dir
+}
+
+#[test]
+fn a_glibc_program_in_a_musl_root_is_explained() {
+    let dir = foreign_programs();
+    let mount = format!("{}:/opt/t:ro", dir.path().display());
+    let out = Sandbox::new().run_with(&["-v", &mount], &["/opt/t/app"]);
+    assert_eq!(out.status.code(), Some(127), "{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(
+        err.starts_with("openpod: cannot execute /opt/t/app\n"),
+        "{err}"
+    );
+    assert!(err.contains("glibc") && err.contains("ld-linux"), "{err}");
+    assert!(err.contains("check-image"), "{err}");
+}
+
+#[test]
+fn a_script_for_a_missing_interpreter_is_explained() {
+    let dir = foreign_programs();
+    let mount = format!("{}:/opt/t:ro", dir.path().display());
+    let out = Sandbox::new().run_with(&["-v", &mount], &["/opt/t/run.py"]);
+    assert_eq!(out.status.code(), Some(127), "{}", stderr(&out));
+    let err = stderr(&out);
+    assert!(err.contains("/nonexistent/python3"), "{err}");
+    assert!(err.contains("first line"), "{err}");
+}
+
+#[test]
+fn running_a_fifo_fails_without_hanging() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let fifo = dir.path().join("pipe");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    std::fs::set_permissions(&fifo, std::fs::Permissions::from_mode(0o777)).unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mount = format!("{}:/opt/t", dir.path().display());
+    let sb = Sandbox::new();
+    let mut child = sb
+        .openpod()
+        .args([
+            "run",
+            "--rm",
+            "--rootfs",
+            &rootfs(),
+            "-v",
+            &mount,
+            "/opt/t/pipe",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if std::time::Instant::now() > deadline {
+            child.kill().ok();
+            // Release the container that waits on the FIFO.
+            std::fs::OpenOptions::new().write(true).open(&fifo).ok();
+            panic!("running a FIFO hangs");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+    assert_eq!(status.code(), Some(126));
+}

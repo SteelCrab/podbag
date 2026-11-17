@@ -44,3 +44,22 @@ fn runs_a_glibc_image_from_docker_hub() {
     assert!(stdout(&out).contains("Debian"), "{}", stdout(&out));
     assert!(stdout(&out).contains("libc.so.6"), "{}", stdout(&out));
 }
+
+#[test]
+fn check_image_passes_alpine_and_debian() {
+    if !enabled() {
+        return;
+    }
+    let sb = Sandbox::new();
+    for image in ["alpine", "debian:stable-slim"] {
+        let out = sb.openpod().args(["pull", image]).output().unwrap();
+        assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+        let out = sb.openpod().args(["check-image", image]).output().unwrap();
+        assert_eq!(out.status.code(), Some(0), "{image}: {}", stdout(&out));
+        assert!(
+            stdout(&out).contains("no problems found"),
+            "{image}: {}",
+            stdout(&out)
+        );
+    }
+}

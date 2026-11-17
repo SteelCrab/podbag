@@ -53,13 +53,27 @@ pub fn newidmap_args(pid: u32, host_id: u32, range: SubIdRange) -> Vec<String> {
         .collect()
 }
 
+/// The name looked up in /etc/subuid and /etc/subgid: the /etc/passwd name, else `$USER`
+/// (directory users such as LDAP are not in /etc/passwd), else the numeric ID.
+pub fn current_user(passwd: Option<&str>, env_user: Option<&str>, uid: u32) -> String {
+    passwd
+        .and_then(|p| user_name(p, uid))
+        .or_else(|| env_user.filter(|u| !u.is_empty()).map(String::from))
+        .unwrap_or_else(|| uid.to_string())
+}
+
+/// `current_user` for this process.
+pub fn this_user(uid: u32) -> String {
+    current_user(
+        std::fs::read_to_string("/etc/passwd").ok().as_deref(),
+        std::env::var("USER").ok().as_deref(),
+        uid,
+    )
+}
+
 /// Write the UID and GID maps of process `pid` with newuidmap and newgidmap.
 pub fn apply_id_maps(pid: u32, uid: u32, gid: u32) -> Result<()> {
-    let user = std::fs::read_to_string("/etc/passwd")
-        .ok()
-        .and_then(|p| user_name(&p, uid))
-        .or_else(|| std::env::var("USER").ok().filter(|u| !u.is_empty()))
-        .unwrap_or_else(|| uid.to_string());
+    let user = this_user(uid);
 
     let newuidmap = find_in_path("newuidmap")?;
     let newgidmap = find_in_path("newgidmap")?;
@@ -129,6 +143,19 @@ fn run_tool(tool: &PathBuf, args: &[String]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_user_comes_from_passwd_then_user_then_the_id() {
+        let passwd = "root:x:0:0::/root:/bin/sh\nana:x:1000:1000::/home/ana:/bin/sh\n";
+        assert_eq!(current_user(Some(passwd), Some("other"), 1000), "ana");
+        // Directory users (LDAP, SSSD) are not in /etc/passwd.
+        assert_eq!(
+            current_user(Some(passwd), Some("ldapuser"), 5000),
+            "ldapuser"
+        );
+        assert_eq!(current_user(None, Some(""), 5000), "5000");
+        assert_eq!(current_user(None, None, 5000), "5000");
+    }
 
     const SUBUID: &str = "# comment\n\nroot:100000:65536\nbroken-line\npista:165536:65536\n1001:300000:1000\npista:900000:10\n";
 
