@@ -4,25 +4,27 @@ A daemonless, rootless container engine that runs Docker/OCI images from a singl
 
 ## Status
 
-Early development (milestone M2). What works:
+Early development (milestone M3). What works:
 
 ```sh
-openpod pull alpine                      # Docker Hub or any OCI registry (public images)
-openpod run alpine echo hello            # pulls the image if needed
-openpod run -u 101 -e A=1 -w /app nginx:alpine sh
-openpod images
-openpod rmi alpine
-openpod system df
-openpod system prune -f
+openpod run alpine echo hello            # pulls the image if needed; the container stays
+openpod run --rm -it alpine sh           # interactive shell, removed on exit
+openpod run -d --name web nginx:alpine   # in the background
+openpod ps -a
+openpod logs -f web
+openpod exec -it web sh
+openpod stop web && openpod rm web
+openpod pull alpine | openpod images | openpod rmi alpine
+openpod system df | openpod system prune -f
 openpod run --rootfs ./rootfs sh         # a plain directory instead of an image
 ```
 
-Containers run in new mount, PID, UTS and IPC namespaces, plus a user namespace
-when run without root. Files are stored once: identical files in different images
-share disk space and page cache. The store keeps at most 10 GiB by default
-(`store_limit` in `~/.config/openpod/config.toml`); the least recently used images go first.
+There is no daemon: each container has a small `openpod __shim` process that keeps its
+logs and answers `stop`, `kill` and `wait`. Containers run in new mount, PID, UTS and IPC
+namespaces, plus a user namespace when run without root. Identical files in different
+images are stored once and share page cache. The store keeps at most 10 GiB by default.
 
-Not yet: background containers, resource limits, volumes and networking.
+Not yet: resource limits, volumes and networking.
 
 ## Development
 

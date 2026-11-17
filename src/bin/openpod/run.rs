@@ -13,6 +13,8 @@ pub fn run(args: RunArgs) -> i32 {
 }
 
 fn start_and_wait(args: RunArgs) -> openpod::Result<i32> {
+    // With -it, keystrokes go to the container as typed (raw mode); restored on return.
+    let raw = args.tty && args.interactive && !args.detach;
     let mut c = match args.rootfs {
         Some(rootfs) => Container::from_rootfs(rootfs).command(args.args),
         None => {
@@ -33,6 +35,13 @@ fn start_and_wait(args: RunArgs) -> openpod::Result<i32> {
             }
         }
     };
+    c = c
+        .interactive(args.interactive)
+        .remove_on_exit(args.rm)
+        .tty(args.tty);
+    if let Some(n) = args.name {
+        c = c.name(n);
+    }
     if let Some(u) = args.user {
         c = c.user(u);
     }
@@ -52,11 +61,17 @@ fn start_and_wait(args: RunArgs) -> openpod::Result<i32> {
     if let Some(h) = args.hostname {
         c = c.hostname(h);
     }
+    if args.detach {
+        let handle = c.start()?;
+        println!("{}", handle.id());
+        return Ok(0);
+    }
 
     // Hold signals until the helper is running, so none is lost in between. Signals that
     // another process sends to the CLI are forwarded to the helper, like `docker run`.
     // Ctrl+C from the terminal is not forwarded: it reaches the container directly.
     let forwarded = [libc::SIGINT, libc::SIGQUIT, libc::SIGTERM, libc::SIGHUP];
+    let _raw = raw.then(raw_terminal).flatten();
     openpod::signals::block(&forwarded);
     match c.spawn_inherit() {
         Ok(r) => {
@@ -68,4 +83,15 @@ fn start_and_wait(args: RunArgs) -> openpod::Result<i32> {
             Err(e)
         }
     }
+}
+
+/// Put this terminal in raw mode for `-t`; restored when the value is dropped.
+#[cfg(target_os = "linux")]
+pub fn raw_terminal() -> Option<openpod::linux::pty::RawMode> {
+    openpod::linux::pty::RawMode::enable(0)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn raw_terminal() -> Option<()> {
+    None
 }

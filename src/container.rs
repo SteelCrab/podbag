@@ -25,6 +25,14 @@ pub struct Container {
     workdir: Option<String>,
     hostname: Option<String>,
     user: Option<String>,
+    #[serde(default)]
+    interactive: bool,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    auto_remove: bool,
+    #[serde(default)]
+    tty: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,6 +103,10 @@ impl Container {
             workdir: None,
             hostname: None,
             user: None,
+            interactive: false,
+            name: None,
+            auto_remove: false,
+            tty: false,
         }
     }
 
@@ -136,59 +148,81 @@ impl Container {
         self
     }
 
+    /// A unique name for the container. The default is the first 12 characters of its ID.
+    pub fn name(mut self, name: impl Into<String>) -> Container {
+        self.name = Some(name.into());
+        self
+    }
+
+    /// Delete the container when it ends (`--rm`). [`Container::run`] and
+    /// [`Container::run_inherit`] always do; [`Container::start`] keeps it by default.
+    pub fn remove_on_exit(mut self, yes: bool) -> Container {
+        self.auto_remove = yes;
+        self
+    }
+
+    /// Give the command a terminal (`-t`).
+    pub fn tty(mut self, yes: bool) -> Container {
+        self.tty = yes;
+        self
+    }
+
+    /// Connect the caller's stdin to the command (`-i`). Without it, stdin is empty.
+    pub fn interactive(mut self, yes: bool) -> Container {
+        self.interactive = yes;
+        self
+    }
+
     /// The user to run as: `name`, `uid`, `name:group` or `uid:gid`. Overrides the image's User.
     pub fn user(mut self, user: impl Into<String>) -> Container {
         self.user = Some(user.into());
         self
     }
 
-    /// Run the container and collect its output. Its stdin is empty.
-    pub fn run(self) -> Result<Output> {
+    /// Run the container and collect its output. Its stdin is empty. The container is
+    /// removed when it ends.
+    pub fn run(mut self) -> Result<Output> {
         #[cfg(target_os = "linux")]
         {
-            use std::io::Read;
             use std::process::Stdio;
+            self.auto_remove = true;
             let (_cleanup, mut helper) =
-                linux_launch::launch(self, Stdio::null(), Stdio::piped(), Stdio::piped())?;
-            let read_fail = |e: std::io::Error| {
-                Error::io("cannot read the container output", &e, "report this bug")
-            };
-
-            // Read both streams at once; reading one to the end first can block on a full pipe.
-            let mut err_pipe = helper.child.stderr.take();
-            let err_reader = std::thread::spawn(move || {
-                let mut buf = Vec::new();
-                err_pipe
-                    .as_mut()
-                    .map(|p| p.read_to_end(&mut buf))
-                    .transpose()
-                    .map(|_| buf)
-            });
-            let mut stdout = Vec::new();
-            if let Some(mut p) = helper.child.stdout.take() {
-                p.read_to_end(&mut stdout).map_err(read_fail)?;
-            }
-            let stderr = err_reader
-                .join()
-                .unwrap_or_else(|_| Ok(Vec::new()))
-                .map_err(read_fail)?;
-            let exit_code = linux_launch::wait(&mut helper)?;
-            Ok(Output {
-                exit_code,
-                stdout,
-                stderr,
-            })
+                linux_launch::launch(self, Stdio::null(), Stdio::piped(), Stdio::piped(), false)?;
+            collect_output(&mut helper)
         }
         #[cfg(not(target_os = "linux"))]
         {
+            let _ = &mut self;
             Err(Error::unsupported_os())
         }
     }
 
     /// Run the container with this process's stdin, stdout and stderr.
-    /// Returns the command's exit code, or 128 + signal number.
-    pub fn run_inherit(self) -> Result<i32> {
+    /// Returns the command's exit code, or 128 + signal number. The container is removed
+    /// when it ends.
+    pub fn run_inherit(mut self) -> Result<i32> {
+        self.auto_remove = true;
         self.spawn_inherit()?.wait()
+    }
+
+    /// Start the container in the background and return at once. It keeps running after
+    /// this process exits, and stays after it ends until [`ContainerHandle::remove`]
+    /// (unless [`Container::remove_on_exit`]).
+    pub fn start(self) -> Result<crate::ContainerHandle> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::process::Stdio;
+            let (cleanup, mut helper) =
+                linux_launch::launch(self, Stdio::null(), Stdio::null(), Stdio::null(), true)?;
+            // The detached shim forked and its first process has exited; reap it.
+            let _ = helper.child.wait();
+            Ok(crate::ContainerHandle::from_id(cleanup.disarm()))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = self;
+            Err(Error::unsupported_os())
+        }
     }
 
     /// Start the container with this process's stdin, stdout and stderr, and return
@@ -198,9 +232,17 @@ impl Container {
         #[cfg(target_os = "linux")]
         {
             use std::process::Stdio;
-            let (cleanup, helper) =
-                linux_launch::launch(self, Stdio::inherit(), Stdio::inherit(), Stdio::inherit())?;
-            Ok(Running { cleanup, helper })
+            let (cleanup, helper) = linux_launch::launch(
+                self,
+                Stdio::inherit(),
+                Stdio::inherit(),
+                Stdio::inherit(),
+                false,
+            )?;
+            Ok(Running {
+                cleanup: Some(cleanup),
+                helper,
+            })
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -209,16 +251,57 @@ impl Container {
     }
 }
 
+/// Read a helper's stdout and stderr to the end, then wait for it.
+#[cfg(target_os = "linux")]
+pub(crate) fn collect_output(helper: &mut crate::helper::HelperChild) -> Result<Output> {
+    use std::io::Read;
+    // Read both streams at once; reading one to the end first can block on a full pipe.
+    let mut err_pipe = helper.child.stderr.take();
+    let err_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        err_pipe
+            .as_mut()
+            .map(|p| p.read_to_end(&mut buf))
+            .transpose()
+            .map(|_| buf)
+    });
+    let mut stdout = Vec::new();
+    let out_result = match helper.child.stdout.take() {
+        Some(mut p) => p.read_to_end(&mut stdout).map(drop),
+        None => Ok(()),
+    };
+    // Always collect the other stream and the helper, even after a read error.
+    let err_result = err_reader.join().unwrap_or_else(|_| Ok(Vec::new()));
+    let exit_code = linux_launch::wait(helper)?;
+    let read_fail =
+        |e: std::io::Error| Error::io("cannot read the container output", &e, "report this bug");
+    out_result.map_err(read_fail)?;
+    let stderr = err_result.map_err(read_fail)?;
+    Ok(Output {
+        exit_code,
+        stdout,
+        stderr,
+    })
+}
+
 /// A started container. Returned by [`Container::spawn_inherit`].
 #[doc(hidden)]
 pub struct Running {
     #[cfg(target_os = "linux")]
-    cleanup: linux_launch::Cleanup,
+    cleanup: Option<linux_launch::Cleanup>,
     #[cfg(target_os = "linux")]
     helper: crate::helper::HelperChild,
 }
 
 impl Running {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn for_exec(helper: crate::helper::HelperChild) -> Running {
+        Running {
+            cleanup: None,
+            helper,
+        }
+    }
+
     /// The PID of the helper process that watches the container.
     pub fn helper_pid(&self) -> u32 {
         #[cfg(target_os = "linux")]
@@ -259,10 +342,22 @@ mod linux_launch {
     pub(super) struct Cleanup {
         dirs: Dirs,
         id: String,
+        armed: bool,
+    }
+
+    impl Cleanup {
+        /// Keep the container; return its ID.
+        pub(super) fn disarm(mut self) -> String {
+            self.armed = false;
+            std::mem::take(&mut self.id)
+        }
     }
 
     impl Drop for Cleanup {
         fn drop(&mut self) {
+            if !self.armed {
+                return;
+            }
             if state::remove_container_dir(&self.dirs, &self.id).is_err() {
                 let _ = helper::run_store_op(
                     &StoreOp::RemoveContainer {
@@ -280,13 +375,14 @@ mod linux_launch {
         stdin: Stdio,
         stdout: Stdio,
         stderr: Stdio,
+        detach: bool,
     ) -> Result<(Cleanup, HelperChild)> {
         let dirs = paths::dirs()?;
         let id = id::new_id()?;
-        let hostname = c
-            .hostname
-            .clone()
-            .unwrap_or_else(|| id::short_id(&id).to_string());
+        let short = id::short_id(&id).to_string();
+        let hostname = c.hostname.clone().unwrap_or_else(|| short.clone());
+        let name = c.name.clone().unwrap_or_else(|| short.clone());
+        let (auto_remove, tty, interactive) = (c.auto_remove, c.tty, c.interactive);
         let cleanup = match c.source {
             Source::Rootfs(ref path) => {
                 let rootfs = std::fs::canonicalize(path)
@@ -311,10 +407,20 @@ mod linux_launch {
                     hostname,
                     user: c.user,
                     image: None,
+                    image_name: None,
+                    name: name.clone(),
+                    auto_remove,
+                    tty,
+                    interactive,
+                    detach,
                 };
                 spec.validate()?;
-                state::write_config(&dirs, &spec)?;
-                Cleanup { dirs, id: spec.id }
+                state::create(&dirs, &spec)?;
+                Cleanup {
+                    dirs,
+                    id: spec.id,
+                    armed: true,
+                }
             }
             Source::Image(ref image) => {
                 let command =
@@ -353,12 +459,19 @@ mod linux_launch {
                     hostname,
                     user: c.user.or(image.config.user.clone()),
                     image: Some(record.digest),
+                    image_name: Some(image.name.clone()),
+                    name: name.clone(),
+                    auto_remove,
+                    tty,
+                    interactive,
+                    detach,
                 };
                 spec.validate()?;
-                state::write_config(&dirs, &spec)?;
+                state::create(&dirs, &spec)?;
                 let cleanup = Cleanup {
                     dirs,
                     id: spec.id.clone(),
+                    armed: true,
                 };
                 for name in ["upper", "work", "merged"] {
                     use std::os::unix::fs::DirBuilderExt;
@@ -380,6 +493,10 @@ mod linux_launch {
         };
         let mut helper = helper::spawn_shim(&cleanup.id, stdin, stdout, stderr)?;
         helper.wait_started()?;
+        // Started: from here the shim owns the container. It removes it at the end when
+        // auto-remove is set; otherwise the container stays.
+        let mut cleanup = cleanup;
+        cleanup.armed = auto_remove && !detach;
         Ok((cleanup, helper))
     }
 

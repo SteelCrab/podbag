@@ -1,4 +1,10 @@
-//! The `openpod __shim <id>` helper: it creates one container and watches it.
+//! The `openpod __shim <id>` helper: it creates one container and serves it until it
+//! ends: output to the log (and to the caller when attached), the control socket, signals.
+
+pub mod control;
+pub mod logbook;
+#[cfg(target_os = "linux")]
+mod supervise;
 
 use crate::helper::StatusChannel;
 use crate::{paths, state};
@@ -7,7 +13,11 @@ use crate::{paths, state};
 pub fn shim_main(id: &str) -> i32 {
     let mut status = StatusChannel::take();
     #[cfg(target_os = "linux")]
-    close_inherited_fds_on_exec();
+    {
+        close_inherited_fds_on_exec();
+        // Held until the container exists and the handlers are in place.
+        crate::signals::block(&supervise::HANDLED);
+    }
     if let Err(e) = crate::id::check(id) {
         return status.fail(e);
     }
@@ -15,15 +25,46 @@ pub fn shim_main(id: &str) -> i32 {
         Ok(d) => d,
         Err(e) => return status.fail(e),
     };
-    let code = run(id, &dirs, &mut status);
-    remove_container(&dirs, id);
-    code
+    let spec = match state::read_config(&dirs, id).and_then(|s| s.validate().map(|()| s)) {
+        Ok(s) => s,
+        Err(e) => return status.fail(e),
+    };
+    #[cfg(target_os = "linux")]
+    {
+        if spec.detach {
+            if let Err(e) = supervise::detach() {
+                return status.fail(e);
+            }
+        }
+        // Readers take this lock to learn that the shim is gone (state::reconcile).
+        let _lock = match state::hold_shim_lock(&dirs, id) {
+            Ok(lock) => lock,
+            Err(e) => {
+                let code = status.fail(e);
+                remove_container(&dirs, id);
+                return code;
+            }
+        };
+        let outcome = supervise::run(&spec, &dirs, &mut status);
+        // A failed start leaves no trace; a finished container stays unless --rm.
+        if !outcome.started || spec.auto_remove {
+            remove_container(&dirs, id);
+        }
+        outcome.code
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = spec;
+        let code = status.fail(crate::Error::unsupported_os());
+        let _ = state::remove_container_dir(&dirs, id);
+        code
+    }
 }
 
 /// Delete the container directory. In rootless mode its writable layer can hold files
 /// owned by subordinate IDs, which only root of a mapped user namespace can delete.
 #[cfg(target_os = "linux")]
-fn remove_container(dirs: &paths::Dirs, id: &str) {
+pub fn remove_container(dirs: &paths::Dirs, id: &str) {
     let dir = dirs.container_dir(id);
     let removed = crate::linux::userns::run_in_userns(|| {
         crate::store::remove_tree(&dir).map_err(|e| {
@@ -39,55 +80,8 @@ fn remove_container(dirs: &paths::Dirs, id: &str) {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
-fn remove_container(dirs: &paths::Dirs, id: &str) {
-    let _ = state::remove_container_dir(dirs, id);
-}
-
 #[cfg(target_os = "linux")]
-fn run(id: &str, dirs: &paths::Dirs, status: &mut StatusChannel) -> i32 {
-    use crate::helper::StatusMessage;
-    use crate::linux;
-    let spec = match state::read_config(dirs, id).and_then(|s| s.validate().map(|()| s)) {
-        Ok(s) => s,
-        Err(e) => return status.fail(e),
-    };
-    let child = match linux::spawn(&spec) {
-        Ok(c) => c,
-        Err(e) => return status.fail(e),
-    };
-    // Install forwarding before reporting "started": callers forward signals only after that.
-    crate::signals::forward_to(
-        child.pid,
-        &[
-            libc::SIGINT,
-            libc::SIGTERM,
-            libc::SIGHUP,
-            libc::SIGQUIT,
-            libc::SIGUSR1,
-            libc::SIGUSR2,
-        ],
-    );
-    status.report(&StatusMessage::Started { pid: child.pid });
-    match linux::wait(child.pid) {
-        Ok(code) => code,
-        Err(e) => {
-            eprintln!("openpod: {e}");
-            e.exit_code()
-        }
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn run(id: &str, dirs: &paths::Dirs, status: &mut StatusChannel) -> i32 {
-    if let Err(e) = state::read_config(dirs, id) {
-        return status.fail(e);
-    }
-    status.fail(crate::Error::unsupported_os())
-}
-
-#[cfg(target_os = "linux")]
-fn close_inherited_fds_on_exec() {
+pub(crate) fn close_inherited_fds_on_exec() {
     const CLOSE_RANGE_CLOEXEC: libc::c_uint = 1 << 2;
     // SAFETY: close_range with CLOSE_RANGE_CLOEXEC only changes descriptor flags.
     let rc = unsafe {

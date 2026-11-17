@@ -34,6 +34,24 @@ pub struct ContainerSpec {
     /// The digest of the image the container uses, if any.
     #[serde(default)]
     pub image: Option<String>,
+    /// The image name as the user gave it, for display.
+    #[serde(default)]
+    pub image_name: Option<String>,
+    /// Unique name; the short ID when the user gave none.
+    #[serde(default)]
+    pub name: String,
+    /// Delete the container when it ends (`run --rm`, and the one-shot library calls).
+    #[serde(default)]
+    pub auto_remove: bool,
+    /// Give the command a terminal (`-t`).
+    #[serde(default)]
+    pub tty: bool,
+    /// Connect the caller's stdin (`-i`).
+    #[serde(default)]
+    pub interactive: bool,
+    /// Run in the background (`-d`): the shim leaves the caller's session.
+    #[serde(default)]
+    pub detach: bool,
 }
 
 impl ContainerSpec {
@@ -120,6 +138,12 @@ pub(crate) fn spec_fixture() -> ContainerSpec {
         hostname: "box".into(),
         user: None,
         image: None,
+        image_name: None,
+        name: "box".into(),
+        auto_remove: false,
+        tty: false,
+        interactive: false,
+        detach: false,
     }
 }
 

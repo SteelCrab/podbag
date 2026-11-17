@@ -172,3 +172,39 @@ fn failed_setup_gives_advice_that_works() {
     assert!(err.contains("\n  fix:   "), "{err}");
     assert!(!err.contains("openpod check"), "{err}");
 }
+
+fn run_with_stdin(sb: &Sandbox, options: &[&str], input: &str) -> std::process::Output {
+    use std::io::Write;
+    let mut child = sb
+        .openpod()
+        .args(["run", "--rm"])
+        .args(options)
+        .args(["--rootfs", &rootfs(), "cat"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
+// Like Docker: without -i the container's stdin is empty.
+#[test]
+fn stdin_is_not_attached_without_i() {
+    let out = run_with_stdin(&Sandbox::new(), &[], "hi\n");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "");
+}
+
+#[test]
+fn stdin_is_attached_with_i() {
+    let out = run_with_stdin(&Sandbox::new(), &["-i"], "hi\n");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(stdout(&out), "hi");
+}

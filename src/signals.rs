@@ -1,22 +1,48 @@
 //! Signal handling for the CLI and the shim. The library API never calls these.
 
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 static TARGET: AtomicI32 = AtomicI32::new(0);
+static PIPE: AtomicI32 = AtomicI32::new(-1);
+/// Forward signals the kernel generated too (see `forward`).
+static ALL: AtomicBool = AtomicBool::new(false);
 
-/// Forward a signal that another process sent (`si_code <= 0`: kill, sigqueue, tgkill).
-/// Signals the kernel generated, such as Ctrl+C from a terminal (`SI_KERNEL`), are not
-/// forwarded: the terminal sends them to the whole foreground process group, which
-/// already includes the container, and a second copy can turn a graceful stop into a
-/// forced one.
+/// Forward a signal to TARGET.
+///
+/// Containers and exec'd commands run in their own session, outside the caller's terminal.
+/// The shim and the exec helper stay in the caller's process group, so they receive the
+/// terminal's signals (Ctrl+C: SIGINT with `si_code` SI_KERNEL) and pass every signal on
+/// (`forward_all_to`, `notify_pipe`). The CLI passes on only signals another process sent
+/// (`si_code <= 0`: kill, sigqueue, tgkill): the terminal's copy already reached its helper.
 extern "C" fn forward(sig: libc::c_int, info: *mut libc::siginfo_t, _context: *mut libc::c_void) {
     // SAFETY: the kernel passes a valid siginfo_t to an SA_SIGINFO handler.
     let from_process = info.is_null() || unsafe { (*info).si_code } <= 0;
     let pid = TARGET.load(Ordering::Relaxed);
-    if from_process && pid > 0 {
+    if (from_process || ALL.load(Ordering::Relaxed)) && pid > 0 {
         // SAFETY: kill is async-signal-safe.
         unsafe { libc::kill(pid, sig) };
     }
+}
+
+/// Write the signal's number to the notify pipe.
+extern "C" fn notify(sig: libc::c_int, _info: *mut libc::siginfo_t, _context: *mut libc::c_void) {
+    let fd = PIPE.load(Ordering::Relaxed);
+    if fd >= 0 {
+        let byte = sig as u8;
+        // SAFETY: write is async-signal-safe; one byte from a valid buffer.
+        unsafe { libc::write(fd, (&byte as *const u8).cast(), 1) };
+    }
+}
+
+/// Report these signals as bytes on `pipe_write` (an event loop reads the other end),
+/// then deliver any that were held.
+pub fn notify_pipe(pipe_write: i32, signals: &[i32]) {
+    PIPE.store(pipe_write, Ordering::Relaxed);
+    let handler = notify as extern "C" fn(libc::c_int, *mut libc::siginfo_t, *mut libc::c_void);
+    for &sig in signals {
+        set_action(sig, handler as libc::sighandler_t, libc::SA_SIGINFO);
+    }
+    set_mask(libc::SIG_UNBLOCK, signals);
 }
 
 /// Hold these signals until `ignore` or `forward_to` handles them.
@@ -36,6 +62,17 @@ pub fn ignore(signals: &[i32]) {
 /// Send each of these signals to `pid` when another process sends it to this process
 /// (see `forward`), then deliver any that were held.
 pub fn forward_to(pid: u32, signals: &[i32]) {
+    ALL.store(false, Ordering::Relaxed);
+    install_forward(pid, signals);
+}
+
+/// Like `forward_to`, for signals from the terminal too.
+pub fn forward_all_to(pid: u32, signals: &[i32]) {
+    ALL.store(true, Ordering::Relaxed);
+    install_forward(pid, signals);
+}
+
+fn install_forward(pid: u32, signals: &[i32]) {
     TARGET.store(pid as i32, Ordering::Relaxed);
     let handler = forward as extern "C" fn(libc::c_int, *mut libc::siginfo_t, *mut libc::c_void);
     for &sig in signals {

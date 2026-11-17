@@ -2,12 +2,14 @@
 //!
 //! Everything here runs inside the shim helper process, never in the library caller.
 
+pub mod exec;
 mod init;
+pub mod pty;
 mod rootfs;
 mod spawn;
 pub mod userns;
 
-pub use spawn::{spawn, wait};
+pub use spawn::{ContainerStdio, spawn, wait};
 
 use crate::{Error, ErrorKind};
 

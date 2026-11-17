@@ -424,6 +424,7 @@ fn container_files_owned_by_other_users_are_cleaned_up() {
         &sb,
         &[
             "run",
+            "--rm",
             &name(&reg, "u"),
             "sh",
             "-c",

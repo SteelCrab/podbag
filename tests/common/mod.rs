@@ -78,19 +78,19 @@ impl Sandbox {
         }
     }
 
-    /// `openpod run --rootfs <rootfs()> <args...>`
+    /// `openpod run --rm --rootfs <rootfs()> <args...>`
     pub fn run(&self, args: &[&str]) -> Output {
         self.openpod()
-            .args(["run", "--rootfs", &rootfs()])
+            .args(["run", "--rm", "--rootfs", &rootfs()])
             .args(args)
             .output()
             .unwrap()
     }
 
-    /// `openpod run --rootfs <rootfs()> <options...> <command...>`
+    /// `openpod run --rm --rootfs <rootfs()> <options...> <command...>`
     pub fn run_with(&self, options: &[&str], command: &[&str]) -> Output {
         self.openpod()
-            .args(["run", "--rootfs", &rootfs()])
+            .args(["run", "--rm", "--rootfs", &rootfs()])
             .args(options)
             .args(command)
             .output()

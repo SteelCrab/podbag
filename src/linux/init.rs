@@ -16,6 +16,7 @@ pub(super) fn child_main(
     rootless: bool,
     sync_read: OwnedFd,
     status_write: OwnedFd,
+    stdio: super::spawn::ContainerStdio,
 ) -> ! {
     let mut sync = File::from(sync_read);
     let mut byte = [0u8; 1];
@@ -26,17 +27,58 @@ pub(super) fn child_main(
     }
     drop(sync);
 
-    let error = match setup_and_exec(spec, rootless) {
-        Err(e) => e,
-        Ok(never) => match never {},
+    let status_fd = std::os::fd::AsRawFd::as_raw_fd(&status_write);
+    let early = if stdio.tty_socket.is_none() {
+        connect_stdio(stdio)
+    } else {
+        Ok(())
     };
+    let error =
+        match early.and_then(|()| setup_and_exec(spec, rootless, status_fd, stdio.tty_socket)) {
+            Err(e) => e,
+            Ok(never) => match never {},
+        };
     let mut status = File::from(status_write);
     let _ = status.write_all(&serde_json::to_vec(&error).unwrap_or_default());
     // SAFETY: as above.
     unsafe { libc::_exit(error.exit_code()) }
 }
 
-fn setup_and_exec(spec: &ContainerSpec, rootless: bool) -> Result<Infallible> {
+/// Put the chosen descriptors on 0, 1 and 2, and start a new session. With a terminal, it
+/// becomes the session's controlling terminal. Without one the session has none, so the
+/// caller's terminal is out of reach (`/dev/tty`, TIOCSTI); the shim or the exec helper
+/// passes the terminal's signals on instead.
+pub(super) fn connect_stdio(stdio: super::spawn::ContainerStdio) -> Result<()> {
+    let fail = |what: &str| os_error(what, std::io::Error::last_os_error(), "report this bug");
+    for (target, &fd) in stdio.fds.iter().enumerate() {
+        // SAFETY: dup2 and fcntl on descriptors owned by this process.
+        unsafe {
+            if fd == target as i32 {
+                // dup2 onto itself keeps FD_CLOEXEC; clear it so the command keeps it.
+                libc::fcntl(fd, libc::F_SETFD, 0);
+            } else if libc::dup2(fd, target as i32) == -1 {
+                return Err(fail("cannot connect the container's standard streams"));
+            }
+        }
+    }
+    // SAFETY: plain system calls on our own process and stdin.
+    unsafe {
+        if libc::setsid() == -1 {
+            return Err(fail("cannot start the container's session"));
+        }
+        if stdio.tty && libc::ioctl(0, libc::TIOCSCTTY, 0) == -1 {
+            return Err(fail("cannot give the container its terminal"));
+        }
+    }
+    Ok(())
+}
+
+fn setup_and_exec(
+    spec: &ContainerSpec,
+    rootless: bool,
+    status_fd: i32,
+    tty_socket: Option<i32>,
+) -> Result<Infallible> {
     if rootless {
         become_root().map_err(|e| {
             setup_error(
@@ -60,6 +102,24 @@ fn setup_and_exec(spec: &ContainerSpec, rootless: bool) -> Result<Infallible> {
         )
     })?;
     enter_rootfs(&spec.rootfs, rootless)?;
+    if let Some(sock) = tty_socket {
+        // Open the terminal in the container's own /dev/pts, so the command can find it.
+        let (master, slave) = super::pty::open(None)?;
+        super::pty::send_fd(sock, std::os::fd::AsRawFd::as_raw_fd(&master)).map_err(|e| {
+            os_error(
+                "cannot hand over the container terminal",
+                e,
+                "report this bug",
+            )
+        })?;
+        drop(master);
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&slave);
+        connect_stdio(super::spawn::ContainerStdio {
+            fds: [fd; 3],
+            tty: true,
+            tty_socket: None,
+        })?;
+    }
 
     let workdir = spec.workdir.as_deref().unwrap_or("/");
     let workdir_error = |e| {
@@ -77,17 +137,39 @@ fn setup_and_exec(spec: &ContainerSpec, rootless: bool) -> Result<Infallible> {
         &std::fs::read_to_string("/etc/group").unwrap_or_default(),
     )?;
     switch_user(&creds)?;
+    die_with_parent(status_fd);
     std::env::set_current_dir(workdir).map_err(workdir_error)?;
 
     let env = spec.effective_env(&creds.home);
     let program = resolve(&spec.command[0], &env)?;
     reset_signals();
+    // Tell the parent the setup worked. The pipe closes on a successful exec.
+    // SAFETY: writing one byte from a valid buffer to our own descriptor.
+    unsafe { libc::write(status_fd, [0u8].as_ptr().cast(), 1) };
     exec(&program, &spec.command, &env)
+}
+
+/// End this process when its parent (the shim) ends. Changing credentials clears
+/// PR_SET_PDEATHSIG, so call this after the last change. If the parent already ended,
+/// the status pipe has lost its reader (POLLERR): end now.
+pub(super) fn die_with_parent(status_fd: i32) {
+    let mut pipe = libc::pollfd {
+        fd: status_fd,
+        events: 0,
+        revents: 0,
+    };
+    // SAFETY: prctl with integer arguments; poll on one valid pollfd.
+    unsafe {
+        libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+        if libc::poll(&mut pipe, 1, 0) > 0 && pipe.revents & libc::POLLERR != 0 {
+            libc::_exit(1);
+        }
+    }
 }
 
 /// Start the command like Docker does: no blocked signals, every signal at its default action.
 /// Ignored signals survive execve, and this process inherited openpod's (Rust ignores SIGPIPE).
-fn reset_signals() {
+pub(super) fn reset_signals() {
     // SAFETY: sa and set are initialized before use; SIG_DFL needs no handler code.
     unsafe {
         let mut sa: libc::sigaction = std::mem::zeroed();
@@ -120,7 +202,7 @@ pub(super) fn become_root() -> std::io::Result<()> {
 }
 
 /// Become the container user: supplementary groups, then group, then user.
-fn switch_user(c: &crate::credentials::Credentials) -> Result<()> {
+pub(super) fn switch_user(c: &crate::credentials::Credentials) -> Result<()> {
     let groups: Vec<libc::gid_t> = c.groups.iter().map(|&g| g as libc::gid_t).collect();
     // SAFETY: plain system calls; the groups pointer is valid for groups.len() entries.
     let ok = unsafe {
@@ -144,7 +226,7 @@ fn setup_error(rootless: bool, what: &str, e: std::io::Error, next: &str) -> Err
 }
 
 /// Find the program: a path with a slash is used as is; a bare name is searched in PATH.
-fn resolve(name: &str, env: &[(String, String)]) -> Result<PathBuf> {
+pub(super) fn resolve(name: &str, env: &[(String, String)]) -> Result<PathBuf> {
     if name.contains('/') {
         return Ok(PathBuf::from(name));
     }
@@ -160,7 +242,11 @@ fn resolve(name: &str, env: &[(String, String)]) -> Result<PathBuf> {
         .ok_or_else(|| not_found(name, Some(path)))
 }
 
-fn exec(program: &Path, argv: &[String], env: &[(String, String)]) -> Result<Infallible> {
+pub(super) fn exec(
+    program: &Path,
+    argv: &[String],
+    env: &[(String, String)],
+) -> Result<Infallible> {
     let invalid = |what: &str| {
         Error::new(
             ErrorKind::InvalidInput,
@@ -216,6 +302,6 @@ fn not_found(name: &str, searched_path: Option<&str>) -> Error {
     )
 }
 
-fn os_error(what: &str, e: std::io::Error, next: &str) -> Error {
+pub(super) fn os_error(what: &str, e: std::io::Error, next: &str) -> Error {
     Error::new(ErrorKind::Runtime, what, e.to_string(), next)
 }

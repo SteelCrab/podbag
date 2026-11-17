@@ -55,6 +55,12 @@ fn shim_reports_unsupported_and_removes_the_container_directory() {
         hostname: "box".into(),
         user: None,
         image: None,
+        image_name: None,
+        name: "box".into(),
+        auto_remove: true,
+        tty: false,
+        interactive: false,
+        detach: false,
     };
     state::write_config(&dirs, &spec).unwrap();
     let mut h = helper::spawn_shim(&spec.id, Stdio::null(), Stdio::null(), Stdio::null()).unwrap();

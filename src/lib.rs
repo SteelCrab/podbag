@@ -4,7 +4,9 @@
 
 #[doc(hidden)]
 pub mod config;
-mod container;
+pub(crate) mod container;
+#[cfg(unix)]
+mod containers;
 mod credentials;
 mod error;
 #[cfg(unix)]
@@ -17,7 +19,8 @@ pub mod idmap;
 #[doc(hidden)]
 pub mod image;
 #[cfg(target_os = "linux")]
-mod linux;
+#[doc(hidden)]
+pub mod linux;
 #[doc(hidden)]
 pub mod paths;
 #[cfg(unix)]
@@ -34,5 +37,8 @@ pub mod state;
 pub mod store;
 
 pub use container::{Container, Output, Running};
+#[cfg(unix)]
+pub use containers::{ContainerHandle, ContainerInfo, ExecOptions, LogFollower, LogLine, Stream};
 pub use error::{Error, ErrorKind, Result};
 pub use image::{DiskUsage, Image, ImageConfig, PruneReport, disk_usage, prune};
+pub use state::{State, Status};

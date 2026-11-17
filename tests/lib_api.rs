@@ -128,3 +128,47 @@ fn host_fds_do_not_leak_into_the_container() {
     // ls itself opens one descriptor (3) to read the directory.
     assert_eq!(String::from_utf8_lossy(&out.stdout), "0\n1\n2\n3\n");
 }
+
+#[test]
+fn library_start_and_wait() {
+    if root_mode() {
+        return;
+    }
+    setup();
+    let handle = Container::from_rootfs(rootfs())
+        .name("libbox")
+        .command(["sh", "-c", "echo hi; exit 4"])
+        .start()
+        .unwrap();
+    assert_eq!(handle.wait().unwrap(), 4);
+    let info = handle.info().unwrap();
+    assert_eq!(info.name, "libbox");
+    let logs: Vec<String> = handle.logs().unwrap().into_iter().map(|l| l.log).collect();
+    assert_eq!(logs, ["hi\n"]);
+    handle.remove(false).unwrap();
+    assert!(openpod::ContainerHandle::get("libbox").is_err());
+}
+
+#[test]
+fn library_exec_captures_output() {
+    if root_mode() {
+        return;
+    }
+    setup();
+    let handle = Container::from_rootfs(rootfs())
+        .name("libexec")
+        .command(["sleep", "30"])
+        .start()
+        .unwrap();
+    let out = handle
+        .exec(
+            &["sh", "-c", "echo in; echo err >&2; exit 2"],
+            &openpod::ExecOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        (out.exit_code, out.stdout.as_slice(), out.stderr.as_slice()),
+        (2, &b"in\n"[..], &b"err\n"[..])
+    );
+    handle.remove(true).unwrap();
+}

@@ -39,8 +39,20 @@ pub(super) fn clone_args(flags: u64) -> CloneArgs {
     }
 }
 
+/// File descriptors (in the calling process) that become the command's stdin, stdout and
+/// stderr. With `tty`, the descriptors are a terminal and the command gets it as its
+/// controlling terminal.
+#[derive(Clone, Copy, Debug)]
+pub struct ContainerStdio {
+    pub fds: [i32; 3],
+    pub tty: bool,
+    /// Create the terminal inside the container (its own /dev/pts) and send its
+    /// controlling side back on this socket. `fds` is then unused.
+    pub tty_socket: Option<i32>,
+}
+
 /// Create the container process. Returns after its command was executed.
-pub fn spawn(spec: &ContainerSpec) -> Result<Spawned> {
+pub fn spawn(spec: &ContainerSpec, stdio: ContainerStdio) -> Result<Spawned> {
     // SAFETY: these calls have no preconditions.
     let (euid, egid) = unsafe { (libc::geteuid(), libc::getegid()) };
     let rootless = euid != 0;
@@ -85,7 +97,7 @@ pub fn spawn(spec: &ContainerSpec) -> Result<Spawned> {
     if ret == 0 {
         drop(sync_write);
         drop(status_read);
-        child_main(spec, rootless, sync_read, status_write);
+        child_main(spec, rootless, sync_read, status_write, stdio);
     }
 
     let pid = ret as u32;
@@ -106,22 +118,33 @@ pub fn spawn(spec: &ContainerSpec) -> Result<Spawned> {
     // Let the child continue. If it already died, the status pipe below is empty.
     let _ = File::from(sync_write).write_all(&[1]);
 
+    // The child writes one 0 byte right before execve. The pipe closes on a successful
+    // exec, so "0 byte, then end" means started; anything else is an error.
     let mut report = Vec::new();
     let _ = File::from(status_read).read_to_end(&mut report);
-    if report.is_empty() {
+    if report == [0] {
         return Ok(Spawned { pid });
     }
-    let _ = wait(pid);
-    Err(
-        serde_json::from_slice::<Error>(&report).unwrap_or_else(|e| {
-            Error::new(
-                ErrorKind::Internal,
-                "the container process sent an unreadable error",
-                e.to_string(),
-                "report this bug",
-            )
-        }),
-    )
+    let status = wait(pid).unwrap_or(-1);
+    if report.is_empty() {
+        return Err(Error::new(
+            ErrorKind::Runtime,
+            "the container process ended before it started",
+            format!(
+                "it exited with status {status} without reporting an error (out of memory, or killed)"
+            ),
+            "run the command again; check `dmesg` for an out-of-memory kill",
+        ));
+    }
+    let report = report.strip_prefix(&[0]).unwrap_or(&report);
+    Err(serde_json::from_slice::<Error>(report).unwrap_or_else(|e| {
+        Error::new(
+            ErrorKind::Internal,
+            "the container process sent an unreadable error",
+            e.to_string(),
+            "report this bug",
+        )
+    }))
 }
 
 /// Wait for the process to end. Returns its exit code, or 128 + signal number.
