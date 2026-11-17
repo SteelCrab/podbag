@@ -29,5 +29,6 @@ curl -fsSL "$base/$file" -o "$tmp/$file"
 echo "$sum  $tmp/$file" | sha256sum -c --quiet - || { echo "sha256 mismatch for $file" >&2; exit 1; }
 
 mkdir -p "$dest"
-tar -xzf "$tmp/$file" -C "$dest"
+# -p keeps modes as archived (1777 /tmp), not reduced by the umask.
+tar -xpzf "$tmp/$file" -C "$dest"
 echo "unpacked $file into $dest"

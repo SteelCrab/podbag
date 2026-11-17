@@ -11,15 +11,43 @@ pub struct Cli {
 pub enum Cmd {
     /// Run a command in a new container
     Run(RunArgs),
+    /// Download an image from a registry
+    Pull { image: String },
+    /// List stored images
+    Images,
+    /// Remove images
+    Rmi {
+        #[arg(required = true)]
+        images: Vec<String>,
+    },
+    /// Manage the image store
+    System {
+        #[command(subcommand)]
+        cmd: SystemCmd,
+    },
     #[command(name = "__shim", hide = true)]
     Shim { id: String },
+    #[command(name = "__store", hide = true)]
+    Store { op: String },
+}
+
+#[derive(Subcommand)]
+pub enum SystemCmd {
+    /// Show disk use
+    Df,
+    /// Remove every image that no container uses
+    Prune {
+        /// Do not ask for confirmation
+        #[arg(short, long)]
+        force: bool,
+    },
 }
 
 #[derive(Args)]
 pub struct RunArgs {
-    /// Use this unpacked root filesystem directory
+    /// Use this unpacked root filesystem directory instead of an image
     #[arg(long)]
-    pub rootfs: String,
+    pub rootfs: Option<String>,
     /// Set an environment variable (NAME=VALUE, or NAME to copy it from this shell)
     #[arg(short = 'e', long = "env")]
     pub env: Vec<String>,
@@ -29,9 +57,20 @@ pub struct RunArgs {
     /// Container hostname
     #[arg(long)]
     pub hostname: Option<String>,
-    /// The command and its arguments
-    #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
-    pub command: Vec<String>,
+    /// User to run as: name, uid, name:group or uid:gid
+    #[arg(short = 'u', long = "user")]
+    pub user: Option<String>,
+    /// Replace the image's entrypoint ("" for none)
+    #[arg(long)]
+    pub entrypoint: Option<String>,
+    /// IMAGE [COMMAND...], or only COMMAND... with --rootfs
+    #[arg(
+        required = true,
+        trailing_var_arg = true,
+        allow_hyphen_values = true,
+        value_name = "IMAGE|COMMAND"
+    )]
+    pub args: Vec<String>,
 }
 
 /// Parse a `-e` value like `docker run`: `NAME=VALUE`, or `NAME` to copy the caller's value.

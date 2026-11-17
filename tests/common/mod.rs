@@ -1,4 +1,6 @@
 #![allow(dead_code)]
+
+pub mod registry;
 use std::process::{Command, Output};
 
 pub const BIN: &str = env!("CARGO_BIN_EXE_openpod");
@@ -17,15 +19,24 @@ pub fn root_mode() -> bool {
 /// Separate data and runtime directories for one test.
 pub struct Sandbox {
     pub tmp: tempfile::TempDir,
+    /// Extra environment for openpod; passed through sudo in root mode.
+    pub env: Vec<(String, String)>,
 }
 
 impl Sandbox {
     pub fn new() -> Sandbox {
         let sb = Sandbox {
             tmp: tempfile::tempdir().unwrap(),
+            env: Vec::new(),
         };
         // Created by the test user, so the test can list it even when openpod runs as root.
         std::fs::create_dir_all(sb.data().join("containers")).unwrap();
+        sb
+    }
+
+    pub fn with_env(key: &str, value: &str) -> Sandbox {
+        let mut sb = Sandbox::new();
+        sb.env.push((key.to_string(), value.to_string()));
         sb
     }
 
@@ -43,16 +54,26 @@ impl Sandbox {
     }
 
     pub fn openpod_bin(&self, bin: &str) -> Command {
-        let data = format!("OPENPOD_DATA_DIR={}", self.data().display());
-        let runtime = format!("OPENPOD_RUNTIME_DIR={}", self.runtime().display());
+        let mut vars = vec![
+            (
+                "OPENPOD_DATA_DIR".to_string(),
+                self.data().display().to_string(),
+            ),
+            (
+                "OPENPOD_RUNTIME_DIR".to_string(),
+                self.runtime().display().to_string(),
+            ),
+        ];
+        vars.extend(self.env.iter().cloned());
         if root_mode() {
             let mut cmd = Command::new("sudo");
-            cmd.args(["-n", "env", &data, &runtime, bin]);
+            cmd.args(["-n", "env"])
+                .args(vars.iter().map(|(k, v)| format!("{k}={v}")))
+                .arg(bin);
             cmd
         } else {
             let mut cmd = Command::new(bin);
-            cmd.env("OPENPOD_DATA_DIR", self.data())
-                .env("OPENPOD_RUNTIME_DIR", self.runtime());
+            cmd.envs(vars);
             cmd
         }
     }

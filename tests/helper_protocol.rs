@@ -48,11 +48,13 @@ fn shim_reports_unsupported_and_removes_the_container_directory() {
     let dirs = paths::dirs().unwrap();
     let spec = ContainerSpec {
         id: "f".repeat(64),
-        rootfs: "/".into(),
+        rootfs: openpod::spec::Rootfs::Dir { path: "/".into() },
         command: vec!["true".into()],
         env: vec![],
         workdir: None,
         hostname: "box".into(),
+        user: None,
+        image: None,
     };
     state::write_config(&dirs, &spec).unwrap();
     let mut h = helper::spawn_shim(&spec.id, Stdio::null(), Stdio::null(), Stdio::null()).unwrap();

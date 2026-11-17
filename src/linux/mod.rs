@@ -5,6 +5,7 @@
 mod init;
 mod rootfs;
 mod spawn;
+pub mod userns;
 
 pub use spawn::{spawn, wait};
 

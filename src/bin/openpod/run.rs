@@ -1,5 +1,5 @@
 use crate::args::{RunArgs, parse_env};
-use openpod::Container;
+use openpod::{Container, ErrorKind, Image};
 
 /// `openpod run`. Returns the process exit code.
 pub fn run(args: RunArgs) -> i32 {
@@ -13,7 +13,32 @@ pub fn run(args: RunArgs) -> i32 {
 }
 
 fn start_and_wait(args: RunArgs) -> openpod::Result<i32> {
-    let mut c = Container::from_rootfs(args.rootfs).command(args.command);
+    let mut c = match args.rootfs {
+        Some(rootfs) => Container::from_rootfs(rootfs).command(args.args),
+        None => {
+            let (name, command) = args
+                .args
+                .split_first()
+                .expect("clap requires at least one argument");
+            let image = match Image::get(name) {
+                Ok(image) => image,
+                Err(e) if e.kind == ErrorKind::NotFound => Image::pull_with_progress(name)?,
+                Err(e) => return Err(e),
+            };
+            let c = Container::from_image(&image);
+            if command.is_empty() {
+                c
+            } else {
+                c.command(command.iter().cloned())
+            }
+        }
+    };
+    if let Some(u) = args.user {
+        c = c.user(u);
+    }
+    if let Some(e) = args.entrypoint {
+        c = c.entrypoint(if e.is_empty() { vec![] } else { vec![e] });
+    }
     for (k, v) in args
         .env
         .iter()

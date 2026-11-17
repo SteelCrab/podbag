@@ -16,7 +16,7 @@ pub struct Spawned {
 /// `struct clone_args` from linux/sched.h (version 2, 88 bytes).
 #[repr(C)]
 #[derive(Default)]
-struct CloneArgs {
+pub(super) struct CloneArgs {
     flags: u64,
     pidfd: u64,
     child_tid: u64,
@@ -28,6 +28,15 @@ struct CloneArgs {
     set_tid: u64,
     set_tid_size: u64,
     cgroup: u64,
+}
+
+/// clone3 arguments for a fork-like clone with `flags`.
+pub(super) fn clone_args(flags: u64) -> CloneArgs {
+    CloneArgs {
+        flags,
+        exit_signal: libc::SIGCHLD as u64,
+        ..Default::default()
+    }
 }
 
 /// Create the container process. Returns after its command was executed.
@@ -53,11 +62,7 @@ pub fn spawn(spec: &ContainerSpec) -> Result<Spawned> {
     if rootless {
         flags |= libc::CLONE_NEWUSER;
     }
-    let args = CloneArgs {
-        flags: flags as u64,
-        exit_signal: libc::SIGCHLD as u64,
-        ..Default::default()
-    };
+    let args = clone_args(flags as u64);
 
     // SAFETY: clone3 without CLONE_VM behaves like fork. This process is single-threaded,
     // so the child may run any code before it calls execve.

@@ -59,20 +59,27 @@ fn setup_and_exec(spec: &ContainerSpec, rootless: bool) -> Result<Infallible> {
             "use a hostname of at most 64 characters",
         )
     })?;
-    enter_rootfs(Path::new(&spec.rootfs), rootless)?;
+    enter_rootfs(&spec.rootfs, rootless)?;
 
     let workdir = spec.workdir.as_deref().unwrap_or("/");
-    std::fs::create_dir_all(workdir)
-        .and_then(|_| std::env::set_current_dir(workdir))
-        .map_err(|e| {
-            os_error(
-                &format!("cannot enter the working directory {workdir}"),
-                e,
-                "choose a working directory the container can create, such as /app",
-            )
-        })?;
+    let workdir_error = |e| {
+        os_error(
+            &format!("cannot enter the working directory {workdir}"),
+            e,
+            "choose a working directory the container can create, such as /app",
+        )
+    };
+    // Created as root, then entered as the container user, like Docker.
+    std::fs::create_dir_all(workdir).map_err(workdir_error)?;
+    let creds = crate::credentials::resolve_user(
+        spec.user.as_deref(),
+        &std::fs::read_to_string("/etc/passwd").unwrap_or_default(),
+        &std::fs::read_to_string("/etc/group").unwrap_or_default(),
+    )?;
+    switch_user(&creds)?;
+    std::env::set_current_dir(workdir).map_err(workdir_error)?;
 
-    let env = spec.effective_env();
+    let env = spec.effective_env(&creds.home);
     let program = resolve(&spec.command[0], &env)?;
     reset_signals();
     exec(&program, &spec.command, &env)
@@ -98,7 +105,7 @@ fn reset_signals() {
 }
 
 /// Become root of the new user namespace: UID 0 and GID 0, no supplementary groups.
-fn become_root() -> std::io::Result<()> {
+pub(super) fn become_root() -> std::io::Result<()> {
     // SAFETY: plain system calls with integer arguments.
     let ok = unsafe {
         libc::setresgid(0, 0, 0) == 0
@@ -110,6 +117,25 @@ fn become_root() -> std::io::Result<()> {
     } else {
         Err(std::io::Error::last_os_error())
     }
+}
+
+/// Become the container user: supplementary groups, then group, then user.
+fn switch_user(c: &crate::credentials::Credentials) -> Result<()> {
+    let groups: Vec<libc::gid_t> = c.groups.iter().map(|&g| g as libc::gid_t).collect();
+    // SAFETY: plain system calls; the groups pointer is valid for groups.len() entries.
+    let ok = unsafe {
+        libc::setgroups(groups.len(), groups.as_ptr()) == 0
+            && libc::setresgid(c.gid, c.gid, c.gid) == 0
+            && libc::setresuid(c.uid, c.uid, c.uid) == 0
+    };
+    if ok {
+        return Ok(());
+    }
+    Err(os_error(
+        &format!("cannot switch to user {}:{}", c.uid, c.gid),
+        std::io::Error::last_os_error(),
+        "in rootless mode, IDs above the range in /etc/subuid and /etc/subgid cannot be used",
+    ))
 }
 
 /// A failed setup step, explained as an AppArmor restriction when that is the cause.

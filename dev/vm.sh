@@ -34,7 +34,9 @@ case "${1:-}" in
   test-root) shift; OPENPOD_TEST_ROOT=1 vm_run cargo test "$@" ;;
   static)
     target="$(limactl shell "$name" uname -m)-unknown-linux-musl"
-    vm_run cargo build --release --target "$target"
+    # ring compiles C code; build it with musl-gcc for the musl target.
+    cc_var="CC_$(echo "$target" | tr '-' '_')"
+    vm_run env "$cc_var=musl-gcc" cargo build --release --target "$target"
     vm_run bash -c "dev/check-binary.sh \"\$CARGO_TARGET_DIR/$target/release/openpod\""
     ;;
   down) limactl stop "$name" ;;

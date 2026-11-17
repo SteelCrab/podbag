@@ -1,13 +1,15 @@
 //! Mount the container's root filesystem and switch to it.
 
+use crate::spec::Rootfs;
 use crate::{Error, ErrorKind, Result};
 use rustix::mount::{MountFlags, MountPropagationFlags, UnmountFlags};
 use std::ffi::CStr;
 use std::path::Path;
 
-/// Mount /proc, /dev, /sys and friends under `rootfs`, then pivot_root into it.
+/// Mount the root filesystem (an overlay of the image, or a plain directory), then
+/// /proc, /dev, /sys and friends under it, then pivot_root into it.
 /// Runs in the container process, inside its new mount namespace.
-pub(super) fn enter_rootfs(rootfs: &Path, rootless: bool) -> Result<()> {
+pub(super) fn enter_rootfs(spec: &Rootfs, rootless: bool) -> Result<()> {
     step(
         rootless,
         "make mounts private",
@@ -16,6 +18,39 @@ pub(super) fn enter_rootfs(rootfs: &Path, rootless: bool) -> Result<()> {
             MountPropagationFlags::REC | MountPropagationFlags::PRIVATE,
         ),
     )?;
+    let rootfs = match spec {
+        Rootfs::Dir { path } => Path::new(path),
+        Rootfs::Overlay {
+            lower,
+            upper,
+            work,
+            merged,
+        } => {
+            // Inside a user namespace, overlayfs keeps its metadata in user.* xattrs.
+            let userxattr = if rootless { ",userxattr" } else { "" };
+            let options = format!("lowerdir={lower},upperdir={upper},workdir={work}{userxattr}");
+            let options = std::ffi::CString::new(options).map_err(|_| {
+                Error::new(
+                    ErrorKind::InvalidInput,
+                    "cannot set up the container root filesystem",
+                    "an overlay path contains a NUL byte",
+                    "use another data directory",
+                )
+            })?;
+            step(
+                rootless,
+                "mount the image overlay",
+                rustix::mount::mount(
+                    "overlay",
+                    merged.as_str(),
+                    "overlay",
+                    MountFlags::empty(),
+                    Some(options.as_c_str()),
+                ),
+            )?;
+            Path::new(merged)
+        }
+    };
     step(
         rootless,
         "bind the root filesystem",

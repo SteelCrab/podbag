@@ -8,7 +8,6 @@ use crate::{Error, ErrorKind, Result};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-#[cfg(not(target_os = "linux"))]
 use std::os::fd::FromRawFd;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
@@ -24,8 +23,16 @@ const HELPER_NAME: &str = "openpod";
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum StatusMessage {
-    Started { pid: u32 },
-    Failed { error: Error },
+    Started {
+        pid: u32,
+    },
+    Failed {
+        error: Error,
+    },
+    /// A helper that does a job (not a container) reports its result.
+    Done {
+        output: serde_json::Value,
+    },
 }
 
 /// Find the helper program for the current process.
@@ -153,8 +160,30 @@ pub fn spawn_shim(id: &str, stdin: Stdio, stdout: Stdio, stderr: Stdio) -> Resul
 }
 
 impl HelperChild {
-    /// Wait for the helper's status line. Returns the PID it reports.
+    /// Wait for a container helper's status line. Returns the PID it reports.
     pub fn wait_started(&mut self) -> Result<u32> {
+        match self.read_status()? {
+            StatusMessage::Started { pid } => Ok(pid),
+            StatusMessage::Failed { error } => {
+                let _ = self.child.wait();
+                Err(error)
+            }
+            StatusMessage::Done { .. } => Err(unexpected_status()),
+        }
+    }
+
+    /// Wait for a job helper to finish. Returns its output.
+    pub fn wait_done(&mut self) -> Result<serde_json::Value> {
+        let message = self.read_status()?;
+        let _ = self.child.wait();
+        match message {
+            StatusMessage::Done { output } => Ok(output),
+            StatusMessage::Failed { error } => Err(error),
+            StatusMessage::Started { .. } => Err(unexpected_status()),
+        }
+    }
+
+    fn read_status(&mut self) -> Result<StatusMessage> {
         let mut line = String::new();
         let read = match self.status.take() {
             Some(mut r) => r.read_line(&mut line),
@@ -186,14 +215,74 @@ impl HelperChild {
                 ));
             }
         };
+        Ok(message)
+    }
+}
 
-        match message {
-            StatusMessage::Started { pid } => Ok(pid),
-            StatusMessage::Failed { error } => {
-                let _ = self.child.wait();
-                Err(error)
+fn unexpected_status() -> Error {
+    Error::new(
+        ErrorKind::Internal,
+        "the openpod helper sent an unexpected status",
+        "a container helper reported a job result, or the other way round",
+        "report this bug",
+    )
+}
+
+/// Run a store job in `openpod __store '<json>'` and return its output.
+/// With `show_progress`, the helper writes progress lines to this process's stderr.
+pub fn run_store_op(
+    op: &crate::store::ops::StoreOp,
+    show_progress: bool,
+) -> Result<serde_json::Value> {
+    let json = serde_json::to_string(op).map_err(|e| {
+        Error::new(
+            ErrorKind::Internal,
+            "cannot encode a store job",
+            e.to_string(),
+            "report this bug",
+        )
+    })?;
+    let stderr = if show_progress {
+        Stdio::inherit()
+    } else {
+        Stdio::null()
+    };
+    spawn_with_args(&["__store", &json], Stdio::null(), Stdio::null(), stderr)?.wait_done()
+}
+
+/// The status descriptor a helper received from its caller.
+pub struct StatusChannel(Option<std::fs::File>);
+
+impl StatusChannel {
+    /// Take fd 3 if the caller passed it, and mark it close-on-exec so children never inherit it.
+    pub fn take() -> StatusChannel {
+        // SAFETY: fcntl on any integer is safe; it fails with EBADF when fd 3 is not open.
+        let open = unsafe { libc::fcntl(STATUS_FD, libc::F_GETFD) } != -1;
+        if !open {
+            return StatusChannel(None);
+        }
+        // SAFETY: fd 3 is open and was given to this process for this purpose only.
+        unsafe { libc::fcntl(STATUS_FD, libc::F_SETFD, libc::FD_CLOEXEC) };
+        // SAFETY: as above; nothing else in this process uses fd 3.
+        StatusChannel(Some(unsafe { std::fs::File::from_raw_fd(STATUS_FD) }))
+    }
+
+    /// Write the status line and close the descriptor. Later calls do nothing.
+    pub fn report(&mut self, message: &StatusMessage) {
+        use std::io::Write;
+        if let Some(mut f) = self.0.take() {
+            if let Ok(mut line) = serde_json::to_string(message) {
+                line.push('\n');
+                let _ = f.write_all(line.as_bytes());
             }
         }
+    }
+
+    /// Report a failure and return the matching exit code.
+    pub fn fail(&mut self, error: Error) -> i32 {
+        let code = error.exit_code();
+        self.report(&StatusMessage::Failed { error });
+        code
     }
 }
 
@@ -315,5 +404,21 @@ mod tests {
         assert_eq!(e.kind, ErrorKind::MissingRequirement);
         assert_eq!(e.what, "cannot find the openpod helper program");
         assert!(e.next.contains("OPENPOD_BIN"));
+    }
+}
+
+#[cfg(test)]
+mod done_tests {
+    use super::*;
+
+    #[test]
+    fn done_message_wire_format() {
+        let m = StatusMessage::Done {
+            output: serde_json::json!({"a": 1}),
+        };
+        assert_eq!(
+            serde_json::to_string(&m).unwrap(),
+            r#"{"status":"done","output":{"a":1}}"#
+        );
     }
 }
