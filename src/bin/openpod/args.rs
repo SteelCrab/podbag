@@ -156,7 +156,9 @@ pub struct RunArgs {
     pub args: Vec<String>,
 }
 
-/// A signal by name (`TERM`, `SIGTERM`) or number.
+/// A signal by name (`TERM`, `SIGTERM`) or number. Names give Linux numbers on every
+/// host: the container always runs on Linux (on macOS and Windows, inside a VM).
+#[cfg_attr(not(unix), allow(dead_code))]
 pub fn parse_signal(s: &str) -> Option<i32> {
     if let Ok(n) = s.parse::<i32>() {
         return (n > 0 && n < 65).then_some(n);
@@ -164,22 +166,23 @@ pub fn parse_signal(s: &str) -> Option<i32> {
     let name = s.to_ascii_uppercase();
     let name = name.strip_prefix("SIG").unwrap_or(&name);
     Some(match name {
-        "HUP" => libc::SIGHUP,
-        "INT" => libc::SIGINT,
-        "QUIT" => libc::SIGQUIT,
-        "KILL" => libc::SIGKILL,
-        "USR1" => libc::SIGUSR1,
-        "USR2" => libc::SIGUSR2,
-        "TERM" => libc::SIGTERM,
-        "STOP" => libc::SIGSTOP,
-        "CONT" => libc::SIGCONT,
-        "WINCH" => libc::SIGWINCH,
+        "HUP" => 1,
+        "INT" => 2,
+        "QUIT" => 3,
+        "KILL" => 9,
+        "USR1" => 10,
+        "USR2" => 12,
+        "TERM" => 15,
+        "CONT" => 18,
+        "STOP" => 19,
+        "WINCH" => 28,
         _ => return None,
     })
 }
 
 /// Parse a `-e` value like `docker run`: `NAME=VALUE`, or `NAME` to copy the caller's value.
 /// A bare name that the caller does not have is skipped.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub fn parse_env(arg: &str, lookup: impl Fn(&str) -> Option<String>) -> Option<(String, String)> {
     match arg.split_once('=') {
         Some((k, v)) => Some((k.to_string(), v.to_string())),
@@ -193,8 +196,11 @@ mod tests {
 
     #[test]
     fn parse_signal_accepts_names_and_numbers() {
-        assert_eq!(parse_signal("TERM"), Some(libc::SIGTERM));
-        assert_eq!(parse_signal("sigterm"), Some(libc::SIGTERM));
+        assert_eq!(parse_signal("TERM"), Some(15));
+        assert_eq!(parse_signal("sigterm"), Some(15));
+        // Linux numbers, also when the CLI runs on macOS (where SIGUSR1 is 30).
+        assert_eq!(parse_signal("USR1"), Some(10));
+        assert_eq!(parse_signal("STOP"), Some(19));
         assert_eq!(parse_signal("9"), Some(9));
         assert_eq!(parse_signal("NOPE"), None);
         assert_eq!(parse_signal("0"), None);

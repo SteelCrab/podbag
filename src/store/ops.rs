@@ -11,6 +11,7 @@ pub enum StoreOp {
 }
 
 /// Entry point of `openpod __store '<json>'`. Returns the process exit code.
+#[cfg(unix)]
 pub fn helper_main(json: &str) -> i32 {
     let mut status = crate::helper::StatusChannel::take();
     let op: StoreOp = match serde_json::from_str(json) {
@@ -33,6 +34,13 @@ pub fn helper_main(json: &str) -> i32 {
     }
 }
 
+/// Entry point of `openpod __store '<json>'`: no store helper on this system.
+#[cfg(not(unix))]
+pub fn helper_main(_json: &str) -> i32 {
+    eprintln!("openpod: {}", crate::Error::unsupported_os());
+    1
+}
+
 #[cfg(target_os = "linux")]
 fn run_as_store_owner(op: StoreOp) -> crate::Result<serde_json::Value> {
     // SAFETY: geteuid has no preconditions.
@@ -43,7 +51,7 @@ fn run_as_store_owner(op: StoreOp) -> crate::Result<serde_json::Value> {
     crate::linux::userns::run_in_userns(move || linux_ops::run(op, &dirs, rootless))
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 fn run_as_store_owner(_op: StoreOp) -> crate::Result<serde_json::Value> {
     Err(crate::Error::unsupported_os())
 }

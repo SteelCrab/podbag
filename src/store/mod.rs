@@ -3,6 +3,7 @@
 pub mod layer;
 pub mod object;
 pub mod ops;
+pub(crate) mod perm;
 pub mod tree;
 pub mod zstd;
 
@@ -75,16 +76,13 @@ impl Store {
     }
 
     fn open_with(dirs: &Dirs, set_owner: bool, can_mknod: bool) -> Result<Store> {
-        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
         let root = dirs.data.join("store");
         for d in [&dirs.data, &root] {
-            std::fs::DirBuilder::new()
+            perm::private_dir_builder()
                 .recursive(true)
-                .mode(0o700)
                 .create(d)
                 .map_err(|e| io_error(d, e))?;
-            std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700))
-                .map_err(|e| io_error(d, e))?;
+            perm::set_mode(d, 0o700).map_err(|e| io_error(d, e))?;
         }
         Store::open_at(root, set_owner, can_mknod)
     }
@@ -130,15 +128,12 @@ impl Store {
             .write(true)
             .open(&path)
             .map_err(|e| io_error(&path, e))?;
-        let op = if exclusive {
-            libc::LOCK_EX
+        let locked = if exclusive {
+            file.lock()
         } else {
-            libc::LOCK_SH
+            file.lock_shared()
         };
-        // SAFETY: flock on an open descriptor.
-        if unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&file), op) } != 0 {
-            return Err(io_error(&path, std::io::Error::last_os_error()));
-        }
+        locked.map_err(|e| io_error(&path, e))?;
         Ok(Lock(file))
     }
 
@@ -715,8 +710,7 @@ struct Lock(File);
 
 impl Drop for Lock {
     fn drop(&mut self) {
-        // SAFETY: unlocking an open descriptor.
-        unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&self.0), libc::LOCK_UN) };
+        let _ = self.0.unlock();
     }
 }
 
@@ -756,10 +750,9 @@ pub fn remove_tree(path: &Path) -> std::io::Result<()> {
 }
 
 fn make_dirs_writable(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
     if let Ok(meta) = std::fs::symlink_metadata(path) {
         if meta.is_dir() {
-            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+            let _ = perm::set_mode(path, 0o700);
             if let Ok(entries) = std::fs::read_dir(path) {
                 for e in entries.flatten() {
                     make_dirs_writable(&e.path());

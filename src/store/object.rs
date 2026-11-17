@@ -130,10 +130,8 @@ impl ObjectStore {
         if self.set_owner {
             apply_owner(&file, meta).map_err(fail)?;
         }
-        use std::os::unix::fs::PermissionsExt;
         // After chown: chown clears set-user-ID and set-group-ID bits.
-        file.set_permissions(std::fs::Permissions::from_mode(meta.mode))
-            .map_err(fail)?;
+        super::perm::set_file_mode(&file, meta.mode).map_err(fail)?;
         drop(file);
         std::fs::create_dir_all(dest.parent().expect("object path has a parent")).map_err(fail)?;
         std::fs::rename(tmp, &dest).map_err(fail)?;
@@ -212,9 +210,14 @@ fn apply_owner(file: &File, meta: &Meta) -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 fn apply_owner(file: &File, meta: &Meta) -> std::io::Result<()> {
     std::os::unix::fs::fchown(file, Some(meta.uid), Some(meta.gid))
+}
+
+#[cfg(not(unix))]
+fn apply_owner(_file: &File, _meta: &Meta) -> std::io::Result<()> {
+    Ok(())
 }
 
 pub(crate) fn io_error(path: &Path, e: std::io::Error) -> Error {

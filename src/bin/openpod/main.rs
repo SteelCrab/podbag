@@ -1,6 +1,8 @@
 mod args;
+#[cfg(unix)]
 mod container;
 mod image;
+#[cfg(unix)]
 mod run;
 
 use args::{Cli, Cmd};
@@ -8,7 +10,12 @@ use clap::Parser;
 
 fn main() {
     let cli = Cli::parse();
-    let code = match cli.cmd {
+    std::process::exit(dispatch(cli.cmd));
+}
+
+#[cfg(unix)]
+fn dispatch(cmd: Cmd) -> i32 {
+    match cmd {
         Cmd::Run(a) => run::run(a),
         Cmd::Pull { image } => image::pull(&image),
         Cmd::Images => image::images(),
@@ -27,8 +34,29 @@ fn main() {
         Cmd::ExecHelper { id, request } => exec_helper(&id, &request),
         Cmd::Shim { id } => openpod::shim::shim_main(&id),
         Cmd::Store { op } => openpod::store::ops::helper_main(&op),
-    };
-    std::process::exit(code);
+    }
+}
+
+/// Image commands work everywhere; containers need Linux (on Windows: WSL2, later).
+#[cfg(not(unix))]
+fn dispatch(cmd: Cmd) -> i32 {
+    match cmd {
+        Cmd::Pull { image } => image::pull(&image),
+        Cmd::Images => image::images(),
+        Cmd::Rmi { images } => image::rmi(&images),
+        Cmd::System { cmd } => image::system(cmd),
+        _ => unsupported(),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn unsupported() -> i32 {
+    image::report(&openpod::Error::new(
+        openpod::ErrorKind::Unsupported,
+        "cannot run containers on this operating system",
+        "openpod runs containers only on Linux",
+        "run openpod on Linux",
+    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -36,12 +64,7 @@ fn exec_helper(id: &str, request: &str) -> i32 {
     openpod::linux::exec::exec_main(id, request)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 fn exec_helper(_id: &str, _request: &str) -> i32 {
-    image::report(&openpod::Error::new(
-        openpod::ErrorKind::Unsupported,
-        "cannot run containers on this operating system",
-        "openpod runs containers only on Linux",
-        "run openpod on Linux",
-    ))
+    unsupported()
 }

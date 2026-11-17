@@ -1,7 +1,11 @@
 //! Merging layers into one image tree (overlay semantics) and building it on disk.
 
-use super::layer::{Entry, EntryKind, unhex};
-use super::object::{ObjectStore, io_error};
+#[cfg(unix)]
+use super::layer::unhex;
+use super::layer::{Entry, EntryKind};
+use super::object::ObjectStore;
+#[cfg(unix)]
+use super::object::io_error;
 use crate::{Error, ErrorKind, Result};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -108,6 +112,7 @@ pub struct MaterializeReport {
     pub skipped_devices: u32,
 }
 
+#[cfg(unix)]
 /// Build `tree` at `dest` (which must not exist). Files are hard links to objects.
 /// Every parent is a directory this function created, so no symlink is ever followed.
 pub fn materialize(
@@ -130,6 +135,7 @@ pub fn materialize(
     result
 }
 
+#[cfg(unix)]
 fn build(
     tree: &Tree,
     objects: &ObjectStore,
@@ -203,6 +209,7 @@ fn build(
     Ok(report)
 }
 
+#[cfg(unix)]
 /// Hard-link the object into the tree. When the object has as many links as the file
 /// system allows (EMLINK), copy it instead and give the copy the entry's metadata.
 pub(crate) fn link_or_copy(
@@ -227,9 +234,11 @@ pub(crate) fn link_or_copy(
     }
 }
 
+#[cfg(unix)]
 trait Mode700 {
     fn mode_700(&mut self) -> &mut Self;
 }
+#[cfg(unix)]
 impl Mode700 for std::fs::DirBuilder {
     fn mode_700(&mut self) -> &mut Self {
         use std::os::unix::fs::DirBuilderExt;
@@ -237,6 +246,7 @@ impl Mode700 for std::fs::DirBuilder {
     }
 }
 
+#[cfg(unix)]
 fn make_node(path: &Path, mode: u32, dev: u64) -> std::io::Result<()> {
     let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
         .map_err(std::io::Error::other)?;
@@ -272,7 +282,18 @@ fn set_xattrs(path: &Path, e: &Entry) -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "linux"))]
+/// Images cannot be unpacked on this system.
+#[cfg(not(unix))]
+pub fn materialize(
+    _tree: &Tree,
+    _objects: &ObjectStore,
+    _dest: &Path,
+    _can_mknod: bool,
+) -> Result<MaterializeReport> {
+    Err(crate::Error::unsupported_os())
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
 fn set_xattrs(_path: &Path, e: &Entry) -> std::io::Result<()> {
     let _ = unhex;
     let _ = e;

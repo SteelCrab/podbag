@@ -208,6 +208,7 @@ impl Container {
     /// Start the container in the background and return at once. It keeps running after
     /// this process exits, and stays after it ends until [`ContainerHandle::remove`]
     /// (unless [`Container::remove_on_exit`]).
+    #[cfg(unix)]
     pub fn start(self) -> Result<crate::ContainerHandle> {
         #[cfg(target_os = "linux")]
         {

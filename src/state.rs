@@ -264,8 +264,14 @@ pub fn create(dirs: &Dirs, spec: &ContainerSpec) -> Result<()> {
                 "check the permissions of the openpod data directory",
             )
         })?;
-    // SAFETY: flock on an open descriptor; released when `lock` is dropped.
-    unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&lock), libc::LOCK_EX) };
+    // Released when `lock` is dropped.
+    lock.lock().map_err(|e| {
+        Error::io(
+            "cannot lock the container list",
+            &e,
+            "check the permissions of the openpod data directory",
+        )
+    })?;
     for other in list_ids(dirs)? {
         if read_config(dirs, &other).is_ok_and(|c| c.name == spec.name) {
             return Err(Error::new(
@@ -299,31 +305,19 @@ const SHIM_LOCK: &str = "shim.lock";
 /// gone. Unlike a PID check, this cannot be fooled by a reused PID.
 pub fn hold_shim_lock(dirs: &Dirs, id: &str) -> Result<std::fs::File> {
     let file = open_shim_lock(dirs, id)?;
-    // SAFETY: flock on an open descriptor; released when `file` is closed.
-    if unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&file), libc::LOCK_EX) } != 0 {
-        return Err(lock_error(id, std::io::Error::last_os_error()));
-    }
+    // Released when `file` is closed.
+    file.lock().map_err(|e| lock_error(id, e))?;
     Ok(file)
 }
 
 /// The shim lock, if no shim holds it.
 fn try_shim_lock(dirs: &Dirs, id: &str) -> Result<Option<std::fs::File>> {
     let file = open_shim_lock(dirs, id)?;
-    // SAFETY: as in hold_shim_lock.
-    if unsafe {
-        libc::flock(
-            std::os::fd::AsRawFd::as_raw_fd(&file),
-            libc::LOCK_EX | libc::LOCK_NB,
-        )
-    } == 0
-    {
-        return Ok(Some(file));
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(e)) => Err(lock_error(id, e)),
     }
-    let e = std::io::Error::last_os_error();
-    if e.raw_os_error() == Some(libc::EWOULDBLOCK) {
-        return Ok(None);
-    }
-    Err(lock_error(id, e))
 }
 
 fn open_shim_lock(dirs: &Dirs, id: &str) -> Result<std::fs::File> {
