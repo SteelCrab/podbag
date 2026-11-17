@@ -4,13 +4,15 @@ A daemonless, rootless container engine that runs Docker/OCI images from a singl
 
 ## Status
 
-Early development (milestone M4). What works:
+Early development (milestone M5). What works:
 
 ```sh
 openpod run alpine echo hello            # pulls the image if needed; the container stays
 openpod run --rm -it alpine sh           # interactive shell, removed on exit
 openpod run -d --name web nginx:alpine   # in the background
 openpod run -m 512m --cpus 1.5 --pids-limit 200 alpine sh   # resource limits
+openpod run -v ./src:/work:ro -v pgdata:/var/lib/pg --tmpfs /run alpine sh   # volumes
+openpod volume create|ls|rm|inspect
 openpod ps -a
 openpod logs -f web
 openpod exec -it web sh
@@ -26,7 +28,22 @@ cgroup namespaces, plus a user namespace when run without root. Identical files 
 different images are stored once and share page cache. The store keeps at most 10 GiB by
 default.
 
-Not yet: volumes and networking.
+Not yet: networking.
+
+## Volumes
+
+| Option | Effect |
+|---|---|
+| `-v /host/dir:/dir[:ro]`, `-v ./dir:/dir` | a host path; created if missing, like `docker run -v` |
+| `-v name:/dir[:ro][,nocopy]` | a named volume in `<data>/volumes/<name>/data`, created on first use |
+| `-v /dir` | an anonymous volume: removed with the container by `--rm` or `rm -v` |
+| `--tmpfs /dir[:size=64m,mode=1777,…]` | a memory file system (`nosuid,nodev,noexec` unless asked) |
+
+An empty volume is filled with the image's files at its target the first time it is
+mounted (owners and modes kept), unless `nocopy` is given. An image's `Volumes` become
+anonymous volumes. `openpod volume rm` refuses a volume that any container still names.
+Mount targets are resolved inside the container's root, so a symbolic link in the image
+cannot send a mount outside it; `/proc` and `/sys` cannot hold mounts.
 
 ## Limits and security
 

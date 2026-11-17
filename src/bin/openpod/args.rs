@@ -43,6 +43,9 @@ pub enum Cmd {
         /// Kill running containers first
         #[arg(short, long)]
         force: bool,
+        /// Also remove the containers' anonymous volumes
+        #[arg(short = 'v', long)]
+        volumes: bool,
         #[arg(required = true)]
         containers: Vec<String>,
     },
@@ -66,6 +69,11 @@ pub enum Cmd {
     Exec(ExecArgs),
     #[command(name = "__exec", hide = true)]
     ExecHelper { id: String, request: String },
+    /// Manage volumes
+    Volume {
+        #[command(subcommand)]
+        cmd: VolumeCmd,
+    },
     /// Manage the image store
     System {
         #[command(subcommand)]
@@ -75,6 +83,28 @@ pub enum Cmd {
     Shim { id: String },
     #[command(name = "__store", hide = true)]
     Store { op: String },
+}
+
+#[derive(Subcommand)]
+pub enum VolumeCmd {
+    /// Create a volume (a random name when none is given)
+    Create { name: Option<String> },
+    /// List volumes
+    Ls {
+        /// Show only names
+        #[arg(short, long)]
+        quiet: bool,
+    },
+    /// Remove volumes that no container uses
+    Rm {
+        /// Do not report missing volumes
+        #[arg(short, long)]
+        force: bool,
+        #[arg(required = true)]
+        names: Vec<String>,
+    },
+    /// Show a volume's details as JSON
+    Inspect { name: String },
 }
 
 #[derive(Subcommand)]
@@ -149,6 +179,12 @@ pub struct RunArgs {
     /// Security option: no-new-privileges, seccomp=unconfined
     #[arg(long = "security-opt")]
     pub security_opt: Vec<String>,
+    /// Mount a volume or host path (SOURCE:TARGET[:ro], or TARGET for a new volume)
+    #[arg(short = 'v', long = "volume")]
+    pub volume: Vec<String>,
+    /// Mount a tmpfs (TARGET[:OPTIONS])
+    #[arg(long)]
+    pub tmpfs: Vec<String>,
     /// Set an environment variable (NAME=VALUE, or NAME to copy it from this shell)
     #[arg(short = 'e', long = "env")]
     pub env: Vec<String>,

@@ -65,6 +65,7 @@ fn shim_reports_unsupported_and_removes_the_container_directory() {
         limits: Default::default(),
         cgroup: Default::default(),
         security: Default::default(),
+        mounts: Vec::new(),
     };
     state::write_config(&dirs, &spec).unwrap();
     let mut h =

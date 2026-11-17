@@ -41,6 +41,8 @@ pub struct Container {
     pids_limit: Option<i64>,
     #[serde(default)]
     security: crate::spec::Security,
+    #[serde(default)]
+    mounts: Vec<crate::volume::MountRequest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,7 +121,66 @@ impl Container {
             cpus: None,
             pids_limit: None,
             security: crate::spec::Security::default(),
+            mounts: Vec::new(),
         }
+    }
+
+    /// Mount a host path or a named volume at `target`. A `source` that starts with `/` or
+    /// `.` is a host path (relative to this process's working directory; created if
+    /// missing); anything else names a volume, created on first use and filled with the
+    /// image's files at `target`.
+    pub fn volume(
+        mut self,
+        source: impl Into<String>,
+        target: impl Into<String>,
+        access: crate::Access,
+    ) -> Container {
+        let (source, target) = (source.into(), target.into());
+        self.mounts
+            .push(if source.starts_with('/') || source.starts_with('.') {
+                crate::MountRequest::Bind {
+                    source,
+                    target,
+                    access,
+                }
+            } else {
+                crate::MountRequest::Named {
+                    name: source,
+                    target,
+                    access,
+                    nocopy: false,
+                }
+            });
+        self
+    }
+
+    /// Mount a new volume of the container's own at `target`. It is removed with the
+    /// container when the container is removed on exit.
+    pub fn anonymous_volume(
+        mut self,
+        target: impl Into<String>,
+        access: crate::Access,
+    ) -> Container {
+        self.mounts.push(crate::MountRequest::Anonymous {
+            target: target.into(),
+            access,
+        });
+        self
+    }
+
+    /// Mount a memory file system at `target`; `options` like `size=64m,mode=1777`.
+    pub fn tmpfs(mut self, target: impl Into<String>, options: impl Into<String>) -> Container {
+        self.mounts.push(crate::MountRequest::Tmpfs {
+            target: target.into(),
+            options: options.into(),
+        });
+        self
+    }
+
+    /// Add a mount request as `-v` or `--tmpfs` produced it.
+    pub fn mount(mut self, request: crate::MountRequest) -> Container {
+        self.mounts.push(request);
+        self
     }
 
     /// Keep a capability beyond Docker's defaults (`--cap-add`; a name or `ALL`).
@@ -407,6 +468,7 @@ mod linux_launch {
     use crate::spec::{ContainerSpec, Rootfs};
     use crate::store::Store;
     use crate::store::ops::StoreOp;
+    use crate::volume::{self, Access, Mount, MountRequest, MountSource};
     use crate::{Error, ErrorKind, Result, id, paths, state};
     use std::process::Stdio;
 
@@ -416,6 +478,8 @@ mod linux_launch {
         dirs: Dirs,
         id: String,
         armed: bool,
+        /// Anonymous volumes made for this container, removed with it.
+        anonymous: Vec<String>,
     }
 
     impl Cleanup {
@@ -439,7 +503,108 @@ mod linux_launch {
                     false,
                 );
             }
+            let anonymous = self.anonymous.iter().map(String::as_str);
+            let _ = crate::volume::remove_anonymous(&self.dirs, &self.id, anonymous);
         }
+    }
+
+    /// Turn mount requests into mounts: host paths become absolute (and exist), volumes
+    /// exist. New anonymous volumes are listed in `anonymous`.
+    fn resolve_mounts(
+        dirs: &Dirs,
+        requests: Vec<MountRequest>,
+        anonymous: &mut Vec<String>,
+    ) -> Result<Vec<Mount>> {
+        let access = |a: Access| a == Access::ReadOnly;
+        let empty = |path: &str| std::fs::read_dir(path).is_ok_and(|mut d| d.next().is_none());
+        let mut mounts = Vec::with_capacity(requests.len());
+        for request in requests {
+            mounts.push(match request {
+                MountRequest::Bind {
+                    source,
+                    target,
+                    access: a,
+                } => Mount {
+                    source: MountSource::Bind {
+                        path: bind_source(&source)?,
+                    },
+                    target,
+                    read_only: access(a),
+                    copy_up: false,
+                },
+                MountRequest::Named {
+                    name,
+                    target,
+                    access: a,
+                    nocopy,
+                } => {
+                    let (v, _) = volume::create_in(dirs, Some(&name), false)?;
+                    Mount {
+                        copy_up: !nocopy && empty(&v.mountpoint),
+                        source: MountSource::Volume {
+                            name,
+                            anonymous: false,
+                            path: v.mountpoint,
+                        },
+                        target,
+                        read_only: access(a),
+                    }
+                }
+                MountRequest::Anonymous { target, access: a } => {
+                    let (v, _) = volume::create_in(dirs, None, true)?;
+                    anonymous.push(v.name.clone());
+                    Mount {
+                        source: MountSource::Volume {
+                            name: v.name,
+                            anonymous: true,
+                            path: v.mountpoint,
+                        },
+                        target,
+                        read_only: access(a),
+                        copy_up: true,
+                    }
+                }
+                MountRequest::Tmpfs { target, options } => {
+                    // The builder takes options as given; check them as --tmpfs does.
+                    let MountRequest::Tmpfs { target, options } =
+                        volume::parse_tmpfs_arg(&format!("{target}:{options}"))?
+                    else {
+                        unreachable!("parse_tmpfs_arg returns a tmpfs request")
+                    };
+                    Mount {
+                        source: MountSource::Tmpfs { options },
+                        target,
+                        read_only: false,
+                        copy_up: false,
+                    }
+                }
+            });
+        }
+        Ok(mounts)
+    }
+
+    /// A host path for `-v`: absolute, created when missing (as `docker run -v` does).
+    fn bind_source(source: &str) -> Result<String> {
+        let fail = |e: std::io::Error| {
+            Error::io(
+                format!("cannot use {source} as a volume"),
+                &e,
+                "check that the path exists or can be created",
+            )
+        };
+        let path = std::path::Path::new(source);
+        let path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir().map_err(fail)?.join(path)
+        };
+        if !path.exists() {
+            std::fs::create_dir_all(&path).map_err(fail)?;
+        }
+        Ok(std::fs::canonicalize(&path)
+            .map_err(fail)?
+            .to_string_lossy()
+            .into_owned())
     }
 
     /// Save the settings and start the shim. Returns after the command started.
@@ -463,7 +628,27 @@ mod linux_launch {
         let hostname = c.hostname.clone().unwrap_or_else(|| short.clone());
         let name = c.name.clone().unwrap_or_else(|| short.clone());
         let (auto_remove, tty, interactive) = (c.auto_remove, c.tty, c.interactive);
-        let cleanup = match c.source {
+        let image_volumes = match &c.source {
+            Source::Image(image) => image.config.volumes.clone(),
+            Source::Rootfs(_) => Vec::new(),
+        };
+        let requests = volume::with_image_volumes(c.mounts.clone(), &image_volumes)?;
+        // Declared before the lock below, so on an early return the lock goes first: the
+        // cleanup takes the volume lock exclusively, and a shared lock held by this same
+        // process would block it.
+        let mut cleanup = Cleanup {
+            dirs: dirs.clone(),
+            id: id.clone(),
+            armed: true,
+            anonymous: Vec::new(),
+        };
+        // Held until the config names the volumes: `volume rm` checks the configs under
+        // the exclusive lock.
+        let volume_lock = (!requests.is_empty())
+            .then(|| volume::lock_shared(&dirs))
+            .transpose()?;
+        let mounts = resolve_mounts(&dirs, requests, &mut cleanup.anonymous)?;
+        match c.source {
             Source::Rootfs(ref path) => {
                 let rootfs = std::fs::canonicalize(path)
                     .ok()
@@ -496,14 +681,10 @@ mod linux_launch {
                     limits: limits.clone(),
                     cgroup: placement.clone(),
                     security: c.security.clone(),
+                    mounts: mounts.clone(),
                 };
                 spec.validate()?;
                 state::create(&dirs, &spec)?;
-                Cleanup {
-                    dirs,
-                    id: spec.id,
-                    armed: true,
-                }
             }
             Source::Image(ref image) => {
                 let command =
@@ -551,14 +732,10 @@ mod linux_launch {
                     limits: limits.clone(),
                     cgroup: placement.clone(),
                     security: c.security.clone(),
+                    mounts: mounts.clone(),
                 };
                 spec.validate()?;
                 state::create(&dirs, &spec)?;
-                let cleanup = Cleanup {
-                    dirs,
-                    id: spec.id.clone(),
-                    armed: true,
-                };
                 for name in ["upper", "work", "merged"] {
                     use std::os::unix::fs::DirBuilderExt;
                     let path = dir.join(name);
@@ -574,9 +751,9 @@ mod linux_launch {
                         })?;
                 }
                 drop(lock);
-                cleanup
             }
-        };
+        }
+        drop(volume_lock);
         let scope = match &placement {
             crate::cgroup::Placement::Scope { slice } => Some(helper::Scope {
                 systemd_run: crate::cgroup::systemd_run().ok_or_else(|| {

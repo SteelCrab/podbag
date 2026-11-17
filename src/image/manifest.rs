@@ -243,6 +243,7 @@ struct RawRun {
     env: Option<Vec<String>>,
     working_dir: Option<String>,
     user: Option<String>,
+    volumes: Option<std::collections::BTreeMap<String, serde_json::Value>>,
 }
 
 #[derive(Deserialize)]
@@ -289,6 +290,7 @@ pub fn parse_config(body: &[u8]) -> Result<ConfigFile> {
             env,
             workdir: non_empty(run.working_dir),
             user: non_empty(run.user),
+            volumes: run.volumes.unwrap_or_default().into_keys().collect(),
         },
     })
 }
@@ -413,6 +415,18 @@ mod tests {
         );
         assert_eq!(c.config.workdir, None);
         assert_eq!(c.config.user.as_deref(), Some("app"));
+        assert!(c.config.volumes.is_empty());
+    }
+
+    #[test]
+    fn image_volumes_are_read() {
+        let body = br#"{"architecture":"arm64","os":"linux",
+            "config":{"Cmd":["sh"],"Volumes":{"/logs":{},"/data":{}}},
+            "rootfs":{"type":"layers","diff_ids":["sha256:1111111111111111111111111111111111111111111111111111111111111111"]}}"#;
+        assert_eq!(
+            parse_config(body).unwrap().config.volumes,
+            ["/data", "/logs"]
+        );
     }
 
     #[test]

@@ -101,7 +101,7 @@ fn setup_and_exec(
             "use a hostname of at most 64 characters",
         )
     })?;
-    enter_rootfs(&spec.rootfs, rootless)?;
+    enter_rootfs(&spec.rootfs, &spec.mounts, rootless)?;
     if let Some(sock) = tty_socket {
         // Open the terminal in the container's own /dev/pts, so the command can find it.
         let (master, slave) = super::pty::open(None)?;

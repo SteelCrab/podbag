@@ -29,6 +29,39 @@ pub struct ContainerInfo {
     pub image: String,
     pub command: Vec<String>,
     pub state: State,
+    /// Volumes, host paths and tmpfs mounts.
+    #[serde(default)]
+    pub mounts: Vec<MountInfo>,
+}
+
+/// One mount of a container, as `inspect` shows it.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct MountInfo {
+    /// `bind`, `volume` or `tmpfs`.
+    pub kind: String,
+    /// The host path, the volume name, or `tmpfs`.
+    pub source: String,
+    pub target: String,
+    pub read_only: bool,
+}
+
+impl From<&crate::volume::Mount> for MountInfo {
+    fn from(m: &crate::volume::Mount) -> Self {
+        use crate::volume::MountSource;
+        let (kind, source) = match &m.source {
+            MountSource::Bind { path } => ("bind", path.clone()),
+            MountSource::Volume { name, .. } => ("volume", name.clone()),
+            MountSource::Tmpfs { .. } => ("tmpfs", "tmpfs".to_string()),
+        };
+        let read_only = m.read_only
+            || matches!(&m.source, MountSource::Tmpfs { options } if options.split(',').any(|o| o == "ro"));
+        MountInfo {
+            kind: kind.to_string(),
+            source,
+            target: m.target.clone(),
+            read_only,
+        }
+    }
 }
 
 /// A container that exists (running or not).
@@ -280,6 +313,16 @@ impl ContainerHandle {
         remove_with_helper(&self.id)
     }
 
+    /// [`ContainerHandle::remove`], and also delete the container's anonymous volumes
+    /// (`rm -v`).
+    pub fn remove_with_volumes(&self, force: bool) -> Result<()> {
+        let dirs = paths::dirs()?;
+        let spec = state::read_config(&dirs, &self.id)?;
+        self.remove(force)?;
+        let anonymous = crate::volume::anonymous_volumes(&spec.mounts);
+        crate::volume::remove_anonymous(&dirs, &self.id, anonymous)
+    }
+
     fn recorded_exit(&self, dirs: &Dirs) -> Result<i32> {
         let st = state::reconcile(dirs, &self.id)?;
         st.exit_code.ok_or_else(|| {
@@ -310,6 +353,7 @@ fn info_of(dirs: &Dirs, id: &str) -> Result<ContainerInfo> {
         image,
         command: spec.command,
         state: st,
+        mounts: spec.mounts.iter().map(MountInfo::from).collect(),
     })
 }
 

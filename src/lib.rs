@@ -41,10 +41,14 @@ pub mod spec;
 pub mod state;
 #[doc(hidden)]
 pub mod store;
+pub mod volume;
 
 pub use container::{Container, Output, Running};
 #[cfg(unix)]
-pub use containers::{ContainerHandle, ContainerInfo, ExecOptions, LogFollower, LogLine, Stream};
+pub use containers::{
+    ContainerHandle, ContainerInfo, ExecOptions, LogFollower, LogLine, MountInfo, Stream,
+};
 pub use error::{Error, ErrorKind, Result};
 pub use image::{DiskUsage, Image, ImageConfig, PruneReport, disk_usage, prune};
 pub use state::{State, Status};
+pub use volume::{Access, MountRequest, Volume};

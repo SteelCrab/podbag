@@ -41,14 +41,14 @@ pub fn shim_main(id: &str) -> i32 {
             Ok(lock) => lock,
             Err(e) => {
                 let code = status.fail(e);
-                remove_container(&dirs, id);
+                remove_container(&dirs, &spec);
                 return code;
             }
         };
         let outcome = supervise::run(&spec, &dirs, &mut status);
         // A failed start leaves no trace; a finished container stays unless --rm.
         if !outcome.started || spec.auto_remove {
-            remove_container(&dirs, id);
+            remove_container(&dirs, &spec);
         }
         outcome.code
     }
@@ -61,11 +61,16 @@ pub fn shim_main(id: &str) -> i32 {
     }
 }
 
-/// Delete the container directory. In rootless mode its writable layer can hold files
-/// owned by subordinate IDs, which only root of a mapped user namespace can delete.
+/// Delete the container directory and its anonymous volumes. In rootless mode its
+/// writable layer can hold files owned by subordinate IDs, which only root of a mapped user
+/// namespace can delete.
 #[cfg(target_os = "linux")]
-pub fn remove_container(dirs: &paths::Dirs, id: &str) {
-    let dir = dirs.container_dir(id);
+pub fn remove_container(dirs: &paths::Dirs, spec: &crate::spec::ContainerSpec) {
+    let anonymous = crate::volume::anonymous_volumes(&spec.mounts);
+    if let Err(e) = crate::volume::remove_anonymous(dirs, &spec.id, anonymous) {
+        eprintln!("openpod: {e}");
+    }
+    let dir = dirs.container_dir(&spec.id);
     let removed = crate::linux::userns::run_in_userns(|| {
         crate::store::remove_tree(&dir).map_err(|e| {
             crate::Error::io(

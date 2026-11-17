@@ -95,9 +95,14 @@ pub fn logs(target: &str, follow: bool) -> i32 {
     }
 }
 
-pub fn rm(targets: &[String], force: bool) -> i32 {
+pub fn rm(targets: &[String], force: bool, volumes: bool) -> i32 {
     each(targets, |h| {
-        h.remove(force).map(|()| println!("{}", h.id()))
+        let removed = if volumes {
+            h.remove_with_volumes(force)
+        } else {
+            h.remove(force)
+        };
+        removed.map(|()| println!("{}", h.id()))
     })
 }
 

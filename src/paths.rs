@@ -18,6 +18,10 @@ impl Dirs {
     pub fn container_dir(&self, id: &str) -> PathBuf {
         self.data.join("containers").join(id)
     }
+
+    pub fn volume_dir(&self, name: &str) -> PathBuf {
+        self.data.join("volumes").join(name)
+    }
 }
 
 /// The directories for the current process.

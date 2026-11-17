@@ -9,7 +9,11 @@ use std::path::Path;
 /// Mount the root filesystem (an overlay of the image, or a plain directory), then
 /// /proc, /dev, /sys and friends under it, then pivot_root into it.
 /// Runs in the container process, inside its new mount namespace.
-pub(super) fn enter_rootfs(spec: &Rootfs, rootless: bool) -> Result<()> {
+pub(super) fn enter_rootfs(
+    spec: &Rootfs,
+    mounts: &[crate::volume::Mount],
+    rootless: bool,
+) -> Result<()> {
     step(
         rootless,
         "make mounts private",
@@ -188,6 +192,8 @@ pub(super) fn enter_rootfs(spec: &Rootfs, rootless: bool) -> Result<()> {
         "make /sys read-only",
         set_read_only_recursive(&sys),
     )?;
+    // The container's own mounts come last, as with runc, so they may cover /dev/shm.
+    super::mounts::mount_all(rootless, rootfs, mounts)?;
 
     step(
         rootless,

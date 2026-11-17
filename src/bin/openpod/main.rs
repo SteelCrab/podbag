@@ -4,6 +4,7 @@ mod container;
 mod image;
 #[cfg(unix)]
 mod run;
+mod volume;
 
 use args::{Cli, Cmd};
 use clap::Parser;
@@ -27,7 +28,12 @@ fn dispatch(cmd: Cmd) -> i32 {
             follow,
             container: c,
         } => container::logs(&c, follow),
-        Cmd::Rm { force, containers } => container::rm(&containers, force),
+        Cmd::Rm {
+            force,
+            volumes,
+            containers,
+        } => container::rm(&containers, force, volumes),
+        Cmd::Volume { cmd } => volume::run(cmd),
         Cmd::Stop { time, containers } => container::stop(&containers, time),
         Cmd::Kill { signal, containers } => container::kill(&containers, &signal),
         Cmd::Exec(a) => container::exec(a),
@@ -45,6 +51,7 @@ fn dispatch(cmd: Cmd) -> i32 {
         Cmd::Images => image::images(),
         Cmd::Rmi { images } => image::rmi(&images),
         Cmd::System { cmd } => image::system(cmd),
+        Cmd::Volume { cmd } => volume::run(cmd),
         _ => unsupported(),
     }
 }

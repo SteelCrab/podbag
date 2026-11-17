@@ -61,6 +61,9 @@ pub struct ContainerSpec {
     /// Capabilities, no_new_privs and seccomp.
     #[serde(default)]
     pub security: Security,
+    /// Volumes, host paths and tmpfs mounts, in order.
+    #[serde(default)]
+    pub mounts: Vec<crate::volume::Mount>,
 }
 
 /// The security settings of a container (and of commands `exec` runs in it).
@@ -159,6 +162,9 @@ impl ContainerSpec {
             );
         }
         crate::caps::effective(&self.security.cap_add, &self.security.cap_drop)?;
+        for m in &self.mounts {
+            crate::volume::check_target(&m.target)?;
+        }
         if self.hostname.is_empty() {
             return invalid("the hostname is empty", "give a non-empty hostname");
         }
@@ -213,6 +219,7 @@ pub(crate) fn spec_fixture() -> ContainerSpec {
         limits: Default::default(),
         cgroup: Default::default(),
         security: Default::default(),
+        mounts: Vec::new(),
     }
 }
 

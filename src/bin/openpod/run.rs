@@ -76,6 +76,12 @@ fn start_and_wait(args: RunArgs) -> openpod::Result<i32> {
     for name in args.cap_drop {
         c = c.cap_drop(name);
     }
+    for v in &args.volume {
+        c = c.mount(openpod::volume::parse_volume_arg(v)?);
+    }
+    for t in &args.tmpfs {
+        c = c.mount(openpod::volume::parse_tmpfs_arg(t)?);
+    }
     for opt in &args.security_opt {
         c = match openpod::spec::parse_security_opt(opt)? {
             openpod::spec::SecurityOpt::NoNewPrivileges(yes) => c.no_new_privileges(yes),

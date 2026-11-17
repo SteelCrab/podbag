@@ -8,6 +8,7 @@ pub enum StoreOp {
     RemoveImage { name: String },
     Prune,
     RemoveContainer { id: String },
+    RemoveVolume { name: String },
 }
 
 /// Entry point of `openpod __store '<json>'`. Returns the process exit code.
@@ -92,6 +93,18 @@ mod linux_ops {
             ),
             StoreOp::Prune => {
                 to_json(&Store::open(dirs, !rootless)?.prune(&|| images_in_use(dirs))?)
+            }
+            StoreOp::RemoveVolume { name } => {
+                crate::volume::check_name(&name)?;
+                let dir = dirs.volume_dir(&name);
+                remove_tree(&dir).map_err(|e| {
+                    crate::Error::io(
+                        format!("cannot remove volume directory {}", dir.display()),
+                        &e,
+                        "remove it by hand",
+                    )
+                })?;
+                Ok(Value::Null)
             }
             StoreOp::RemoveContainer { id } => {
                 id::check(&id)?;

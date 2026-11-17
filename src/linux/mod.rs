@@ -4,6 +4,7 @@
 
 pub mod exec;
 mod init;
+mod mounts;
 pub mod pty;
 mod rootfs;
 mod security;

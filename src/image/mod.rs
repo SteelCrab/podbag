@@ -183,6 +183,9 @@ pub struct ImageConfig {
     pub env: Vec<(String, String)>,
     pub workdir: Option<String>,
     pub user: Option<String>,
+    /// Paths the image declares as volumes (`Volumes`); each becomes an anonymous volume.
+    #[serde(default)]
+    pub volumes: Vec<String>,
 }
 
 #[cfg(test)]
