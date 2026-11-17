@@ -69,6 +69,11 @@ pub enum Cmd {
     Exec(ExecArgs),
     #[command(name = "__exec", hide = true)]
     ExecHelper { id: String, request: String },
+    /// Manage networks
+    Network {
+        #[command(subcommand)]
+        cmd: NetworkCmd,
+    },
     /// Manage volumes
     Volume {
         #[command(subcommand)]
@@ -83,6 +88,28 @@ pub enum Cmd {
     Shim { id: String },
     #[command(name = "__store", hide = true)]
     Store { op: String },
+    #[command(name = "__session", hide = true)]
+    Session,
+}
+
+#[derive(Subcommand)]
+pub enum NetworkCmd {
+    /// Create a bridge network
+    Create {
+        /// Subnet in CIDR form (default: the next free 10.78.<n>.0/24)
+        #[arg(long)]
+        subnet: Option<String>,
+        name: String,
+    },
+    /// List networks
+    Ls,
+    /// Remove networks that no container uses
+    Rm {
+        #[arg(required = true)]
+        names: Vec<String>,
+    },
+    /// Show a network's details as JSON
+    Inspect { name: String },
 }
 
 #[derive(Subcommand)]
@@ -185,6 +212,12 @@ pub struct RunArgs {
     /// Mount a tmpfs (TARGET[:OPTIONS])
     #[arg(long)]
     pub tmpfs: Vec<String>,
+    /// Connect to a network: bridge (default), host, none, or a network name
+    #[arg(long, alias = "net")]
+    pub network: Option<String>,
+    /// Publish a port ([IP:][HOST_PORT:]CONTAINER_PORT[/tcp|udp])
+    #[arg(short = 'p', long = "publish")]
+    pub publish: Vec<String>,
     /// Set an environment variable (NAME=VALUE, or NAME to copy it from this shell)
     #[arg(short = 'e', long = "env")]
     pub env: Vec<String>,

@@ -368,13 +368,76 @@ pub(super) fn run(spec: &ContainerSpec, dirs: &Dirs, status: &mut StatusChannel)
             return failed(status, e);
         }
     };
-    let child = match linux::spawn(spec, io.stdio, group.as_ref().map(|g| g.fd())) {
+    // SAFETY: geteuid has no preconditions. (Read before joining a user namespace.)
+    let rootless = unsafe { libc::geteuid() } != 0;
+    let bridged = matches!(spec.network, crate::network::NetworkMode::Bridge { .. });
+    let session = if rootless && bridged {
+        match super::net::join_session(dirs, spec) {
+            Ok(pid) => Some(pid),
+            Err(e) => {
+                remove_control(dirs, id);
+                if let Some(g) = group {
+                    g.remove();
+                }
+                return failed(status, e);
+            }
+        }
+    } else {
+        None
+    };
+    let userns = match (rootless, session) {
+        (false, _) => linux::UserNs::Host,
+        (true, Some(_)) => linux::UserNs::Joined,
+        (true, None) => linux::UserNs::New,
+    };
+    // Undo what a failed start made.
+    let undo = |group: Option<cgroup::Group>| {
+        remove_control(dirs, id);
+        if let Some(g) = group {
+            g.remove();
+        }
+        super::net::detach(dirs, spec, session.is_some());
+    };
+    // A bridge container's address, then its /etc files (first among its mounts).
+    let bridge = match &spec.network {
+        crate::network::NetworkMode::Bridge { network } => {
+            match super::net::bridge_address(dirs, spec, network) {
+                Ok(b) => Some(b),
+                Err(e) => {
+                    undo(group);
+                    return failed(status, e);
+                }
+            }
+        }
+        _ => None,
+    };
+    let own = match &bridge {
+        Some((_, ip)) => crate::netfiles::Own::Address(&spec.name, &spec.hostname, *ip),
+        None => super::net::own_without_address(spec),
+    };
+    let mut run_spec = spec.clone();
+    let peers = super::net::peers(dirs, spec);
+    match super::net::files(spec, dirs, rootless, own, &peers) {
+        Ok(mut files) => {
+            files.append(&mut run_spec.mounts);
+            run_spec.mounts = files;
+        }
+        Err(e) => {
+            undo(group);
+            return failed(status, e);
+        }
+    }
+    let mut attach = |pid: u32| super::net::attach(spec, bridge.as_ref(), session, pid);
+    let child = match linux::spawn(
+        &run_spec,
+        io.stdio,
+        group.as_ref().map(|g| g.fd()),
+        userns,
+        &mut attach,
+    ) {
         Ok(c) => c,
         Err(e) => {
-            remove_control(dirs, id);
-            if let Some(g) = group {
-                g.remove();
-            }
+            undo(group);
             return failed(status, e);
         }
     };
@@ -383,12 +446,20 @@ pub(super) fn run(spec: &ContainerSpec, dirs: &Dirs, status: &mut StatusChannel)
         // SAFETY: killing our own child, which runs but has no terminal to talk on.
         unsafe { libc::kill(child.pid as libc::pid_t, libc::SIGKILL) };
         let _ = linux::wait(child.pid);
-        remove_control(dirs, id);
-        if let Some(g) = group {
-            g.remove();
-        }
+        undo(group);
         return failed(status, e);
     }
+    // Published ports: bound now, so a taken port fails the start.
+    let published = match super::proxy::open(&spec.publish) {
+        Ok(p) => p,
+        Err(e) => {
+            // SAFETY: killing our own child; nothing is published for it.
+            unsafe { libc::kill(child.pid as libc::pid_t, libc::SIGKILL) };
+            let _ = linux::wait(child.pid);
+            undo(group);
+            return failed(status, e);
+        }
+    };
     // SAFETY: pidfd_open on our own child; the result is a new descriptor or -1.
     let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, child.pid as libc::pid_t, 0) };
     // SAFETY: a fresh descriptor that nothing else owns.
@@ -409,8 +480,14 @@ pub(super) fn run(spec: &ContainerSpec, dirs: &Dirs, status: &mut StatusChannel)
             .as_ref()
             .map(|g| g.path().to_string_lossy().into_owned()),
         oom: None,
+        ip: bridge.as_ref().map(|(_, ip)| ip.to_string()),
+        ports: published.iter().map(|(m, _)| *m).collect(),
     };
     let _ = state::write_state(dirs, id, &st);
+    super::net::announce(dirs, spec);
+    let relays = bridge
+        .as_ref()
+        .map(|(_, ip)| super::proxy::serve(published, *ip, session));
 
     let echo = io
         .outputs
@@ -430,12 +507,18 @@ pub(super) fn run(spec: &ContainerSpec, dirs: &Dirs, status: &mut StatusChannel)
         &listener,
         &sig_r,
     );
+    // Published ports close first: the address goes back to the network below.
+    if let Some(relays) = relays {
+        relays.close();
+    }
     let _ = log.flush_partial();
     st.status = Status::Exited;
     st.exit_code = Some(code);
     st.oom = group.as_ref().and_then(|g| g.oom_reason());
     st.finished = Some(state::now());
     let _ = state::write_state(dirs, id, &st);
+    // Give the address back before anyone hears of the exit: they may reuse it at once.
+    super::net::detach(dirs, spec, session.is_some());
     // Answer waiters only after the state says "exited": they may act on it at once.
     for w in &waiters {
         control::reply(w, &Response::Exited { exit_code: code });

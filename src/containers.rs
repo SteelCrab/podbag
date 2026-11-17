@@ -420,6 +420,8 @@ mod tests {
             finished: None,
             cgroup: None,
             oom: None,
+            ip: None,
+            ports: Vec::new(),
         };
         state::write_state(&dirs, &id, &running).unwrap();
         let _shim_alive = state::hold_shim_lock(&dirs, &id).unwrap();

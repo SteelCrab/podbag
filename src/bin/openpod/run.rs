@@ -76,6 +76,12 @@ fn start_and_wait(args: RunArgs) -> openpod::Result<i32> {
     for name in args.cap_drop {
         c = c.cap_drop(name);
     }
+    if let Some(n) = &args.network {
+        c = c.network(openpod::network::parse_network_arg(n)?);
+    }
+    for p in &args.publish {
+        c = c.publish(openpod::network::parse_publish_arg(p)?);
+    }
     for v in &args.volume {
         c = c.mount(openpod::volume::parse_volume_arg(v)?);
     }

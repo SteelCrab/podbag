@@ -26,6 +26,11 @@ pub mod image;
 #[doc(hidden)]
 pub mod linux;
 #[doc(hidden)]
+pub mod netfiles;
+#[doc(hidden)]
+pub mod netlink;
+pub mod network;
+#[doc(hidden)]
 pub mod paths;
 #[doc(hidden)]
 pub mod seccomp;

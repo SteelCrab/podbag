@@ -43,6 +43,10 @@ pub struct Container {
     security: crate::spec::Security,
     #[serde(default)]
     mounts: Vec<crate::volume::MountRequest>,
+    #[serde(default)]
+    network: Option<crate::network::NetworkMode>,
+    #[serde(default)]
+    publish: Vec<crate::network::PortMapping>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,7 +126,22 @@ impl Container {
             pids_limit: None,
             security: crate::spec::Security::default(),
             mounts: Vec::new(),
+            network: None,
+            publish: Vec::new(),
         }
+    }
+
+    /// How to connect the container: a bridge network (the default `bridge`, or one made
+    /// with [`crate::network::Network::create`]), the host's network, or none.
+    pub fn network(mut self, mode: crate::network::NetworkMode) -> Container {
+        self.network = Some(mode);
+        self
+    }
+
+    /// Publish a container port on the host (`-p`).
+    pub fn publish(mut self, port: crate::network::PortMapping) -> Container {
+        self.publish.push(port);
+        self
     }
 
     /// Mount a host path or a named volume at `target`. A `source` that starts with `/` or
@@ -623,6 +642,30 @@ mod linux_launch {
             eprintln!("openpod: warning: {w}");
         }
         let dirs = paths::dirs()?;
+        let network = c.network.clone().unwrap_or_default();
+        let mut c = c;
+        if !c.publish.is_empty() {
+            match network {
+                crate::network::NetworkMode::Host => {
+                    eprintln!(
+                        "openpod: warning: published ports are discarded with --network host"
+                    );
+                    c.publish.clear();
+                }
+                crate::network::NetworkMode::None => {
+                    return Err(Error::new(
+                        ErrorKind::InvalidInput,
+                        "cannot publish ports",
+                        "the container has no network (--network none)",
+                        "use a bridge network, or drop -p",
+                    ));
+                }
+                crate::network::NetworkMode::Bridge { .. } => {}
+            }
+        }
+        if let crate::network::NetworkMode::Bridge { network } = &network {
+            crate::network::get_in(&dirs, network)?;
+        }
         let id = id::new_id()?;
         let short = id::short_id(&id).to_string();
         let hostname = c.hostname.clone().unwrap_or_else(|| short.clone());
@@ -682,6 +725,8 @@ mod linux_launch {
                     cgroup: placement.clone(),
                     security: c.security.clone(),
                     mounts: mounts.clone(),
+                    network: network.clone(),
+                    publish: c.publish.clone(),
                 };
                 spec.validate()?;
                 state::create(&dirs, &spec)?;
@@ -733,6 +778,8 @@ mod linux_launch {
                     cgroup: placement.clone(),
                     security: c.security.clone(),
                     mounts: mounts.clone(),
+                    network: network.clone(),
+                    publish: c.publish.clone(),
                 };
                 spec.validate()?;
                 state::create(&dirs, &spec)?;

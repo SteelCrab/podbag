@@ -95,15 +95,26 @@ fn start(id: &str, json: &str) -> Result<Started> {
     for (name, flag) in [
         ("ipc", libc::CLONE_NEWIPC),
         ("uts", libc::CLONE_NEWUTS),
+        ("net", libc::CLONE_NEWNET),
         ("pid", libc::CLONE_NEWPID),
         ("mnt", libc::CLONE_NEWNS),
     ] {
+        // A container on the host's network shares this namespace: joining it again
+        // would need privileges over the host's namespace.
+        if same_namespace(pid, name) {
+            continue;
+        }
         namespaces.push((open_ns(name)?, flag));
     }
     let root = File::open(format!("/proc/{pid}/root")).map_err(|e| enter_error(&spec.name, e))?;
     // Joined by the child: the helper's own cgroup lies outside the container's cgroup
     // namespace, where clone3 could not place the child.
-    let cgroup_ns = open_ns("cgroup")?;
+    // A container made before it had its own cgroup namespace shares ours: skip it.
+    let cgroup_ns = if same_namespace(pid, "cgroup") {
+        None
+    } else {
+        Some(open_ns("cgroup")?)
+    };
     let cgroup = st
         .cgroup
         .as_deref()
@@ -170,7 +181,7 @@ fn start(id: &str, json: &str) -> Result<Started> {
     })?;
     if child == 0 {
         drop(status_r);
-        let joined = join_cgroup_ns(&cgroup_ns);
+        let joined = cgroup_ns.as_ref().map_or(Ok(()), join_cgroup_ns);
         let error = match joined
             .and_then(|()| child_setup(&spec, &req, &root, stdio, status_w.as_raw_fd()))
         {
@@ -267,6 +278,13 @@ fn finish(started: Started) -> i32 {
         super::pty::relay(master, started.relay_stdin, started.pid);
     }
     wait(started.pid).unwrap_or(-1)
+}
+
+/// Whether process `pid` is in this process's namespace of kind `name`.
+fn same_namespace(pid: u32, name: &str) -> bool {
+    let link = |p: String| std::fs::read_link(p).ok();
+    let theirs = link(format!("/proc/{pid}/ns/{name}"));
+    theirs.is_some() && theirs == link(format!("/proc/self/ns/{name}"))
 }
 
 /// In the forked child: join the container's cgroup namespace.

@@ -5,13 +5,15 @@
 pub mod exec;
 mod init;
 mod mounts;
+pub mod net;
 pub mod pty;
 mod rootfs;
 mod security;
+pub mod session;
 mod spawn;
 pub mod userns;
 
-pub use spawn::{ContainerStdio, spawn, wait};
+pub use spawn::{ContainerStdio, UserNs, spawn, wait};
 
 use crate::{Error, ErrorKind};
 

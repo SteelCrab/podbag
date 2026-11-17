@@ -2,6 +2,7 @@ mod args;
 #[cfg(unix)]
 mod container;
 mod image;
+mod network;
 #[cfg(unix)]
 mod run;
 mod volume;
@@ -34,12 +35,14 @@ fn dispatch(cmd: Cmd) -> i32 {
             containers,
         } => container::rm(&containers, force, volumes),
         Cmd::Volume { cmd } => volume::run(cmd),
+        Cmd::Network { cmd } => network::run(cmd),
         Cmd::Stop { time, containers } => container::stop(&containers, time),
         Cmd::Kill { signal, containers } => container::kill(&containers, &signal),
         Cmd::Exec(a) => container::exec(a),
         Cmd::ExecHelper { id, request } => exec_helper(&id, &request),
         Cmd::Shim { id } => openpod::shim::shim_main(&id),
         Cmd::Store { op } => openpod::store::ops::helper_main(&op),
+        Cmd::Session => session_helper(),
     }
 }
 
@@ -52,6 +55,7 @@ fn dispatch(cmd: Cmd) -> i32 {
         Cmd::Rmi { images } => image::rmi(&images),
         Cmd::System { cmd } => image::system(cmd),
         Cmd::Volume { cmd } => volume::run(cmd),
+        Cmd::Network { cmd } => network::run(cmd),
         _ => unsupported(),
     }
 }
@@ -73,5 +77,15 @@ fn exec_helper(id: &str, request: &str) -> i32 {
 
 #[cfg(all(unix, not(target_os = "linux")))]
 fn exec_helper(_id: &str, _request: &str) -> i32 {
+    unsupported()
+}
+
+#[cfg(target_os = "linux")]
+fn session_helper() -> i32 {
+    openpod::linux::session::session_main()
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn session_helper() -> i32 {
     unsupported()
 }

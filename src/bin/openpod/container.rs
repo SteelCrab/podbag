@@ -18,7 +18,7 @@ pub fn ps(all: bool, quiet: bool) -> i32 {
         return 0;
     }
     let now = openpod::state::now();
-    let rows: Vec<[String; 6]> = list
+    let rows: Vec<[String; 7]> = list
         .iter()
         .map(|c| {
             [
@@ -30,6 +30,7 @@ pub fn ps(all: bool, quiet: bool) -> i32 {
                     human_duration(now.saturating_sub(c.state.created))
                 ),
                 status(c, now),
+                ports(c),
                 c.name.clone(),
             ]
         })
@@ -41,6 +42,7 @@ pub fn ps(all: bool, quiet: bool) -> i32 {
             "COMMAND",
             "CREATED",
             "STATUS",
+            "PORTS",
             "NAMES",
         ],
         &rows,
@@ -187,6 +189,28 @@ fn command(c: &ContainerInfo) -> String {
     } else {
         format!("\"{full}\"")
     }
+}
+
+/// Docker's PORTS column: `0.0.0.0:8080->80/tcp`, while the container runs.
+fn ports(c: &ContainerInfo) -> String {
+    if c.state.status != Status::Running {
+        return String::new();
+    }
+    c.state
+        .ports
+        .iter()
+        .map(|p| {
+            let proto = match p.proto {
+                openpod::network::Proto::Tcp => "tcp",
+                openpod::network::Proto::Udp => "udp",
+            };
+            format!(
+                "{}:{}->{}/{proto}",
+                p.host_ip, p.host_port, p.container_port
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn status(c: &ContainerInfo, now: u64) -> String {

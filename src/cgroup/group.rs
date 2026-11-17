@@ -41,11 +41,9 @@ pub fn choose_placement(rootless: bool, limits: &Limits) -> Result<(Placement, O
     let parent = parent_name()?;
     let root = Path::new(ROOT);
     if rootless {
-        let user_manager = std::env::var_os("XDG_RUNTIME_DIR")
-            .is_some_and(|d| Path::new(&d).join("systemd/private").exists());
         return rootless_placement(
             systemd_run(),
-            user_manager,
+            user_manager(),
             root.join("cgroup.controllers").exists(),
             limits,
             &parent,
@@ -101,6 +99,12 @@ fn prepare_parent(parent: &Path) -> std::io::Result<Vec<String>> {
         _ => {}
     }
     enable(parent)
+}
+
+/// Whether the user's systemd service manager is reachable (systemd-run --user needs it).
+pub fn user_manager() -> bool {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .is_some_and(|d| Path::new(&d).join("systemd/private").exists())
 }
 
 /// The systemd-run program: `OPENPOD_SYSTEMD_RUN`, or `systemd-run` in PATH.

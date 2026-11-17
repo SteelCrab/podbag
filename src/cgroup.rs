@@ -9,6 +9,7 @@ mod group;
 #[cfg(target_os = "linux")]
 pub use group::{
     Group, ROOT, choose_placement, create, parent_name, remove_dir, systemd_run, try_remove_dir,
+    user_manager,
 };
 
 /// Where a container's cgroup goes. The library decides; the shim creates it.

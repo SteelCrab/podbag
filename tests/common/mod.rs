@@ -23,12 +23,46 @@ pub struct Sandbox {
     pub env: Vec<(String, String)>,
 }
 
+// Remove what a test leaves: its containers, and (as root) files the test user cannot
+// delete, through sudo, so the VM's /tmp (a small tmpfs) does not fill up over many runs.
+impl Drop for Sandbox {
+    fn drop(&mut self) {
+        // A test that failed half-way may leave containers running (and holding ports).
+        if let Ok(out) = self.openpod().args(["ps", "-aq"]).output() {
+            let ids: Vec<String> = String::from_utf8_lossy(&out.stdout)
+                .split_whitespace()
+                .map(String::from)
+                .collect();
+            if !ids.is_empty() {
+                let _ = self.openpod().args(["rm", "-f"]).args(&ids).output();
+            }
+        }
+        if root_mode() {
+            let _ = Command::new("sudo")
+                .args(["-n", "rm", "-rf"])
+                .arg(self.tmp.path())
+                .status();
+        }
+    }
+}
+
 impl Sandbox {
     pub fn new() -> Sandbox {
-        let sb = Sandbox {
+        let mut sb = Sandbox {
             tmp: tempfile::tempdir().unwrap(),
             env: Vec::new(),
         };
+        // As root, every sandbox's default network uses the host's one bridge device; its
+        // own subnet keeps the sandboxes' address tables from handing out the same address.
+        if root_mode() {
+            static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let slot = (std::process::id() + n) % 250 + 1;
+            sb.env.push((
+                "OPENPOD_DEFAULT_SUBNET".to_string(),
+                format!("10.79.{slot}.0/24"),
+            ));
+        }
         // Created by the test user, so the test can list it even when openpod runs as root.
         std::fs::create_dir_all(sb.data().join("containers")).unwrap();
         sb

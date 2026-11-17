@@ -4,7 +4,7 @@ A daemonless, rootless container engine that runs Docker/OCI images from a singl
 
 ## Status
 
-Early development (milestone M5). What works:
+Early development (milestone M6). What works:
 
 ```sh
 openpod run alpine echo hello            # pulls the image if needed; the container stays
@@ -13,6 +13,10 @@ openpod run -d --name web nginx:alpine   # in the background
 openpod run -m 512m --cpus 1.5 --pids-limit 200 alpine sh   # resource limits
 openpod run -v ./src:/work:ro -v pgdata:/var/lib/pg --tmpfs /run alpine sh   # volumes
 openpod volume create|ls|rm|inspect
+openpod network create app                                    # networks
+openpod run -d --name db --network app alpine sleep 1d
+openpod run -d --name api --network app -p 8080:80 nginx:alpine
+openpod exec api ping -c1 db                                  # by name
 openpod ps -a
 openpod logs -f web
 openpod exec -it web sh
@@ -28,7 +32,7 @@ cgroup namespaces, plus a user namespace when run without root. Identical files 
 different images are stored once and share page cache. The store keeps at most 10 GiB by
 default.
 
-Not yet: networking.
+Not yet: `openpod check`, image libc checks, macOS and Windows.
 
 ## Volumes
 
@@ -73,10 +77,33 @@ system calls (module loading, kexec, mount, new namespaces, keyrings, BPF, …),
 kernel files (`/proc/kcore`, `/proc/keys`, `/sys/firmware`, …) and read-only kernel
 settings (`/proc/sys`, `/proc/sysrq-trigger`, …). `exec` applies the same.
 
+## Networks
+
+| Option | Effect |
+|---|---|
+| `--network bridge` (default) | the default network: bridge `openpod0`, `10.77.0.0/16` (`default_subnet` in `config.toml`) |
+| `--network NAME` | a network from `openpod network create`; containers on it find each other by name |
+| `--network host` | the host's network |
+| `--network none` | loopback only |
+| `-p [IP:][HOST:]CONTAINER[/tcp\|udp]` | publish a port; without a host port the kernel picks one (`ps`, `inspect`) |
+
+New networks get `10.78.<n>.0/24` unless `--subnet` says otherwise; a subnet that overlaps
+another network or a host route is refused. Names on a network are written into each
+container's `/etc/hosts`, which openpod rewrites as containers start and stop.
+
+As root, bridges live in the host's network namespace with an nftables table `openpod` for
+NAT (no other table is touched), and IPv4 forwarding is turned on. Without root, one
+session process per user holds a user and a network namespace; the bridges live there and
+`pasta` connects them to the host (DNS through pasta at `169.254.1.1`). The first container
+starts the session and the last one stops it. Rootless bridge containers share the
+session's user namespace. Published ports are relayed by each container's shim in both
+modes, so the container sees the gateway as the client address.
+
 ## Requirements
 
 - Linux 5.12 or later, with cgroup v2 at `/sys/fs/cgroup`.
 - Without root: `newuidmap`/`newgidmap` and entries in `/etc/subuid` and `/etc/subgid`;
+  `pasta` (package `passt`) for bridge networks (or use `--network host`/`none`);
   on Ubuntu 24.04 and later an AppArmor profile (see below); for resource limits and the
   memory budget, a systemd user session. Without one, containers still run, with a
   warning, but `--memory`, `--cpus` and `--pids-limit` are refused.

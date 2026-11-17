@@ -4,6 +4,10 @@
 pub mod control;
 pub mod logbook;
 #[cfg(target_os = "linux")]
+mod net;
+#[cfg(target_os = "linux")]
+mod proxy;
+#[cfg(target_os = "linux")]
 mod supervise;
 
 use crate::helper::StatusChannel;

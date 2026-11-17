@@ -13,6 +13,8 @@ pub struct Config {
     pub store_limit: u64,
     /// How much memory all containers may use together (design 6.6).
     pub memory_budget: Budget,
+    /// The default network's subnet (design 6.8.2).
+    pub default_subnet: String,
 }
 
 impl Default for Config {
@@ -20,12 +22,13 @@ impl Default for Config {
         Config {
             store_limit: DEFAULT_STORE_LIMIT,
             memory_budget: Budget::default(),
+            default_subnet: "10.77.0.0/16".to_string(),
         }
     }
 }
 
-/// Read `<config>/config.toml` (missing file = defaults). `OPENPOD_STORE_LIMIT` and
-/// `OPENPOD_MEMORY_BUDGET` override it.
+/// Read `<config>/config.toml` (missing file = defaults). `OPENPOD_STORE_LIMIT`,
+/// `OPENPOD_MEMORY_BUDGET` and `OPENPOD_DEFAULT_SUBNET` override it.
 pub fn load(dirs: &Dirs) -> Result<Config> {
     let path = dirs.config.join("config.toml");
     let mut config = match std::fs::read_to_string(&path) {
@@ -47,6 +50,10 @@ pub fn load(dirs: &Dirs) -> Result<Config> {
     }
     if let Ok(v) = std::env::var("OPENPOD_MEMORY_BUDGET") {
         config.memory_budget = parse_budget(&v)?;
+    }
+    if let Ok(v) = std::env::var("OPENPOD_DEFAULT_SUBNET") {
+        crate::network::parse_cidr(&v)?;
+        config.default_subnet = v;
     }
     Ok(config)
 }
@@ -75,6 +82,10 @@ pub fn parse(text: &str) -> Result<Config> {
             "store_limit" => config.store_limit = parse_size(value).map_err(|e| bad(e.why))?,
             "memory_budget" => {
                 config.memory_budget = parse_budget(value).map_err(|e| bad(e.why))?
+            }
+            "default_subnet" => {
+                crate::network::parse_cidr(value).map_err(|e| bad(e.why))?;
+                config.default_subnet = value.to_string();
             }
             other => return Err(bad(format!("unknown setting {other}"))),
         }
@@ -165,6 +176,14 @@ mod tests {
         assert_eq!(budget("memory_budget = \"25%\""), Budget::Percent(25));
         assert_eq!(budget("memory_budget = \"0\""), Budget::Unlimited);
         assert_eq!(budget(""), Budget::Percent(50));
+    }
+
+    #[test]
+    fn reads_default_subnet() {
+        assert_eq!(parse("").unwrap().default_subnet, "10.77.0.0/16");
+        let c = parse("default_subnet = \"172.31.0.0/16\"").unwrap();
+        assert_eq!(c.default_subnet, "172.31.0.0/16");
+        assert!(parse("default_subnet = \"10.0.0.1/16\"").is_err());
     }
 
     #[test]

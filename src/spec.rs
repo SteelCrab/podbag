@@ -64,6 +64,13 @@ pub struct ContainerSpec {
     /// Volumes, host paths and tmpfs mounts, in order.
     #[serde(default)]
     pub mounts: Vec<crate::volume::Mount>,
+    /// How the container is connected. Containers made before networks existed used the
+    /// host's network.
+    #[serde(default = "crate::network::NetworkMode::legacy")]
+    pub network: crate::network::NetworkMode,
+    /// Published ports (`-p`).
+    #[serde(default)]
+    pub publish: Vec<crate::network::PortMapping>,
 }
 
 /// The security settings of a container (and of commands `exec` runs in it).
@@ -220,6 +227,8 @@ pub(crate) fn spec_fixture() -> ContainerSpec {
         cgroup: Default::default(),
         security: Default::default(),
         mounts: Vec::new(),
+        network: crate::network::NetworkMode::Host,
+        publish: Vec::new(),
     }
 }
 

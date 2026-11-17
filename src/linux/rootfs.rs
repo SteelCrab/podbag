@@ -12,6 +12,7 @@ use std::path::Path;
 pub(super) fn enter_rootfs(
     spec: &Rootfs,
     mounts: &[crate::volume::Mount],
+    own_netns: bool,
     rootless: bool,
 ) -> Result<()> {
     step(
@@ -149,20 +150,31 @@ pub(super) fn enter_rootfs(
         None,
     )?;
 
-    // Without a network namespace, a new sysfs cannot be mounted; bind the host's, read-only.
+    // A new sysfs shows the container's own network devices, and needs a network namespace
+    // of its own (owned by its user namespace). Without one, bind the host's.
     let sys = at("sys");
-    make_dir(&sys)?;
-    step(
-        rootless,
-        "bind /sys",
-        rustix::mount::mount_bind_recursive("/sys", &sys),
-    )?;
+    if own_netns {
+        mount_fs(
+            "sysfs",
+            &sys,
+            "sysfs",
+            MountFlags::NOSUID | MountFlags::NODEV | MountFlags::NOEXEC | MountFlags::RDONLY,
+            None,
+        )?;
+    } else {
+        make_dir(&sys)?;
+        step(
+            rootless,
+            "bind /sys",
+            rustix::mount::mount_bind_recursive("/sys", &sys),
+        )?;
+    }
     // The container's own cgroup tree (its cgroup namespace), where the host has cgroup v2.
     // The kernel refuses cgroup2 right on the root of the bound host cgroup2 mount (same
     // superblock: EBUSY), and that mount cannot be detached in rootless mode (it is locked),
     // so an empty tmpfs goes in between.
     let cgroup = sys.join("fs/cgroup");
-    if cgroup.join("cgroup.controllers").exists() {
+    if Path::new("/sys/fs/cgroup/cgroup.controllers").exists() && cgroup.is_dir() {
         step(
             rootless,
             "cover sys/fs/cgroup",

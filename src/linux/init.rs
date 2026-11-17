@@ -101,7 +101,11 @@ fn setup_and_exec(
             "use a hostname of at most 64 characters",
         )
     })?;
-    enter_rootfs(&spec.rootfs, &spec.mounts, rootless)?;
+    let own_netns = spec.network != crate::network::NetworkMode::Host;
+    if own_netns {
+        loopback_up()?;
+    }
+    enter_rootfs(&spec.rootfs, &spec.mounts, own_netns, rootless)?;
     if let Some(sock) = tty_socket {
         // Open the terminal in the container's own /dev/pts, so the command can find it.
         let (master, slave) = super::pty::open(None)?;
@@ -148,6 +152,24 @@ fn setup_and_exec(
     // SAFETY: writing one byte from a valid buffer to our own descriptor.
     unsafe { libc::write(status_fd, [0u8].as_ptr().cast(), 1) };
     exec(&program, &spec.command, &env)
+}
+
+/// Bring up `lo` in this process's own network namespace (it holds CAP_NET_ADMIN there).
+fn loopback_up() -> Result<()> {
+    let up = || -> std::io::Result<()> {
+        let mut s = crate::netlink::Socket::route()?;
+        if let Some(lo) = s.link_index("lo")? {
+            s.request(crate::netlink::route::set_up(lo))?;
+        }
+        Ok(())
+    };
+    up().map_err(|e| {
+        os_error(
+            "cannot bring up the loopback interface",
+            e,
+            "report this bug",
+        )
+    })
 }
 
 /// End this process when its parent (the shim) ends. Changing credentials clears

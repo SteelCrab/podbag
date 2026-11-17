@@ -132,6 +132,12 @@ pub struct State {
     /// Why the kernel ended the container for memory, if it did.
     #[serde(default)]
     pub oom: Option<crate::cgroup::OomReason>,
+    /// The container's address on its bridge network.
+    #[serde(default)]
+    pub ip: Option<String>,
+    /// Published ports, with the host ports in use.
+    #[serde(default)]
+    pub ports: Vec<crate::network::PortMapping>,
 }
 
 /// Seconds since the epoch.
@@ -303,6 +309,8 @@ pub fn create(dirs: &Dirs, spec: &ContainerSpec) -> Result<()> {
         finished: None,
         cgroup: None,
         oom: None,
+        ip: None,
+        ports: Vec::new(),
     };
     write_state(dirs, &spec.id, &state)
 }
@@ -364,6 +372,12 @@ pub fn reconcile(dirs: &Dirs, id: &str) -> Result<State> {
     Ok(state)
 }
 
+/// Whether container `id`'s shim still runs (it holds its lock), without changing state.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn shim_running(dirs: &Dirs, id: &str) -> bool {
+    matches!(try_shim_lock(dirs, id), Ok(None))
+}
+
 /// `reconcile` for a state read earlier.
 fn settle(dirs: &Dirs, id: &str, seen: State) -> Result<State> {
     if seen.status != Status::Running {
@@ -379,6 +393,19 @@ fn settle(dirs: &Dirs, id: &str, seen: State) -> Result<State> {
         state.exit_code = None;
         state.finished = Some(now());
         write_state(dirs, id, &state)?;
+        // The shim did not give back the container's address (or, rootless, its place
+        // in the network session); do it now.
+        if let Ok(spec) = read_config(dirs, id) {
+            if let crate::network::NetworkMode::Bridge { network } = &spec.network {
+                let _ = crate::network::release(dirs, network, id);
+                crate::network::refresh_hosts(dirs, network);
+                // SAFETY: geteuid has no preconditions.
+                #[cfg(target_os = "linux")]
+                if unsafe { libc::geteuid() } != 0 {
+                    crate::linux::session::release(dirs, id);
+                }
+            }
+        }
         // The shim did not remove the container's cgroup (root mode); do it now.
         #[cfg(target_os = "linux")]
         if let Some(path) = state.cgroup.as_deref() {
@@ -416,6 +443,8 @@ mod tests {
             finished: Some(3),
             cgroup: None,
             oom: None,
+            ip: None,
+            ports: Vec::new(),
         };
         write_state(&dirs, &spec.id, &st).unwrap();
         assert_eq!(read_state(&dirs, &spec.id).unwrap(), st);
@@ -491,6 +520,8 @@ mod tests {
             finished: None,
             cgroup: None,
             oom: None,
+            ip: None,
+            ports: Vec::new(),
         };
         write_state(&dirs, &spec.id, &running).unwrap();
         let lock = hold_shim_lock(&dirs, &spec.id).unwrap();
@@ -518,6 +549,8 @@ mod tests {
             finished: None,
             cgroup: None,
             oom: None,
+            ip: None,
+            ports: Vec::new(),
         };
         let done = State {
             status: Status::Exited,
@@ -525,6 +558,8 @@ mod tests {
             finished: Some(3),
             cgroup: None,
             oom: None,
+            ip: None,
+            ports: Vec::new(),
             ..seen.clone()
         };
         write_state(&dirs, &spec.id, &done).unwrap();
@@ -570,6 +605,8 @@ mod tests {
             finished: None,
             cgroup: None,
             oom: None,
+            ip: None,
+            ports: Vec::new(),
         };
         write_state(&dirs, &spec.id, &running).unwrap();
         let fixed = reconcile(&dirs, &spec.id).unwrap();

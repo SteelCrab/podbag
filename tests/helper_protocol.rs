@@ -66,6 +66,8 @@ fn shim_reports_unsupported_and_removes_the_container_directory() {
         cgroup: Default::default(),
         security: Default::default(),
         mounts: Vec::new(),
+        network: openpod::network::NetworkMode::Host,
+        publish: Vec::new(),
     };
     state::write_config(&dirs, &spec).unwrap();
     let mut h =

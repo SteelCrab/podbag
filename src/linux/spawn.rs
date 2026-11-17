@@ -54,16 +54,29 @@ pub struct ContainerStdio {
 /// `CLONE_INTO_CGROUP` from linux/sched.h: start the child in the cgroup `args.cgroup`.
 pub(super) const CLONE_INTO_CGROUP: u64 = 0x2_0000_0000;
 
+/// How the container gets its user namespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserNs {
+    /// Root mode: none.
+    Host,
+    /// Rootless: a new one, mapped with newuidmap and newgidmap.
+    New,
+    /// Rootless: this process already joined one (the network session's).
+    Joined,
+}
+
 /// Create the container process in its own namespaces (cgroup namespace included) and,
 /// when `cgroup` is given, directly in that cgroup. Returns after its command was executed.
 pub fn spawn(
     spec: &ContainerSpec,
     stdio: ContainerStdio,
     cgroup: Option<std::os::fd::BorrowedFd<'_>>,
+    userns: UserNs,
+    before_start: &mut dyn FnMut(u32) -> Result<()>,
 ) -> Result<Spawned> {
     // SAFETY: these calls have no preconditions.
     let (euid, egid) = unsafe { (libc::geteuid(), libc::getegid()) };
-    let rootless = euid != 0;
+    let rootless = userns != UserNs::Host;
 
     let pipe = || {
         pipe_with(PipeFlags::CLOEXEC).map_err(|e| {
@@ -82,8 +95,11 @@ pub fn spawn(
         | libc::CLONE_NEWUTS
         | libc::CLONE_NEWIPC
         | libc::CLONE_NEWCGROUP;
-    if rootless {
+    if userns == UserNs::New {
         flags |= libc::CLONE_NEWUSER;
+    }
+    if spec.network != crate::network::NetworkMode::Host {
+        flags |= libc::CLONE_NEWNET;
     }
     let mut args = clone_args(flags as u64);
     if let Some(fd) = cgroup {
@@ -119,7 +135,7 @@ pub fn spawn(
     drop(sync_read);
     drop(status_write);
 
-    if rootless {
+    if userns == UserNs::New {
         if let Err(e) = idmap::apply_id_maps(pid, euid, egid) {
             // A missing tool or subuid entry is its own problem; a failing tool may be AppArmor.
             // Read the child's AppArmor label before the child is gone.
@@ -128,6 +144,12 @@ pub fn spawn(
             kill_and_reap(pid);
             return Err(denied.flatten().unwrap_or(e));
         }
+    }
+
+    // Network and similar setup from outside, while the child waits.
+    if let Err(e) = before_start(pid) {
+        kill_and_reap(pid);
+        return Err(e);
     }
 
     // Let the child continue. If it already died, the status pipe below is empty.
