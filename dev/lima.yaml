@@ -1,0 +1,13 @@
+# Development VM for openpod. Created and managed by dev/vm.sh.
+vmType: vz
+mountType: virtiofs
+cpus: 4
+memory: "4GiB"
+disk: "20GiB"
+images:
+  - location: "https://cloud-images.ubuntu.com/releases/resolute/release/ubuntu-26.04-server-cloudimg-arm64.img"
+    arch: "aarch64"
+  - location: "https://cloud-images.ubuntu.com/releases/resolute/release/ubuntu-26.04-server-cloudimg-amd64.img"
+    arch: "x86_64"
+# dev/vm.sh sets a writable mount for the repository.
+mounts: []
