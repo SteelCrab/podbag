@@ -52,6 +52,71 @@ pub struct ContainerSpec {
     /// Run in the background (`-d`): the shim leaves the caller's session.
     #[serde(default)]
     pub detach: bool,
+    /// Resource limits (`--memory`, `--cpus`, `--pids-limit`).
+    #[serde(default)]
+    pub limits: crate::cgroup::Limits,
+    /// Where the container's cgroup goes.
+    #[serde(default)]
+    pub cgroup: crate::cgroup::Placement,
+    /// Capabilities, no_new_privs and seccomp.
+    #[serde(default)]
+    pub security: Security,
+}
+
+/// The security settings of a container (and of commands `exec` runs in it).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Security {
+    /// `--cap-add`: capability names, or `ALL`.
+    pub cap_add: Vec<String>,
+    /// `--cap-drop`: capability names, or `ALL`.
+    pub cap_drop: Vec<String>,
+    /// `--security-opt no-new-privileges`: setuid programs cannot gain privileges.
+    pub no_new_privileges: bool,
+    /// The default seccomp filter; `--security-opt seccomp=unconfined` turns it off.
+    pub seccomp: bool,
+}
+
+impl Default for Security {
+    fn default() -> Self {
+        Security {
+            cap_add: Vec::new(),
+            cap_drop: Vec::new(),
+            no_new_privileges: false,
+            seccomp: true,
+        }
+    }
+}
+
+/// One `--security-opt` value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecurityOpt {
+    NoNewPrivileges(bool),
+    SeccompUnconfined,
+}
+
+/// Read a `--security-opt` value, as Docker writes them (`=` or the older `:`).
+pub fn parse_security_opt(s: &str) -> Result<SecurityOpt> {
+    let bad = |why: &str| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            format!("invalid security option {s:?}"),
+            why,
+            "use no-new-privileges[=true|false] or seccomp=unconfined",
+        )
+    };
+    let (key, value) = match s.split_once(['=', ':']) {
+        Some((k, v)) => (k, Some(v)),
+        None => (s, None),
+    };
+    match (key, value) {
+        ("no-new-privileges", None | Some("true")) => Ok(SecurityOpt::NoNewPrivileges(true)),
+        ("no-new-privileges", Some("false")) => Ok(SecurityOpt::NoNewPrivileges(false)),
+        ("no-new-privileges", Some(_)) => Err(bad("no-new-privileges takes true or false")),
+        ("seccomp", Some("unconfined")) => Ok(SecurityOpt::SeccompUnconfined),
+        ("seccomp", _) => Err(bad("custom seccomp profiles are not supported")),
+        _ => Err(bad("openpod does not know this option")),
+    }
 }
 
 impl ContainerSpec {
@@ -93,6 +158,7 @@ impl ContainerSpec {
                 "set OPENPOD_DATA_DIR to a path without them",
             );
         }
+        crate::caps::effective(&self.security.cap_add, &self.security.cap_drop)?;
         if self.hostname.is_empty() {
             return invalid("the hostname is empty", "give a non-empty hostname");
         }
@@ -144,6 +210,9 @@ pub(crate) fn spec_fixture() -> ContainerSpec {
         tty: false,
         interactive: false,
         detach: false,
+        limits: Default::default(),
+        cgroup: Default::default(),
+        security: Default::default(),
     }
 }
 
@@ -151,6 +220,39 @@ pub(crate) fn spec_fixture() -> ContainerSpec {
 mod tests {
     use super::*;
     use crate::ErrorKind;
+
+    #[test]
+    fn security_opt_parsing() {
+        let p = |s: &str| parse_security_opt(s).unwrap();
+        assert_eq!(p("no-new-privileges"), SecurityOpt::NoNewPrivileges(true));
+        assert_eq!(
+            p("no-new-privileges=false"),
+            SecurityOpt::NoNewPrivileges(false)
+        );
+        assert_eq!(
+            p("no-new-privileges:true"),
+            SecurityOpt::NoNewPrivileges(true)
+        );
+        assert_eq!(p("seccomp=unconfined"), SecurityOpt::SeccompUnconfined);
+        for bad in [
+            "apparmor=x",
+            "seccomp=/tmp/p.json",
+            "no-new-privileges=maybe",
+        ] {
+            assert_eq!(
+                parse_security_opt(bad).unwrap_err().kind,
+                ErrorKind::InvalidInput,
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_capability_names_are_invalid_settings() {
+        let mut s = spec_fixture();
+        s.security.cap_add = vec!["NOPE".into()];
+        assert_eq!(s.validate().unwrap_err().kind, ErrorKind::InvalidInput);
+    }
 
     fn spec() -> ContainerSpec {
         spec_fixture()

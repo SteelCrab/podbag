@@ -220,8 +220,34 @@ impl ContainerHandle {
                 "report this bug",
             )
         })?;
-        let mut helper =
-            crate::helper::spawn_with_args(&["__exec", &self.id, &json], stdin, stdout, stderr)?;
+        // Rootless: a plain session may not move a process into the container's cgroup;
+        // a process in a scope of the same slice may (design: exec in the same cgroup).
+        let scope = match (
+            &state::read_config(&paths::dirs()?, &self.id)?.cgroup,
+            &info.state.cgroup,
+        ) {
+            (crate::cgroup::Placement::Scope { slice }, Some(_)) => Some(crate::helper::Scope {
+                systemd_run: crate::cgroup::systemd_run().ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::MissingRequirement,
+                        "cannot run the command in the container's cgroup",
+                        "systemd-run was not found",
+                        "install systemd, or set OPENPOD_SYSTEMD_RUN",
+                    )
+                })?,
+                slice: slice.clone(),
+                unit: None,
+                delegate: false,
+            }),
+            _ => None,
+        };
+        let mut helper = crate::helper::spawn_with_args(
+            &["__exec", &self.id, &json],
+            stdin,
+            stdout,
+            stderr,
+            scope.as_ref(),
+        )?;
         helper.wait_started()?;
         Ok(helper)
     }
@@ -241,6 +267,11 @@ impl ContainerHandle {
             }
             let _ = self.kill(libc::SIGKILL);
             let _ = self.wait();
+        }
+        // The last chance to find the container's cgroup: its record goes away now.
+        #[cfg(target_os = "linux")]
+        if let Some(path) = state::read_state(&dirs, &self.id)?.cgroup {
+            crate::cgroup::remove_dir(std::path::Path::new(&path));
         }
         if state::remove_container_dir(&dirs, &self.id).is_ok() {
             return Ok(());
@@ -343,6 +374,8 @@ mod tests {
             created: 1,
             started: Some(1),
             finished: None,
+            cgroup: None,
+            oom: None,
         };
         state::write_state(&dirs, &id, &running).unwrap();
         let _shim_alive = state::hold_shim_lock(&dirs, &id).unwrap();

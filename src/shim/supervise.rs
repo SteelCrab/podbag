@@ -12,7 +12,7 @@ use crate::helper::{StatusChannel, StatusMessage};
 use crate::paths::Dirs;
 use crate::spec::ContainerSpec;
 use crate::state::{self, State, Status};
-use crate::{Error, Result, linux};
+use crate::{Error, Result, cgroup, linux};
 use rustix::pipe::{PipeFlags, pipe_with};
 use std::collections::VecDeque;
 use std::fs::File;
@@ -312,6 +312,16 @@ fn socket_pair() -> Result<(OwnedFd, OwnedFd)> {
     Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
 }
 
+/// The memory budget in bytes (`None`: no limit), from the settings and the host's memory.
+fn memory_budget(dirs: &Dirs) -> Result<Option<u64>> {
+    let setting = crate::config::load(dirs)?.memory_budget;
+    let total = std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|m| cgroup::mem_total(&m))
+        .unwrap_or(0);
+    Ok(setting.bytes(total).filter(|&b| b > 0))
+}
+
 pub(super) fn run(spec: &ContainerSpec, dirs: &Dirs, status: &mut StatusChannel) -> Outcome {
     let failed = |status: &mut StatusChannel, e: Error| Outcome {
         code: status.fail(e),
@@ -344,10 +354,27 @@ pub(super) fn run(spec: &ContainerSpec, dirs: &Dirs, status: &mut StatusChannel)
         }
     };
 
-    let child = match linux::spawn(spec, io.stdio) {
+    let budget = match memory_budget(dirs) {
+        Ok(b) => b,
+        Err(e) => {
+            remove_control(dirs, id);
+            return failed(status, e);
+        }
+    };
+    let group = match cgroup::create(&spec.cgroup, id, &spec.limits, budget) {
+        Ok(g) => g,
+        Err(e) => {
+            remove_control(dirs, id);
+            return failed(status, e);
+        }
+    };
+    let child = match linux::spawn(spec, io.stdio, group.as_ref().map(|g| g.fd())) {
         Ok(c) => c,
         Err(e) => {
             remove_control(dirs, id);
+            if let Some(g) = group {
+                g.remove();
+            }
             return failed(status, e);
         }
     };
@@ -357,6 +384,9 @@ pub(super) fn run(spec: &ContainerSpec, dirs: &Dirs, status: &mut StatusChannel)
         unsafe { libc::kill(child.pid as libc::pid_t, libc::SIGKILL) };
         let _ = linux::wait(child.pid);
         remove_control(dirs, id);
+        if let Some(g) = group {
+            g.remove();
+        }
         return failed(status, e);
     }
     // SAFETY: pidfd_open on our own child; the result is a new descriptor or -1.
@@ -375,6 +405,10 @@ pub(super) fn run(spec: &ContainerSpec, dirs: &Dirs, status: &mut StatusChannel)
         created,
         started: Some(state::now()),
         finished: None,
+        cgroup: group
+            .as_ref()
+            .map(|g| g.path().to_string_lossy().into_owned()),
+        oom: None,
     };
     let _ = state::write_state(dirs, id, &st);
 
@@ -399,6 +433,7 @@ pub(super) fn run(spec: &ContainerSpec, dirs: &Dirs, status: &mut StatusChannel)
     let _ = log.flush_partial();
     st.status = Status::Exited;
     st.exit_code = Some(code);
+    st.oom = group.as_ref().and_then(|g| g.oom_reason());
     st.finished = Some(state::now());
     let _ = state::write_state(dirs, id, &st);
     // Answer waiters only after the state says "exited": they may act on it at once.
@@ -409,6 +444,9 @@ pub(super) fn run(spec: &ContainerSpec, dirs: &Dirs, status: &mut StatusChannel)
     remove_control(dirs, id);
     if let Some(echo) = echo {
         echo.finish();
+    }
+    if let Some(group) = group {
+        group.remove();
     }
     Outcome {
         code,
@@ -584,10 +622,9 @@ fn accept_requests(
                 };
                 control::reply(&stream, &response);
             }
-            Some(Request::Wait) => match exit {
-                Some(code) => control::reply(&stream, &Response::Exited { exit_code: code }),
-                None => waiters.push(stream),
-            },
+            // Answered when the state says "exited", even if the exit is known already:
+            // the caller may read the state and the log as soon as it hears.
+            Some(Request::Wait) => waiters.push(stream),
             None => {}
         }
     }
@@ -606,4 +643,32 @@ fn kill_container(pid: u32, sig: i32) -> std::io::Result<()> {
 
 fn remove_control(dirs: &Dirs, id: &str) {
     control::remove(dirs, id);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Read;
+
+    // A waiter must hear about the exit only after the state and the log are written
+    // (`run` answers the queued waiters then), even when the exit is already known.
+    #[test]
+    fn wait_during_the_drain_is_answered_later() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("s.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut client = UnixStream::connect(&path).unwrap();
+        client.write_all(b"{\"op\":\"wait\"}\n").unwrap();
+        let mut waiters = Vec::new();
+        accept_requests(&listener, "x", 1, Some(4), &mut waiters);
+        assert_eq!(waiters.len(), 1);
+        client.set_nonblocking(true).unwrap();
+        let mut buf = [0u8; 64];
+        let early = client.read(&mut buf);
+        assert!(
+            matches!(&early, Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
+            "answered early: {early:?}"
+        );
+    }
 }

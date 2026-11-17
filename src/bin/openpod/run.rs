@@ -61,6 +61,27 @@ fn start_and_wait(args: RunArgs) -> openpod::Result<i32> {
     if let Some(h) = args.hostname {
         c = c.hostname(h);
     }
+    if let Some(m) = args.memory {
+        c = c.memory(openpod::cgroup::parse_memory(&m)?);
+    }
+    if let Some(n) = args.cpus {
+        c = c.cpus(n);
+    }
+    if let Some(n) = args.pids_limit {
+        c = c.pids_limit(n);
+    }
+    for name in args.cap_add {
+        c = c.cap_add(name);
+    }
+    for name in args.cap_drop {
+        c = c.cap_drop(name);
+    }
+    for opt in &args.security_opt {
+        c = match openpod::spec::parse_security_opt(opt)? {
+            openpod::spec::SecurityOpt::NoNewPrivileges(yes) => c.no_new_privileges(yes),
+            openpod::spec::SecurityOpt::SeccompUnconfined => c.seccomp(false),
+        };
+    }
     if args.detach {
         let handle = c.start()?;
         println!("{}", handle.id());

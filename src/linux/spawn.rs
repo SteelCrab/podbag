@@ -51,8 +51,16 @@ pub struct ContainerStdio {
     pub tty_socket: Option<i32>,
 }
 
-/// Create the container process. Returns after its command was executed.
-pub fn spawn(spec: &ContainerSpec, stdio: ContainerStdio) -> Result<Spawned> {
+/// `CLONE_INTO_CGROUP` from linux/sched.h: start the child in the cgroup `args.cgroup`.
+pub(super) const CLONE_INTO_CGROUP: u64 = 0x2_0000_0000;
+
+/// Create the container process in its own namespaces (cgroup namespace included) and,
+/// when `cgroup` is given, directly in that cgroup. Returns after its command was executed.
+pub fn spawn(
+    spec: &ContainerSpec,
+    stdio: ContainerStdio,
+    cgroup: Option<std::os::fd::BorrowedFd<'_>>,
+) -> Result<Spawned> {
     // SAFETY: these calls have no preconditions.
     let (euid, egid) = unsafe { (libc::geteuid(), libc::getegid()) };
     let rootless = euid != 0;
@@ -69,12 +77,19 @@ pub fn spawn(spec: &ContainerSpec, stdio: ContainerStdio) -> Result<Spawned> {
     let (sync_read, sync_write) = pipe()?;
     let (status_read, status_write) = pipe()?;
 
-    let mut flags =
-        libc::CLONE_NEWNS | libc::CLONE_NEWPID | libc::CLONE_NEWUTS | libc::CLONE_NEWIPC;
+    let mut flags = libc::CLONE_NEWNS
+        | libc::CLONE_NEWPID
+        | libc::CLONE_NEWUTS
+        | libc::CLONE_NEWIPC
+        | libc::CLONE_NEWCGROUP;
     if rootless {
         flags |= libc::CLONE_NEWUSER;
     }
-    let args = clone_args(flags as u64);
+    let mut args = clone_args(flags as u64);
+    if let Some(fd) = cgroup {
+        args.flags |= CLONE_INTO_CGROUP;
+        args.cgroup = std::os::fd::AsRawFd::as_raw_fd(&fd) as u64;
+    }
 
     // SAFETY: clone3 without CLONE_VM behaves like fork. This process is single-threaded,
     // so the child may run any code before it calls execve.
@@ -145,6 +160,29 @@ pub fn spawn(spec: &ContainerSpec, stdio: ContainerStdio) -> Result<Spawned> {
             "report this bug",
         )
     }))
+}
+
+/// Fork with clone3, directly into `cgroup` when given. Returns 0 in the child and the
+/// child's PID in the parent. The caller must be single-threaded, as with fork.
+pub(super) fn fork_into(cgroup: Option<std::os::fd::BorrowedFd<'_>>) -> std::io::Result<u32> {
+    let mut args = clone_args(0);
+    if let Some(fd) = cgroup {
+        args.flags |= CLONE_INTO_CGROUP;
+        args.cgroup = std::os::fd::AsRawFd::as_raw_fd(&fd) as u64;
+    }
+    // SAFETY: clone3 without CLONE_VM behaves like fork; the caller is single-threaded.
+    let ret = unsafe {
+        libc::syscall(
+            libc::SYS_clone3,
+            &args as *const CloneArgs,
+            std::mem::size_of::<CloneArgs>(),
+        )
+    };
+    if ret == -1 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(ret as u32)
+    }
 }
 
 /// Wait for the process to end. Returns its exit code, or 128 + signal number.

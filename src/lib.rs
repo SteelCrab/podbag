@@ -3,6 +3,10 @@
 //! The command-line tool is a thin layer over this library.
 
 #[doc(hidden)]
+pub mod caps;
+#[doc(hidden)]
+pub mod cgroup;
+#[doc(hidden)]
 pub mod config;
 pub(crate) mod container;
 #[cfg(unix)]
@@ -23,6 +27,8 @@ pub mod image;
 pub mod linux;
 #[doc(hidden)]
 pub mod paths;
+#[doc(hidden)]
+pub mod seccomp;
 #[cfg(unix)]
 #[doc(hidden)]
 pub mod shim;

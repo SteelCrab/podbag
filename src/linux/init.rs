@@ -136,6 +136,7 @@ fn setup_and_exec(
         &std::fs::read_to_string("/etc/passwd").unwrap_or_default(),
         &std::fs::read_to_string("/etc/group").unwrap_or_default(),
     )?;
+    super::security::apply(&spec.security)?;
     switch_user(&creds)?;
     die_with_parent(status_fd);
     std::env::set_current_dir(workdir).map_err(workdir_error)?;

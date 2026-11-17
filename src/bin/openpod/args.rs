@@ -131,6 +131,24 @@ pub struct RunArgs {
     /// Use this unpacked root filesystem directory instead of an image
     #[arg(long)]
     pub rootfs: Option<String>,
+    /// Memory limit (like 512m or 2g)
+    #[arg(short = 'm', long)]
+    pub memory: Option<String>,
+    /// Number of CPUs (like 0.5)
+    #[arg(long)]
+    pub cpus: Option<f64>,
+    /// Process limit (0 or less: no limit)
+    #[arg(long = "pids-limit", allow_hyphen_values = true)]
+    pub pids_limit: Option<i64>,
+    /// Add a Linux capability (or ALL)
+    #[arg(long = "cap-add")]
+    pub cap_add: Vec<String>,
+    /// Drop a Linux capability (or ALL)
+    #[arg(long = "cap-drop")]
+    pub cap_drop: Vec<String>,
+    /// Security option: no-new-privileges, seccomp=unconfined
+    #[arg(long = "security-opt")]
+    pub security_opt: Vec<String>,
     /// Set an environment variable (NAME=VALUE, or NAME to copy it from this shell)
     #[arg(short = 'e', long = "env")]
     pub env: Vec<String>,

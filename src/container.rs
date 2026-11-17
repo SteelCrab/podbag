@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 /// assert_eq!(out.stdout, b"hello\n");
 /// # Ok::<(), openpod::Error>(())
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub struct Container {
     source: Source,
@@ -33,6 +33,14 @@ pub struct Container {
     auto_remove: bool,
     #[serde(default)]
     tty: bool,
+    #[serde(default)]
+    memory: Option<u64>,
+    #[serde(default)]
+    cpus: Option<f64>,
+    #[serde(default)]
+    pids_limit: Option<i64>,
+    #[serde(default)]
+    security: crate::spec::Security,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,7 +115,71 @@ impl Container {
             name: None,
             auto_remove: false,
             tty: false,
+            memory: None,
+            cpus: None,
+            pids_limit: None,
+            security: crate::spec::Security::default(),
         }
+    }
+
+    /// Keep a capability beyond Docker's defaults (`--cap-add`; a name or `ALL`).
+    pub fn cap_add(mut self, name: impl Into<String>) -> Container {
+        self.security.cap_add.push(name.into());
+        self
+    }
+
+    /// Drop a capability (`--cap-drop`; a name or `ALL`). Drops apply before adds.
+    pub fn cap_drop(mut self, name: impl Into<String>) -> Container {
+        self.security.cap_drop.push(name.into());
+        self
+    }
+
+    /// Stop setuid programs from gaining privileges (`--security-opt no-new-privileges`).
+    pub fn no_new_privileges(mut self, yes: bool) -> Container {
+        self.security.no_new_privileges = yes;
+        self
+    }
+
+    /// Use the default seccomp filter (on unless turned off: `seccomp=unconfined`).
+    pub fn seccomp(mut self, yes: bool) -> Container {
+        self.security.seccomp = yes;
+        self
+    }
+
+    /// Limit the container's memory to `bytes` (`--memory`; at least 6 MiB).
+    pub fn memory(mut self, bytes: u64) -> Container {
+        self.memory = Some(bytes);
+        self
+    }
+
+    /// Limit the container to this many CPUs' worth of time (`--cpus`; at least 0.01).
+    pub fn cpus(mut self, cpus: f64) -> Container {
+        self.cpus = Some(cpus);
+        self
+    }
+
+    /// Limit the number of processes and threads (`--pids-limit`; 0 or less: no limit).
+    pub fn pids_limit(mut self, limit: i64) -> Container {
+        self.pids_limit = Some(limit);
+        self
+    }
+
+    /// The limits as the shim applies them. Invalid values are errors.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    fn limits(&self) -> Result<crate::cgroup::Limits> {
+        if let Some(bytes) = self.memory.filter(|&b| b < crate::cgroup::MIN_MEMORY) {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!("invalid memory limit {bytes}"),
+                "Minimum memory limit allowed is 6MiB",
+                "give at least 6 MiB",
+            ));
+        }
+        Ok(crate::cgroup::Limits {
+            memory: self.memory,
+            cpu_quota: self.cpus.map(crate::cgroup::cpus_to_quota).transpose()?,
+            pids: self.pids_limit.and_then(crate::cgroup::pids_max),
+        })
     }
 
     /// The command and its arguments. For an image, this replaces the image's Cmd.
@@ -378,6 +450,13 @@ mod linux_launch {
         stderr: Stdio,
         detach: bool,
     ) -> Result<(Cleanup, HelperChild)> {
+        let limits = c.limits()?;
+        // SAFETY: geteuid has no preconditions.
+        let rootless = unsafe { libc::geteuid() } != 0;
+        let (placement, warning) = crate::cgroup::choose_placement(rootless, &limits)?;
+        if let Some(w) = warning {
+            eprintln!("openpod: warning: {w}");
+        }
         let dirs = paths::dirs()?;
         let id = id::new_id()?;
         let short = id::short_id(&id).to_string();
@@ -414,6 +493,9 @@ mod linux_launch {
                     tty,
                     interactive,
                     detach,
+                    limits: limits.clone(),
+                    cgroup: placement.clone(),
+                    security: c.security.clone(),
                 };
                 spec.validate()?;
                 state::create(&dirs, &spec)?;
@@ -466,6 +548,9 @@ mod linux_launch {
                     tty,
                     interactive,
                     detach,
+                    limits: limits.clone(),
+                    cgroup: placement.clone(),
+                    security: c.security.clone(),
                 };
                 spec.validate()?;
                 state::create(&dirs, &spec)?;
@@ -492,7 +577,23 @@ mod linux_launch {
                 cleanup
             }
         };
-        let mut helper = helper::spawn_shim(&cleanup.id, stdin, stdout, stderr)?;
+        let scope = match &placement {
+            crate::cgroup::Placement::Scope { slice } => Some(helper::Scope {
+                systemd_run: crate::cgroup::systemd_run().ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::MissingRequirement,
+                        "cannot start the container in a systemd scope",
+                        "systemd-run was not found",
+                        "install systemd, or set OPENPOD_SYSTEMD_RUN",
+                    )
+                })?,
+                slice: slice.clone(),
+                unit: Some(format!("openpod-{}", cleanup.id)),
+                delegate: true,
+            }),
+            _ => None,
+        };
+        let mut helper = helper::spawn_shim(&cleanup.id, stdin, stdout, stderr, scope.as_ref())?;
         helper.wait_started()?;
         // Started: from here the shim owns the container. It removes it at the end when
         // auto-remove is set; otherwise the container stays.

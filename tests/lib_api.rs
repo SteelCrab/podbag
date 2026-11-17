@@ -172,3 +172,38 @@ fn library_exec_captures_output() {
     );
     handle.remove(true).unwrap();
 }
+
+#[test]
+fn library_runs_as_root() {
+    if !root_mode() {
+        return;
+    }
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } != 0 {
+        // Run this test again, as root.
+        let out = std::process::Command::new("sudo")
+            .args(["-n", "env"])
+            .arg(format!("OPENPOD_TEST_ROOTFS={}", rootfs()))
+            .arg("OPENPOD_TEST_ROOT=1")
+            .arg(std::env::current_exe().unwrap())
+            .args(["--exact", "library_runs_as_root", "--nocapture"])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success(),
+            "{text}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(text.contains("1 passed"), "{text}");
+        return;
+    }
+    setup();
+    let out = Container::from_rootfs(rootfs())
+        .command(["cat", "/proc/self/uid_map"])
+        .run()
+        .unwrap();
+    // Root mode has no user namespace: the map is the whole identity map.
+    let map = String::from_utf8_lossy(&out.stdout);
+    assert!(map.contains("4294967295"), "{map}");
+}

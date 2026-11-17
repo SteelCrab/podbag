@@ -1,5 +1,6 @@
 //! User settings from `<config dir>/config.toml`.
 
+use crate::cgroup::{Budget, parse_budget};
 use crate::paths::Dirs;
 use crate::{Error, ErrorKind, Result};
 
@@ -10,17 +11,21 @@ pub const DEFAULT_STORE_LIMIT: u64 = 10 << 30;
 pub struct Config {
     /// Bytes of image content to keep before the least recently used images are removed.
     pub store_limit: u64,
+    /// How much memory all containers may use together (design 6.6).
+    pub memory_budget: Budget,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Config {
             store_limit: DEFAULT_STORE_LIMIT,
+            memory_budget: Budget::default(),
         }
     }
 }
 
-/// Read `<config>/config.toml` (missing file = defaults). `OPENPOD_STORE_LIMIT` overrides it.
+/// Read `<config>/config.toml` (missing file = defaults). `OPENPOD_STORE_LIMIT` and
+/// `OPENPOD_MEMORY_BUDGET` override it.
 pub fn load(dirs: &Dirs) -> Result<Config> {
     let path = dirs.config.join("config.toml");
     let mut config = match std::fs::read_to_string(&path) {
@@ -39,6 +44,9 @@ pub fn load(dirs: &Dirs) -> Result<Config> {
     };
     if let Ok(v) = std::env::var("OPENPOD_STORE_LIMIT") {
         config.store_limit = parse_size(&v)?;
+    }
+    if let Ok(v) = std::env::var("OPENPOD_MEMORY_BUDGET") {
+        config.memory_budget = parse_budget(&v)?;
     }
     Ok(config)
 }
@@ -65,6 +73,9 @@ pub fn parse(text: &str) -> Result<Config> {
         let value = value.trim().trim_matches('"');
         match key.trim() {
             "store_limit" => config.store_limit = parse_size(value).map_err(|e| bad(e.why))?,
+            "memory_budget" => {
+                config.memory_budget = parse_budget(value).map_err(|e| bad(e.why))?
+            }
             other => return Err(bad(format!("unknown setting {other}"))),
         }
     }
@@ -146,6 +157,14 @@ mod tests {
         let e = parse("store_limt = \"1GB\"").unwrap_err();
         assert_eq!(e.kind, ErrorKind::InvalidInput);
         assert!(e.why.contains("store_limt"), "{}", e.why);
+    }
+
+    #[test]
+    fn reads_memory_budget() {
+        let budget = |text: &str| parse(text).unwrap().memory_budget;
+        assert_eq!(budget("memory_budget = \"25%\""), Budget::Percent(25));
+        assert_eq!(budget("memory_budget = \"0\""), Budget::Unlimited);
+        assert_eq!(budget(""), Budget::Percent(50));
     }
 
     #[test]

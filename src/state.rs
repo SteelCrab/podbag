@@ -126,6 +126,12 @@ pub struct State {
     pub created: u64,
     pub started: Option<u64>,
     pub finished: Option<u64>,
+    /// The container's cgroup directory, while it has one.
+    #[serde(default)]
+    pub cgroup: Option<String>,
+    /// Why the kernel ended the container for memory, if it did.
+    #[serde(default)]
+    pub oom: Option<crate::cgroup::OomReason>,
 }
 
 /// Seconds since the epoch.
@@ -295,6 +301,8 @@ pub fn create(dirs: &Dirs, spec: &ContainerSpec) -> Result<()> {
         created: now(),
         started: None,
         finished: None,
+        cgroup: None,
+        oom: None,
     };
     write_state(dirs, &spec.id, &state)
 }
@@ -342,7 +350,18 @@ fn lock_error(id: &str, e: std::io::Error) -> Error {
 /// machine rebooted): the container counts as exited with an unknown exit code.
 pub fn reconcile(dirs: &Dirs, id: &str) -> Result<State> {
     let state = read_state(dirs, id)?;
-    settle(dirs, id, state)
+    let state = settle(dirs, id, state)?;
+    // An ended container's cgroup may remain when an earlier removal found it busy (root
+    // mode); every state check tries once more (design 6.12).
+    #[cfg(target_os = "linux")]
+    if state.status == Status::Exited {
+        if let Some(path) = state.cgroup.as_deref() {
+            if path.starts_with(crate::cgroup::ROOT) {
+                crate::cgroup::try_remove_dir(std::path::Path::new(path));
+            }
+        }
+    }
+    Ok(state)
 }
 
 /// `reconcile` for a state read earlier.
@@ -360,6 +379,13 @@ fn settle(dirs: &Dirs, id: &str, seen: State) -> Result<State> {
         state.exit_code = None;
         state.finished = Some(now());
         write_state(dirs, id, &state)?;
+        // The shim did not remove the container's cgroup (root mode); do it now.
+        #[cfg(target_os = "linux")]
+        if let Some(path) = state.cgroup.as_deref() {
+            if path.starts_with(crate::cgroup::ROOT) {
+                crate::cgroup::remove_dir(std::path::Path::new(path));
+            }
+        }
     }
     Ok(state)
 }
@@ -388,6 +414,8 @@ mod tests {
             created: 1,
             started: Some(2),
             finished: Some(3),
+            cgroup: None,
+            oom: None,
         };
         write_state(&dirs, &spec.id, &st).unwrap();
         assert_eq!(read_state(&dirs, &spec.id).unwrap(), st);
@@ -461,6 +489,8 @@ mod tests {
             created: 1,
             started: Some(2),
             finished: None,
+            cgroup: None,
+            oom: None,
         };
         write_state(&dirs, &spec.id, &running).unwrap();
         let lock = hold_shim_lock(&dirs, &spec.id).unwrap();
@@ -486,11 +516,15 @@ mod tests {
             created: 1,
             started: Some(2),
             finished: None,
+            cgroup: None,
+            oom: None,
         };
         let done = State {
             status: Status::Exited,
             exit_code: Some(7),
             finished: Some(3),
+            cgroup: None,
+            oom: None,
             ..seen.clone()
         };
         write_state(&dirs, &spec.id, &done).unwrap();
@@ -534,6 +568,8 @@ mod tests {
             created: 1,
             started: Some(2),
             finished: None,
+            cgroup: None,
+            oom: None,
         };
         write_state(&dirs, &spec.id, &running).unwrap();
         let fixed = reconcile(&dirs, &spec.id).unwrap();

@@ -11,7 +11,7 @@ use std::io::{BufRead, BufReader};
 use std::os::fd::FromRawFd;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
 /// The file descriptor on which the helper reports its status.
@@ -103,14 +103,50 @@ pub fn locate_helper_with(
 pub struct HelperChild {
     pub child: Child,
     status: Option<BufReader<File>>,
+    /// The systemd-run program the helper was started through, if any.
+    via: Option<PathBuf>,
 }
 
-/// Start `<helper> <args...>` with the status pipe on fd 3.
+/// Run a helper inside a new transient systemd scope of the user's service manager
+/// (rootless cgroups). systemd-run registers the scope, then executes the helper in place:
+/// same PID, same descriptors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Scope {
+    pub systemd_run: PathBuf,
+    /// The slice that holds the scope, such as `openpod.slice`.
+    pub slice: String,
+    /// The scope's unit name; systemd picks one when `None`.
+    pub unit: Option<String>,
+    /// Let the helper manage the cgroups below its scope.
+    pub delegate: bool,
+}
+
+/// The program and arguments that run `<helper> <args...>` in `scope`.
+pub fn scope_command(scope: &Scope, helper: &Path, args: &[&str]) -> (PathBuf, Vec<String>) {
+    let mut argv: Vec<String> = ["--user", "--scope", "--quiet", "--collect"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    if scope.delegate {
+        argv.extend(["-p".to_string(), "Delegate=yes".to_string()]);
+    }
+    argv.push(format!("--slice={}", scope.slice));
+    if let Some(unit) = &scope.unit {
+        argv.push(format!("--unit={unit}"));
+    }
+    argv.push("--".to_string());
+    argv.push(helper.to_string_lossy().into_owned());
+    argv.extend(args.iter().map(|a| a.to_string()));
+    (scope.systemd_run.clone(), argv)
+}
+
+/// Start `<helper> <args...>` with the status pipe on fd 3, in `scope` when given.
 pub fn spawn_with_args(
     args: &[&str],
     stdin: Stdio,
     stdout: Stdio,
     stderr: Stdio,
+    scope: Option<&Scope>,
 ) -> Result<HelperChild> {
     let helper = locate_helper()?;
     let fail = |e: std::io::Error| {
@@ -124,8 +160,20 @@ pub fn spawn_with_args(
     let (read_end, write_end) = cloexec_pipe().map_err(fail)?;
     let write_fd = write_end.as_raw_fd();
 
-    let mut cmd = Command::new(&helper);
-    cmd.args(args).stdin(stdin).stdout(stdout).stderr(stderr);
+    let mut cmd = match scope {
+        Some(s) => {
+            let (program, argv) = scope_command(s, &helper, args);
+            let mut cmd = Command::new(program);
+            cmd.args(argv);
+            cmd
+        }
+        None => {
+            let mut cmd = Command::new(&helper);
+            cmd.args(args);
+            cmd
+        }
+    };
+    cmd.stdin(stdin).stdout(stdout).stderr(stderr);
     // SAFETY: the closure only calls sigemptyset, sigprocmask, dup2 and fcntl,
     // which are async-signal-safe.
     unsafe {
@@ -145,18 +193,40 @@ pub fn spawn_with_args(
             Ok(())
         });
     }
-    let child = cmd.spawn().map_err(fail)?;
+    let child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => match scope {
+            Some(s) => return Err(scope_error(&s.systemd_run, e.to_string())),
+            None => return Err(fail(e)),
+        },
+    };
     drop(write_end); // the helper holds the only write end now
 
     Ok(HelperChild {
         child,
         status: Some(BufReader::new(File::from(read_end))),
+        via: scope.map(|s| s.systemd_run.clone()),
     })
 }
 
-/// Start `<helper> __shim <id>`.
-pub fn spawn_shim(id: &str, stdin: Stdio, stdout: Stdio, stderr: Stdio) -> Result<HelperChild> {
-    spawn_with_args(&["__shim", id], stdin, stdout, stderr)
+/// Start `<helper> __shim <id>`, in `scope` when given.
+pub fn spawn_shim(
+    id: &str,
+    stdin: Stdio,
+    stdout: Stdio,
+    stderr: Stdio,
+    scope: Option<&Scope>,
+) -> Result<HelperChild> {
+    spawn_with_args(&["__shim", id], stdin, stdout, stderr, scope)
+}
+
+fn scope_error(systemd_run: &Path, why: String) -> Error {
+    Error::new(
+        ErrorKind::MissingRequirement,
+        "cannot start the container in a systemd scope",
+        format!("{}: {why}", systemd_run.display()),
+        "check `systemctl --user status`; rootless resource limits need a systemd user session",
+    )
 }
 
 impl HelperChild {
@@ -207,6 +277,11 @@ impl HelperChild {
                     .wait()
                     .map(|s| s.to_string())
                     .unwrap_or_else(|e| e.to_string());
+                if let Some(systemd_run) = &self.via {
+                    // systemd-run ends before it executes the helper when it cannot
+                    // create the scope.
+                    return Err(scope_error(systemd_run, status));
+                }
                 return Err(Error::new(
                     ErrorKind::Internal,
                     "the openpod helper exited without reporting a status",
@@ -247,7 +322,14 @@ pub fn run_store_op(
     } else {
         Stdio::null()
     };
-    spawn_with_args(&["__store", &json], Stdio::null(), Stdio::null(), stderr)?.wait_done()
+    spawn_with_args(
+        &["__store", &json],
+        Stdio::null(),
+        Stdio::null(),
+        stderr,
+        None,
+    )?
+    .wait_done()
 }
 
 /// The status descriptor a helper received from its caller.
@@ -410,6 +492,54 @@ mod tests {
 #[cfg(test)]
 mod done_tests {
     use super::*;
+
+    #[test]
+    fn scope_command_line() {
+        let s = Scope {
+            systemd_run: "/usr/bin/systemd-run".into(),
+            slice: "openpod.slice".into(),
+            unit: Some("openpod-abc".into()),
+            delegate: true,
+        };
+        let (prog, args) = scope_command(&s, Path::new("/bin/openpod"), &["__shim", "abc"]);
+        assert_eq!(prog, std::path::PathBuf::from("/usr/bin/systemd-run"));
+        assert_eq!(
+            args,
+            [
+                "--user",
+                "--scope",
+                "--quiet",
+                "--collect",
+                "-p",
+                "Delegate=yes",
+                "--slice=openpod.slice",
+                "--unit=openpod-abc",
+                "--",
+                "/bin/openpod",
+                "__shim",
+                "abc"
+            ]
+        );
+        let plain = Scope {
+            unit: None,
+            delegate: false,
+            ..s
+        };
+        let (_, args) = scope_command(&plain, Path::new("/bin/openpod"), &["__exec"]);
+        assert_eq!(
+            args,
+            [
+                "--user",
+                "--scope",
+                "--quiet",
+                "--collect",
+                "--slice=openpod.slice",
+                "--",
+                "/bin/openpod",
+                "__exec"
+            ]
+        );
+    }
 
     #[test]
     fn done_message_wire_format() {

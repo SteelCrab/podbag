@@ -71,6 +71,23 @@ pub(super) fn enter_rootfs(spec: &Rootfs, rootless: bool) -> Result<()> {
         MountFlags::NOSUID | MountFlags::NODEV | MountFlags::NOEXEC,
         None,
     )?;
+    mask(rootless, rootfs, "proc/")?;
+    for rel in READ_ONLY {
+        let path = at(rel);
+        if std::fs::symlink_metadata(&path).is_err() {
+            continue;
+        }
+        step(
+            rootless,
+            &format!("bind {rel}"),
+            rustix::mount::mount_bind(&path, &path),
+        )?;
+        step(
+            rootless,
+            &format!("make {rel} read-only"),
+            set_read_only_recursive(&path),
+        )?;
+    }
     mount_fs(
         "tmpfs",
         &at("dev"),
@@ -136,6 +153,36 @@ pub(super) fn enter_rootfs(spec: &Rootfs, rootless: bool) -> Result<()> {
         "bind /sys",
         rustix::mount::mount_bind_recursive("/sys", &sys),
     )?;
+    // The container's own cgroup tree (its cgroup namespace), where the host has cgroup v2.
+    // The kernel refuses cgroup2 right on the root of the bound host cgroup2 mount (same
+    // superblock: EBUSY), and that mount cannot be detached in rootless mode (it is locked),
+    // so an empty tmpfs goes in between.
+    let cgroup = sys.join("fs/cgroup");
+    if cgroup.join("cgroup.controllers").exists() {
+        step(
+            rootless,
+            "cover sys/fs/cgroup",
+            rustix::mount::mount(
+                "tmpfs",
+                &cgroup,
+                "tmpfs",
+                MountFlags::NOSUID | MountFlags::NODEV | MountFlags::NOEXEC,
+                Some(c"size=0,mode=0755"),
+            ),
+        )?;
+        step(
+            rootless,
+            "mount sys/fs/cgroup",
+            rustix::mount::mount(
+                "cgroup2",
+                &cgroup,
+                "cgroup2",
+                MountFlags::NOSUID | MountFlags::NODEV | MountFlags::NOEXEC,
+                None,
+            ),
+        )?;
+    }
+    mask(rootless, rootfs, "sys/")?;
     step(
         rootless,
         "make /sys read-only",
@@ -158,6 +205,56 @@ pub(super) fn enter_rootfs(spec: &Rootfs, rootless: bool) -> Result<()> {
         rustix::mount::unmount(".", UnmountFlags::DETACH),
     )?;
     step(rootless, "enter the new root", rustix::process::chdir("/"))
+}
+
+/// Kernel files and directories a container must not read (Docker's list). Files are
+/// covered with /dev/null, directories with an empty read-only tmpfs.
+const MASKED: [&str; 12] = [
+    "proc/asound",
+    "proc/acpi",
+    "proc/interrupts",
+    "proc/kcore",
+    "proc/keys",
+    "proc/latency_stats",
+    "proc/timer_list",
+    "proc/timer_stats",
+    "proc/sched_debug",
+    "proc/scsi",
+    "sys/firmware",
+    "sys/devices/virtual/powercap",
+];
+
+/// Kernel settings a container may read but not change (Docker's list).
+const READ_ONLY: [&str; 5] = [
+    "proc/bus",
+    "proc/fs",
+    "proc/irq",
+    "proc/sys",
+    "proc/sysrq-trigger",
+];
+
+/// Cover the masked paths under `root` that start with `prefix`. Paths this kernel does
+/// not have are skipped.
+fn mask(rootless: bool, root: &Path, prefix: &str) -> Result<()> {
+    for rel in MASKED.iter().filter(|p| p.starts_with(prefix)) {
+        let path = root.join(rel);
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        let covered = if meta.is_dir() {
+            rustix::mount::mount(
+                "tmpfs",
+                &path,
+                "tmpfs",
+                MountFlags::RDONLY | MountFlags::NOSUID | MountFlags::NODEV | MountFlags::NOEXEC,
+                None,
+            )
+        } else {
+            rustix::mount::mount_bind("/dev/null", &path)
+        };
+        step(rootless, &format!("mask {rel}"), covered)?;
+    }
+    Ok(())
 }
 
 fn mount_fs(

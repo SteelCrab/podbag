@@ -1,13 +1,15 @@
 //! `openpod __exec <id> '<json>'`: run another command inside a running container.
 //!
 //! The helper opens the container's namespaces through /proc, joins them (the user
-//! namespace first when rootless), forks so the child lands in the container's PID
-//! namespace, and the child enters the container's root before it executes the command.
+//! namespace first when rootless), and forks so the child lands in the container's PID
+//! namespace and, with clone3, directly in its cgroup. The child joins the container's
+//! cgroup namespace, enters its root, applies its security settings, and executes the
+//! command.
 
 use super::init::{
     connect_stdio, die_with_parent, exec, os_error, reset_signals, resolve, switch_user,
 };
-use super::spawn::{ContainerStdio, wait};
+use super::spawn::{ContainerStdio, fork_into, wait};
 use crate::containers::ExecOptions;
 use crate::helper::{StatusChannel, StatusMessage};
 use crate::state::{self, Status};
@@ -99,6 +101,21 @@ fn start(id: &str, json: &str) -> Result<Started> {
         namespaces.push((open_ns(name)?, flag));
     }
     let root = File::open(format!("/proc/{pid}/root")).map_err(|e| enter_error(&spec.name, e))?;
+    // Joined by the child: the helper's own cgroup lies outside the container's cgroup
+    // namespace, where clone3 could not place the child.
+    let cgroup_ns = open_ns("cgroup")?;
+    let cgroup = st
+        .cgroup
+        .as_deref()
+        .map(|path| {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_DIRECTORY)
+                .open(path)
+                .map_err(|e| enter_error(&spec.name, e))
+        })
+        .transpose()?;
     for (file, flag) in &namespaces {
         // SAFETY: setns on a namespace descriptor we opened; this process is single-threaded.
         if unsafe { libc::setns(file.as_raw_fd(), *flag) } != 0 {
@@ -143,18 +160,20 @@ fn start(id: &str, json: &str) -> Result<Started> {
         )
     })?;
 
-    // SAFETY: fork in a single-threaded process.
-    let child = unsafe { libc::fork() };
-    if child == -1 {
-        return Err(Error::io(
-            "cannot start the command",
-            &std::io::Error::last_os_error(),
-            "report this bug",
-        ));
-    }
+    use std::os::fd::AsFd;
+    let child = fork_into(cgroup.as_ref().map(|c| c.as_fd())).map_err(|e| {
+        Error::io(
+            "cannot start the command in the container",
+            &e,
+            "check that the container is still running",
+        )
+    })?;
     if child == 0 {
         drop(status_r);
-        let error = match child_setup(&spec, &req, &root, stdio, status_w.as_raw_fd()) {
+        let joined = join_cgroup_ns(&cgroup_ns);
+        let error = match joined
+            .and_then(|()| child_setup(&spec, &req, &root, stdio, status_w.as_raw_fd()))
+        {
             Err(e) => e,
             Ok(never) => match never {},
         };
@@ -164,7 +183,6 @@ fn start(id: &str, json: &str) -> Result<Started> {
     }
     drop(status_w);
     drop(slave);
-    let child = child as u32;
     let mut report = Vec::new();
     let _ = File::from(status_r).read_to_end(&mut report);
     if report != [0] {
@@ -217,6 +235,7 @@ fn child_setup(
         &std::fs::read_to_string("/etc/passwd").unwrap_or_default(),
         &std::fs::read_to_string("/etc/group").unwrap_or_default(),
     )?;
+    super::security::apply(&spec.security)?;
     switch_user(&creds)?;
     die_with_parent(status_fd);
     let workdir = opts
@@ -248,6 +267,19 @@ fn finish(started: Started) -> i32 {
         super::pty::relay(master, started.relay_stdin, started.pid);
     }
     wait(started.pid).unwrap_or(-1)
+}
+
+/// In the forked child: join the container's cgroup namespace.
+fn join_cgroup_ns(ns: &File) -> Result<()> {
+    // SAFETY: setns on a namespace descriptor we opened.
+    if unsafe { libc::setns(ns.as_raw_fd(), libc::CLONE_NEWCGROUP) } != 0 {
+        return Err(os_error(
+            "cannot enter the container's cgroup namespace",
+            std::io::Error::last_os_error(),
+            "check that the container is still running",
+        ));
+    }
+    Ok(())
 }
 
 fn not_running(name: &str) -> Error {

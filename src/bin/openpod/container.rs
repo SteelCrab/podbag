@@ -194,7 +194,10 @@ fn status(c: &ContainerInfo, now: u64) -> String {
         Status::Exited => {
             let code = c.state.exit_code.map_or("?".to_string(), |c| c.to_string());
             let ago = human_duration(now.saturating_sub(c.state.finished.unwrap_or(now)));
-            format!("Exited ({code}) {ago} ago")
+            match c.state.oom {
+                Some(reason) => format!("Exited ({code}, out of memory: {reason}) {ago} ago"),
+                None => format!("Exited ({code}) {ago} ago"),
+            }
         }
     }
 }

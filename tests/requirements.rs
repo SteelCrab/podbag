@@ -15,7 +15,12 @@ fn missing_newuidmap_is_explained() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(125));
-    let err = stderr(&out);
+    // Without PATH, systemd-run is missing too: a warning comes first.
+    let err: String = stderr(&out)
+        .lines()
+        .filter(|l| !l.starts_with("openpod: warning:"))
+        .map(|l| format!("{l}\n"))
+        .collect();
     assert!(
         err.starts_with("openpod: cannot map user IDs for the container\n"),
         "{err}"
