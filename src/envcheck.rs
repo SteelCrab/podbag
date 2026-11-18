@@ -33,6 +33,8 @@ pub struct Facts {
     pub image_mount: crate::config::ImageMount,
     /// As root: whether the composefs probe passed, and why not. None when rootless.
     pub composefs: Option<Result<(), String>>,
+    /// The `keeper` setting (design 6.15).
+    pub keeper: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +104,7 @@ pub fn evaluate(f: &Facts) -> Vec<Item> {
         )
     });
     items.push(image_mount(f));
+    items.push(keeper(f));
     let na = |name: &str| item(name, NotApplicable, "not needed as root", None);
     if f.root {
         for name in [
@@ -266,6 +269,16 @@ fn image_mount(f: &Facts) -> Item {
     }
 }
 
+/// Who watches detached containers (design 6.15). Never a failure: both ways work.
+fn keeper(f: &Facts) -> Item {
+    let detail = if f.keeper {
+        "one process watches all detached containers and leaves after the last one"
+    } else {
+        "off: every container has a shim of its own (keeper = false)"
+    };
+    item("keeper", Level::Ok, detail, None)
+}
+
 /// 1 when a required item fails, else 0.
 pub fn exit_code(items: &[Item]) -> i32 {
     i32::from(items.iter().any(|i| i.level == Level::Fail))
@@ -302,6 +315,9 @@ pub fn gather() -> Facts {
     let subids =
         |file: &str| crate::idmap::parse_subid(&read(file), &user, uid).map(|r| u64::from(r.count));
     let linger_dir = Path::new("/var/lib/systemd/linger");
+    let config = crate::paths::dirs()
+        .and_then(|d| crate::config::load(&d))
+        .ok();
     Facts {
         kernel: parse_kernel(&read("/proc/sys/kernel/osrelease")).unwrap_or((0, 0)),
         cgroup2: Path::new("/sys/fs/cgroup/cgroup.controllers").exists(),
@@ -327,11 +343,9 @@ pub fn gather() -> Facts {
             .ok(),
         docker: Path::new("/sys/class/net/docker0").exists()
             || Path::new("/run/docker.sock").exists(),
-        image_mount: crate::paths::dirs()
-            .and_then(|d| crate::config::load(&d))
-            .map(|c| c.image_mount)
-            .unwrap_or_default(),
+        image_mount: config.as_ref().map(|c| c.image_mount).unwrap_or_default(),
         composefs: root.then(composefs_support),
+        keeper: config.map_or(crate::config::KEEPER_DEFAULT, |c| c.keeper),
     }
 }
 
@@ -370,7 +384,35 @@ mod tests {
             docker: false,
             image_mount: crate::config::ImageMount::Auto,
             composefs: None,
+            keeper: true,
         }
+    }
+
+    #[test]
+    fn the_keeper_item_says_who_watches() {
+        let on = evaluate(&good_rootless());
+        let i = item(&on, "keeper");
+        assert_eq!(i.level, Level::Ok);
+        assert!(
+            i.detail
+                .starts_with("one process watches all detached containers")
+        );
+        let off = evaluate(&Facts {
+            keeper: false,
+            ..good_rootless()
+        });
+        let i = item(&off, "keeper");
+        assert_eq!(i.level, Level::Ok, "off is a choice, not a fault");
+        assert!(
+            i.detail
+                .starts_with("off: every container has a shim of its own")
+        );
+        // Root mode shows it too.
+        let root = evaluate(&Facts {
+            root: true,
+            ..good_rootless()
+        });
+        assert_eq!(item(&root, "keeper").level, Level::Ok);
     }
 
     #[test]

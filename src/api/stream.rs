@@ -1,10 +1,10 @@
 //! Docker's multiplexed stream, and clients attached to containers that have not started.
 
+use crate::helper::Io;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
-use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
@@ -220,15 +220,15 @@ pub fn start_attached(
         }
     };
     let (stdin_r, stdin_w) = match stdin {
-        Some((r, w)) => (Stdio::from(r), Some(w)),
-        None => (Stdio::null(), None),
+        Some((r, w)) => (Io::Fd(r.into()), Some(w)),
+        None => (Io::Null, None),
     };
     let (err_r, err_w) = match err {
-        Some((r, w)) => (Some(r), Stdio::from(w)),
-        None => (None, Stdio::null()),
+        Some((r, w)) => (Some(r), Io::Fd(w.into())),
+        None => (None, Io::Null),
     };
     let generation = registry.begin(&id);
-    let running = match handle.start_attached(stdin_r, Stdio::from(out_w), err_w) {
+    let running = match handle.start_attached(stdin_r, Io::Fd(out_w.into()), err_w) {
         Ok(r) => r,
         Err(e) => {
             registry.abandon(&id, generation);

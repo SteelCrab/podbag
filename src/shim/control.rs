@@ -140,12 +140,29 @@ pub fn not_running(id: &str) -> Error {
     )
 }
 
-/// Read one request from a freshly accepted connection (shim side).
+/// The longest request line a shim or the keeper takes in.
+pub const MAX_REQUEST: usize = 4096;
+
+/// Read one request from a freshly accepted connection (shim side): at most
+/// [`MAX_REQUEST`] bytes, and no longer than a second without data.
 pub fn read_request(stream: &UnixStream) -> Option<Request> {
-    stream.set_read_timeout(Some(Duration::from_secs(1))).ok()?;
-    let mut line = String::new();
-    BufReader::new(stream).read_line(&mut line).ok()?;
-    serde_json::from_str(line.trim_end()).ok()
+    read_request_within(stream, Duration::from_secs(1))
+}
+
+/// [`read_request`] with another limit on the time without data.
+pub fn read_request_within(stream: &UnixStream, limit: Duration) -> Option<Request> {
+    use std::io::Read;
+    stream.set_read_timeout(Some(limit)).ok()?;
+    let mut line = Vec::new();
+    BufReader::new(stream.take(MAX_REQUEST as u64))
+        .read_until(b'\n', &mut line)
+        .ok()?;
+    parse_request(&line)
+}
+
+/// The request in the bytes of one line (with or without its line end).
+pub fn parse_request(line: &[u8]) -> Option<Request> {
+    serde_json::from_slice(line.trim_ascii_end()).ok()
 }
 
 /// Write one response (shim side). Errors are ignored: the client may have gone.
@@ -159,6 +176,31 @@ pub fn reply(mut stream: &UnixStream, response: &Response) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_request_line_has_a_limit() {
+        let (a, b) = UnixStream::pair().unwrap();
+        (&a).write_all(b"{\"op\":\"wait\"}\n").unwrap();
+        assert_eq!(read_request(&b), Some(Request::Wait));
+        // A line that never ends is given up after MAX_REQUEST bytes, not read to its end.
+        let (a, b) = UnixStream::pair().unwrap();
+        let writer = std::thread::spawn(move || {
+            let chunk = [b'x'; 1024];
+            let mut sent = 0usize;
+            while sent < 256 * 1024 && (&a).write_all(&chunk).is_ok() {
+                sent += chunk.len();
+            }
+            sent
+        });
+        assert_eq!(read_request(&b), None);
+        drop(b);
+        assert!(writer.join().unwrap() < 256 * 1024, "all of it was read");
+        assert_eq!(
+            parse_request(b"{\"op\":\"kill\",\"signal\":9}"),
+            Some(Request::Kill { signal: 9 })
+        );
+        assert_eq!(parse_request(b"{\"op\":\"ki"), None);
+    }
 
     #[test]
     fn wire_format() {

@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 mod group;
 #[cfg(target_os = "linux")]
 pub use group::{
-    Group, ROOT, choose_placement, create, parent_name, remove_dir, systemd_run, try_remove_dir,
-    user_manager,
+    Group, ROOT, choose_placement, create, enable_controllers, own_cgroup, parent_name, remove_dir,
+    slice_budget, systemd_run, try_remove_dir, user_manager,
 };
 
 /// Where a container's cgroup goes. The library decides; the shim creates it.

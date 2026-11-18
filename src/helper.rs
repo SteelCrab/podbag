@@ -103,10 +103,47 @@ pub fn locate_helper_with(
 
 /// A started helper process and the read end of its status pipe.
 pub struct HelperChild {
-    pub child: Child,
+    proc: Proc,
     status: Option<BufReader<File>>,
     /// The systemd-run program the helper was started through, if any.
     via: Option<PathBuf>,
+}
+
+/// The helper: a child of this process, or a starter the keeper forked for it.
+enum Proc {
+    Child(Child),
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    Kept {
+        pid: u32,
+        /// The keeper tells the starter's exit code here.
+        conn: std::os::unix::net::UnixStream,
+        stdout: Option<File>,
+        stderr: Option<File>,
+        exit: Option<i32>,
+    },
+}
+
+/// Where a helper's standard stream goes. Unlike [`Stdio`], it can be sent to the keeper.
+#[derive(Debug)]
+pub enum Io {
+    /// This process's own stream.
+    Inherit,
+    Null,
+    /// A pipe to this process: read it with [`HelperChild::take_stdout`] and
+    /// [`HelperChild::take_stderr`].
+    Piped,
+    Fd(OwnedFd),
+}
+
+impl Io {
+    pub fn into_stdio(self) -> Stdio {
+        match self {
+            Io::Inherit => Stdio::inherit(),
+            Io::Null => Stdio::null(),
+            Io::Piped => Stdio::piped(),
+            Io::Fd(fd) => Stdio::from(fd),
+        }
+    }
 }
 
 /// Run a helper inside a new transient systemd scope of the user's service manager
@@ -185,6 +222,23 @@ pub fn raise_descriptor_limit() {
     }
 }
 
+/// In a fork that runs on without an exec (the keeper's starters): give this process
+/// the soft descriptor limit from before [`raise_descriptor_limit`].
+pub fn restore_descriptor_limit() {
+    let first = FIRST_NOFILE.load(std::sync::atomic::Ordering::Relaxed);
+    if first == u64::MAX {
+        return;
+    }
+    // SAFETY: getrlimit and setrlimit with a valid rlimit.
+    unsafe {
+        let mut lim: libc::rlimit = std::mem::zeroed();
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) == 0 {
+            lim.rlim_cur = first as libc::rlim_t;
+            libc::setrlimit(libc::RLIMIT_NOFILE, &lim);
+        }
+    }
+}
+
 /// [`spawn_with_args`], with `extra` (if any) on fd 4 of the helper.
 pub fn spawn_with_fd(
     args: &[&str],
@@ -193,6 +247,36 @@ pub fn spawn_with_fd(
     stderr: Stdio,
     scope: Option<&Scope>,
     extra: Option<std::os::fd::OwnedFd>,
+) -> Result<HelperChild> {
+    spawn(args, stdin, stdout, stderr, scope, extra, None)
+}
+
+/// Start `<helper> <args...>` without streams and with `env` as its whole environment:
+/// a helper that outlives this process (the keeper) must not carry the rest of it along.
+pub fn spawn_with_env(
+    args: &[&str],
+    scope: Option<&Scope>,
+    env: Vec<(String, String)>,
+) -> Result<HelperChild> {
+    spawn(
+        args,
+        Stdio::null(),
+        Stdio::null(),
+        Stdio::null(),
+        scope,
+        None,
+        Some(env),
+    )
+}
+
+fn spawn(
+    args: &[&str],
+    stdin: Stdio,
+    stdout: Stdio,
+    stderr: Stdio,
+    scope: Option<&Scope>,
+    extra: Option<std::os::fd::OwnedFd>,
+    env: Option<Vec<(String, String)>>,
 ) -> Result<HelperChild> {
     let helper = locate_helper()?;
     let fail = |e: std::io::Error| {
@@ -234,6 +318,9 @@ pub fn spawn_with_fd(
         }
     };
     cmd.stdin(stdin).stdout(stdout).stderr(stderr);
+    if let Some(env) = env {
+        cmd.env_clear().envs(env);
+    }
     if OWN_GROUP.load(std::sync::atomic::Ordering::Relaxed) {
         cmd.process_group(0);
     }
@@ -280,7 +367,7 @@ pub fn spawn_with_fd(
     drop(extra);
 
     Ok(HelperChild {
-        child,
+        proc: Proc::Child(child),
         status: Some(BufReader::new(File::from(read_end))),
         via: scope.map(|s| s.systemd_run.clone()),
     })
@@ -328,12 +415,118 @@ fn scope_error(systemd_run: &Path, why: String) -> Error {
 }
 
 impl HelperChild {
+    /// A starter that the keeper forked: `conn` reports its end, `status` is the read end
+    /// of its status pipe, `stdout` and `stderr` are this process's ends of piped streams.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn kept(
+        pid: u32,
+        conn: std::os::unix::net::UnixStream,
+        status: File,
+        stdout: Option<File>,
+        stderr: Option<File>,
+    ) -> HelperChild {
+        HelperChild {
+            proc: Proc::Kept {
+                pid,
+                conn,
+                stdout,
+                stderr,
+                exit: None,
+            },
+            status: Some(BufReader::new(status)),
+            via: None,
+        }
+    }
+
+    /// The helper's process ID (signals for it go there).
+    pub fn pid(&self) -> u32 {
+        match &self.proc {
+            Proc::Child(c) => c.id(),
+            Proc::Kept { pid, .. } => *pid,
+        }
+    }
+
+    /// Whether the keeper started this helper (it is not a child of this process, so the
+    /// terminal's signals do not reach it by themselves).
+    pub fn is_kept(&self) -> bool {
+        matches!(self.proc, Proc::Kept { .. })
+    }
+
+    /// Wait for the helper to end. Returns its exit code, or 128 + signal number.
+    pub fn wait(&mut self) -> std::io::Result<i32> {
+        match &mut self.proc {
+            Proc::Child(c) => {
+                use std::os::unix::process::ExitStatusExt;
+                let status = c.wait()?;
+                Ok(status
+                    .code()
+                    .unwrap_or_else(|| 128 + status.signal().unwrap_or(0)))
+            }
+            Proc::Kept { conn, exit, .. } => {
+                if let Some(code) = exit {
+                    return Ok(*code);
+                }
+                loop {
+                    let (line, _) = crate::keeper::proto::recv_with_fds(conn, 0)?;
+                    if let Ok(crate::keeper::proto::Reply::Exited { code }) =
+                        serde_json::from_slice(&line)
+                    {
+                        *exit = Some(code);
+                        return Ok(code);
+                    }
+                }
+            }
+        }
+    }
+
+    /// After a failed `wait`: whether the helper has ended. A kept starter ends with its
+    /// keeper, a moment after the connection to the keeper closes.
+    pub fn ended(&self) -> bool {
+        let Proc::Kept { pid, .. } = &self.proc else {
+            return true;
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            // SAFETY: signal 0 only asks whether the process exists.
+            let gone = unsafe { libc::kill(*pid as libc::pid_t, 0) } != 0
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+            if gone || std::time::Instant::now() >= deadline {
+                return gone;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// After a detached start: a child shim forked and its first process has ended (reap
+    /// it); a kept starter is the keeper's to reap.
+    pub fn release_detached(&mut self) {
+        if let Proc::Child(c) = &mut self.proc {
+            let _ = c.wait();
+        }
+    }
+
+    /// This process's end of a piped stdout.
+    pub fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+        match &mut self.proc {
+            Proc::Child(c) => c.stdout.take().map(|p| Box::new(p) as _),
+            Proc::Kept { stdout, .. } => stdout.take().map(|p| Box::new(p) as _),
+        }
+    }
+
+    /// This process's end of a piped stderr.
+    pub fn take_stderr(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
+        match &mut self.proc {
+            Proc::Child(c) => c.stderr.take().map(|p| Box::new(p) as _),
+            Proc::Kept { stderr, .. } => stderr.take().map(|p| Box::new(p) as _),
+        }
+    }
+
     /// Wait for a container helper's status line. Returns the PID it reports.
     pub fn wait_started(&mut self) -> Result<u32> {
         match self.read_status()? {
             StatusMessage::Started { pid } => Ok(pid),
             StatusMessage::Failed { error } => {
-                let _ = self.child.wait();
+                let _ = self.wait();
                 Err(error)
             }
             StatusMessage::Done { .. } => Err(unexpected_status()),
@@ -343,7 +536,7 @@ impl HelperChild {
     /// Wait for a job helper to finish. Returns its output.
     pub fn wait_done(&mut self) -> Result<serde_json::Value> {
         let message = self.read_status()?;
-        let _ = self.child.wait();
+        let _ = self.wait();
         match message {
             StatusMessage::Done { output } => Ok(output),
             StatusMessage::Failed { error } => Err(error),
@@ -371,9 +564,8 @@ impl HelperChild {
             }
             _ => {
                 let status = self
-                    .child
                     .wait()
-                    .map(|s| s.to_string())
+                    .map(|code| format!("exit status: {code}"))
                     .unwrap_or_else(|e| e.to_string());
                 if let Some(systemd_run) = &self.via {
                     // systemd-run ends before it executes the helper when it cannot
@@ -436,7 +628,7 @@ pub fn run_store_op_lines(
         Stdio::piped(),
         None,
     )?;
-    if let Some(stderr) = helper.child.stderr.take() {
+    if let Some(stderr) = helper.take_stderr() {
         // Read to the end, whatever the bytes: a helper blocked on a full pipe would
         // never report its result.
         let mut reader = std::io::BufReader::new(stderr);

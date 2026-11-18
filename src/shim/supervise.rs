@@ -34,7 +34,7 @@ pub(super) const HANDLED: [i32; 7] = [
 ];
 
 /// How long to keep reading output after the container exits.
-const DRAIN: Duration = Duration::from_secs(2);
+pub(crate) const DRAIN: Duration = Duration::from_secs(2);
 
 /// While this much output waits for a slow caller, the shim stops reading the container's
 /// output, so the container waits too (as it would writing to a slow terminal).
@@ -43,6 +43,8 @@ const ECHO_LIMIT: usize = 1 << 20;
 pub(super) struct Outcome {
     pub code: i32,
     pub started: bool,
+    /// The keeper watches the container from here on: nothing to clean up in this process.
+    pub handed_over: bool,
 }
 
 /// Leave the caller: fork (the caller reaps the parent at once), new session, no terminal.
@@ -322,12 +324,22 @@ fn memory_budget(dirs: &Dirs) -> Result<Option<u64>> {
     Ok(setting.bytes(total).filter(|&b| b > 0))
 }
 
-pub(super) fn run(spec: &ContainerSpec, dirs: &Dirs, status: &mut StatusChannel) -> Outcome {
+pub(super) fn run(
+    spec: &ContainerSpec,
+    dirs: &Dirs,
+    status: &mut StatusChannel,
+    lock: &File,
+) -> Outcome {
     let failed = |status: &mut StatusChannel, e: Error| Outcome {
         code: status.fail(e),
         started: false,
+        handed_over: false,
     };
     let id = spec.id.as_str();
+    // A detached container of the keeper needs no process of its own: the keeper becomes
+    // its parent and takes over the watching once it runs (design 6.15). Published ports
+    // are relayed by a shim, so such a container keeps this process.
+    let hand_over = spec.detach && crate::keeper::under_keeper() && spec.publish.is_empty();
     let mut io = match Io::prepare(spec) {
         Ok(io) => io,
         Err(e) => return failed(status, e),
@@ -361,7 +373,7 @@ pub(super) fn run(spec: &ContainerSpec, dirs: &Dirs, status: &mut StatusChannel)
             return failed(status, e);
         }
     };
-    let group = match cgroup::create(&spec.cgroup, id, &spec.limits, budget) {
+    let group = match crate::keeper::cgroups::create(&spec.cgroup, id, &spec.limits, budget) {
         Ok(g) => g,
         Err(e) => {
             remove_control(dirs, id);
@@ -433,6 +445,11 @@ pub(super) fn run(spec: &ContainerSpec, dirs: &Dirs, status: &mut StatusChannel)
         io.stdio,
         group.as_ref().map(|g| g.fd()),
         userns,
+        if hand_over {
+            linux::Parent::Grandparent
+        } else {
+            linux::Parent::Caller
+        },
         &mut attach,
     ) {
         Ok(c) => c,
@@ -468,10 +485,16 @@ pub(super) fn run(spec: &ContainerSpec, dirs: &Dirs, status: &mut StatusChannel)
     let created = state::read_state(dirs, id)
         .map(|s| s.created)
         .unwrap_or_else(|_| state::now());
-    let mut st = State {
+    let st = State {
         status: Status::Running,
         pid: Some(child.pid),
-        shim_pid: Some(std::process::id()),
+        // The process that watches it: this one, or the keeper (this starter's parent).
+        shim_pid: Some(if hand_over {
+            // SAFETY: getppid has no preconditions.
+            unsafe { libc::getppid() as u32 }
+        } else {
+            std::process::id()
+        }),
         exit_code: None,
         created,
         started: Some(state::now()),
@@ -485,6 +508,34 @@ pub(super) fn run(spec: &ContainerSpec, dirs: &Dirs, status: &mut StatusChannel)
     };
     let _ = state::write_state(dirs, id, &st);
     super::net::announce(dirs, spec);
+    if hand_over {
+        // The listener, the lock and the output go to the keeper; this process ends.
+        let mut fds = vec![listener.as_raw_fd(), lock.as_raw_fd()];
+        match &io.master {
+            Some(master) => fds.push(master.as_raw_fd()),
+            None => fds.extend(io.outputs.iter().map(|o| o.fd.as_raw_fd())),
+        }
+        return match crate::keeper::handover::send(dirs, id, child.pid, spec.tty, &fds) {
+            Ok(()) => {
+                status.report(&StatusMessage::Started { pid: child.pid });
+                Outcome {
+                    code: 0,
+                    started: true,
+                    handed_over: true,
+                }
+            }
+            Err(e) => {
+                // The keeper is gone or cannot take it: the container cannot stay.
+                // SAFETY: a signal to the container this process just made.
+                unsafe { libc::kill(child.pid as libc::pid_t, libc::SIGKILL) };
+                finish(dirs, spec, st, 137, None, session.is_some(), listener, &[]);
+                if let Some(g) = group {
+                    g.remove();
+                }
+                failed(status, e)
+            }
+        };
+    }
     let relays = bridge
         .as_ref()
         .map(|(_, ip)| super::proxy::serve(published, *ip, session));
@@ -512,19 +563,17 @@ pub(super) fn run(spec: &ContainerSpec, dirs: &Dirs, status: &mut StatusChannel)
         relays.close();
     }
     let _ = log.flush_partial();
-    st.status = Status::Exited;
-    st.exit_code = Some(code);
-    st.oom = group.as_ref().and_then(|g| g.oom_reason());
-    st.finished = Some(state::now());
-    let _ = state::write_state(dirs, id, &st);
-    // Give the address back before anyone hears of the exit: they may reuse it at once.
-    super::net::detach(dirs, spec, session.is_some());
-    // Answer waiters only after the state says "exited": they may act on it at once.
-    for w in &waiters {
-        control::reply(w, &Response::Exited { exit_code: code });
-    }
-    drop(listener);
-    remove_control(dirs, id);
+    let oom = group.as_ref().and_then(|g| g.oom_reason());
+    finish(
+        dirs,
+        spec,
+        st,
+        code,
+        oom,
+        session.is_some(),
+        listener,
+        &waiters,
+    );
     if let Some(echo) = echo {
         echo.finish();
     }
@@ -534,7 +583,36 @@ pub(super) fn run(spec: &ContainerSpec, dirs: &Dirs, status: &mut StatusChannel)
     Outcome {
         code,
         started: true,
+        handed_over: false,
     }
+}
+
+/// What follows a container's end, for the shim and for the keeper's finisher: the state,
+/// the network address, the waiters, the control socket.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn finish(
+    dirs: &Dirs,
+    spec: &ContainerSpec,
+    mut st: State,
+    code: i32,
+    oom: Option<cgroup::OomReason>,
+    session: bool,
+    listener: UnixListener,
+    waiters: &[UnixStream],
+) {
+    st.status = Status::Exited;
+    st.exit_code = Some(code);
+    st.oom = oom;
+    st.finished = Some(state::now());
+    let _ = state::write_state(dirs, &spec.id, &st);
+    // Give the address back before anyone hears of the exit: they may reuse it at once.
+    super::net::detach(dirs, spec, session);
+    // Answer waiters only after the state says "exited": they may act on it at once.
+    for w in waiters {
+        control::reply(w, &Response::Exited { exit_code: code });
+    }
+    drop(listener);
+    remove_control(dirs, &spec.id);
 }
 
 #[derive(Clone, Copy)]
@@ -680,7 +758,7 @@ fn try_reap(pid: u32) -> Option<i32> {
     })
 }
 
-fn accept_requests(
+pub(crate) fn accept_requests(
     listener: &UnixListener,
     id: &str,
     pid: u32,
@@ -690,43 +768,58 @@ fn accept_requests(
 ) {
     while let Ok((stream, _)) = listener.accept() {
         let _ = stream.set_nonblocking(false);
-        match control::read_request(&stream) {
-            Some(Request::Kill { signal }) => {
-                let response = match exit {
-                    Some(_) => Response::Failed {
-                        error: control::not_running(id),
+        let request = control::read_request(&stream);
+        handle_request(stream, request, id, pid, exit, master, waiters);
+    }
+}
+
+/// Answer one request that came on `stream`. A `wait` is answered when the container has
+/// ended: its stream joins `waiters`.
+pub(crate) fn handle_request(
+    stream: UnixStream,
+    request: Option<Request>,
+    id: &str,
+    pid: u32,
+    exit: Option<i32>,
+    master: Option<i32>,
+    waiters: &mut Vec<UnixStream>,
+) {
+    match request {
+        Some(Request::Kill { signal }) => {
+            let response = match exit {
+                Some(_) => Response::Failed {
+                    error: control::not_running(id),
+                },
+                None => match kill_container(pid, signal) {
+                    Ok(()) => Response::Ok { ok: true },
+                    Err(e) => Response::Failed {
+                        error: Error::io(
+                            "cannot signal the container",
+                            &e,
+                            "check the signal number",
+                        ),
                     },
-                    None => match kill_container(pid, signal) {
-                        Ok(()) => Response::Ok { ok: true },
-                        Err(e) => Response::Failed {
-                            error: Error::io(
-                                "cannot signal the container",
-                                &e,
-                                "check the signal number",
-                            ),
-                        },
-                    },
-                };
-                control::reply(&stream, &response);
-            }
-            // Answered when the state says "exited", even if the exit is known already:
-            // the caller may read the state and the log as soon as it hears.
-            Some(Request::Wait) => waiters.push(stream),
-            Some(Request::Resize { rows, cols }) => {
-                let response = match (exit, master) {
-                    (Some(_), _) => Response::Failed {
-                        error: control::not_running(id),
-                    },
-                    (None, Some(m)) => {
-                        linux::pty::set_size(m, rows, cols);
-                        Response::Ok { ok: true }
-                    }
-                    (None, None) => Response::Ok { ok: true },
-                };
-                control::reply(&stream, &response);
-            }
-            None => {}
+                },
+            };
+            control::reply(&stream, &response);
         }
+        // Answered when the state says "exited", even if the exit is known already:
+        // the caller may read the state and the log as soon as it hears.
+        Some(Request::Wait) => waiters.push(stream),
+        Some(Request::Resize { rows, cols }) => {
+            let response = match (exit, master) {
+                (Some(_), _) => Response::Failed {
+                    error: control::not_running(id),
+                },
+                (None, Some(m)) => {
+                    linux::pty::set_size(m, rows, cols);
+                    Response::Ok { ok: true }
+                }
+                (None, None) => Response::Ok { ok: true },
+            };
+            control::reply(&stream, &response);
+        }
+        None => {}
     }
 }
 

@@ -247,19 +247,18 @@ impl ContainerHandle {
     pub fn start(&self) -> Result<()> {
         #[cfg(target_os = "linux")]
         {
-            use std::process::Stdio;
+            use crate::helper::Io;
             let dirs = paths::dirs()?;
             self.refuse_running()?;
             let mut helper = crate::container::start_shim(
                 &dirs,
                 &self.id,
-                Stdio::null(),
-                Stdio::null(),
-                Stdio::null(),
+                Io::Null,
+                Io::Null,
+                Io::Null,
                 crate::helper::ShimMode::Detached,
             )?;
-            // The detached shim forked and its first process has exited; reap it.
-            let _ = helper.child.wait();
+            helper.release_detached();
             Ok(())
         }
         #[cfg(not(target_os = "linux"))]
@@ -274,9 +273,9 @@ impl ContainerHandle {
     #[doc(hidden)]
     pub fn start_attached(
         &self,
-        stdin: std::process::Stdio,
-        stdout: std::process::Stdio,
-        stderr: std::process::Stdio,
+        stdin: crate::helper::Io,
+        stdout: crate::helper::Io,
+        stderr: crate::helper::Io,
     ) -> Result<crate::Running> {
         #[cfg(target_os = "linux")]
         {
@@ -438,6 +437,9 @@ impl ContainerHandle {
     pub fn remove(&self, force: bool) -> Result<()> {
         let dirs = paths::dirs()?;
         let info = info_of(&dirs, &self.id)?;
+        // A container that was running when a forced removal began may remove itself
+        // while it ends (`--rm`): gone is what the caller asked for.
+        let mut may_vanish = false;
         if info.state.status == Status::Running {
             if !force {
                 return Err(Error::new(
@@ -449,17 +451,30 @@ impl ContainerHandle {
             }
             let _ = self.kill(libc::SIGKILL);
             let _ = self.wait();
+            may_vanish = true;
         }
+        let gone = || may_vanish && !dirs.container_dir(&self.id).exists();
         // The last chance to find the container's cgroup: its record goes away now.
         #[cfg(target_os = "linux")]
-        if let Some(path) = state::read_state(&dirs, &self.id)?.cgroup {
-            crate::cgroup::remove_dir(std::path::Path::new(&path));
+        match state::read_state(&dirs, &self.id) {
+            Ok(st) => {
+                if let Some(path) = st.cgroup {
+                    crate::cgroup::remove_dir(std::path::Path::new(&path));
+                }
+            }
+            // Its own removal has taken the record already (and takes the cgroup): what
+            // is left of the directory goes below.
+            Err(_) if may_vanish => {}
+            Err(e) => return Err(e),
         }
         if state::remove_container_dir(&dirs, &self.id).is_ok() {
             return Ok(());
         }
         // Files the container's users created (subordinate IDs when rootless).
-        remove_with_helper(&self.id)
+        match remove_with_helper(&self.id) {
+            Err(_) if gone() => Ok(()),
+            done => done,
+        }
     }
 
     /// [`ContainerHandle::remove`], and also delete the container's anonymous volumes

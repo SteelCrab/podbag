@@ -12,6 +12,8 @@ mod supervise;
 
 use crate::helper::StatusChannel;
 use crate::{paths, state};
+#[cfg(target_os = "linux")]
+pub(crate) use supervise::{DRAIN, finish, handle_request};
 
 /// Run the shim for container `id`. `mode` says whether it serves an attached caller
 /// (`None`: what the container was created with). With `keep_on_failure` a failed start
@@ -42,7 +44,8 @@ pub fn shim_main(id: &str, mode: Option<crate::helper::ShimMode>, keep_on_failur
     }
     #[cfg(target_os = "linux")]
     {
-        if spec.detach {
+        // A starter of the keeper is outside the caller's session already.
+        if spec.detach && !crate::keeper::under_keeper() {
             if let Err(e) = supervise::detach() {
                 return status.fail(e);
             }
@@ -53,11 +56,11 @@ pub fn shim_main(id: &str, mode: Option<crate::helper::ShimMode>, keep_on_failur
             // Another shim serves it: leave the container alone.
             Err(e) => return status.fail(e),
         };
-        let outcome = supervise::run(&spec, &dirs, &mut status);
+        let outcome = supervise::run(&spec, &dirs, &mut status, &_lock);
         // A failed `run` leaves no trace, a failed `start` keeps the container; a finished
         // container stays unless --rm. With --rm it goes even when its start failed, like
-        // Docker (whose CLI waits for that removal).
-        if spec.auto_remove || (!outcome.started && !keep_on_failure) {
+        // Docker (whose CLI waits for that removal). One that the keeper took over runs on.
+        if !outcome.handed_over && (spec.auto_remove || (!outcome.started && !keep_on_failure)) {
             remove_container(&dirs, &spec);
         }
         outcome.code
@@ -81,6 +84,11 @@ pub fn remove_container(dirs: &paths::Dirs, spec: &crate::spec::ContainerSpec) {
         eprintln!("openpod: {e}");
     }
     let dir = dirs.container_dir(&spec.id);
+    // Most containers leave only this user's files: they go without a user namespace
+    // (two setuid helper runs). What other container users made needs the namespace.
+    if crate::store::remove_tree(&dir).is_ok() {
+        return;
+    }
     let removed = crate::linux::userns::run_in_userns(|| {
         crate::store::remove_tree(&dir).map_err(|e| {
             crate::Error::io(

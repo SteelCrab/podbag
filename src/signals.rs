@@ -82,6 +82,14 @@ pub fn ignore(signals: &[i32]) {
     set_mask(libc::SIG_UNBLOCK, signals);
 }
 
+/// Give these signals their default action again, then deliver any that were held.
+pub fn restore_default(signals: &[i32]) {
+    for &sig in signals {
+        set_action(sig, libc::SIG_DFL, 0);
+    }
+    set_mask(libc::SIG_UNBLOCK, signals);
+}
+
 /// Send each of these signals to `pid` when another process sends it to this process
 /// (see `forward`), then deliver any that were held.
 pub fn forward_to(pid: u32, signals: &[i32]) {

@@ -4,7 +4,7 @@ A daemonless, rootless container engine that runs Docker/OCI images from a singl
 
 ## Status
 
-Early development (milestone M8a). What works:
+Early development (milestone M9). What works:
 
 ```sh
 openpod run alpine echo hello            # pulls the image if needed; the container stays
@@ -29,8 +29,18 @@ openpod check-image myapp:1              # programs that cannot run in the image
 openpod system service &                 # the Docker API, for the docker CLI (see below)
 ```
 
-There is no daemon: each container has a small `openpod __shim` process that keeps its
-logs and answers `stop`, `kill` and `wait`. Containers run in new mount, PID, UTS, IPC and
+There is no daemon. While containers run, one small keeper process (`openpod __keeper`,
+about 2 MiB) writes the logs of the detached ones and answers `stop`, `kill` and `wait`
+for them, so a detached container costs no process of its own. The keeper starts with the
+first container and leaves 10 seconds after the last one: with no containers, nothing
+runs. A container in the foreground, and one that publishes ports, keeps a helper process
+of its own while it runs. The keeper is the parent of the containers it watches: if it is
+killed, they end with it. It serves only the user that started it, in a runtime directory
+that nobody else can write to, and only the openpod program file it was started from:
+after an upgrade, new containers get a helper of their own until the old keeper has
+left. `keeper = false` in `config.toml` (or `OPENPOD_KEEPER=0`) gives
+every container its own `openpod __shim` process instead; `keeper_linger = 10000`
+(milliseconds) sets how long an idle keeper stays. Containers run in new mount, PID, UTS, IPC and
 cgroup namespaces, plus a user namespace when run without root. Identical files in
 different images are stored once and share page cache. The store keeps at most 10 GiB by
 default.
@@ -59,7 +69,8 @@ time a container uses it. Removing an image unmounts it.
 ## Checks
 
 `openpod check` lists what openpod needs on this system, one line each: the kernel,
-cgroup v2, how images are mounted (as root) and, without root, `newuidmap`/`newgidmap`, subordinate IDs, `pasta`, the systemd
+cgroup v2, how images are mounted (as root), whether the keeper is in use and, without root,
+`newuidmap`/`newgidmap`, subordinate IDs, `pasta`, the systemd
 user session, AppArmor, linger and the lowest port a user may publish. Each problem comes
 with the command that fixes it. As root, it warns when Docker's firewall blocks bridge
 networks. `openpod check --apparmor-profile` prints the profile described under "AppArmor".
@@ -112,9 +123,11 @@ A container ended for memory shows why in `ps` and `inspect`:
 `Exited (137, out of memory: memory budget)` or `… container limit`. The kernel may
 rarely end a second container when the first one's memory is not given back yet.
 
-**Where the cgroups are.** As root: `/sys/fs/cgroup/openpod/<id>`. Without root: a
-transient systemd scope `openpod-<id>.scope` in the user's `openpod.slice`, started with
-`systemd-run --user --scope`. `exec` runs commands in the same cgroup.
+**Where the cgroups are.** As root: `/sys/fs/cgroup/openpod/<id>`. Without root: the
+keeper runs in one transient systemd scope in the user's `openpod.slice` (started with
+`systemd-run --user --scope`) and makes each container's cgroup below it, `<scope>/c/<id>`,
+so a start needs no `systemd-run` of its own. Without the keeper every container gets a
+scope of its own, `openpod-<id>.scope`. `exec` runs commands in the same cgroup.
 
 **Security defaults.** Docker's 14 capabilities, a seccomp filter that refuses dangerous
 system calls (module loading, kexec, mount, new namespaces, keyrings, BPF, …), hidden

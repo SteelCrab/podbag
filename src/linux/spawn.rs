@@ -65,6 +65,16 @@ pub enum UserNs {
     Joined,
 }
 
+/// Whose child the container becomes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Parent {
+    /// The caller: a shim that serves the container itself.
+    Caller,
+    /// The caller's parent (`CLONE_PARENT`): a starter makes the container for the keeper,
+    /// which reaps it. The caller cannot wait for it.
+    Grandparent,
+}
+
 /// Create the container process in its own namespaces (cgroup namespace included) and,
 /// when `cgroup` is given, directly in that cgroup. Returns after its command was executed.
 pub fn spawn(
@@ -72,6 +82,7 @@ pub fn spawn(
     stdio: ContainerStdio,
     cgroup: Option<std::os::fd::BorrowedFd<'_>>,
     userns: UserNs,
+    parent: Parent,
     before_start: &mut dyn FnMut(u32) -> Result<()>,
 ) -> Result<Spawned> {
     // SAFETY: these calls have no preconditions.
@@ -106,6 +117,21 @@ pub fn spawn(
         args.flags |= CLONE_INTO_CGROUP;
         args.cgroup = std::os::fd::AsRawFd::as_raw_fd(&fd) as u64;
     }
+    if parent == Parent::Grandparent {
+        // The kernel takes the exit signal from this process (SIGCHLD); asking for one
+        // here is an error.
+        args.flags |= libc::CLONE_PARENT as u64;
+        args.exit_signal = 0;
+    }
+    // A child of ours is killed and reaped; a child of our parent is killed, and reaped
+    // there.
+    let end = |pid: u32| match parent {
+        Parent::Caller => kill_and_reap(pid),
+        // SAFETY: kill has no memory arguments.
+        Parent::Grandparent => unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        },
+    };
 
     // SAFETY: clone3 without CLONE_VM behaves like fork. This process is single-threaded,
     // so the child may run any code before it calls execve.
@@ -141,14 +167,14 @@ pub fn spawn(
             // Read the child's AppArmor label before the child is gone.
             let denied = (e.kind == ErrorKind::Runtime)
                 .then(|| super::userns_denial(rootless, None, Some(pid)));
-            kill_and_reap(pid);
+            end(pid);
             return Err(denied.flatten().unwrap_or(e));
         }
     }
 
     // Network and similar setup from outside, while the child waits.
     if let Err(e) = before_start(pid) {
-        kill_and_reap(pid);
+        end(pid);
         return Err(e);
     }
 
@@ -162,7 +188,10 @@ pub fn spawn(
     if report == [0] {
         return Ok(Spawned { pid });
     }
-    let status = wait(pid).unwrap_or(-1);
+    let status = match parent {
+        Parent::Caller => wait(pid).unwrap_or(-1),
+        Parent::Grandparent => -1,
+    };
     if report.is_empty() {
         return Err(Error::new(
             ErrorKind::Runtime,

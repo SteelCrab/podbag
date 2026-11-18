@@ -162,6 +162,8 @@ fn missing_pasta() -> Error {
 /// Start `openpod __session` (in its own systemd scope when there is one, so it does not
 /// live in a container's cgroup) and wait until it reports the holder's PID.
 fn start() -> Result<u32> {
+    // What every rootless container needs comes first, then what only the network needs.
+    idmap::require_tools()?;
     if pasta().is_none() {
         return Err(missing_pasta());
     }
@@ -187,7 +189,7 @@ fn start() -> Result<u32> {
         scope.as_ref(),
     )?;
     let pid = helper.wait_started()?;
-    let _ = helper.child.wait();
+    let _ = helper.wait();
     Ok(pid)
 }
 
@@ -231,6 +233,10 @@ fn create() -> Result<u32> {
         use std::os::fd::FromRawFd;
         (File::from_raw_fd(fds[0]), File::from_raw_fd(fds[1]))
     };
+    // The holder's answer: whether it could set itself up, and why not.
+    let (ready_r, ready_w) = rustix::pipe::pipe_with(rustix::pipe::PipeFlags::CLOEXEC)
+        .map(|(r, w)| (File::from(r), File::from(w)))
+        .map_err(|e| fail("create", e.into()))?;
     let record = dir(&crate::paths::dirs()?).join("pid");
     let flags = (libc::CLONE_NEWUSER | libc::CLONE_NEWNET) as u64;
     let args = super::spawn::clone_args(flags);
@@ -247,14 +253,20 @@ fn create() -> Result<u32> {
     }
     if ret == 0 {
         drop(sync_w);
-        holder_main(sync_r, record);
+        drop(ready_r);
+        holder_main(sync_r, ready_w, record);
     }
     let pid = ret as u32;
     drop(sync_r);
+    drop(ready_w);
     if let Err(e) = idmap::apply_id_maps(pid, euid, egid) {
+        // Under AppArmor's restriction on user namespaces the tools fail: say that.
+        let denied = (e.kind == ErrorKind::Runtime)
+            .then(|| super::userns_denial(true, None, Some(pid)))
+            .flatten();
         // SAFETY: our own child.
         unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
-        return Err(e);
+        return Err(denied.unwrap_or(e));
     }
     // The record first: the holder checks it from now on.
     if let Err(e) = std::fs::write(&record, format!("{pid}\n")) {
@@ -265,6 +277,25 @@ fn create() -> Result<u32> {
     let mut sync_w = sync_w;
     let _ = sync_w.write_all(&[1]);
     drop(sync_w);
+    // Wait for the holder's answer: pasta needs its network namespace, and a holder that
+    // could not set itself up (AppArmor's restriction, for one) knows the reason.
+    let mut ready_r = ready_r;
+    let mut answer = Vec::new();
+    let _ = ready_r.read_to_end(&mut answer);
+    let ready = serde_json::from_slice::<Result<()>>(&answer).unwrap_or_else(|_| {
+        Err(Error::new(
+            ErrorKind::Runtime,
+            "cannot start the rootless network session",
+            "its holder process ended during setup",
+            "run `openpod check` to see what this system lacks",
+        ))
+    });
+    if let Err(e) = ready {
+        // SAFETY: our own child.
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+        let _ = std::fs::remove_file(&record);
+        return Err(e);
+    }
     // pasta sets up its interface in the holder's network namespace, then goes to the
     // background. Its error output goes to a file: a pipe would stay open in the daemon.
     let dirs = crate::paths::dirs()?;
@@ -313,23 +344,29 @@ fn create() -> Result<u32> {
 /// forwarding, then wait in a session of its own. It ends by itself once its record
 /// (`record`, the session's `pid` file) is gone or names another process, so a lost
 /// session does not linger; pasta follows it out.
-fn holder_main(mut sync: File, record: PathBuf) -> ! {
+fn holder_main(mut sync: File, mut ready: File, record: PathBuf) -> ! {
     let mut byte = [0u8; 1];
     if !matches!(sync.read(&mut byte), Ok(1)) {
         // SAFETY: leave the forked child without running destructors.
         unsafe { libc::_exit(1) };
     }
     drop(sync);
-    let ok = super::init::become_root().is_ok()
-        && (|| -> std::io::Result<()> {
+    let set_up: Result<()> = super::init::become_root()
+        .and_then(|()| -> std::io::Result<()> {
             let mut s = crate::netlink::Socket::route()?;
             if let Some(lo) = s.link_index("lo")? {
                 s.request(crate::netlink::route::set_up(lo))?;
             }
             std::fs::write("/proc/sys/net/ipv4/ip_forward", "1")
-        })()
-        .is_ok();
-    if !ok {
+        })
+        .map_err(|e| {
+            super::userns_denial(true, Some(&e), None).unwrap_or_else(|| io_error("set up", e))
+        });
+    let failed = set_up.is_err();
+    // The creator waits for this answer (and for the pipe to close).
+    let _ = ready.write_all(&serde_json::to_vec(&set_up).unwrap_or_default());
+    drop(ready);
+    if failed {
         // SAFETY: as above.
         unsafe { libc::_exit(1) };
     }

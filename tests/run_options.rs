@@ -36,17 +36,6 @@ fn default_hostname_is_the_short_id() {
     assert!(name.chars().all(|c| c.is_ascii_hexdigit()));
 }
 
-/// The PID of the only child of `pid`.
-fn only_child(pid: u32) -> u32 {
-    let text = std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children")).unwrap();
-    let pids: Vec<u32> = text
-        .split_whitespace()
-        .map(|p| p.parse().unwrap())
-        .collect();
-    assert_eq!(pids.len(), 1, "expected one child of {pid}, found {pids:?}");
-    pids[0]
-}
-
 /// Wait until the container prints `ready`.
 fn wait_ready(child: &mut std::process::Child) {
     let mut line = String::new();
@@ -57,7 +46,6 @@ fn wait_ready(child: &mut std::process::Child) {
 }
 
 // PID 1 ignores SIGKILL sent from inside its own namespace, so the test sends it from the host.
-// Process chain: openpod (CLI) -> openpod __shim -> sleep (PID 1 in the container).
 #[test]
 fn killed_by_signal_exits_128_plus_signal() {
     if root_mode() {
@@ -78,7 +66,12 @@ fn killed_by_signal_exits_128_plus_signal() {
         .spawn()
         .unwrap();
     wait_ready(&mut child);
-    let init = only_child(only_child(child.id()));
+    // The container's first process, from its record: the CLI has no child of its own
+    // when the keeper starts the container.
+    let id = stdout(&sb.openpod().args(["ps", "-q"]).output().unwrap());
+    let info = stdout(&sb.openpod().args(["inspect", id.trim()]).output().unwrap());
+    let info: serde_json::Value = serde_json::from_str(&info).unwrap();
+    let init = info["state"]["pid"].as_u64().unwrap();
     unsafe { libc::kill(init as i32, libc::SIGKILL) };
     assert_eq!(child.wait().unwrap().code(), Some(137));
 }

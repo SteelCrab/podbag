@@ -38,6 +38,20 @@ impl Drop for Sandbox {
                 let _ = self.openpod().args(["rm", "-f"]).args(&ids).output();
             }
         }
+        // The sandbox's keeper, if one still lingers: nothing of a test stays behind.
+        let keeper = format!("__keeper {}$", self.runtime().display());
+        let mut pkill = if root_mode() {
+            let mut c = Command::new("sudo");
+            c.args(["-n", "pkill"]);
+            c
+        } else {
+            Command::new("pkill")
+        };
+        let _ = pkill
+            .args(["-TERM", "-f", &keeper])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
         if root_mode() {
             // Shared image mounts (composefs) stay until their image is removed; take
             // down every mount below this sandbox, deepest first, before deleting it.
@@ -71,6 +85,14 @@ impl Sandbox {
                 "OPENPOD_DEFAULT_SUBNET".to_string(),
                 format!("10.79.{slot}.0/24"),
             ));
+        }
+        // The keeper of a sandbox leaves soon after its last container (a later value
+        // of the same variable wins, for tests that want another time).
+        sb.env
+            .push(("OPENPOD_KEEPER_LINGER_MS".to_string(), "300".to_string()));
+        // OPENPOD_TEST_KEEPER=0 runs the suite with a shim per container.
+        if std::env::var("OPENPOD_TEST_KEEPER").as_deref() == Ok("0") {
+            sb.env.push(("OPENPOD_KEEPER".to_string(), "0".to_string()));
         }
         // Created by the test user, so the test can list it even when openpod runs as root.
         std::fs::create_dir_all(sb.data().join("containers")).unwrap();

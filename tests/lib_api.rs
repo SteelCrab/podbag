@@ -265,7 +265,11 @@ fn resize_reaches_the_container_tty() {
     let (stdin_r, _stdin_w) = std::io::pipe().unwrap();
     let (mut out_r, out_w) = std::io::pipe().unwrap();
     let running = handle
-        .start_attached(stdin_r.into(), out_w.into(), std::process::Stdio::null())
+        .start_attached(
+            openpod::helper::Io::Fd(stdin_r.into()),
+            openpod::helper::Io::Fd(out_w.into()),
+            openpod::helper::Io::Null,
+        )
         .unwrap();
     handle.resize(30, 100).unwrap();
     let text = read_until(&mut out_r, "30 100");

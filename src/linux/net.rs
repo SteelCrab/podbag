@@ -107,8 +107,19 @@ pub fn connect(
     let ns = std::fs::File::open(format!("/proc/{pid}/ns/net"))
         .map_err(|e| fail("open the container's network namespace", e))?;
     let mut s = Socket::route().map_err(|e| fail("netlink", e))?;
-    s.request(route::new_veth(&host_side, "eth0", ns.as_raw_fd()))
-        .map_err(|e| fail("create the veth pair", e))?;
+    let made = match s.request(route::new_veth(&host_side, "eth0", ns.as_raw_fd())) {
+        // Left by this container's last run: the kernel takes a network namespace (and
+        // the veth pair with it) down a moment after its last process. Remove the old
+        // device and make the pair again.
+        Err(e) if e.raw_os_error() == Some(libc::EEXIST) => {
+            if let Ok(Some(old)) = s.link_index(&host_side) {
+                let _ = s.request(route::del_link(old));
+            }
+            s.request(route::new_veth(&host_side, "eth0", ns.as_raw_fd()))
+        }
+        made => made,
+    };
+    made.map_err(|e| fail("create the veth pair", e))?;
     let index = s
         .link_index(&host_side)
         .map_err(|e| fail("find the veth", e))?

@@ -345,10 +345,10 @@ impl Container {
     pub fn run(mut self) -> Result<Output> {
         #[cfg(target_os = "linux")]
         {
-            use std::process::Stdio;
+            use crate::helper::Io;
             self.auto_remove = true;
             let (_cleanup, mut helper) =
-                linux_launch::launch(self, Stdio::null(), Stdio::piped(), Stdio::piped(), false)?;
+                linux_launch::launch(self, Io::Null, Io::Piped, Io::Piped, false)?;
             collect_output(&mut helper)
         }
         #[cfg(not(target_os = "linux"))]
@@ -373,11 +373,10 @@ impl Container {
     pub fn start(self) -> Result<crate::ContainerHandle> {
         #[cfg(target_os = "linux")]
         {
-            use std::process::Stdio;
+            use crate::helper::Io;
             let (cleanup, mut helper) =
-                linux_launch::launch(self, Stdio::null(), Stdio::null(), Stdio::null(), true)?;
-            // The detached shim forked and its first process has exited; reap it.
-            let _ = helper.child.wait();
+                linux_launch::launch(self, Io::Null, Io::Null, Io::Null, true)?;
+            helper.release_detached();
             Ok(crate::ContainerHandle::from_id(cleanup.disarm()))
         }
         #[cfg(not(target_os = "linux"))]
@@ -409,14 +408,9 @@ impl Container {
     pub fn spawn_inherit(self) -> Result<Running> {
         #[cfg(target_os = "linux")]
         {
-            use std::process::Stdio;
-            let (cleanup, helper) = linux_launch::launch(
-                self,
-                Stdio::inherit(),
-                Stdio::inherit(),
-                Stdio::inherit(),
-                false,
-            )?;
+            use crate::helper::Io;
+            let (cleanup, helper) =
+                linux_launch::launch(self, Io::Inherit, Io::Inherit, Io::Inherit, false)?;
             Ok(Running {
                 cleanup: Some(cleanup),
                 helper,
@@ -457,12 +451,12 @@ pub fn check_name(name: &str) -> Result<()> {
 pub(crate) fn start_shim(
     dirs: &crate::paths::Dirs,
     id: &str,
-    stdin: std::process::Stdio,
-    stdout: std::process::Stdio,
-    stderr: std::process::Stdio,
+    stdin: crate::helper::Io,
+    stdout: crate::helper::Io,
+    stderr: crate::helper::Io,
     mode: crate::helper::ShimMode,
 ) -> Result<crate::helper::HelperChild> {
-    linux_launch::start(dirs, id, stdin, stdout, stderr, mode, true)
+    linux_launch::start(dirs, id, stdin, stdout, stderr, mode, true).map_err(|failed| failed.error)
 }
 
 /// Read a helper's stdout and stderr to the end, then wait for it.
@@ -470,7 +464,7 @@ pub(crate) fn start_shim(
 pub(crate) fn collect_output(helper: &mut crate::helper::HelperChild) -> Result<Output> {
     use std::io::Read;
     // Read both streams at once; reading one to the end first can block on a full pipe.
-    let mut err_pipe = helper.child.stderr.take();
+    let mut err_pipe = helper.take_stderr();
     let err_reader = std::thread::spawn(move || {
         let mut buf = Vec::new();
         err_pipe
@@ -480,7 +474,7 @@ pub(crate) fn collect_output(helper: &mut crate::helper::HelperChild) -> Result<
             .map(|_| buf)
     });
     let mut stdout = Vec::new();
-    let out_result = match helper.child.stdout.take() {
+    let out_result = match helper.take_stdout() {
         Some(mut p) => p.read_to_end(&mut stdout).map(drop),
         None => Ok(()),
     };
@@ -519,9 +513,25 @@ impl Running {
     /// The PID of the helper process that watches the container.
     pub fn helper_pid(&self) -> u32 {
         #[cfg(target_os = "linux")]
-        return self.helper.child.id();
+        return self.helper.pid();
         #[cfg(not(target_os = "linux"))]
         unreachable!("no container runs on this operating system")
+    }
+
+    /// Pass these signals on to the helper while this process waits for it. A helper that
+    /// the keeper started is outside this process's terminal: it gets the terminal's
+    /// signals (Ctrl+C, a new window size) from here too.
+    pub fn forward_signals(&self, signals: &[i32]) {
+        #[cfg(target_os = "linux")]
+        if self.helper.is_kept() {
+            let mut all = signals.to_vec();
+            all.push(libc::SIGWINCH);
+            crate::signals::forward_all_to(self.helper.pid(), &all);
+        } else {
+            crate::signals::forward_to(self.helper.pid(), signals);
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = signals;
     }
 
     /// Wait for the container to end. Returns its exit code, or 128 + signal number.
@@ -529,7 +539,13 @@ impl Running {
         #[cfg(target_os = "linux")]
         {
             let code = linux_launch::wait(&mut self.helper);
-            drop(self.cleanup);
+            if code.is_err() && !self.helper.ended() {
+                // A kept helper that outlived its keeper would still run the container:
+                // its record stays.
+                let _ = self.cleanup.take().map(linux_launch::Cleanup::disarm);
+            } else {
+                drop(self.cleanup);
+            }
             code
         }
         #[cfg(not(target_os = "linux"))]
@@ -543,14 +559,13 @@ impl Running {
 #[cfg(target_os = "linux")]
 mod linux_launch {
     use super::{Container, Source, command_line};
-    use crate::helper::{self, HelperChild};
+    use crate::helper::{self, HelperChild, Io};
     use crate::paths::Dirs;
     use crate::spec::{ContainerSpec, Rootfs};
     use crate::store::ops::StoreOp;
     use crate::store::{ImageRoot, Store};
     use crate::volume::{self, Access, Mount, MountRequest, MountSource};
     use crate::{Error, ErrorKind, Result, id, paths, state};
-    use std::process::Stdio;
 
     /// Removes the container directory when dropped. Files that container users created
     /// (owned by subordinate IDs when rootless) are removed through the store helper.
@@ -691,9 +706,9 @@ mod linux_launch {
     /// Create the container and start it: a failed start removes it again (`run`).
     pub(super) fn launch(
         c: Container,
-        stdin: Stdio,
-        stdout: Stdio,
-        stderr: Stdio,
+        stdin: Io,
+        stdout: Io,
+        stderr: Io,
         detach: bool,
     ) -> Result<(Cleanup, HelperChild)> {
         let (mut cleanup, auto_remove) = create(c)?;
@@ -702,7 +717,7 @@ mod linux_launch {
         } else {
             helper::ShimMode::Attached
         };
-        let helper = start(
+        let started = start(
             &cleanup.dirs,
             &cleanup.id,
             stdin,
@@ -710,7 +725,17 @@ mod linux_launch {
             stderr,
             mode,
             false,
-        )?;
+        );
+        let helper = match started {
+            Ok(helper) => helper,
+            Err(failed) => {
+                if failed.unanswered {
+                    // A starter may run the container: nothing of it is removed.
+                    let _ = cleanup.disarm();
+                }
+                return Err(failed.error);
+            }
+        };
         // Started: from here the shim owns the container. It removes it at the end when
         // auto-remove is set; otherwise the container stays.
         cleanup.armed = auto_remove && !detach;
@@ -908,18 +933,62 @@ mod linux_launch {
         Ok((cleanup, auto_remove))
     }
 
+    /// A start that failed.
+    pub(super) struct Failed {
+        pub(super) error: Error,
+        /// The keeper took the request and never answered: a starter may still run the
+        /// container, so its record must stay.
+        pub(super) unanswered: bool,
+    }
+
+    impl From<Error> for Failed {
+        fn from(error: Error) -> Failed {
+            Failed {
+                error,
+                unanswered: false,
+            }
+        }
+    }
+
     /// Start the shim of container `id` (created or exited) and wait until it runs.
     pub(super) fn start(
         dirs: &Dirs,
         id: &str,
-        stdin: Stdio,
-        stdout: Stdio,
-        stderr: Stdio,
+        stdin: Io,
+        stdout: Io,
+        stderr: Io,
         mode: helper::ShimMode,
         keep_on_failure: bool,
-    ) -> Result<HelperChild> {
+    ) -> std::result::Result<HelperChild, Failed> {
+        use crate::keeper::client::Asked;
         let spec = state::read_config(dirs, id)?;
         state::wait_for_previous_shim(dirs, id, std::time::Duration::from_secs(5))?;
+        // Through the keeper when there is one (design 6.15); a shim of our own otherwise.
+        let io = [stdin, stdout, stderr];
+        if crate::keeper::enabled(dirs) {
+            let scope = matches!(spec.cgroup, crate::cgroup::Placement::Scope { .. });
+            match crate::keeper::client::start(dirs, id, &io, mode, keep_on_failure, scope) {
+                Asked::Started(mut kept) => {
+                    kept.wait_started()?;
+                    return Ok(kept);
+                }
+                Asked::Unavailable => {}
+                // A shim of our own now could start the container a second time.
+                Asked::Unanswered => {
+                    return Err(Failed {
+                        error: Error::new(
+                            ErrorKind::Runtime,
+                            format!("cannot start container {}", crate::id::short_id(id)),
+                            "the keeper of this runtime directory did not answer in time",
+                            "look at it with `openpod ps -a`, then start or remove it; \
+                             `OPENPOD_KEEPER=0` starts containers without the keeper",
+                        ),
+                        unanswered: true,
+                    });
+                }
+            }
+        }
+        let [stdin, stdout, stderr] = io.map(Io::into_stdio);
         let scope = match &spec.cgroup {
             crate::cgroup::Placement::Scope { slice } => Some(helper::Scope {
                 systemd_run: crate::cgroup::systemd_run().ok_or_else(|| {
@@ -951,14 +1020,20 @@ mod linux_launch {
 
     /// Wait for the shim. Returns its exit code, or 128 + signal number.
     pub(super) fn wait(helper: &mut HelperChild) -> Result<i32> {
-        use std::os::unix::process::ExitStatusExt;
-        let status = helper
-            .child
-            .wait()
-            .map_err(|e| Error::io("cannot wait for the container", &e, "report this bug"))?;
-        Ok(status
-            .code()
-            .unwrap_or_else(|| 128 + status.signal().unwrap_or(0)))
+        let kept = helper.is_kept();
+        helper.wait().map_err(|e| {
+            if kept {
+                // The connection to the keeper ended: everything it watched ended too.
+                Error::new(
+                    ErrorKind::Runtime,
+                    "the container was stopped",
+                    format!("the keeper that watched it ended ({e})"),
+                    "run it again; `openpod ps -a` shows what is left of it",
+                )
+            } else {
+                Error::io("cannot wait for the container", &e, "report this bug")
+            }
+        })
     }
 }
 

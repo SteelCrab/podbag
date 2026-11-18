@@ -161,3 +161,23 @@ fn check_prints_the_apparmor_profile() {
         "{text}"
     );
 }
+
+#[test]
+fn check_shows_the_keeper() {
+    let on = Sandbox::with_env("OPENPOD_KEEPER", "1");
+    let text = stdout(&on.openpod().arg("check").output().unwrap());
+    let line = check_line(&text, "keeper");
+    assert!(line.starts_with("ok"), "{text}");
+    assert!(
+        line.contains("one process watches all detached containers"),
+        "{text}"
+    );
+    let off = Sandbox::with_env("OPENPOD_KEEPER", "0");
+    let text = stdout(&off.openpod().arg("check").output().unwrap());
+    let line = check_line(&text, "keeper");
+    assert!(line.starts_with("ok"), "{text}");
+    assert!(
+        line.contains("off: every container has a shim of its own"),
+        "{text}"
+    );
+}

@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # Measure one container tool in the openpod-dev VM (design 9):
 #   - start time of `run --rm --network none alpine true` (median and p90),
-#   - memory for N sleeping containers, without a network and on the default network,
+#   - memory for N sleeping containers, without a network and on the default network
+#     (the system's available memory, the memory held by category, the tool's processes),
 #   - processes the tool keeps with no containers,
 #   - disk use of two Python images that share their Python files but not their base.
 # Results go to <results-dir>/<tool>.env as key=value lines (dev/bench/report.sh reads them).
 #
 # usage: dev/bench/run.sh openpod|openpod-root|podman|docker|kiri [results-dir]
-# (OPENPOD_IMAGE_MOUNT=hardlink with openpod-root: root mode without composefs)
+# (OPENPOD_IMAGE_MOUNT=hardlink with openpod-root: root mode without composefs;
+#  OPENPOD_KEEPER=0 with openpod or openpod-root: a shim per container, no keeper)
 # Needs `dev/vm.sh bench-setup` (Docker, Podman, Kiri) and `dev/vm.sh static` (openpod).
 set -euo pipefail
 
@@ -27,19 +29,21 @@ case "$tool" in
     export OPENPOD_DATA_DIR=/var/tmp/openpod-bench/data
     export OPENPOD_RUNTIME_DIR="$XDG_RUNTIME_DIR/openpod-bench"
     cli=("$static")
-    # The shims, the session holder and pasta.
-    proc_pattern='^(openpod|pasta.*)$'
+    # The keeper (and a shim for each container that still needs one), the session
+    # holder and pasta.
+    proc_pattern='^(openpod.*|pasta.*)$'
     store=("$OPENPOD_DATA_DIR")
-    version="$("$static" --version)"
+    version="$("$static" --version)${OPENPOD_KEEPER:+ (keeper $OPENPOD_KEEPER)}"
     ;;
   openpod-root)
     # OPENPOD_IMAGE_MOUNT=hardlink measures root mode without composefs.
     cli=(sudo -n env OPENPOD_DATA_DIR=/var/tmp/openpod-bench-root/data
       OPENPOD_RUNTIME_DIR=/run/openpod-bench-root
-      ${OPENPOD_IMAGE_MOUNT:+OPENPOD_IMAGE_MOUNT=$OPENPOD_IMAGE_MOUNT} "$static")
-    proc_pattern='^(openpod)$'
+      ${OPENPOD_IMAGE_MOUNT:+OPENPOD_IMAGE_MOUNT=$OPENPOD_IMAGE_MOUNT}
+      ${OPENPOD_KEEPER:+OPENPOD_KEEPER=$OPENPOD_KEEPER} "$static")
+    proc_pattern='^(openpod.*)$'
     store=(/var/tmp/openpod-bench-root/data)
-    version="$("$static" --version) (root, ${OPENPOD_IMAGE_MOUNT:-composefs})"
+    version="$("$static" --version) (root, ${OPENPOD_IMAGE_MOUNT:-composefs}${OPENPOD_KEEPER:+, keeper $OPENPOD_KEEPER})"
     ;;
   podman)
     cli=(podman)
@@ -80,7 +84,46 @@ fi
 
 now_us() { local t="$EPOCHREALTIME"; echo "${t/./}"; }
 drop_caches() { sync; sudo -n sh -c 'echo 3 > /proc/sys/vm/drop_caches'; sleep 2; }
-used_kb() { awk '/^MemTotal/{t=$2} /^MemAvailable/{a=$2} END{print t-a}' /proc/meminfo; }
+# What processes and the kernel hold, without the page cache: anonymous and shared memory,
+# slab, kernel stacks, page tables, per-CPU and vmalloc memory. Steadier than available
+# memory. (Pages the kernel takes straight from the page allocator are in no category.)
+# The VM's own helper (lima's guest agent, a Go program that follows network changes) grows
+# and shrinks by 10 MiB and more while containers come and go; a Linux host has no such
+# process, so its anonymous memory is left out of both system-wide figures, like that of
+# the firmware updater a timer starts now and then (BENCH_BYSTANDERS: a pattern of names).
+bystanders="${BENCH_BYSTANDERS:-^(lima-guestagent|fwupd|fwupdmgr)$}"
+bystander_kb() {
+  local sum=0 pid kb
+  for pid in $(ps -eo pid=,comm= | awk -v re="$bystanders" '$2 ~ re {print $1}'); do
+    kb="$(sudo -n awk '/^Pss_Anon:/{print $2}' "/proc/$pid/smaps_rollup" 2>/dev/null || echo 0)"
+    sum=$((sum + ${kb:-0}))
+  done
+  echo "$sum"
+}
+held_kb() {
+  local all
+  all="$(awk '/^(AnonPages|Shmem|Slab|KernelStack|PageTables|Percpu|VmallocUsed):/{s+=$2} END{print s}' /proc/meminfo)"
+  echo $((all - $(bystander_kb)))
+}
+# The system's used memory: MemTotal - MemAvailable, less the bystanders.
+used_kb() {
+  local all
+  all="$(awk '/^MemTotal/{t=$2} /^MemAvailable/{a=$2} END{print t-a}' /proc/meminfo)"
+  echo $((all - $(bystander_kb)))
+}
+# The memory of removed containers (namespaces, cgroups) is freed a little later: wait
+# until what the system holds stops falling, so that one round's leftovers do not count
+# in the next one.
+settle() {
+  local prev cur
+  prev="$(held_kb)"
+  for _ in $(seq 15); do
+    sleep 2
+    cur="$(held_kb)"
+    [ $((prev - cur)) -gt 256 ] || return 0
+    prev="$cur"
+  done
+}
 tool_pids() { ps -eo pid=,comm= | awk -v re="$proc_pattern" '$2 ~ re {print $1}'; }
 tool_procs() { tool_pids | wc -l; }
 tool_pss_kb() {
@@ -111,6 +154,8 @@ parts="${BENCH_PARTS:-start memory disk}"
 want() { [[ " $parts " == *" $1 "* ]]; }
 results="$out/$tool.env"
 if want start && want memory && want disk; then
+  # What a tool keeps with no containers: openpod's keeper leaves 10 s after the last one.
+  sleep "${BENCH_IDLE_WAIT:-12}"
   {
     echo "tool=$tool"
     echo "version=$version"
@@ -122,7 +167,7 @@ if want start && want memory && want disk; then
 else
   [ -f "$results" ] || { echo "BENCH_PARTS=$parts needs an earlier $results" >&2; exit 2; }
   if want start; then sed -i '/^start_/d' "$results"; fi
-  if want memory; then sed -i -E '/^(mem|pss|procs)_/d' "$results"; fi
+  if want memory; then sed -i -E '/^(mem|pss|procs|held)_/d' "$results"; fi
   if want disk; then sed -i '/^disk_/d' "$results"; fi
 fi
 
@@ -138,6 +183,21 @@ times="$("${timed_prefix[@]}" bash -c '
   done' _ "$runs" "$alpine" "${cli[@]}")"
 echo "start_median_ms=$(pct 50 <<<"$times")" >>"$results"
 echo "start_p90_ms=$(pct 90 <<<"$times")" >>"$results"
+case "$tool" in
+  openpod*)
+    # A start that finds no keeper (the first after 10 s without containers): with no
+    # linger the keeper leaves after each container, so every run starts its own.
+    cold="$("${timed_prefix[@]}" bash -c '
+      for i in $(seq 33); do
+        t0="${EPOCHREALTIME/./}"
+        OPENPOD_KEEPER_LINGER_MS=0 "${@:2}" run --rm --network none "$1" true >/dev/null
+        t1="${EPOCHREALTIME/./}"
+        [ "$i" -le 3 ] || echo $((t1 - t0))
+        sleep 0.3
+      done' _ "$alpine" "${cli[@]}")"
+    echo "start_cold_median_ms=$(pct 50 <<<"$cold")" >>"$results"
+    ;;
+esac
 fi
 
 # 2. Memory for $count sleeping containers. The system-wide difference is noisy (other
@@ -147,22 +207,29 @@ for net in none default; do
   net_args=()
   [ "$net" = default ] || net_args=(--network none)
   deltas=()
+  helds=()
   for round in 1 2 3; do
     echo "memory: $count containers, network $net, round $round" >&2
     drop_caches
+    settle
     before="$(used_kb)"
+    held_before="$(held_kb)"
     for i in $(seq "$count"); do
       "${timed_prefix[@]}" "${cli[@]}" run -d "${net_args[@]}" "$alpine" sleep 3600 >/dev/null
     done
     sleep 5
     drop_caches
     deltas+=($(($(used_kb) - before)))
+    helds+=($(($(held_kb) - held_before)))
     pss="$(tool_pss_kb)"
     nprocs="$(tool_procs)"
     remove_all
   done
   {
     echo "mem_${net}_kb=$(printf '%s\n' "${deltas[@]}" | sort -n | sed -n 2p)"
+    echo "mem_${net}_all_kb=\"${deltas[*]}\""
+    echo "held_${net}_kb=$(printf '%s\n' "${helds[@]}" | sort -n | sed -n 2p)"
+    echo "held_${net}_all_kb=\"${helds[*]}\""
     echo "pss_${net}_kb=$pss"
     echo "procs_${net}=$nprocs"
   } >>"$results"

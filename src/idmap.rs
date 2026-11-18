@@ -80,8 +80,21 @@ pub fn apply_id_maps(pid: u32, uid: u32, gid: u32) -> Result<()> {
     let uid_range = read_range(SUBUID, &user, uid)?;
     let gid_range = read_range(SUBGID, &user, uid)?;
 
-    run_tool(&newuidmap, &newidmap_args(pid, uid, uid_range))?;
-    run_tool(&newgidmap, &newidmap_args(pid, gid, gid_range))
+    // The two maps do not depend on each other: both tools run at the same time (each
+    // is a setuid program that takes about a millisecond to start).
+    let uids = start_tool(&newuidmap, &newidmap_args(pid, uid, uid_range));
+    let gids = start_tool(&newgidmap, &newidmap_args(pid, gid, gid_range));
+    // Both are collected, also when the first failed: no child is left behind.
+    let uids = uids.and_then(|child| end_tool(&newuidmap, child));
+    let gids = gids.and_then(|child| end_tool(&newgidmap, child));
+    uids.and(gids)
+}
+
+/// Check that newuidmap and newgidmap can be found, before work that would be wasted
+/// without them.
+pub fn require_tools() -> Result<()> {
+    find_in_path("newuidmap")?;
+    find_in_path("newgidmap").map(|_| ())
 }
 
 fn find_in_path(tool: &str) -> Result<PathBuf> {
@@ -111,18 +124,30 @@ fn read_range(file: &str, user: &str, uid: u32) -> Result<SubIdRange> {
     })
 }
 
-fn run_tool(tool: &PathBuf, args: &[String]) -> Result<()> {
-    let out = std::process::Command::new(tool)
+fn start_tool(tool: &PathBuf, args: &[String]) -> Result<std::process::Child> {
+    std::process::Command::new(tool)
         .args(args)
         .stdin(std::process::Stdio::null())
-        .output()
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .map_err(|e| {
             Error::io(
                 WHAT,
                 &e,
                 format!("check that {} can be run", tool.display()),
             )
-        })?;
+        })
+}
+
+fn end_tool(tool: &PathBuf, child: std::process::Child) -> Result<()> {
+    let out = child.wait_with_output().map_err(|e| {
+        Error::io(
+            WHAT,
+            &e,
+            format!("check that {} can be run", tool.display()),
+        )
+    })?;
     if out.status.success() {
         return Ok(());
     }

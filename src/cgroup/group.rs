@@ -262,9 +262,7 @@ fn scoped(slice: &str, limits: &Limits, budget: Option<u64>) -> Result<Group> {
         }
     };
     if let Some(slice_dir) = own.parent() {
-        if let Some((high, max)) = budget_change(slice_dir, budget) {
-            set_slice_budget(slice, &high, &max);
-        }
+        slice_budget(slice, slice_dir, budget);
     }
     configure(&path, &enabled, limits)?;
     let dir = open_dir(&path).map_err(fail)?;
@@ -273,6 +271,14 @@ fn scoped(slice: &str, limits: &Limits, budget: Option<u64>) -> Result<Group> {
         dir,
         owned: false,
     })
+}
+
+/// Rootless: put the budget on `slice` (its cgroup is `slice_dir`), unless it is there
+/// already. Failing is only a warning.
+pub fn slice_budget(slice: &str, slice_dir: &Path, budget: Option<u64>) {
+    if let Some((high, max)) = budget_change(slice_dir, budget) {
+        set_slice_budget(slice, &high, &max);
+    }
 }
 
 /// Rootless: the slice belongs to the user's service manager; ask it to set the values.
@@ -308,7 +314,7 @@ fn set_slice_budget(slice: &str, high: &str, max: &str) {
 }
 
 /// This process's cgroup directory, from `/proc/self/cgroup` (`0::<path>`).
-fn own_cgroup() -> std::io::Result<PathBuf> {
+pub fn own_cgroup() -> std::io::Result<PathBuf> {
     let text = std::fs::read_to_string("/proc/self/cgroup")?;
     let rel = text
         .lines()
@@ -319,6 +325,10 @@ fn own_cgroup() -> std::io::Result<PathBuf> {
 
 /// Turn on the controllers openpod uses for the children of `dir`, where available.
 /// Returns the ones that are on.
+pub fn enable_controllers(dir: &Path) -> std::io::Result<Vec<String>> {
+    enable(dir)
+}
+
 pub(super) fn enable(dir: &Path) -> std::io::Result<Vec<String>> {
     let available = std::fs::read_to_string(dir.join("cgroup.controllers"))?;
     let on = std::fs::read_to_string(dir.join("cgroup.subtree_control"))?;

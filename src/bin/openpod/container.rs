@@ -137,14 +137,10 @@ pub fn start(targets: &[String], attach: bool, interactive: bool) -> i32 {
     )
     .map(|s| s.tty)
     .unwrap_or(false);
-    use std::process::Stdio;
+    use openpod::helper::Io;
     let result = crate::run::foreground(tty && interactive, |_| {
-        let stdin = if interactive {
-            Stdio::inherit()
-        } else {
-            Stdio::null()
-        };
-        handle.start_attached(stdin, Stdio::inherit(), Stdio::inherit())
+        let stdin = if interactive { Io::Inherit } else { Io::Null };
+        handle.start_attached(stdin, Io::Inherit, Io::Inherit)
     });
     match result {
         Ok(code) => code,
@@ -206,7 +202,7 @@ pub fn exec(a: ExecArgs) -> i32 {
             .then(crate::run::raw_terminal)
             .flatten();
         let running = h.exec_inherit(command, &options)?;
-        openpod::signals::forward_to(running.helper_pid(), &forwarded);
+        running.forward_signals(&forwarded);
         running.wait()
     });
     match result {

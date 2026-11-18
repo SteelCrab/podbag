@@ -52,7 +52,7 @@ pub fn foreground(
     openpod::signals::block(&forwarded);
     match start(()) {
         Ok(r) => {
-            openpod::signals::forward_to(r.helper_pid(), &forwarded);
+            r.forward_signals(&forwarded);
             r.wait()
         }
         Err(e) => {

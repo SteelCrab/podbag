@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Write docs/benchmarks.md: the Linux table from dev/bench/run.sh and scale.sh results (run
+# Write docs/benchmarks.md: the Linux tables from dev/bench/run.sh and scale.sh results (run
 # in the VM), the macOS table from dev/bench/mac.py results (bench-results/mac in the
 # repository, measured on the Mac), then the reading of them in dev/bench/notes.md.
 #
@@ -34,8 +34,31 @@ row() {
   echo "$line"
 }
 start() { echo "$(get "$1" start_median_ms) / $(get "$1" start_p90_ms)"; }
+# The first start when nothing of the tool runs: openpod starts its keeper then. Podman has
+# nothing to start first; Docker's and Kiri's daemons stay, so they have no such start.
+cold() {
+  local v
+  v="$(get "$1" start_cold_median_ms)"
+  if [ -n "$v" ]; then
+    echo "$v"
+  elif [ "$1" = podman ]; then
+    echo "$(get "$1" start_median_ms) (no daemon)"
+  else
+    echo "— (its daemon stays)"
+  fi
+}
+# The three rounds of one result, in MiB.
+rounds() { get "$1" "$2" | tr -d '"' | awk '{for (i = 1; i <= NF; i++) printf "%s%.1f", (i > 1 ? ", " : ""), $i/1024}'; }
 mem_none() { sys_mb "$(get "$1" mem_none_kb)"; }
 mem_default() { sys_mb "$(get "$1" mem_default_kb)"; }
+held_none() { mb "$(get "$1" held_none_kb)"; }
+held_default() { mb "$(get "$1" held_default_kb)"; }
+# The largest difference between the three rounds of one tool, over the given tools (MiB).
+held_spread() {
+  for t in "$@"; do
+    for net in none default; do get "$t" "held_${net}_all_kb" | tr -d '"'; done
+  done | awk '{lo=$1; hi=$1; for(i=2;i<=NF;i++){if($i<lo)lo=$i; if($i>hi)hi=$i} if(hi-lo>m)m=hi-lo} END{printf "%.1f", m/1024}'
+}
 pss_none() { echo "$(mb "$(get "$1" pss_none_kb)") ($(per "$(get "$1" pss_none_kb)" "$(get "$1" idle_pss_kb)" "$(get "$1" count)") per container)"; }
 pss_default() { echo "$(mb "$(get "$1" pss_default_kb)") ($(per "$(get "$1" pss_default_kb)" "$(get "$1" idle_pss_kb)" "$(get "$1" count)") per container)"; }
 procs() { echo "$(get "$1" procs_none) / $(get "$1" procs_default)"; }
@@ -75,21 +98,40 @@ mac_tools=(docker-desktop orbstack kiri podman colima openpod)
   echo "$rule"
   row "Version" version
   row "Start: \`run --rm --network none alpine true\`, median / p90 (ms, $runs runs)" start
-  row "$count sleeping containers, no network: change in the system's used memory" mem_none
+  row "The same start when nothing of the tool runs yet, median (ms)" cold
+  row "$count sleeping containers, no network: memory the system holds, by category" held_none
   row "$count sleeping containers, no network: the tool's processes (PSS)" pss_none
-  row "$count sleeping containers, default network: change in the system's used memory" mem_default
+  row "$count sleeping containers, no network: change in MemTotal − MemAvailable (noisy, see below)" mem_none
+  row "$count sleeping containers, default network: memory the system holds, by category" held_default
   row "$count sleeping containers, default network: the tool's processes (PSS)" pss_default
+  row "$count sleeping containers, default network: change in MemTotal − MemAvailable (noisy, see below)" mem_default
   row "Tool processes with $count containers: no network / default network" procs
   row "Tool processes with no containers: count, PSS" idle
   row "Disk: \`python:3.12-slim-bookworm\`" disk_first
   row "Disk: then \`python:3.12-slim-trixie\` adds" disk_second
   row "Disk: both images" disk_both
   echo
-  echo "- \"Change in the system's used memory\" is MemTotal − MemAvailable after minus before (caches"
-  echo "  dropped), the median of three rounds. It includes the containers' own processes and"
-  echo "  the kernel's memory for namespaces and cgroups; it moves by 10–20 MiB between runs. It does not"
-  echo "  include daemons that were already running (Docker's)."
-  echo "- \"The tool's processes\": openpod's shims, session holder and pasta; Podman's"
+  echo "- \"Memory the system holds, by category\" is the change in AnonPages + Shmem + Slab +"
+  echo "  KernelStack + PageTables + Percpu + VmallocUsed of \`/proc/meminfo\`: what processes and"
+  echo "  the kernel hold, without the page cache. Caches are dropped before each reading; the"
+  echo "  value is the median of three rounds; the rounds of one tool differ by at most"
+  echo "  $(held_spread openpod openpod-root kiri) MiB for openpod and Kiri ($(held_spread podman docker) MiB for Podman and Docker). It includes"
+  echo "  the containers' own processes (the same $count \`sleep\` for every tool) and the kernel's"
+  echo "  memory for their namespaces and cgroups, not daemons that already ran (Docker's), and"
+  echo "  not pages the kernel takes straight from its page allocator (they are in no category)."
+  echo "- \"Change in MemTotal − MemAvailable\" is the kernel's estimate of memory that is no longer"
+  echo "  available, read at the same moments. It cannot tell the small tools apart. The three"
+  echo "  rounds without a network gave, in MiB: openpod rootless $(rounds openpod mem_none_all_kb); openpod as root"
+  echo "  $(rounds openpod-root mem_none_all_kb); Kiri $(rounds kiri mem_none_all_kb). The sums by category of the same rounds:"
+  echo "  $(rounds openpod held_none_all_kb); $(rounds openpod-root held_none_all_kb); $(rounds kiri held_none_all_kb). openpod's figures in this row are"
+  echo "  higher than Kiri's; no counter of the kernel says where that memory would be, and in"
+  echo "  a separate reading three identical rounds of Kiri moved free memory by −9.5, −17.3 and"
+  echo "  +6.4 MiB. The row stays for the large numbers."
+  echo "- Both system-wide rows leave out the anonymous memory of the VM's own helper (lima's guest"
+  echo "  agent), which grew by 23 MiB during one run of 150 containers and shrank by 46 MiB during"
+  echo "  the next, and of the firmware updater that a timer starts; a Linux host has no guest agent."
+  echo "- \"The tool's processes\": openpod's keeper (and a helper for each container that is"
+  echo "  attached or publishes ports), session holder and pasta; Podman's"
   echo "  conmon, pasta and helpers; Docker's dockerd, containerd and shims; Kiri's daemon and"
   echo "  the one init process all its containers share. PSS divides shared"
   echo "  pages among the processes that share them. \"Per container\" is (total − the tool's"
@@ -163,22 +205,50 @@ mac_tools=(docker-desktop orbstack kiri podman colima openpod)
     echo "  so Docker Desktop's existing images and containers stayed. For that reason disk use is"
     echo "  compared in the Linux table only."
   fi
-  if [ -f "$in/scale.env" ]; then
-    s() { sed -n "s/^$1=//p" "$in/scale.env"; }
+  # The many-containers run: a column for each tool that was measured.
+  scale_tools=()
+  scale_titles=()
+  for i in "${!all_tools[@]}"; do
+    if [ -f "$in/scale-${all_tools[$i]}.env" ]; then
+      scale_tools+=("${all_tools[$i]}")
+      scale_titles+=("${all_titles[$i]}")
+    fi
+  done
+  if [ "${#scale_tools[@]}" -gt 0 ]; then
+    sg() { sed -n "s/^$2=//p" "$in/scale-$1.env" | head -1; }
+    srow() {
+      local label="$1"; shift
+      local line="| $label |"
+      for t in "${scale_tools[@]}"; do line="$line $("$@" "$t") |"; done
+      echo "$line"
+    }
+    s_ms() { echo "$(sg "$2" "$1") ms"; }
+    s_mem() { echo "$(mb "$(sg "$2" "held_$1_kb")") / $(mb "$(sg "$2" "pss_$1_kb")")"; }
+    s_procs() { sg "$1" procs_total; }
+    total="$(sg "${scale_tools[0]}" total)"
     echo
-    echo "## $(s total) containers on one network (openpod, rootless)"
+    echo "## $total containers on one network"
     echo
-    echo "\`dev/bench/scale.sh\`: \`run -d --network bench --name cN alpine sleep\`, one after another."
+    echo "\`dev/bench/scale.sh\`: \`run -d --network bench --name cN alpine sleep\`, one after another,"
+    echo "on a network made with \`network create --subnet 10.90.0.0/22 bench\`; same session as the"
+    echo "table above."
     echo
-    echo "| | |"
-    echo "|---|---|"
-    echo "| Start, containers 1–10 (median) | $(s start_first10_ms) ms |"
-    echo "| Start, containers 41–50 (median) | $(s start_at50_ms) ms |"
-    echo "| Start, the last 10 (median) | $(s start_last10_ms) ms |"
-    echo "| Memory at 50: change in the system's used memory / openpod's processes (PSS) | $(sys_mb "$(s mem_50_kb)") / $(mb "$(s pss_50_kb)") |"
-    echo "| Memory at $(s total): change in the system's used memory / openpod's processes (PSS) | $(sys_mb "$(s mem_total_kb)") / $(mb "$(s pss_total_kb)") |"
-    echo "| \`ps -a\` with $(s total) containers | $(s ps_ms) ms |"
-    echo "| \`rm -f\` of all $(s total) | $(s rm_all_ms) ms |"
+    header="| |"
+    rule="|---|"
+    for t in "${scale_titles[@]}"; do
+      header="$header $t |"
+      rule="$rule---|"
+    done
+    echo "$header"
+    echo "$rule"
+    srow "Start, containers 1–10 (median)" s_ms start_first10_ms
+    srow "Start, containers 41–50 (median)" s_ms start_at50_ms
+    srow "Start, the last 10 (median)" s_ms start_last10_ms
+    srow "Memory at 50: the system holds, by category / the tool's processes (PSS)" s_mem 50
+    srow "Memory at $total: the system holds, by category / the tool's processes (PSS)" s_mem total
+    srow "Tool processes at $total" s_procs
+    srow "\`ps -a\` with $total containers" s_ms ps_ms
+    srow "\`rm -f\` of all $total" s_ms rm_all_ms
   fi
   if [ -f "$repo/dev/bench/notes.md" ]; then
     echo

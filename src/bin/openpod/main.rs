@@ -60,6 +60,13 @@ fn dispatch(cmd: Cmd) -> i32 {
         Cmd::Kill { signal, containers } => container::kill(&containers, &signal),
         Cmd::Exec(a) => container::exec(a),
         Cmd::ExecHelper { id, request } => exec_helper(&id, &request),
+        #[cfg(target_os = "linux")]
+        Cmd::Keeper { runtime } => openpod::keeper::keeper_main(&runtime),
+        #[cfg(not(target_os = "linux"))]
+        Cmd::Keeper { .. } => {
+            eprintln!("openpod: the keeper runs on Linux only");
+            1
+        }
         Cmd::Shim {
             id,
             mode,

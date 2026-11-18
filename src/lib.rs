@@ -31,6 +31,9 @@ pub mod id;
 pub mod idmap;
 #[doc(hidden)]
 pub mod image;
+#[cfg(unix)]
+#[doc(hidden)]
+pub mod keeper;
 #[doc(hidden)]
 pub mod libc_check;
 #[cfg(target_os = "linux")]

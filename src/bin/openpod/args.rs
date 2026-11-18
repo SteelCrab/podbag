@@ -113,6 +113,9 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: SystemCmd,
     },
+    /// The keeper of a runtime directory (design 6.15)
+    #[command(name = "__keeper", hide = true)]
+    Keeper { runtime: String },
     #[command(name = "__shim", hide = true)]
     Shim {
         id: String,

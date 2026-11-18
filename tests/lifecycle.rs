@@ -893,3 +893,26 @@ fn start_waits_for_the_last_shim_to_finish() {
     assert!(begun.elapsed() < std::time::Duration::from_secs(3));
     run(&["rm", "-f", "ss"]);
 }
+
+#[test]
+fn rm_f_of_a_container_that_removes_itself_succeeds() {
+    // `--rm` removes the container when it ends; `rm -f` ends it and removes it too. Two
+    // removers must not make `rm -f` fail.
+    let sb = Sandbox::new();
+    for round in 0..20 {
+        let out = sb
+            .openpod()
+            .args(["run", "-d", "--rm", "--rootfs", &rootfs(), "sleep", "300"])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+        let id = stdout(&out);
+        let out = sb.openpod().args(["rm", "-f", &id]).output().unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "round {round}: {}",
+            stderr(&out)
+        );
+    }
+}

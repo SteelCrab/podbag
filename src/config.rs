@@ -17,7 +17,15 @@ pub struct Config {
     pub default_subnet: String,
     /// How root mode mounts images (design 6.3.3).
     pub image_mount: ImageMount,
+    /// One keeper process watches the detached containers (design 6.15); without it each
+    /// container has a shim process of its own.
+    pub keeper: bool,
+    /// How long the keeper stays after its last container, in milliseconds.
+    pub keeper_linger_ms: u64,
 }
+
+/// Whether the keeper is used when nothing says otherwise.
+pub const KEEPER_DEFAULT: bool = true;
 
 /// `image_mount`: `auto` uses composefs when openpod runs as root and the kernel passes
 /// the probe, hard-link trees otherwise; `hardlink` always uses hard-link trees.
@@ -47,12 +55,23 @@ impl Default for Config {
             memory_budget: Budget::default(),
             default_subnet: "10.77.0.0/16".to_string(),
             image_mount: ImageMount::Auto,
+            keeper: KEEPER_DEFAULT,
+            keeper_linger_ms: 10_000,
         }
     }
 }
 
+fn parse_switch(value: &str) -> std::result::Result<bool, String> {
+    match value {
+        "true" | "1" => Ok(true),
+        "false" | "0" => Ok(false),
+        other => Err(format!("\"{other}\" is neither true nor false")),
+    }
+}
+
 /// Read `<config>/config.toml` (missing file = defaults). `OPENPOD_STORE_LIMIT`,
-/// `OPENPOD_MEMORY_BUDGET`, `OPENPOD_DEFAULT_SUBNET` and `OPENPOD_IMAGE_MOUNT` override it.
+/// `OPENPOD_MEMORY_BUDGET`, `OPENPOD_DEFAULT_SUBNET`, `OPENPOD_IMAGE_MOUNT`, `OPENPOD_KEEPER`
+/// and `OPENPOD_KEEPER_LINGER_MS` override it.
 pub fn load(dirs: &Dirs) -> Result<Config> {
     let path = dirs.config.join("config.toml");
     let mut config = match std::fs::read_to_string(&path) {
@@ -95,6 +114,25 @@ fn apply_overrides(config: &mut Config, var: impl Fn(&str) -> Option<String>) ->
             )
         })?;
     }
+    let invalid = |name: &str, why: String| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            format!("invalid {name}"),
+            why,
+            "set it to 1 or 0, or unset it",
+        )
+    };
+    if let Some(v) = var("OPENPOD_KEEPER") {
+        config.keeper = parse_switch(&v).map_err(|why| invalid("OPENPOD_KEEPER", why))?;
+    }
+    if let Some(v) = var("OPENPOD_KEEPER_LINGER_MS") {
+        config.keeper_linger_ms = v.parse().map_err(|_| {
+            invalid(
+                "OPENPOD_KEEPER_LINGER_MS",
+                format!("{v} is not a number of milliseconds"),
+            )
+        })?;
+    }
     Ok(())
 }
 
@@ -128,6 +166,12 @@ pub fn parse(text: &str) -> Result<Config> {
                 config.default_subnet = value.to_string();
             }
             "image_mount" => config.image_mount = ImageMount::parse(value).map_err(bad)?,
+            "keeper" => config.keeper = parse_switch(value).map_err(bad)?,
+            "keeper_linger" => {
+                config.keeper_linger_ms = value
+                    .parse()
+                    .map_err(|_| bad(format!("{value} is not a number of milliseconds")))?
+            }
             other => return Err(bad(format!("unknown setting {other}"))),
         }
     }
@@ -225,6 +269,29 @@ mod tests {
         let c = parse("default_subnet = \"172.31.0.0/16\"").unwrap();
         assert_eq!(c.default_subnet, "172.31.0.0/16");
         assert!(parse("default_subnet = \"10.0.0.1/16\"").is_err());
+    }
+
+    #[test]
+    fn keeper_settings() {
+        let c = parse("").unwrap();
+        assert_eq!((c.keeper, c.keeper_linger_ms), (KEEPER_DEFAULT, 10_000));
+        let c = parse("keeper = false\nkeeper_linger = 2500").unwrap();
+        assert_eq!((c.keeper, c.keeper_linger_ms), (false, 2500));
+        assert!(parse("keeper = true").unwrap().keeper);
+        assert!(parse("keeper = \"maybe\"").is_err());
+        let mut c = Config::default();
+        let env = |k: &str| match k {
+            "OPENPOD_KEEPER" => Some("1".to_string()),
+            "OPENPOD_KEEPER_LINGER_MS" => Some("300".to_string()),
+            _ => None,
+        };
+        apply_overrides(&mut c, env).unwrap();
+        assert_eq!((c.keeper, c.keeper_linger_ms), (true, 300));
+        let off = |k: &str| (k == "OPENPOD_KEEPER").then(|| "0".to_string());
+        apply_overrides(&mut c, off).unwrap();
+        assert!(!c.keeper);
+        let bad = |k: &str| (k == "OPENPOD_KEEPER").then(|| "perhaps".to_string());
+        assert!(apply_overrides(&mut c, bad).is_err());
     }
 
     #[test]
