@@ -51,6 +51,17 @@ impl Socket {
     /// kernel acknowledges message `last_seq` or ends a dump. An error answer is returned
     /// as that errno. Returns the payloads of the other answers.
     fn exchange(&mut self, bytes: &[u8], last_seq: u32) -> io::Result<Vec<Vec<u8>>> {
+        self.exchange_until(bytes, last_seq, false)
+    }
+
+    /// As `exchange`; with `whole_dump`, only the end of a dump ends the reading (a
+    /// listing must be read to its end, or its last message meets the next request).
+    fn exchange_until(
+        &mut self,
+        bytes: &[u8],
+        last_seq: u32,
+        whole_dump: bool,
+    ) -> io::Result<Vec<Vec<u8>>> {
         // SAFETY: sending from a valid buffer.
         let sent =
             unsafe { libc::send(self.fd.as_raw_fd(), bytes.as_ptr().cast(), bytes.len(), 0) };
@@ -95,7 +106,7 @@ impl Socket {
                 }
                 at += (len + 3) & !3;
             }
-            if !answers.is_empty() && last_seq == 0 {
+            if !answers.is_empty() && last_seq == 0 && !whole_dump {
                 return Ok(answers);
             }
         }
@@ -110,6 +121,12 @@ impl Socket {
     /// Send pre-built bytes (a batch) whose last message has sequence `last_seq`.
     pub fn request_raw(&mut self, bytes: &[u8], last_seq: u32) -> io::Result<Vec<Vec<u8>>> {
         self.exchange(bytes, last_seq)
+    }
+
+    /// Send one listing request (`NLM_F_DUMP`) and return every entry of the answer.
+    pub fn dump(&mut self, msg: Message) -> io::Result<Vec<Vec<u8>>> {
+        let seq = self.next_seq();
+        self.exchange_until(&msg.finish(seq), 0, true)
     }
 
     pub fn next_seq(&mut self) -> u32 {

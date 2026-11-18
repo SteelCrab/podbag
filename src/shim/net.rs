@@ -78,7 +78,7 @@ pub(super) fn bridge_address(
     network: &str,
 ) -> Result<(crate::network::Network, std::net::Ipv4Addr)> {
     let net = crate::network::get_in(dirs, network)?;
-    let ip = crate::network::allocate(dirs, network, &spec.id, &spec.name)?;
+    let ip = crate::network::allocate(dirs, network, &spec.id, &spec.name, &spec.hostname)?;
     Ok((net, ip))
 }
 

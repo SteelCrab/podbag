@@ -11,6 +11,45 @@ const NFT_MSG_NEWTABLE: u16 = 0;
 const NFT_MSG_NEWCHAIN: u16 = 3;
 const NFT_MSG_DELCHAIN: u16 = 5;
 const NFT_MSG_NEWRULE: u16 = 6;
+const NFT_MSG_GETRULE: u16 = 7;
+/// `NLM_F_ROOT | NLM_F_MATCH`: a listing.
+const NLM_F_DUMP: u16 = 0x300;
+/// NFTA_RULE_USERDATA.
+const RULE_USERDATA: u16 = 7;
+
+/// The mark on every rule that openpod writes (a rule comment: `nft list` shows it): this
+/// text and the network's subnet. With the bridge, which is in the chains' names, that is
+/// all the rules are made from. A start leaves a network's rules alone when all of them
+/// are there with this mark, so **change the number whenever the rules in
+/// `masquerade_batch` change**: hosts that have the rules of an earlier version then get
+/// the new ones at the next start.
+const RULES_VERSION: &str = "openpod rules 1";
+/// How many rules `masquerade_batch` puts into the NAT chain and into the forward chain.
+const NAT_RULES: usize = 1;
+const FORWARD_RULES: usize = 2;
+
+/// The network address of `subnet` (its host bits cleared) and its mask.
+fn network_of(subnet: [u8; 4], prefix: u8) -> ([u8; 4], [u8; 4]) {
+    let mask = (u32::MAX
+        .checked_shl(32 - u32::from(prefix.min(32)))
+        .unwrap_or(0))
+    .to_be_bytes();
+    let mut network = subnet;
+    for (byte, m) in network.iter_mut().zip(mask) {
+        *byte &= m;
+    }
+    (network, mask)
+}
+
+/// The mark as rule user data: one comment entry (type 0, length, text, NUL).
+fn rules_mark(subnet: [u8; 4], prefix: u8) -> Vec<u8> {
+    let ([a, b, c, d], _) = network_of(subnet, prefix);
+    let text = format!("{RULES_VERSION} {a}.{b}.{c}.{d}/{}", prefix.min(32));
+    let mut mark = vec![0, (text.len() + 1) as u8];
+    mark.extend_from_slice(text.as_bytes());
+    mark.push(0);
+    mark
+}
 const NFT_MSG_DELRULE: u16 = 8;
 const NLM_F_APPEND: u16 = 0x800;
 const NFPROTO_IPV4: u8 = 2;
@@ -101,11 +140,12 @@ fn flush(chain: &str) -> Message {
     m
 }
 
-fn rule(chain: &str, exprs: impl FnOnce(&mut Message)) -> Message {
+fn rule(chain: &str, mark: &[u8], exprs: impl FnOnce(&mut Message)) -> Message {
     let mut m = message(NFT_MSG_NEWRULE, NLM_F_CREATE | NLM_F_APPEND);
     m.attr_str(1, TABLE);
     m.attr_str(2, chain);
     m.nested(4 | NLA_F_NESTED, exprs);
+    m.attr(RULE_USERDATA, mark);
     m
 }
 
@@ -186,12 +226,9 @@ pub fn masquerade_batch(
     let mut table = message(NFT_MSG_NEWTABLE, NLM_F_CREATE);
     table.attr_str(1, TABLE);
 
-    let mask = (u32::MAX
-        .checked_shl(32 - u32::from(prefix.min(32)))
-        .unwrap_or(0))
-    .to_be_bytes();
-    let network_addr: Vec<u8> = subnet.iter().zip(mask).map(|(a, m)| a & m).collect();
-    let masquerade = rule(&chain, |m| {
+    let (network_addr, mask) = network_of(subnet, prefix);
+    let mark = rules_mark(subnet, prefix);
+    let masquerade = rule(&chain, &mark, |m| {
         expr(
             m,
             "payload",
@@ -229,7 +266,7 @@ pub fn masquerade_batch(
     // Isolation: no new connection reaches the bridge from anywhere but itself (other
     // networks, other hosts routing through this one); answers to its own may.
     let forward = forward_chain_name(bridge);
-    let inbound = rule(&forward, |m| {
+    let inbound = rule(&forward, &mark, |m| {
         match_ifname(m, NFT_META_OIFNAME, NFT_CMP_EQ, bridge);
         match_ifname(m, NFT_META_IIFNAME, NFT_CMP_NEQ, bridge);
         expr(
@@ -262,7 +299,7 @@ pub fn masquerade_batch(
         );
         drop_verdict(m);
     });
-    let host_loopback = rule(&forward, |m| {
+    let host_loopback = rule(&forward, &mark, |m| {
         match_ifname(m, NFT_META_IIFNAME, NFT_CMP_EQ, bridge);
         expr(
             m,
@@ -300,6 +337,57 @@ pub fn masquerade_batch(
     )
 }
 
+/// Listings that the kernel answers without a transaction: the rules of each of the
+/// network's chains, with the number of rules that this version puts there. Send each
+/// with `Socket::dump` and give the answer to [`rules_in_place`].
+pub fn rule_queries(bridge: &str) -> [(Message, usize); 2] {
+    [
+        (chain_name(bridge), NAT_RULES),
+        (forward_chain_name(bridge), FORWARD_RULES),
+    ]
+    .map(|(chain, expected)| {
+        let mut query = Message::new(
+            (NFNL_SUBSYS_NFTABLES << 8) | NFT_MSG_GETRULE,
+            NLM_F_REQUEST | NLM_F_DUMP,
+            &nfgenmsg(NFPROTO_IPV4, 0),
+        );
+        query.attr_str(1, TABLE);
+        query.attr_str(2, &chain);
+        (query, expected)
+    })
+}
+
+/// Whether a chain's listing (`rules`: one entry for each rule) holds exactly this
+/// version's rules for this subnet: their number, each with the mark. A chain that is not
+/// there, was emptied, or has rules of another version, of another subnet or of somebody
+/// else is not. (A bridge is named after its subnet, so another subnet on the same bridge
+/// means that two names fell together; the rules then follow the network that starts a
+/// container.)
+pub fn rules_in_place(rules: &[Vec<u8>], expected: usize, subnet: [u8; 4], prefix: u8) -> bool {
+    let mark = rules_mark(subnet, prefix);
+    rules.len() == expected
+        && rules
+            .iter()
+            .all(|rule| user_data(rule) == Some(mark.as_slice()))
+}
+
+/// The user data of one rule in a listing: after the 4-byte header, attributes of
+/// (length, type, payload), each padded to 4 bytes.
+fn user_data(rule: &[u8]) -> Option<&[u8]> {
+    let mut rest = rule.get(4..)?;
+    loop {
+        let len = usize::from(u16::from_ne_bytes([*rest.first()?, *rest.get(1)?]));
+        let ty = u16::from_ne_bytes([*rest.get(2)?, *rest.get(3)?]) & 0x3fff;
+        if len < 4 {
+            return None;
+        }
+        if ty == RULE_USERDATA {
+            return rest.get(4..len);
+        }
+        rest = rest.get((len + 3) & !3..)?;
+    }
+}
+
 /// Remove the network's chains: flush each, then delete it.
 pub fn remove_masquerade_batch(first_seq: u32, bridge: &str) -> (Vec<u8>, u32) {
     let mut msgs = Vec::new();
@@ -316,6 +404,101 @@ pub fn remove_masquerade_batch(first_seq: u32, bridge: &str) -> (Vec<u8>, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rules of a batch for `chain`, as a listing would give them: each without its
+    /// 16-byte message header.
+    fn listed_rules(batch: &[u8], chain: &str) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        let mut at = 0;
+        while at + 16 <= batch.len() {
+            let len = u32::from_ne_bytes(batch[at..at + 4].try_into().unwrap()) as usize;
+            let ty = u16::from_ne_bytes([batch[at + 4], batch[at + 5]]);
+            let body = &batch[at + 16..at + len];
+            let mut name = chain.as_bytes().to_vec();
+            name.push(0);
+            if ty == (NFNL_SUBSYS_NFTABLES << 8) | NFT_MSG_NEWRULE
+                && body.windows(name.len()).any(|w| w == name.as_slice())
+            {
+                out.push(body.to_vec());
+            }
+            at += (len + 3) & !3;
+        }
+        out
+    }
+
+    #[test]
+    fn rules_are_in_place_only_with_this_versions_mark() {
+        let (batch, _) = masquerade_batch(1, [10, 77, 1, 0], 24, "opd-1");
+        let nat = listed_rules(&batch, "post-opd-1");
+        let forward = listed_rules(&batch, "fwd-opd-1");
+        assert_eq!((nat.len(), forward.len()), (NAT_RULES, FORWARD_RULES));
+        let in_place =
+            |rules: &[Vec<u8>], expected| rules_in_place(rules, expected, [10, 77, 1, 0], 24);
+        assert!(in_place(&nat, NAT_RULES));
+        assert!(in_place(&forward, FORWARD_RULES));
+        // The subnet as it is written does not matter, only the network it names.
+        assert!(rules_in_place(&nat, NAT_RULES, [10, 77, 1, 9], 24));
+        // A chain that is not there or was emptied, and one with a rule too few or too many.
+        assert!(!in_place(&[], NAT_RULES));
+        assert!(!in_place(&forward[..1], FORWARD_RULES));
+        assert!(!in_place(&forward, NAT_RULES));
+        // The rules of another subnet on the same bridge, in both chains.
+        assert!(!rules_in_place(&nat, NAT_RULES, [10, 77, 2, 0], 24));
+        assert!(!rules_in_place(&nat, NAT_RULES, [10, 77, 0, 0], 16));
+        assert!(!rules_in_place(&forward, FORWARD_RULES, [10, 77, 2, 0], 24));
+        // A rule of another version: the same rule with another number in its mark, or
+        // with no mark.
+        let mut other = nat.clone();
+        let text = RULES_VERSION.as_bytes();
+        let at = other[0]
+            .windows(text.len())
+            .position(|w| w == text)
+            .unwrap();
+        let number = at + text.len() - 1;
+        assert_eq!(other[0][number], b'1');
+        other[0][number] = b'2';
+        assert!(!in_place(&other, NAT_RULES));
+        let mark_attr = (4 + rules_mark([10, 77, 1, 0], 24).len() + 3) & !3;
+        let unmarked = vec![nat[0][..nat[0].len() - mark_attr].to_vec()];
+        assert_eq!(user_data(&unmarked[0]), None);
+        assert!(!in_place(&unmarked, NAT_RULES));
+        // Answers that are no rules at all.
+        assert!(!in_place(&[vec![1, 2, 3]], 1));
+        assert!(!in_place(&[vec![0; 4]], 1));
+        assert!(!in_place(&[vec![0, 0, 0, 0, 3, 0, 7, 0]], 1));
+        assert_eq!(user_data(&[]), None);
+        // The mark names the network, whatever the prefix.
+        assert_eq!(
+            &rules_mark([10, 77, 1, 9], 24)[2..],
+            b"openpod rules 1 10.77.1.0/24\0"
+        );
+        assert_eq!(
+            &rules_mark([10, 77, 1, 9], 0)[2..],
+            b"openpod rules 1 0.0.0.0/0\0"
+        );
+        assert_eq!(
+            &rules_mark([10, 77, 1, 9], 32)[2..],
+            b"openpod rules 1 10.77.1.9/32\0"
+        );
+    }
+
+    #[test]
+    fn the_listing_asks_for_each_chain_of_the_network() {
+        let [(nat, n), (forward, f)] = rule_queries("opd-1");
+        assert_eq!((n, f), (NAT_RULES, FORWARD_RULES));
+        for (query, chain) in [(nat, "post-opd-1"), (forward, "fwd-opd-1")] {
+            let bytes = query.finish(7);
+            let ty = u16::from_ne_bytes([bytes[4], bytes[5]]);
+            let flags = u16::from_ne_bytes([bytes[6], bytes[7]]);
+            assert_eq!(ty, (NFNL_SUBSYS_NFTABLES << 8) | NFT_MSG_GETRULE);
+            assert_eq!(flags, NLM_F_REQUEST | NLM_F_DUMP);
+            let a = attrs(&bytes[20..]);
+            assert_eq!(get(&a, 1), b"openpod\0");
+            let mut name = chain.as_bytes().to_vec();
+            name.push(0);
+            assert_eq!(get(&a, 2), name);
+        }
+    }
 
     /// (type, payload) of each attribute in `b`.
     fn attrs(b: &[u8]) -> Vec<(u16, Vec<u8>)> {

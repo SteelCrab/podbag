@@ -46,6 +46,48 @@ pub fn hosts_file(own: Own<'_>, peers: &[(String, Ipv4Addr)], host_hosts: &str) 
     }
 }
 
+/// One `address<TAB>name` line for each container of a user network: the part of
+/// `/etc/hosts` that all of them share. Made once for a refresh of all their files.
+pub struct PeerBlock {
+    text: String,
+    /// Where each peer's line ends in `text`, in the order of the peers.
+    ends: Vec<usize>,
+}
+
+impl PeerBlock {
+    pub fn new(peers: &[(String, Ipv4Addr)]) -> PeerBlock {
+        use std::fmt::Write;
+        let mut text = String::with_capacity(peers.len() * 32);
+        let mut ends = Vec::with_capacity(peers.len());
+        for (name, ip) in peers {
+            let _ = writeln!(text, "{ip}\t{name}");
+            ends.push(text.len());
+        }
+        PeerBlock { text, ends }
+    }
+
+    /// `/etc/hosts` of peer number `index` (its place in the list given to `new`): the
+    /// localhost lines, its own line with `hostname`, then the other peers. The same text
+    /// as [`hosts_file`] gives for it.
+    pub fn hosts_of(&self, index: usize, name: &str, hostname: &str, ip: Ipv4Addr) -> String {
+        let start = index
+            .checked_sub(1)
+            .and_then(|before| self.ends.get(before).copied())
+            .unwrap_or(0);
+        let end = self.ends.get(index).copied().unwrap_or(start);
+        let mut text = String::with_capacity(LOCALHOST.len() + 64 + self.text.len());
+        text.push_str(LOCALHOST);
+        if name == hostname {
+            text.push_str(&format!("{ip}\t{hostname}\n"));
+        } else {
+            text.push_str(&format!("{ip}\t{hostname} {name}\n"));
+        }
+        text.push_str(self.text.get(..start).unwrap_or_default());
+        text.push_str(self.text.get(end..).unwrap_or_default());
+        text
+    }
+}
+
 /// The DNS server pasta answers on in a rootless network (`--dns-forward`).
 pub const PASTA_DNS: &str = "169.254.1.1";
 
@@ -100,8 +142,14 @@ pub fn resolv_conf(
 pub fn rewrite_in_place(path: &std::path::Path, content: &str) -> std::io::Result<()> {
     use std::io::Write;
     let mut file = std::fs::OpenOptions::new().write(true).open(path)?;
-    file.set_len(0)?;
-    file.write_all(content.as_bytes())
+    // Over the old content, and cut only what is left of a longer one: emptying the file
+    // first costs several times more on a disk, and a reader would find it empty.
+    let old = file.metadata()?.len();
+    file.write_all(content.as_bytes())?;
+    if old > content.len() as u64 {
+        file.set_len(content.len() as u64)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -129,6 +177,51 @@ mod tests {
             1,
             "own entry once: {text}"
         );
+    }
+
+    #[test]
+    fn the_block_gives_the_same_file_as_the_peer_list() {
+        let peers = vec![
+            ("db".to_string(), Ipv4Addr::new(10, 78, 1, 2)),
+            ("web".to_string(), Ipv4Addr::new(10, 78, 1, 3)),
+            ("web2".to_string(), Ipv4Addr::new(10, 78, 1, 13)),
+        ];
+        let block = PeerBlock::new(&peers);
+        for (index, (name, ip)) in peers.iter().enumerate() {
+            // A hostname of its own, and the name as the hostname.
+            for hostname in ["abc123", name.as_str()] {
+                assert_eq!(
+                    block.hosts_of(index, name, hostname, *ip),
+                    hosts_file(Own::Address(name, hostname, *ip), &peers, ""),
+                    "{name} as {hostname}"
+                );
+            }
+        }
+        // A place that is not in the list leaves every peer in (and does not panic).
+        let ip = Ipv4Addr::new(10, 78, 1, 9);
+        assert_eq!(
+            block.hosts_of(7, "new", "new", ip),
+            hosts_file(Own::Address("new", "new", ip), &peers, "")
+        );
+        let none = PeerBlock::new(&[]);
+        assert_eq!(
+            none.hosts_of(0, "a", "a", ip),
+            hosts_file(Own::Address("a", "a", ip), &[], "")
+        );
+    }
+
+    #[test]
+    fn the_own_line_comes_first() {
+        // Two containers with one hostname: each resolves it to itself.
+        let peers = vec![
+            ("a".to_string(), Ipv4Addr::new(10, 78, 1, 2)),
+            ("b".to_string(), Ipv4Addr::new(10, 78, 1, 3)),
+        ];
+        let text = PeerBlock::new(&peers).hosts_of(1, "b", "same", Ipv4Addr::new(10, 78, 1, 3));
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.get(2), Some(&"10.78.1.3\tsame b"), "{text}");
+        assert_eq!(lines.get(3), Some(&"10.78.1.2\ta"), "{text}");
+        assert_eq!(lines.len(), 4, "{text}");
     }
 
     #[test]
@@ -175,6 +268,18 @@ mod tests {
         let before = std::fs::metadata(&path).unwrap().ino();
         rewrite_in_place(&path, "short\n").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "short\n");
+        assert_eq!(std::fs::metadata(&path).unwrap().ino(), before);
+        // Longer again, and the same length.
+        rewrite_in_place(&path, "a longer text than before\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "a longer text than before\n"
+        );
+        rewrite_in_place(&path, "A LONGER TEXT THAN BEFORE\n").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "A LONGER TEXT THAN BEFORE\n"
+        );
         assert_eq!(std::fs::metadata(&path).unwrap().ino(), before);
     }
 }

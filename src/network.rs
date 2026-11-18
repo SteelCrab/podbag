@@ -221,6 +221,10 @@ struct Record {
 struct Member {
     ip: Ipv4Addr,
     name: String,
+    /// The container's hostname, for its own line in `/etc/hosts`. Records written
+    /// before it was stored here have none: the container's config has it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hostname: Option<String>,
 }
 
 /// The host's IPv4 routes (destination and prefix), except the default route, so a new
@@ -605,11 +609,23 @@ pub(crate) fn remove_in(dirs: &Dirs, name: &str) -> Result<Network> {
 /// An address for container `id` in `network`: its old one, or the lowest free one after
 /// the gateway.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-pub(crate) fn allocate(dirs: &Dirs, network: &str, id: &str, name: &str) -> Result<Ipv4Addr> {
+pub(crate) fn allocate(
+    dirs: &Dirs,
+    network: &str,
+    id: &str,
+    name: &str,
+    hostname: &str,
+) -> Result<Ipv4Addr> {
     let _lock = lock(dirs)?;
     let mut record = load(dirs, network)?;
-    if let Some(m) = record.containers.get(id) {
-        return Ok(m.ip);
+    if let Some(m) = record.containers.get_mut(id) {
+        let ip = m.ip;
+        // A member from an earlier version's record learns its hostname at its next start.
+        if m.hostname.as_deref() != Some(hostname) {
+            m.hostname = Some(hostname.to_string());
+            write_record(dirs, &record)?;
+        }
+        return Ok(ip);
     }
     let (addr, prefix) = record.network.cidr();
     let first = u32::from(addr) + 2;
@@ -635,6 +651,7 @@ pub(crate) fn allocate(dirs: &Dirs, network: &str, id: &str, name: &str) -> Resu
         Member {
             ip,
             name: name.to_string(),
+            hostname: Some(hostname.to_string()),
         },
     );
     write_record(dirs, &record)?;
@@ -671,12 +688,22 @@ pub(crate) fn refresh_hosts(dirs: &Dirs, network: &str) {
         .values()
         .map(|m| (m.name.clone(), m.ip))
         .collect();
-    for (id, m) in &record.containers {
-        let Ok(spec) = crate::state::read_config(dirs, id) else {
-            continue;
+    // The names are the same in every member's file: made once, not once for each.
+    let block = crate::netfiles::PeerBlock::new(&peers);
+    for (index, (id, m)) in record.containers.iter().enumerate() {
+        // A record of an earlier version has no hostnames: the member's config has it.
+        let from_config;
+        let hostname = match &m.hostname {
+            Some(hostname) => hostname.as_str(),
+            None => match crate::state::read_config(dirs, id) {
+                Ok(spec) => {
+                    from_config = spec.hostname;
+                    from_config.as_str()
+                }
+                Err(_) => continue,
+            },
         };
-        let own = crate::netfiles::Own::Address(&m.name, &spec.hostname, m.ip);
-        let text = crate::netfiles::hosts_file(own, &peers, "");
+        let text = block.hosts_of(index, &m.name, hostname, m.ip);
         // A user mount may replace the file: then there is nothing to write.
         let _ = crate::netfiles::rewrite_in_place(&dirs.container_dir(id).join("hosts"), &text);
     }
@@ -717,7 +744,7 @@ mod tests {
         create_in(&dirs, "busy", None, &[]).unwrap();
         let spec = crate::spec::spec_fixture();
         crate::state::create(&dirs, &spec).unwrap();
-        allocate(&dirs, "busy", &spec.id, &spec.name).unwrap();
+        allocate(&dirs, "busy", &spec.id, &spec.name, &spec.hostname).unwrap();
         let gone: Vec<String> = prune_in(&dirs)
             .unwrap()
             .into_iter()
@@ -760,7 +787,7 @@ mod tests {
         let dirs = dirs_in(tmp.path());
         create_in(&dirs, "app", None, &[]).unwrap();
         let spec = crate::spec::spec_fixture();
-        let ip = allocate(&dirs, "app", &spec.id, &spec.name).unwrap();
+        let ip = allocate(&dirs, "app", &spec.id, &spec.name, &spec.hostname).unwrap();
         assert_eq!(
             endpoints(&dirs, "app").unwrap(),
             [(spec.id.clone(), spec.name.clone(), ip)]
@@ -955,7 +982,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dirs = dirs_in(tmp.path());
         create_in(&dirs, "tiny", Some("10.200.0.0/29"), &[]).unwrap();
-        let ip = |id: &str| allocate(&dirs, "tiny", id, id).unwrap();
+        let ip = |id: &str| allocate(&dirs, "tiny", id, id, id).unwrap();
         assert_eq!(ip("a"), Ipv4Addr::new(10, 200, 0, 2));
         assert_eq!(ip("b"), Ipv4Addr::new(10, 200, 0, 3));
         assert_eq!(
@@ -973,7 +1000,7 @@ mod tests {
             ip(id);
         }
         // .1 gateway, .2-.6 used, .7 broadcast: full.
-        let e = allocate(&dirs, "tiny", "h", "h").unwrap_err();
+        let e = allocate(&dirs, "tiny", "h", "h", "h").unwrap_err();
         assert!(e.why.contains("no free address"), "{}", e.why);
         let members = members(&dirs, "tiny").unwrap();
         assert_eq!(members.len(), 5);
@@ -989,7 +1016,7 @@ mod tests {
             .map(|i| {
                 let dirs = dirs.clone();
                 std::thread::spawn(move || {
-                    allocate(&dirs, "bridge", &format!("c{i}"), &format!("c{i}")).unwrap()
+                    allocate(&dirs, "bridge", &format!("c{i}"), &format!("c{i}"), "h").unwrap()
                 })
             })
             .collect();
@@ -1010,12 +1037,175 @@ mod tests {
             network: "app".into(),
         };
         crate::state::create(&dirs, &spec).unwrap();
-        allocate(&dirs, "app", &spec.id, "web").unwrap();
+        allocate(&dirs, "app", &spec.id, "web", &spec.hostname).unwrap();
         let e = remove_in(&dirs, "app").unwrap_err();
         assert!(e.why.contains("web"), "{}", e.why);
         crate::state::remove_container_dir(&dirs, &spec.id).unwrap();
         remove_in(&dirs, "app").unwrap();
         assert_eq!(get_in(&dirs, "app").unwrap_err().kind, ErrorKind::NotFound);
+    }
+
+    /// A container `name` (ID: its first letter in hex, 32 times) on network `app`, with an empty
+    /// hosts file as its shim would have made, and its address.
+    fn member(dirs: &Dirs, name: &str, hostname: &str) -> (String, Ipv4Addr) {
+        let mut spec = crate::spec::spec_fixture();
+        spec.id = format!("{:02x}", name.bytes().next().unwrap_or(0)).repeat(32);
+        spec.name = name.into();
+        spec.hostname = hostname.into();
+        spec.network = NetworkMode::Bridge {
+            network: "app".into(),
+        };
+        crate::state::create(dirs, &spec).unwrap();
+        std::fs::write(dirs.container_dir(&spec.id).join("hosts"), "").unwrap();
+        let ip = allocate(dirs, "app", &spec.id, name, hostname).unwrap();
+        (spec.id, ip)
+    }
+
+    fn hosts_of(dirs: &Dirs, id: &str) -> String {
+        std::fs::read_to_string(dirs.container_dir(id).join("hosts")).unwrap_or_default()
+    }
+
+    #[test]
+    fn refresh_does_not_need_the_members_configs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = dirs_in(tmp.path());
+        create_in(&dirs, "app", None, &[]).unwrap();
+        let (web, web_ip) = member(&dirs, "web", "front");
+        let (db, db_ip) = member(&dirs, "db", "db");
+        // The record alone says what goes into the files.
+        for id in [&web, &db] {
+            std::fs::remove_file(dirs.container_dir(id).join("config.json")).unwrap();
+        }
+        refresh_hosts(&dirs, "app");
+        let local = "127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n";
+        assert_eq!(
+            hosts_of(&dirs, &web),
+            format!("{local}{web_ip}\tfront web\n{db_ip}\tdb\n")
+        );
+        assert_eq!(
+            hosts_of(&dirs, &db),
+            format!("{local}{db_ip}\tdb\n{web_ip}\tweb\n")
+        );
+    }
+
+    #[test]
+    fn a_member_of_an_older_record_gets_its_hostname_from_its_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = dirs_in(tmp.path());
+        create_in(&dirs, "app", None, &[]).unwrap();
+        let (web, web_ip) = member(&dirs, "web", "front");
+        let (db, db_ip) = member(&dirs, "db", "db");
+        // The record as an earlier version wrote it: members without a hostname.
+        let path = record_path(&dirs, "app");
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        for m in json["containers"].as_object_mut().unwrap().values_mut() {
+            m.as_object_mut().unwrap().remove("hostname");
+        }
+        std::fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+        refresh_hosts(&dirs, "app");
+        assert!(hosts_of(&dirs, &web).contains(&format!("{web_ip}\tfront web\n")));
+        assert!(hosts_of(&dirs, &web).contains(&format!("{db_ip}\tdb\n")));
+        assert!(hosts_of(&dirs, &db).contains(&format!("{web_ip}\tweb\n")));
+        // Its next start writes the hostname down, and keeps the address.
+        assert_eq!(
+            allocate(&dirs, "app", &web, "web", "front").unwrap(),
+            web_ip
+        );
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(json["containers"][&web]["hostname"], "front");
+    }
+
+    #[test]
+    fn a_member_without_a_hosts_file_does_not_stop_the_refresh() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = dirs_in(tmp.path());
+        create_in(&dirs, "app", None, &[]).unwrap();
+        let (a, a_ip) = member(&dirs, "a", "a");
+        let (b, _) = member(&dirs, "b", "b");
+        let (c, c_ip) = member(&dirs, "c", "c");
+        // One has a mount of its own over /etc/hosts (no file), one has no directory.
+        std::fs::remove_file(dirs.container_dir(&a).join("hosts")).unwrap();
+        std::fs::remove_dir_all(dirs.container_dir(&b)).unwrap();
+        refresh_hosts(&dirs, "app");
+        assert!(!dirs.container_dir(&a).join("hosts").exists());
+        assert!(hosts_of(&dirs, &c).contains(&format!("{c_ip}\tc\n")));
+        assert!(hosts_of(&dirs, &c).contains(&format!("{a_ip}\ta\n")));
+    }
+
+    #[test]
+    fn hosts_follow_the_record_after_starts_and_stops() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = dirs_in(tmp.path());
+        create_in(&dirs, "app", None, &[]).unwrap();
+        let (a, a_ip) = member(&dirs, "a", "a");
+        let (b, b_ip) = member(&dirs, "b", "b");
+        refresh_hosts(&dirs, "app");
+        let (c, c_ip) = member(&dirs, "c", "c");
+        refresh_hosts(&dirs, "app");
+        let all = format!("{a_ip}\ta\n{b_ip}\tb\n{c_ip}\tc\n");
+        for id in [&a, &b, &c] {
+            let text = hosts_of(&dirs, id);
+            for line in all.lines() {
+                assert_eq!(text.matches(line).count(), 1, "{line} in {text}");
+            }
+        }
+        // One leaves: the others forget its name.
+        release(&dirs, "app", &b).unwrap();
+        refresh_hosts(&dirs, "app");
+        for id in [&a, &c] {
+            let text = hosts_of(&dirs, id);
+            assert!(!text.contains("\tb\n"), "{text}");
+            assert!(
+                text.contains(&format!("{a_ip}\ta\n")) && text.contains(&format!("{c_ip}\tc\n"))
+            );
+        }
+        // The default network has no names.
+        refresh_hosts(&dirs, DEFAULT);
+    }
+
+    /// Not a test: how long the network work of one start takes with 250 members.
+    /// `cargo test --lib bench_250_members -- --ignored --nocapture`
+    #[test]
+    #[ignore = "a measurement"]
+    fn bench_250_members() {
+        let base = std::env::var("BENCH_DIR").unwrap_or_else(|_| "/var/tmp".into());
+        let tmp = tempfile::tempdir_in(base).unwrap();
+        let dirs = dirs_in(tmp.path());
+        create_in(&dirs, "app", Some("10.94.0.0/22"), &[]).unwrap();
+        let mut spec = crate::spec::spec_fixture();
+        spec.network = NetworkMode::Bridge {
+            network: "app".into(),
+        };
+        for i in 0..250 {
+            spec.id = format!("{i:064x}");
+            spec.name = format!("c{i}");
+            spec.hostname = spec.name.clone();
+            crate::state::create(&dirs, &spec).unwrap();
+            std::fs::write(dirs.container_dir(&spec.id).join("hosts"), "").unwrap();
+            allocate(&dirs, "app", &spec.id, &spec.name, &spec.hostname).unwrap();
+        }
+        refresh_hosts(&dirs, "app");
+        let time = |what: &str, f: &mut dyn FnMut()| {
+            let mut best = std::time::Duration::MAX;
+            for _ in 0..7 {
+                let t = std::time::Instant::now();
+                f();
+                best = best.min(t.elapsed());
+            }
+            eprintln!("{what}: {:.2} ms", best.as_secs_f64() * 1000.0);
+        };
+        time("refresh_hosts", &mut || refresh_hosts(&dirs, "app"));
+        time("members", &mut || drop(members(&dirs, "app").unwrap()));
+        let mut n = 1000;
+        time("allocate + release", &mut || {
+            n += 1;
+            let id = format!("{n:064x}");
+            allocate(&dirs, "app", &id, "x", "x").unwrap();
+            release(&dirs, "app", &id).unwrap();
+        });
+        time("get_in", &mut || drop(get_in(&dirs, "app").unwrap()));
     }
 
     #[test]

@@ -162,6 +162,108 @@ mod kernel_tests {
         assert!(run("ip -o -4 addr show opdtest0").contains("10.99.0.1/16"));
     }
 
+    /// The number of the kernel's nftables rule set: it goes up with every transaction.
+    fn generation() -> u32 {
+        // NFT_MSG_GETGEN; the answer holds NFTA_GEN_ID (attribute 1, big-endian).
+        let mut s = Socket::open(libc::NETLINK_NETFILTER).unwrap();
+        let seq = s.next_seq();
+        let query = Message::new((10 << 8) | 16, 1, &[2, 0, 0, 0]);
+        let answers = s.request_raw(&query.finish(seq), 0).unwrap();
+        let body = answers.first().expect("an answer");
+        let mut at = 4;
+        while at + 4 <= body.len() {
+            let len = u16::from_ne_bytes([body[at], body[at + 1]]) as usize;
+            let ty = u16::from_ne_bytes([body[at + 2], body[at + 3]]);
+            if ty == 1 {
+                return u32::from_be_bytes(body[at + 4..at + 8].try_into().unwrap());
+            }
+            at += (len + 3) & !3;
+        }
+        panic!("no generation in {body:?}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "needs root in a new network namespace"]
+    fn a_prepared_bridge_is_not_prepared_again() {
+        let net = crate::network::Network {
+            name: "again".into(),
+            id: "0".repeat(12),
+            subnet: "10.76.3.0/24".into(),
+            gateway: "10.76.3.1".into(),
+            bridge: "opd-again".into(),
+            created: 0,
+        };
+        // The table's lines in a fixed order: chains are listed in the order they were made.
+        let listed = || {
+            let mut lines: Vec<String> = run("nft list table ip openpod")
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect();
+            lines.sort();
+            lines
+        };
+        let index = crate::linux::net::prepare_bridge(&net).unwrap();
+        let rules = listed();
+        assert!(
+            rules
+                .iter()
+                .any(|l| l.contains("oifname != \"opd-again\" masquerade")),
+            "{rules:?}"
+        );
+        // The second container of a network finds everything in place: no transaction
+        // (each one makes the kernel wait for several milliseconds).
+        let before = generation();
+        assert_eq!(crate::linux::net::prepare_bridge(&net).unwrap(), index);
+        assert_eq!(generation(), before, "the rules were written again");
+        assert_eq!(listed(), rules);
+        // Chains that somebody emptied get their rules again: a chain that is there says
+        // nothing about its rules.
+        run("nft flush chain ip openpod fwd-opd-again");
+        assert_ne!(listed(), rules);
+        crate::linux::net::prepare_bridge(&net).unwrap();
+        assert_eq!(listed(), rules, "an emptied chain stayed empty");
+        // Rules that are not this version's (written by hand, or by another version of
+        // openpod) are replaced, even when their number is right.
+        run("nft flush chain ip openpod post-opd-again; \
+             nft add rule ip openpod post-opd-again ip saddr 10.76.3.0/24 oifname != opd-again masquerade");
+        assert_ne!(listed(), rules);
+        crate::linux::net::prepare_bridge(&net).unwrap();
+        assert_eq!(listed(), rules, "a rule of another version stayed");
+        // Rules that somebody removed (a firewall reload) come back with the next start.
+        run(
+            "nft flush chain ip openpod post-opd-again; nft delete chain ip openpod post-opd-again",
+        );
+        assert!(!listed().iter().any(|l| l.contains("post-opd-again")));
+        crate::linux::net::prepare_bridge(&net).unwrap();
+        assert_eq!(listed(), rules);
+        // And all of them, when the whole table is gone.
+        run("nft delete table ip openpod");
+        crate::linux::net::prepare_bridge(&net).unwrap();
+        assert_eq!(listed(), rules);
+        // The same bridge with another subnet (root's default bridge serves every data
+        // directory, and the default subnet is a setting): rules that are in place for
+        // one subnet are not in place for the other.
+        let moved = crate::network::Network {
+            subnet: "10.76.4.0/24".into(),
+            gateway: "10.76.4.1".into(),
+            ..net.clone()
+        };
+        crate::linux::net::prepare_bridge(&moved).unwrap();
+        let now = listed();
+        assert!(
+            now.iter()
+                .any(|l| l.contains("ip saddr 10.76.4.0/24 oifname != \"opd-again\" masquerade")),
+            "the rules stayed those of the other subnet: {now:?}"
+        );
+        assert_eq!(now.iter().filter(|l| l.contains("masquerade")).count(), 1);
+        let before = generation();
+        crate::linux::net::prepare_bridge(&moved).unwrap();
+        assert_eq!(generation(), before, "the rules were written again");
+        crate::linux::net::remove_bridge(&net).unwrap();
+    }
+
     #[test]
     #[ignore = "needs root in a new network namespace"]
     fn kernel_accepts_the_nat_chain() {

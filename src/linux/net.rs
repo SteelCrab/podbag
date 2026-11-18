@@ -28,7 +28,8 @@ fn tolerate_exists(r: std::io::Result<()>) -> std::io::Result<()> {
 }
 
 /// Make sure the network's bridge exists with its gateway address and is up, that IPv4
-/// forwarding is on, and that its masquerade rule is in place. Safe to repeat.
+/// forwarding is on, and that its masquerade rule is in place. Safe to repeat, and cheap
+/// when everything is there already (every container's start comes through here).
 pub fn prepare_bridge(net: &Network) -> Result<u32> {
     let fail = |what: &str, e: std::io::Error| net_error(&net.name, what, e);
     let (subnet, prefix) = net.cidr();
@@ -59,10 +60,22 @@ pub fn prepare_bridge(net: &Network) -> Result<u32> {
         std::fs::write(forward, "1").map_err(|e| fail("turn on IPv4 forwarding", e))?;
     }
     let mut f = Socket::open(libc::NETLINK_NETFILTER).map_err(|e| fail("netlink", e))?;
-    let first = f.next_seq();
-    let (bytes, last) = nft::masquerade_batch(first, subnet.octets(), prefix, &net.bridge);
-    f.request_raw(&bytes, last)
-        .map_err(|e| fail("add the masquerade rule", e))?;
+    // A transaction makes the kernel wait for every CPU (several milliseconds), so the
+    // rules are written only when they are not all there: for a network's first
+    // container, after something removed or emptied the chains (a firewall reload), and
+    // after an upgrade that changed the rules. Reading them is not a transaction.
+    let in_place = nft::rule_queries(&net.bridge)
+        .into_iter()
+        .all(|(query, expected)| {
+            f.dump(query)
+                .is_ok_and(|rules| nft::rules_in_place(&rules, expected, subnet.octets(), prefix))
+        });
+    if !in_place {
+        let first = f.next_seq();
+        let (bytes, last) = nft::masquerade_batch(first, subnet.octets(), prefix, &net.bridge);
+        f.request_raw(&bytes, last)
+            .map_err(|e| fail("add the masquerade rule", e))?;
+    }
     Ok(index)
 }
 

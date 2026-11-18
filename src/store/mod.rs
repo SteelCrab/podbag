@@ -1040,6 +1040,24 @@ pub fn images_in_use(dirs: &Dirs) -> HashMap<String, String> {
 
 /// Remove a directory tree, making read-only directories writable first if needed.
 pub fn remove_tree(path: &Path) -> std::io::Result<()> {
+    // A dead container's overlay mount is taken down by the kernel a moment after its
+    // last process (later still when many containers end at once), and until then it may
+    // put files into its work directory: "not empty" is tried again for a short time.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match remove_tree_once(path) {
+            Err(e)
+                if e.kind() == std::io::ErrorKind::DirectoryNotEmpty
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            done => return done,
+        }
+    }
+}
+
+fn remove_tree_once(path: &Path) -> std::io::Result<()> {
     match std::fs::remove_dir_all(path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -1156,6 +1174,35 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remove_tree_waits_out_a_late_writer() {
+        // The kernel takes a dead container's overlay mount down a moment after its last
+        // process; until then it may still put files into the mount's work directory.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("container");
+        std::fs::create_dir_all(dir.join("work")).unwrap();
+        let writers: Vec<_> = (0..2)
+            .map(|w| {
+                let busy = dir.join("work");
+                std::thread::spawn(move || {
+                    let end = std::time::Instant::now() + std::time::Duration::from_millis(200);
+                    let mut n = 0u32;
+                    while std::time::Instant::now() < end {
+                        let _ = std::fs::write(busy.join(format!("late-{w}-{n}")), b"");
+                        n += 1;
+                    }
+                })
+            })
+            .collect();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let removed = remove_tree(&dir);
+        for w in writers {
+            w.join().unwrap();
+        }
+        removed.unwrap();
+        assert!(!dir.exists());
+    }
     use crate::ErrorKind;
 
     fn file_layer(files: &[(&str, &[u8])]) -> Vec<u8> {

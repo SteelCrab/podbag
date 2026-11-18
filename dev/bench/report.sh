@@ -57,7 +57,9 @@ held_default() { mb "$(get "$1" held_default_kb)"; }
 held_spread() {
   for t in "$@"; do
     for net in none default; do get "$t" "held_${net}_all_kb" | tr -d '"'; done
-  done | awk '{lo=$1; hi=$1; for(i=2;i<=NF;i++){if($i<lo)lo=$i; if($i>hi)hi=$i} if(hi-lo>m)m=hi-lo} END{printf "%.1f", m/1024}'
+  done | awk '{lo=$1; hi=$1; for(i=2;i<=NF;i++){if($i<lo)lo=$i; if($i>hi)hi=$i}
+      # As the rounds are printed: each rounded to a tenth of a MiB.
+      d=int(hi/1024*10+0.5)/10 - int(lo/1024*10+0.5)/10; if(d>m)m=d} END{printf "%.1f", m}'
 }
 pss_none() { echo "$(mb "$(get "$1" pss_none_kb)") ($(per "$(get "$1" pss_none_kb)" "$(get "$1" idle_pss_kb)" "$(get "$1" count)") per container)"; }
 pss_default() { echo "$(mb "$(get "$1" pss_default_kb)") ($(per "$(get "$1" pss_default_kb)" "$(get "$1" idle_pss_kb)" "$(get "$1" count)") per container)"; }
@@ -123,13 +125,14 @@ mac_tools=(docker-desktop orbstack kiri podman colima openpod)
   echo "  available, read at the same moments. It cannot tell the small tools apart. The three"
   echo "  rounds without a network gave, in MiB: openpod rootless $(rounds openpod mem_none_all_kb); openpod as root"
   echo "  $(rounds openpod-root mem_none_all_kb); Kiri $(rounds kiri mem_none_all_kb). The sums by category of the same rounds:"
-  echo "  $(rounds openpod held_none_all_kb); $(rounds openpod-root held_none_all_kb); $(rounds kiri held_none_all_kb). openpod's figures in this row are"
-  echo "  higher than Kiri's; no counter of the kernel says where that memory would be, and in"
-  echo "  a separate reading three identical rounds of Kiri moved free memory by −9.5, −17.3 and"
+  echo "  $(rounds openpod held_none_all_kb); $(rounds openpod-root held_none_all_kb); $(rounds kiri held_none_all_kb). Where this row and the sum"
+  echo "  by category disagree, no counter of the kernel says where the memory would be; in a"
+  echo "  separate reading three identical rounds of Kiri moved free memory by −9.5, −17.3 and"
   echo "  +6.4 MiB. The row stays for the large numbers."
-  echo "- Both system-wide rows leave out the anonymous memory of the VM's own helper (lima's guest"
-  echo "  agent), which grew by 23 MiB during one run of 150 containers and shrank by 46 MiB during"
-  echo "  the next, and of the firmware updater that a timer starts; a Linux host has no guest agent."
+  echo "- lima's guest agent was stopped for the session (\`dev/bench/session.sh\`): it grew by"
+  echo "  23 MiB during one run of 150 containers, shrank by 46 MiB during the next, and took a"
+  echo "  fifth of the CPU time while containers started. A Linux host has no guest agent. Both"
+  echo "  system-wide rows also leave its anonymous memory out, should it run."
   echo "- \"The tool's processes\": openpod's keeper (and a helper for each container that is"
   echo "  attached or publishes ports), session holder and pasta; Podman's"
   echo "  conmon, pasta and helpers; Docker's dockerd, containerd and shims; Kiri's daemon and"
@@ -230,8 +233,35 @@ mac_tools=(docker-desktop orbstack kiri podman colima openpod)
     echo "## $total containers on one network"
     echo
     echo "\`dev/bench/scale.sh\`: \`run -d --network bench --name cN alpine sleep\`, one after another,"
-    echo "on a network made with \`network create --subnet 10.90.0.0/22 bench\`; same session as the"
-    echo "table above."
+    echo "on a network made with \`network create --subnet 10.90.0.0/22 bench\`; the same program and"
+    echo "VM as the table above. \`rm -f\` gets all $total containers on one command line."
+    scale_rounds="$(ls "$in"/scale-"${scale_tools[0]}".round* 2>/dev/null | wc -l | tr -d ' ')"
+    if [ "$scale_rounds" -gt 1 ]; then
+      # One figure of every round of a tool, in the round's order.
+      s_rounds() { # $1 tool, $2 key, $3 kb|ms
+        local out="" f v
+        for f in "$in"/scale-"$1".round*; do
+          v="$(sed -n "s/^$2=//p" "$f" | head -1)"
+          [ "$3" = kb ] && v="$(awk -v k="$v" 'BEGIN{printf "%.0f", k/1024}')"
+          out="$out${out:+, }$v"
+        done
+        echo "$out"
+      }
+      echo
+      echo "Every tool was run $scale_rounds times, in turn, after one round that is not counted"
+      echo "(see \"The state of the system\" below); each figure is the median of its"
+      echo "$scale_rounds readings. The single runs of three rows, in the order of the columns:"
+      echo
+      line="- what the system holds at $total, MiB:"
+      for t in "${scale_tools[@]}"; do line="$line $(s_rounds "$t" held_total_kb kb);"; done
+      echo "${line%;}"
+      line="- the first \`ps -a\` after the caches were dropped, ms:"
+      for t in "${scale_tools[@]}"; do line="$line $(s_rounds "$t" ps_first_ms ms);"; done
+      echo "${line%;}"
+      line="- \`rm -f\` of all $total, ms:"
+      for t in "${scale_tools[@]}"; do line="$line $(s_rounds "$t" rm_all_ms ms);"; done
+      echo "${line%;}"
+    fi
     echo
     header="| |"
     rule="|---|"
@@ -247,7 +277,8 @@ mac_tools=(docker-desktop orbstack kiri podman colima openpod)
     srow "Memory at 50: the system holds, by category / the tool's processes (PSS)" s_mem 50
     srow "Memory at $total: the system holds, by category / the tool's processes (PSS)" s_mem total
     srow "Tool processes at $total" s_procs
-    srow "\`ps -a\` with $total containers" s_ms ps_ms
+    s_ps() { echo "$(sg "$1" ps_ms) ms ($(sg "$1" ps_first_ms) ms)"; }
+    srow "\`ps -a\` with $total containers (the first one after the caches were dropped)" s_ps
     srow "\`rm -f\` of all $total" s_ms rm_all_ms
   fi
   if [ -f "$repo/dev/bench/notes.md" ]; then

@@ -916,3 +916,146 @@ fn rm_f_of_a_container_that_removes_itself_succeeds() {
         );
     }
 }
+
+#[test]
+fn rm_f_ends_every_container_before_it_removes_the_first() {
+    // With many containers on one command line, all of them end at about the same
+    // moment; one after another, each would wait for the removal of those before it.
+    let sb = Sandbox::new();
+    // On a network: what follows a container's end there (its address, the others'
+    // name lists) is the slow part.
+    ok(&openpod(&sb, &["network", "create", "many"]));
+    let count = 100;
+    let names: Vec<String> = (0..count).map(|i| format!("many{i}")).collect();
+    let mut pids = Vec::new();
+    for name in &names {
+        start(
+            &sb,
+            &["--network", "many", "--name", name],
+            &["sleep", "300"],
+        );
+        pids.push(inspect(&sb, name)["state"]["pid"].as_u64().unwrap());
+    }
+    let mut rm = sb
+        .openpod()
+        .args(["rm", "-f"])
+        .args(&names)
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    // When does each container's process go away, and when is half of the containers
+    // removed? One after another, the other half would still run at that moment. (Ended
+    // all at once, the kernel needs some tens of milliseconds to take them all down.)
+    let records = sb.data().join("containers");
+    let left = || std::fs::read_dir(&records).map_or(0, |d| d.count());
+    let mut gone: Vec<Option<Instant>> = vec![None; pids.len()];
+    let mut half_removed = None;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while gone.iter().any(Option::is_none) || half_removed.is_none() {
+        assert!(Instant::now() < deadline, "containers were left");
+        for (seen, pid) in gone.iter_mut().zip(&pids) {
+            if seen.is_none() && !std::path::Path::new(&format!("/proc/{pid}")).exists() {
+                *seen = Some(Instant::now());
+            }
+        }
+        if half_removed.is_none() && left() <= count / 2 {
+            half_removed = Some(Instant::now());
+        }
+        std::thread::sleep(Duration::from_micros(500));
+    }
+    assert_eq!(rm.wait().unwrap().code(), Some(0));
+    let first = gone.iter().flatten().min().unwrap();
+    let last = gone.iter().flatten().max().unwrap();
+    eprintln!(
+        "the last of {count} containers ended {:?} after the first",
+        last.duration_since(*first)
+    );
+    assert!(
+        *last <= half_removed.unwrap(),
+        "containers still ran when half of them were removed"
+    );
+    assert!(stdout(&openpod(&sb, &["ps", "-aq"])).is_empty());
+    ok(&openpod(&sb, &["network", "rm", "many"]));
+}
+
+#[test]
+fn rm_f_of_many_reports_each_and_removes_the_rest() {
+    let sb = Sandbox::new();
+    let running = start(
+        &sb,
+        &["--network", "none", "--name", "up"],
+        &["sleep", "300"],
+    );
+    let stopped = start(&sb, &["--network", "none", "--name", "down"], &["true"]);
+    wait_for_status(&sb, "down", "exited");
+    // A running one, one that has ended, a name nobody has, and one name twice.
+    let out = openpod(&sb, &["rm", "-f", "up", "nope", "down", "up"]);
+    assert_eq!(out.status.code(), Some(125), "{}", stderr(&out));
+    assert_eq!(
+        stdout(&out),
+        format!("{}\n{}", running.trim(), stopped.trim())
+    );
+    let err = stderr(&out);
+    assert!(err.contains("cannot find container nope"), "{err}");
+    assert!(err.contains("cannot find container up"), "{err}");
+    assert!(stdout(&openpod(&sb, &["ps", "-aq"])).is_empty());
+}
+
+#[test]
+fn rm_f_of_many_takes_a_container_that_removes_itself() {
+    // All named containers are ended first; one with `--rm` is then gone before its
+    // turn comes. That is what was asked for, not an error.
+    let sb = Sandbox::new();
+    for round in 0..5 {
+        let own = start(
+            &sb,
+            &["--network", "none", "--rm", "--name", "self"],
+            &["sleep", "300"],
+        );
+        let other = start(
+            &sb,
+            &["--network", "none", "--name", "other"],
+            &["sleep", "300"],
+        );
+        let out = openpod(&sb, &["rm", "-f", "other", "self"]);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "round {round}: {}",
+            stderr(&out)
+        );
+        assert_eq!(stdout(&out), format!("{}\n{}", other.trim(), own.trim()));
+        assert!(stdout(&openpod(&sb, &["ps", "-aq"])).is_empty());
+    }
+}
+
+#[test]
+fn rm_fv_of_many_reports_volumes_it_could_not_remove() {
+    let sb = Sandbox::new();
+    for name in ["a", "b"] {
+        start(
+            &sb,
+            &["--network", "none", "--name", name, "-v", "/mnt"],
+            &["sleep", "300"],
+        );
+    }
+    // The volumes cannot be removed: their lock is not a file any more.
+    let lock = sb.data().join("volumes").join(".lock");
+    let script = format!("rm -f '{0}' && mkdir '{0}'", lock.display());
+    let broke = if root_mode() {
+        std::process::Command::new("sudo")
+            .args(["-n", "sh", "-c", &script])
+            .status()
+    } else {
+        std::process::Command::new("sh")
+            .args(["-c", &script])
+            .status()
+    };
+    assert!(broke.unwrap().success());
+    let out = openpod(&sb, &["rm", "-f", "-v", "a", "b"]);
+    // The containers are gone; that their volumes stayed is said, for each.
+    assert_ne!(out.status.code(), Some(0), "the failure was not reported");
+    let err = stderr(&out);
+    assert_eq!(err.matches(".lock").count(), 2, "{err}");
+    assert!(stdout(&openpod(&sb, &["ps", "-aq"])).is_empty());
+}

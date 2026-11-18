@@ -74,6 +74,18 @@ pub struct ContainerHandle {
     id: String,
 }
 
+/// See [`ContainerHandle::lookup`].
+pub struct Lookup(state::Lookup);
+
+impl Lookup {
+    /// As [`ContainerHandle::get`]; a container removed since the first call is not found.
+    pub fn get(&mut self, name_or_id: &str) -> Result<ContainerHandle> {
+        Ok(ContainerHandle {
+            id: self.0.resolve(name_or_id)?,
+        })
+    }
+}
+
 impl ContainerHandle {
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn from_id(id: String) -> ContainerHandle {
@@ -86,6 +98,12 @@ impl ContainerHandle {
         Ok(ContainerHandle {
             id: state::resolve(&dirs, name_or_id)?,
         })
+    }
+
+    /// For a command that names several containers: finds them one after another with
+    /// one look at the container list (a `get` for each reads every container again).
+    pub fn lookup() -> Result<Lookup> {
+        Ok(Lookup(state::Lookup::new(&paths::dirs()?)))
     }
 
     /// Containers, newest first. Without `all`, only running ones.

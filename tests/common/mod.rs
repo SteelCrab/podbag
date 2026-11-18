@@ -53,6 +53,37 @@ impl Drop for Sandbox {
             .stderr(std::process::Stdio::null())
             .status();
         if root_mode() {
+            // The bridges of this sandbox's networks (its default network has a subnet
+            // and so a bridge of its own), with their firewall chains: root's live in the
+            // host's namespace and would pile up there over the runs. A bridge that still
+            // has containers on it belongs to another sandbox too (networks of different
+            // sandboxes can get the same subnet, and so the same bridge).
+            let _ = Command::new("sudo")
+                .args([
+                    "-n",
+                    "sh",
+                    "-c",
+                    r#"for f in "$1"/networks/*.json; do
+                         b=$(sed -n 's/.*"bridge": *"\(opd-[^"]*\)".*/\1/p' "$f" 2>/dev/null)
+                         [ -n "$b" ] || continue
+                         # The ports of containers that were just removed go a moment later.
+                         n=0
+                         while [ -n "$(ls "/sys/class/net/$b/brif" 2>/dev/null)" ] && [ $n -lt 20 ]; do
+                           sleep 0.05; n=$((n+1))
+                         done
+                         [ -z "$(ls "/sys/class/net/$b/brif" 2>/dev/null)" ] || continue
+                         ip link del "$b" 2>/dev/null
+                         for c in "post-$b" "fwd-$b"; do
+                           nft flush chain ip openpod "$c" 2>/dev/null
+                           nft delete chain ip openpod "$c" 2>/dev/null
+                         done
+                       done"#,
+                    "_",
+                ])
+                .arg(self.data())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
             // Shared image mounts (composefs) stay until their image is removed; take
             // down every mount below this sandbox, deepest first, before deleting it.
             for point in mounts_under(self.tmp.path()).into_iter().rev() {
@@ -75,8 +106,9 @@ impl Sandbox {
             tmp: tempfile::tempdir().unwrap(),
             env: Vec::new(),
         };
-        // As root, every sandbox's default network uses the host's one bridge device; its
-        // own subnet keeps the sandboxes' address tables from handing out the same address.
+        // As root, the bridges are in the host's network namespace, where the default
+        // subnet's bridge is one device for all: each sandbox gets a subnet of its own for
+        // its default network, and with it a bridge of its own (named after the subnet).
         if root_mode() {
             static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
             let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

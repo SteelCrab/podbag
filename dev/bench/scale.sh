@@ -74,16 +74,18 @@ used_kb() {
   all="$(awk '/^MemTotal/{t=$2} /^MemAvailable/{a=$2} END{print t-a}' /proc/meminfo)"
   echo $((all - $(bystander_kb)))
 }
-# The memory of removed containers (namespaces, cgroups) is freed a little later: wait
-# until what the system holds stops falling, so that one round's leftovers do not count
-# in the next one.
+# The memory of removed containers (namespaces, cgroups) is freed later, for hundreds of
+# containers over many seconds: wait until what the system holds has stopped falling for
+# three readings in a row (at most 90 s), so that one run's leftovers do not count in the
+# next one.
 settle() {
-  local prev cur
+  local prev cur still=0
   prev="$(held_kb)"
-  for _ in $(seq 15); do
+  for _ in $(seq 45); do
     sleep 2
     cur="$(held_kb)"
-    [ $((prev - cur)) -gt 256 ] || return 0
+    if [ $((prev - cur)) -gt 256 ]; then still=0; else still=$((still + 1)); fi
+    [ "$still" -lt 3 ] || return 0
     prev="$cur"
   done
 }
@@ -142,7 +144,11 @@ procs_total="$(procs)"
 bystander_total=$(($(bystander_kb) - bystander_before))
 # The last container reaches the first by name.
 "${cli[@]}" exec "c$total" ping -c 1 -W 2 c1 >/dev/null
-ps_ms="$(timed_ms "${inner[@]}" ps -a)"
+# The caches were dropped just now for the memory reading: the first `ps -a` reads every
+# container's record from the disk (a tool with a daemon has them in memory). Then five
+# more, for the usual case.
+ps_first_ms="$(timed_ms "${inner[@]}" ps -a)"
+ps_ms="$(for _ in 1 2 3 4 5; do timed_ms "${inner[@]}" ps -a; done | sort -n | sed -n 3p)"
 rm_ms="$("${timed_prefix[@]}" bash -c '
   t0="${EPOCHREALTIME/./}"; "$@" rm -f $("$@" ps -aq) >/dev/null; t1="${EPOCHREALTIME/./}"
   echo $(((t1 - t0) / 1000))' _ "${inner[@]}")"
@@ -162,6 +168,7 @@ rm_ms="$("${timed_prefix[@]}" bash -c '
   echo "pss_total_kb=$pss_total"
   echo "procs_total=$procs_total"
   echo "bystander_total_kb=$bystander_total"
+  echo "ps_first_ms=$ps_first_ms"
   echo "ps_ms=$ps_ms"
   echo "rm_all_ms=$rm_ms"
 } >"$out/scale-$tool.env"

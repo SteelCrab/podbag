@@ -23,15 +23,24 @@ impl Service {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        let service = Service { child, socket };
-        assert!(
-            wait_for(Duration::from_secs(10), || curl(
-                &service.socket,
-                &["/_ping"]
-            )
-            .0 == "OK"),
-            "the service did not answer"
-        );
+        let mut service = Service { child, socket };
+        if !wait_for(Duration::from_secs(10), || {
+            curl(&service.socket, &["/_ping"]).0 == "OK"
+        }) {
+            // What the service says about it, for the test's output.
+            let last = curl(&service.socket, &["/_ping"]);
+            let state = service.child.try_wait();
+            let _ = service.child.kill();
+            let mut said = String::new();
+            if let Some(mut err) = service.child.stderr.take() {
+                use std::io::Read;
+                let _ = err.read_to_string(&mut said);
+            }
+            panic!(
+                "the service did not answer (its state: {state:?}; it said: {said:?}; \
+                 the last answer: {last:?})"
+            );
+        }
         service
     }
 

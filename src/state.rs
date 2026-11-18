@@ -218,38 +218,122 @@ pub fn list_ids(dirs: &Dirs) -> Result<Vec<String>> {
     Ok(ids)
 }
 
+/// The name of container `id`, read without the rest of its settings (finding a
+/// container by name looks at every container).
+pub fn name_of(dirs: &Dirs, id: &str) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Named {
+        name: String,
+    }
+    id::check(id).ok()?;
+    let bytes = std::fs::read(dirs.container_dir(id).join(CONFIG)).ok()?;
+    serde_json::from_slice::<Named>(&bytes).ok().map(|n| n.name)
+}
+
+fn not_found(name_or_id: &str) -> Error {
+    Error::new(
+        ErrorKind::NotFound,
+        format!("cannot find container {name_or_id}"),
+        "no container has this name or ID",
+        "run `openpod ps -a` to list containers",
+    )
+}
+
+/// Finds several containers by name or ID with one look at the container list: a
+/// command that names many containers must not read all of them again for each.
+pub struct Lookup {
+    dirs: Dirs,
+    /// The IDs when the first container was asked for, sorted.
+    ids: Option<Vec<String>>,
+    /// Name to ID, read when a name is first asked for.
+    names: Option<std::collections::HashMap<String, String>>,
+}
+
+impl Lookup {
+    pub fn new(dirs: &Dirs) -> Lookup {
+        Lookup {
+            dirs: dirs.clone(),
+            ids: None,
+            names: None,
+        }
+    }
+
+    /// As [`resolve`]. A container that was removed after the first call is not found.
+    pub fn resolve(&mut self, name_or_id: &str) -> Result<String> {
+        let Lookup { dirs, ids, names } = self;
+        let ids: &Vec<String> = match ids {
+            Some(ids) => ids,
+            None => ids.insert(list_ids(dirs)?),
+        };
+        // The command that asks may have removed it since the list was read.
+        let still_there = |id: &str| dirs.container_dir(id).is_dir();
+        let found = |id: &str| {
+            if still_there(id) {
+                Ok(id.to_string())
+            } else {
+                Err(not_found(name_or_id))
+            }
+        };
+        if ids.binary_search_by(|i| i.as_str().cmp(name_or_id)).is_ok() {
+            return found(name_or_id);
+        }
+        let names = names.get_or_insert_with(|| {
+            // The first container of a name wins, as in `resolve` (IDs are sorted).
+            let mut names = std::collections::HashMap::new();
+            for id in ids {
+                if let Some(name) = name_of(dirs, id) {
+                    names.entry(name).or_insert_with(|| id.clone());
+                }
+            }
+            names
+        });
+        if let Some(id) = names.get(name_or_id) {
+            return found(id);
+        }
+        if name_or_id.len() < 4 {
+            return Err(not_found(name_or_id));
+        }
+        let matches: Vec<&String> = ids
+            .iter()
+            .filter(|i| i.starts_with(name_or_id) && still_there(i))
+            .collect();
+        match matches.as_slice() {
+            [one] => Ok((*one).clone()),
+            [] => Err(not_found(name_or_id)),
+            _ => Err(ambiguous(name_or_id)),
+        }
+    }
+}
+
+fn ambiguous(name_or_id: &str) -> Error {
+    Error::new(
+        ErrorKind::InvalidInput,
+        format!("cannot choose container {name_or_id}"),
+        format!("{name_or_id} matches more than one container"),
+        "give more characters of the ID, or use the name",
+    )
+}
+
 /// Find a container by full ID, name, or ID prefix of at least 4 characters.
 pub fn resolve(dirs: &Dirs, name_or_id: &str) -> Result<String> {
-    let not_found = || {
-        Error::new(
-            ErrorKind::NotFound,
-            format!("cannot find container {name_or_id}"),
-            "no container has this name or ID",
-            "run `openpod ps -a` to list containers",
-        )
-    };
-    let ids = list_ids(dirs)?;
-    if ids.iter().any(|i| i == name_or_id) {
+    // A full ID needs no look at the others.
+    if id::is_valid(name_or_id) && dirs.container_dir(name_or_id).is_dir() {
         return Ok(name_or_id.to_string());
     }
+    let ids = list_ids(dirs)?;
     for i in &ids {
-        if read_config(dirs, i).is_ok_and(|c| c.name == name_or_id) {
+        if name_of(dirs, i).is_some_and(|name| name == name_or_id) {
             return Ok(i.clone());
         }
     }
     if name_or_id.len() < 4 {
-        return Err(not_found());
+        return Err(not_found(name_or_id));
     }
     let matches: Vec<&String> = ids.iter().filter(|i| i.starts_with(name_or_id)).collect();
     match matches.as_slice() {
         [one] => Ok((*one).clone()),
-        [] => Err(not_found()),
-        _ => Err(Error::new(
-            ErrorKind::InvalidInput,
-            format!("cannot choose container {name_or_id}"),
-            format!("{name_or_id} matches more than one container"),
-            "give more characters of the ID, or use the name",
-        )),
+        [] => Err(not_found(name_or_id)),
+        _ => Err(ambiguous(name_or_id)),
     }
 }
 
@@ -285,7 +369,7 @@ pub fn create(dirs: &Dirs, spec: &ContainerSpec) -> Result<()> {
         )
     })?;
     for other in list_ids(dirs)? {
-        if read_config(dirs, &other).is_ok_and(|c| c.name == spec.name) {
+        if name_of(dirs, &other).is_some_and(|name| name == spec.name) {
             return Err(Error::new(
                 ErrorKind::Conflict,
                 format!("cannot create container {}", spec.name),
@@ -477,6 +561,77 @@ mod tests {
         };
         write_state(&dirs, &spec.id, &st).unwrap();
         assert_eq!(read_state(&dirs, &spec.id).unwrap(), st);
+    }
+
+    #[test]
+    fn the_name_is_read_without_the_other_settings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = dirs_in(tmp.path());
+        create(&dirs, &spec_named('a', "web")).unwrap();
+        let a = "a".repeat(64);
+        assert_eq!(name_of(&dirs, &a).as_deref(), Some("web"));
+        // Settings that this version cannot read in full still give their name.
+        let path = dirs.container_dir(&a).join(CONFIG);
+        std::fs::write(
+            &path,
+            br#"{"name":"odd","rootfs":17,"later":{"name":"inner"}}"#,
+        )
+        .unwrap();
+        assert_eq!(name_of(&dirs, &a).as_deref(), Some("odd"));
+        assert!(read_config(&dirs, &a).is_err());
+        std::fs::write(&path, b"not json").unwrap();
+        assert_eq!(name_of(&dirs, &a), None);
+        assert_eq!(name_of(&dirs, &"b".repeat(64)), None);
+        assert_eq!(name_of(&dirs, "../../etc"), None);
+    }
+
+    #[test]
+    fn a_lookup_reads_the_names_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = dirs_in(tmp.path());
+        create(&dirs, &spec_named('a', "web")).unwrap();
+        create(&dirs, &spec_named('b', "db")).unwrap();
+        let mut other = spec_named('c', "cache");
+        other.id = format!("ab{}", "c".repeat(62));
+        create(&dirs, &other).unwrap();
+        let (a, b) = ("a".repeat(64), "b".repeat(64));
+        let mut lookup = Lookup::new(&dirs);
+        assert_eq!(lookup.resolve("web").unwrap(), a);
+        // From here on the names come from what the first look found.
+        for id in [&a, &b, &other.id] {
+            std::fs::remove_file(dirs.container_dir(id).join(CONFIG)).unwrap();
+        }
+        assert_eq!(lookup.resolve("db").unwrap(), b);
+        assert_eq!(lookup.resolve(&b).unwrap(), b);
+        assert_eq!(lookup.resolve("abcc").unwrap(), other.id);
+        assert_eq!(lookup.resolve("aaaa").unwrap(), a);
+        // The same answers as `resolve` for what cannot be found or chosen.
+        assert_eq!(lookup.resolve("aaa").unwrap_err().kind, ErrorKind::NotFound);
+        let e = lookup.resolve("nope").unwrap_err();
+        assert_eq!(e.what, "cannot find container nope");
+        let mut twin = spec_named('d', "twin");
+        twin.id = format!("ab{}", "d".repeat(62));
+        create(&dirs, &twin).unwrap();
+        let mut fresh = Lookup::new(&dirs);
+        assert_eq!(fresh.resolve("abcc").unwrap(), other.id);
+        assert_eq!(fresh.resolve("ab").unwrap_err().kind, ErrorKind::NotFound);
+        assert_eq!(
+            fresh.resolve(&"ab".repeat(2)).unwrap_err().kind,
+            ErrorKind::NotFound
+        );
+        // A container that was removed meanwhile is not found, by name or by ID.
+        remove_container_dir(&dirs, &b).unwrap();
+        assert_eq!(
+            lookup.resolve("db").unwrap_err().what,
+            "cannot find container db"
+        );
+        assert_eq!(lookup.resolve(&b).unwrap_err().kind, ErrorKind::NotFound);
+        // A name wins over an ID prefix, as in `resolve`.
+        let mut named = spec_named('e', "aaaa");
+        named.id = "e".repeat(64);
+        create(&dirs, &named).unwrap();
+        assert_eq!(Lookup::new(&dirs).resolve("aaaa").unwrap(), named.id);
+        assert_eq!(resolve(&dirs, "aaaa").unwrap(), named.id);
     }
 
     #[test]

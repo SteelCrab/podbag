@@ -98,14 +98,71 @@ pub fn logs(target: &str, follow: bool) -> i32 {
 }
 
 pub fn rm(targets: &[String], force: bool, volumes: bool) -> i32 {
-    each(targets, |h| {
+    let remove = |h: &ContainerHandle| {
         let removed = if volumes {
             h.remove_with_volumes(force)
         } else {
             h.remove(force)
         };
         removed.map(|()| println!("{}", h.id()))
-    })
+    };
+    if !force || targets.len() < 2 {
+        return each(targets, remove);
+    }
+    // With several containers to end: all of them first, so that what follows each end
+    // (the state, the network address, the cgroup) happens for all at the same time, not
+    // for one after another.
+    const SIGKILL: i32 = 9;
+    let dirs = openpod::paths::dirs().ok();
+    let mut lookup = ContainerHandle::lookup().ok();
+    // Each container that is there now, and whether it removes itself when it ends
+    // (`--rm`): only such a one may be gone before its turn comes.
+    let found: Vec<Option<(ContainerHandle, bool)>> = targets
+        .iter()
+        .map(|t| {
+            let handle = lookup.as_mut()?.get(t).ok()?;
+            let removes_itself = dirs.as_ref().is_some_and(|d| {
+                openpod::state::read_config(d, handle.id()).is_ok_and(|c| c.auto_remove)
+            });
+            Some((handle, removes_itself))
+        })
+        .collect();
+    for (h, _) in found.iter().flatten() {
+        // One that does not run says so when it is removed, below.
+        let _ = h.kill(SIGKILL);
+    }
+    let gone = |h: &ContainerHandle| matches!(ContainerHandle::get(h.id()), Err(e) if e.kind == openpod::ErrorKind::NotFound);
+    let mut code = 0;
+    let mut done = std::collections::HashSet::new();
+    for (t, entry) in targets.iter().zip(&found) {
+        let result = match entry {
+            Some((h, removes_itself)) if done.insert(h.id().to_string()) => match remove(h) {
+                // It removes itself (and its anonymous volumes) now that it has ended,
+                // perhaps at this very moment: when it is gone, that is what was asked
+                // for. Its own removal gets a moment; then one more try.
+                Err(first) if *removes_itself => {
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                    loop {
+                        if gone(h) {
+                            println!("{}", h.id());
+                            break Ok(());
+                        }
+                        if std::time::Instant::now() >= deadline {
+                            break remove(h).map_err(|_| first);
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                }
+                removed => removed,
+            },
+            // Not there when the command began, or named a second time: the usual answer.
+            _ => ContainerHandle::get(t).and_then(|h| remove(&h)),
+        };
+        if let Err(e) = result {
+            code = report(&e);
+        }
+    }
+    code
 }
 
 /// `openpod start`: in the background, or with `-a` attached to this terminal (one
@@ -217,8 +274,14 @@ pub fn exec(a: ExecArgs) -> i32 {
 /// Apply `f` to each container; report errors and keep going, like Docker.
 fn each(targets: &[String], f: impl Fn(&ContainerHandle) -> openpod::Result<()>) -> i32 {
     let mut code = 0;
+    // One look at the container list for all of them.
+    let mut lookup = ContainerHandle::lookup().ok();
     for t in targets {
-        if let Err(e) = ContainerHandle::get(t).and_then(|h| f(&h)) {
+        let handle = match &mut lookup {
+            Some(lookup) => lookup.get(t),
+            None => ContainerHandle::get(t),
+        };
+        if let Err(e) = handle.and_then(|h| f(&h)) {
             code = report(&e);
         }
     }
