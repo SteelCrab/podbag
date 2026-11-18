@@ -81,6 +81,8 @@ fn dispatch(cmd: Cmd) -> i32 {
         }
         Cmd::Store { op } => openpod::store::ops::helper_main(&op),
         Cmd::Session => session_helper(),
+        Cmd::Restarter { id } => openpod::restart::restart_main(&id),
+        Cmd::Probe { id, start_period } => openpod::health::probe_main(&id, start_period),
     }
 }
 

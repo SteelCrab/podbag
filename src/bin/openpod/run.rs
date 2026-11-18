@@ -64,6 +64,8 @@ pub fn foreground(
 
 /// The container `run` and `create` describe.
 fn build(args: RunArgs) -> openpod::Result<Container> {
+    // Read before the arguments are taken apart below.
+    let health = health_settings(&args)?;
     let mut c = match args.rootfs {
         Some(rootfs) => Container::from_rootfs(rootfs).command(args.args),
         None => {
@@ -88,6 +90,12 @@ fn build(args: RunArgs) -> openpod::Result<Container> {
         .interactive(args.interactive)
         .remove_on_exit(args.rm)
         .tty(args.tty);
+    if let Some(policy) = &args.restart {
+        c = c.restart(policy.parse()?);
+    }
+    if let Some(settings) = health {
+        c = c.health(settings);
+    }
     if let Some(n) = args.name {
         c = c.name(n);
     }
@@ -125,8 +133,20 @@ fn build(args: RunArgs) -> openpod::Result<Container> {
     for name in args.cap_drop {
         c = c.cap_drop(name);
     }
-    if let Some(n) = &args.network {
+    let mut networks = args.network.iter();
+    if let Some(n) = networks.next() {
         c = c.network(openpod::network::parse_network_arg(n)?);
+    }
+    for n in networks {
+        // `host` and `none` stay as given: the check refuses them with a reason.
+        let name = match openpod::network::parse_network_arg(n)? {
+            openpod::network::NetworkMode::Bridge { network } => network,
+            _ => n.clone(),
+        };
+        c = c.extra_network(name, Vec::new());
+    }
+    for alias in &args.network_alias {
+        c = c.network_alias(alias.clone());
     }
     for p in &args.publish {
         c = c.publish(openpod::network::parse_publish_arg(p)?);
@@ -155,4 +175,46 @@ pub fn raw_terminal() -> Option<openpod::linux::pty::RawMode> {
 #[cfg(not(target_os = "linux"))]
 pub fn raw_terminal() -> Option<()> {
     None
+}
+
+/// The `--health-*` options: None when none was given (the image's check, if any).
+fn health_settings(args: &RunArgs) -> openpod::Result<Option<openpod::health::HealthSettings>> {
+    use openpod::health::{HealthSettings, parse_duration};
+    let given = args.health_cmd.is_some()
+        || args.health_interval.is_some()
+        || args.health_timeout.is_some()
+        || args.health_retries.is_some()
+        || args.health_start_period.is_some()
+        || args.health_start_interval.is_some();
+    if args.no_healthcheck {
+        if given {
+            return Err(openpod::Error::new(
+                openpod::ErrorKind::InvalidInput,
+                "cannot run the container",
+                "--no-healthcheck does not go with the --health options",
+                "drop one of them",
+            ));
+        }
+        return Ok(Some(HealthSettings::none()));
+    }
+    if !given {
+        return Ok(None);
+    }
+    let ms = |text: &Option<String>| -> openpod::Result<Option<u64>> {
+        text.as_deref()
+            .map(|t| parse_duration(t).map(|d| d.as_millis() as u64))
+            .transpose()
+    };
+    Ok(Some(HealthSettings {
+        test: args
+            .health_cmd
+            .as_ref()
+            .map(|cmd| vec!["CMD-SHELL".to_string(), cmd.clone()])
+            .unwrap_or_default(),
+        interval_ms: ms(&args.health_interval)?,
+        timeout_ms: ms(&args.health_timeout)?,
+        retries: args.health_retries,
+        start_period_ms: ms(&args.health_start_period)?,
+        start_interval_ms: ms(&args.health_start_interval)?,
+    }))
 }

@@ -5,11 +5,12 @@
 use crate::network::NetworkMode;
 use std::net::Ipv4Addr;
 
-/// The container's own line in `/etc/hosts`.
-#[derive(Debug, Clone, Copy)]
+/// What a container's `/etc/hosts` is made of.
+#[derive(Debug, Clone)]
 pub enum Own<'a> {
-    /// A bridge container: its name, hostname and address.
-    Address(&'a str, &'a str, Ipv4Addr),
+    /// A bridge container: its whole file, made from the network records
+    /// (`network::hosts_text`).
+    Bridge(String),
     /// The host's network: the host's file, plus the hostname.
     Host(&'a str),
     /// No network: loopback only, plus the hostname.
@@ -18,10 +19,10 @@ pub enum Own<'a> {
 
 const LOCALHOST: &str = "127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n";
 
-/// `/etc/hosts`. `peers` are the other containers on the same network (by name); the
-/// container itself is skipped among them.
-pub fn hosts_file(own: Own<'_>, peers: &[(String, Ipv4Addr)], host_hosts: &str) -> String {
+/// `/etc/hosts`. `host_hosts` is the host's file, for the host's network.
+pub fn hosts_file(own: &Own<'_>, host_hosts: &str) -> String {
     match own {
+        Own::Bridge(text) => text.clone(),
         Own::Host(hostname) => {
             let mut text = host_hosts.to_string();
             if !text.is_empty() && !text.ends_with('\n') {
@@ -31,23 +32,34 @@ pub fn hosts_file(own: Own<'_>, peers: &[(String, Ipv4Addr)], host_hosts: &str) 
             text
         }
         Own::Loopback(hostname) => format!("{LOCALHOST}127.0.1.1\t{hostname}\n"),
-        Own::Address(name, hostname, ip) => {
-            let mut text = LOCALHOST.to_string();
-            if name == hostname {
-                text.push_str(&format!("{ip}\t{hostname}\n"));
-            } else {
-                text.push_str(&format!("{ip}\t{hostname} {name}\n"));
-            }
-            for (peer, peer_ip) in peers.iter().filter(|(p, _)| p != name) {
-                text.push_str(&format!("{peer_ip}\t{peer}\n"));
-            }
-            text
-        }
     }
 }
 
-/// One `address<TAB>name` line for each container of a user network: the part of
-/// `/etc/hosts` that all of them share. Made once for a refresh of all their files.
+/// One container of a user network as the others see it: its address and names.
+pub struct Peer<'a> {
+    pub ip: Ipv4Addr,
+    pub name: &'a str,
+    /// Further names on this network (`--network-alias`).
+    pub aliases: &'a [String],
+}
+
+/// `names`, space-separated, each once, at the end of `text` (where the line's names
+/// begin).
+fn push_names<'a>(text: &mut String, names: impl Iterator<Item = &'a str>) {
+    let start = text.len();
+    for name in names {
+        if text[start..].split(' ').any(|written| written == name) {
+            continue;
+        }
+        if text.len() > start {
+            text.push(' ');
+        }
+        text.push_str(name);
+    }
+}
+
+/// One `address<TAB>name aliases…` line for each container of a user network: the part
+/// of `/etc/hosts` that all of them share. Made once for a refresh of all their files.
 pub struct PeerBlock {
     text: String,
     /// Where each peer's line ends in `text`, in the order of the peers.
@@ -55,37 +67,69 @@ pub struct PeerBlock {
 }
 
 impl PeerBlock {
-    pub fn new(peers: &[(String, Ipv4Addr)]) -> PeerBlock {
+    pub fn new(peers: &[Peer<'_>]) -> PeerBlock {
         use std::fmt::Write;
         let mut text = String::with_capacity(peers.len() * 32);
         let mut ends = Vec::with_capacity(peers.len());
-        for (name, ip) in peers {
-            let _ = writeln!(text, "{ip}\t{name}");
+        for p in peers {
+            let _ = write!(text, "{}\t", p.ip);
+            push_names(
+                &mut text,
+                std::iter::once(p.name).chain(p.aliases.iter().map(String::as_str)),
+            );
+            text.push('\n');
             ends.push(text.len());
         }
         PeerBlock { text, ends }
     }
 
-    /// `/etc/hosts` of peer number `index` (its place in the list given to `new`): the
-    /// localhost lines, its own line with `hostname`, then the other peers. The same text
-    /// as [`hosts_file`] gives for it.
-    pub fn hosts_of(&self, index: usize, name: &str, hostname: &str, ip: Ipv4Addr) -> String {
-        let start = index
-            .checked_sub(1)
+    /// The block without the line of the peer at `place` (its place in the list given to
+    /// `new`), in two pieces. A place that is not in the list leaves every line in.
+    fn without(&self, place: Option<usize>) -> (&str, &str) {
+        let Some(end) = place.and_then(|i| self.ends.get(i).copied()) else {
+            return (&self.text, "");
+        };
+        let start = place
+            .and_then(|i| i.checked_sub(1))
             .and_then(|before| self.ends.get(before).copied())
             .unwrap_or(0);
-        let end = self.ends.get(index).copied().unwrap_or(start);
-        let mut text = String::with_capacity(LOCALHOST.len() + 64 + self.text.len());
-        text.push_str(LOCALHOST);
-        if name == hostname {
-            text.push_str(&format!("{ip}\t{hostname}\n"));
-        } else {
-            text.push_str(&format!("{ip}\t{hostname} {name}\n"));
-        }
-        text.push_str(self.text.get(..start).unwrap_or_default());
-        text.push_str(self.text.get(end..).unwrap_or_default());
-        text
+        (
+            self.text.get(..start).unwrap_or_default(),
+            self.text.get(end..).unwrap_or_default(),
+        )
     }
+}
+
+/// `/etc/hosts` of a container on bridge networks: the localhost lines, a line of its own
+/// on each network (`own`: its address there and its aliases there, its primary network
+/// first: the hostname resolves to that one), then the other containers of each of its
+/// user networks (`lists`: the network's block and the container's own place in it).
+pub fn bridge_hosts(
+    hostname: &str,
+    name: &str,
+    own: &[(Ipv4Addr, &[String])],
+    lists: &[(&PeerBlock, Option<usize>)],
+) -> String {
+    use std::fmt::Write;
+    let shared: usize = lists.iter().map(|(block, _)| block.text.len()).sum();
+    let mut text = String::with_capacity(LOCALHOST.len() + 64 * own.len() + shared);
+    text.push_str(LOCALHOST);
+    for (ip, aliases) in own {
+        let _ = write!(text, "{ip}\t");
+        push_names(
+            &mut text,
+            [hostname, name]
+                .into_iter()
+                .chain(aliases.iter().map(String::as_str)),
+        );
+        text.push('\n');
+    }
+    for (block, place) in lists {
+        let (before, after) = block.without(*place);
+        text.push_str(before);
+        text.push_str(after);
+    }
+    text
 }
 
 /// The DNS server pasta answers on in a rootless network (`--dns-forward`).
@@ -158,66 +202,103 @@ mod tests {
 
     const LOCAL: &str = "127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n";
 
+    fn peer<'a>(name: &'a str, ip: [u8; 4], aliases: &'a [String]) -> Peer<'a> {
+        Peer {
+            ip: Ipv4Addr::from(ip),
+            name,
+            aliases,
+        }
+    }
+
+    fn strings(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
     #[test]
-    fn hosts_for_a_bridge_container_lists_its_peers() {
-        let peers = vec![
-            ("db".to_string(), Ipv4Addr::new(10, 78, 1, 2)),
-            ("web".to_string(), Ipv4Addr::new(10, 78, 1, 3)),
+    fn hosts_lines_carry_aliases() {
+        // Its name once, each alias once.
+        let web = strings(&["front", "web", "front"]);
+        let peers = [
+            peer("db", [10, 78, 1, 2], &[]),
+            peer("web", [10, 78, 1, 3], &web),
         ];
-        let text = hosts_file(
-            Own::Address("web", "abc123", Ipv4Addr::new(10, 78, 1, 3)),
-            &peers,
-            "",
-        );
-        assert!(text.starts_with(LOCAL), "{text}");
-        assert!(text.contains("10.78.1.3\tabc123 web\n"), "{text}");
-        assert!(text.contains("10.78.1.2\tdb\n"), "{text}");
+        let block = PeerBlock::new(&peers);
+        let own = Ipv4Addr::new(10, 78, 1, 2);
         assert_eq!(
-            text.matches("10.78.1.3").count(),
-            1,
-            "own entry once: {text}"
+            bridge_hosts("db", "db", &[(own, &[])], &[(&block, Some(0))]),
+            format!("{LOCAL}10.78.1.2\tdb\n10.78.1.3\tweb front\n")
         );
     }
 
     #[test]
-    fn the_block_gives_the_same_file_as_the_peer_list() {
-        let peers = vec![
-            ("db".to_string(), Ipv4Addr::new(10, 78, 1, 2)),
-            ("web".to_string(), Ipv4Addr::new(10, 78, 1, 3)),
-            ("web2".to_string(), Ipv4Addr::new(10, 78, 1, 13)),
-        ];
+    fn the_own_line_carries_the_own_aliases() {
+        let aliases = strings(&["api", "abc123", "web", "api"]);
+        let peers = [peer("web", [10, 78, 1, 3], &aliases)];
         let block = PeerBlock::new(&peers);
-        for (index, (name, ip)) in peers.iter().enumerate() {
-            // A hostname of its own, and the name as the hostname.
-            for hostname in ["abc123", name.as_str()] {
-                assert_eq!(
-                    block.hosts_of(index, name, hostname, *ip),
-                    hosts_file(Own::Address(name, hostname, *ip), &peers, ""),
-                    "{name} as {hostname}"
-                );
-            }
-        }
-        // A place that is not in the list leaves every peer in (and does not panic).
-        let ip = Ipv4Addr::new(10, 78, 1, 9);
+        let own = Ipv4Addr::new(10, 78, 1, 3);
         assert_eq!(
-            block.hosts_of(7, "new", "new", ip),
-            hosts_file(Own::Address("new", "new", ip), &peers, "")
+            bridge_hosts("abc123", "web", &[(own, &aliases)], &[(&block, Some(0))]),
+            format!("{LOCAL}10.78.1.3\tabc123 web api\n")
+        );
+    }
+
+    #[test]
+    fn a_container_on_two_networks_has_a_line_on_each_and_both_lists() {
+        let w = strings(&["w"]);
+        let front = [
+            peer("web", [10, 1, 0, 2], &[]),
+            peer("db", [10, 1, 0, 3], &[]),
+        ];
+        let back = [
+            peer("cache", [10, 2, 0, 2], &[]),
+            peer("web", [10, 2, 0, 3], &w),
+        ];
+        let (front, back) = (PeerBlock::new(&front), PeerBlock::new(&back));
+        let own = [
+            (Ipv4Addr::new(10, 1, 0, 2), &[][..]),
+            (Ipv4Addr::new(10, 2, 0, 3), &w[..]),
+        ];
+        assert_eq!(
+            bridge_hosts("web", "web", &own, &[(&front, Some(0)), (&back, Some(1))]),
+            format!("{LOCAL}10.1.0.2\tweb\n10.2.0.3\tweb w\n10.1.0.3\tdb\n10.2.0.2\tcache\n")
+        );
+    }
+
+    #[test]
+    fn a_place_outside_the_block_leaves_every_peer_in() {
+        let peers = [peer("db", [10, 78, 1, 2], &[])];
+        let block = PeerBlock::new(&peers);
+        let ip = Ipv4Addr::new(10, 78, 1, 9);
+        let all = format!("{LOCAL}10.78.1.9\tnew\n10.78.1.2\tdb\n");
+        assert_eq!(
+            bridge_hosts("new", "new", &[(ip, &[])], &[(&block, Some(7))]),
+            all
+        );
+        assert_eq!(
+            bridge_hosts("new", "new", &[(ip, &[])], &[(&block, None)]),
+            all
         );
         let none = PeerBlock::new(&[]);
         assert_eq!(
-            none.hosts_of(0, "a", "a", ip),
-            hosts_file(Own::Address("a", "a", ip), &[], "")
+            bridge_hosts("a", "a", &[(ip, &[])], &[(&none, Some(0))]),
+            format!("{LOCAL}10.78.1.9\ta\n")
         );
     }
 
     #[test]
     fn the_own_line_comes_first() {
         // Two containers with one hostname: each resolves it to itself.
-        let peers = vec![
-            ("a".to_string(), Ipv4Addr::new(10, 78, 1, 2)),
-            ("b".to_string(), Ipv4Addr::new(10, 78, 1, 3)),
+        let peers = [
+            peer("a", [10, 78, 1, 2], &[]),
+            peer("b", [10, 78, 1, 3], &[]),
         ];
-        let text = PeerBlock::new(&peers).hosts_of(1, "b", "same", Ipv4Addr::new(10, 78, 1, 3));
+        let own = Ipv4Addr::new(10, 78, 1, 3);
+        let text = bridge_hosts(
+            "same",
+            "b",
+            &[(own, &[])],
+            &[(&PeerBlock::new(&peers), Some(1))],
+        );
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.get(2), Some(&"10.78.1.3\tsame b"), "{text}");
         assert_eq!(lines.get(3), Some(&"10.78.1.2\ta"), "{text}");
@@ -227,11 +308,14 @@ mod tests {
     #[test]
     fn hosts_for_host_and_none() {
         let host = "127.0.0.1 localhost\n192.168.5.15 lima\n";
-        let text = hosts_file(Own::Host("box"), &[], host);
+        let text = hosts_file(&Own::Host("box"), host);
         assert!(text.starts_with(host), "{text}");
         assert!(text.ends_with("127.0.1.1\tbox\n"), "{text}");
-        let text = hosts_file(Own::Loopback("box"), &[], host);
+        let text = hosts_file(&Own::Loopback("box"), host);
         assert_eq!(text, format!("{LOCAL}127.0.1.1\tbox\n"));
+        // A bridge container's file is made from the network records.
+        let made = "made\n".to_string();
+        assert_eq!(hosts_file(&Own::Bridge(made.clone()), host), made);
     }
 
     #[test]

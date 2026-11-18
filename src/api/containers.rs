@@ -3,7 +3,9 @@
 use super::create::container_from_create;
 use super::docker::{docker_image_name, docker_repo, epoch_of, state_name};
 use super::http::{Request, client_gone, peer_closed};
-use super::router::{Ctx, Reply, check_filters, message, not_supported, reply_error};
+use super::router::{
+    Ctx, Reply, check_filters, label_matches, labels_match, message, not_supported, reply_error,
+};
 use super::shapes::{self, Facts};
 use super::stream::{self, Exit, Wanted, frame};
 use crate::containers::ContainerInfo;
@@ -112,9 +114,33 @@ fn create(req: &Request) -> Reply {
 
 /// The container's Docker shape (`shapes::list_entry` or `shapes::inspect`).
 fn shape(ctx: &Ctx, info: &ContainerInfo, spec: &ContainerSpec, f: fn(&Facts) -> Value) -> Value {
-    let network = match &spec.network {
-        NetworkMode::Bridge { network } => crate::network::get_in(&ctx.dirs, network).ok(),
-        _ => None,
+    let alone = |name| shapes::Attached {
+        name,
+        network: None,
+        ip: None,
+        aliases: &[],
+    };
+    let networks: Vec<shapes::Attached> = match &spec.network {
+        NetworkMode::Bridge { .. } => spec
+            .bridge_networks()
+            .into_iter()
+            .enumerate()
+            .map(|(index, name)| {
+                let (network, ip) = match crate::network::with_address_of(&ctx.dirs, name, &info.id)
+                {
+                    Ok((network, ip)) => (Some(network), ip),
+                    Err(_) => (None, None),
+                };
+                shapes::Attached {
+                    name,
+                    network,
+                    ip,
+                    aliases: spec.aliases_on(index),
+                }
+            })
+            .collect(),
+        NetworkMode::Host => vec![alone("host")],
+        NetworkMode::None => vec![alone("none")],
     };
     let dir = ctx.dirs.container_dir(&info.id);
     let volumes = ctx.dirs.data.join("volumes");
@@ -124,10 +150,12 @@ fn shape(ctx: &Ctx, info: &ContainerInfo, spec: &ContainerSpec, f: fn(&Facts) ->
         state: &info.state,
         image: &image,
         mounts: &info.mounts,
-        network: network.as_ref(),
+        networks: &networks,
         dir: &dir,
         volumes: &volumes,
         now: state::now(),
+        restart_count: crate::restart::record(&ctx.dirs, &info.id).count,
+        health: info.health.as_ref(),
     })
 }
 
@@ -151,13 +179,6 @@ fn name_matches(pattern: &str, name: &str) -> bool {
     }
 }
 
-fn label_matches(want: &str, labels: &BTreeMap<String, String>) -> bool {
-    match want.split_once('=') {
-        Some((k, v)) => labels.get(k).is_some_and(|x| x == v),
-        None => labels.contains_key(want),
-    }
-}
-
 /// Docker's container filters: labels must all match; other values of one key are
 /// alternatives.
 fn matches(
@@ -170,6 +191,10 @@ fn matches(
         "name" => values.iter().any(|v| name_matches(v, &spec.name)),
         "id" => values.iter().any(|v| info.id.starts_with(v.as_str())),
         "status" => values.iter().any(|v| v == state_name(info.state.status)),
+        "health" => {
+            let health = info.health.as_ref().map_or("none", |h| h.status.name());
+            values.iter().any(|v| v == health)
+        }
         "exited" => values
             .iter()
             .any(|v| info.state.status == Status::Exited && v.parse().ok() == info.state.exit_code),
@@ -185,7 +210,9 @@ fn matches(
 fn check_list_filters(filters: &BTreeMap<String, Vec<String>>) -> Result<(), Reply> {
     check_filters(
         filters,
-        &["label", "name", "id", "status", "exited", "ancestor"],
+        &[
+            "label", "name", "id", "status", "exited", "ancestor", "health",
+        ],
         &[
             "before",
             "since",
@@ -193,7 +220,6 @@ fn check_list_filters(filters: &BTreeMap<String, Vec<String>>) -> Result<(), Rep
             "network",
             "publish",
             "expose",
-            "health",
             "isolation",
             "is-task",
         ],
@@ -693,13 +719,7 @@ fn prune(req: &Request) -> Reply {
             .and_then(|d| state::read_config(&d, &info.id).ok())
             .map(|s| s.labels)
             .unwrap_or_default();
-        let keep = filters
-            .get("label")
-            .is_some_and(|w| !w.iter().all(|w| label_matches(w, &labels)))
-            || filters
-                .get("label!")
-                .is_some_and(|w| w.iter().any(|w| label_matches(w, &labels)));
-        if keep {
+        if !labels_match(&labels, &filters) {
             continue;
         }
         if ContainerHandle::get(&info.id)

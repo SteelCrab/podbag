@@ -36,6 +36,12 @@ pub struct ContainerInfo {
     /// Volumes, host paths and tmpfs mounts.
     #[serde(default)]
     pub mounts: Vec<MountInfo>,
+    /// How many times its restart policy started it again since the user last started it.
+    #[serde(default)]
+    pub restart_count: u32,
+    /// Its health since its last start, when it has a check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health: Option<crate::health::Health>,
 }
 
 /// One mount of a container, as `inspect` shows it.
@@ -147,6 +153,8 @@ impl ContainerHandle {
     }
 
     fn kill_in(&self, dirs: &Dirs, signal: i32) -> Result<()> {
+        // Before the signal: whoever cleans up after the end must see it.
+        crate::restart::mark_stopped(dirs, &self.id);
         match control::send(
             dirs,
             &self.id,
@@ -191,7 +199,7 @@ impl ContainerHandle {
     }
 
     fn stop_in(&self, dirs: &Dirs, timeout: Duration) -> Result<i32> {
-        if self.kill_in(dirs, libc::SIGTERM).is_err() {
+        if self.kill_in(dirs, libc::SIGTERM).is_err() && !self.signal_a_start(dirs, libc::SIGTERM) {
             // Already ended, or ending: the shim (if still there) or the state has the code.
             return self.wait_in(dirs);
         }
@@ -268,6 +276,7 @@ impl ContainerHandle {
             use crate::helper::Io;
             let dirs = paths::dirs()?;
             self.refuse_running()?;
+            crate::restart::user_started(&dirs, &self.id);
             let mut helper = crate::container::start_shim(
                 &dirs,
                 &self.id,
@@ -299,6 +308,7 @@ impl ContainerHandle {
         {
             let dirs = paths::dirs()?;
             self.refuse_running()?;
+            crate::restart::user_started(&dirs, &self.id);
             let helper = crate::container::start_shim(
                 &dirs,
                 &self.id,
@@ -451,6 +461,149 @@ impl ContainerHandle {
         Ok(helper)
     }
 
+    /// A start under way (a restarter's) holds the shim lock before the container has a
+    /// control socket: send `signal` once it has one. False when the lock was let go first
+    /// (the start failed, or what held it was the cleanup of an ended run).
+    fn signal_a_start(&self, dirs: &Dirs, signal: i32) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if !state::shim_running(dirs, &self.id) || std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+            if self.kill_in(dirs, signal).is_ok() {
+                return true;
+            }
+            // One that runs and refuses the signal is ending, not starting.
+            if state::read_state(dirs, &self.id).is_ok_and(|s| s.status == Status::Running) {
+                return false;
+            }
+        }
+    }
+
+    /// Hold the container's shim lock for its removal: no start can begin while the
+    /// record goes. A start under way or the cleanup of an ended run holds it for a moment;
+    /// with `force`, what such a start began is killed. None when the directory went
+    /// meanwhile (a `--rm` container removed itself).
+    #[cfg(target_os = "linux")]
+    fn quiet(&self, dirs: &Dirs, force: bool) -> Result<Option<std::fs::File>> {
+        if force {
+            // A restarter that has not started it yet leaves it alone now.
+            crate::restart::mark_stopped(dirs, &self.id);
+        }
+        let short = crate::id::short_id(&self.id);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            match state::try_shim_lock(dirs, &self.id) {
+                Ok(Some(lock)) => return Ok(Some(lock)),
+                Ok(None) => {}
+                Err(_) if !dirs.container_dir(&self.id).exists() => return Ok(None),
+                Err(e) => return Err(e),
+            }
+            if force {
+                // Reaches what a start began, once it has a control socket.
+                let _ = self.kill_in(dirs, libc::SIGKILL);
+            } else if state::read_state(dirs, &self.id).is_ok_and(|s| s.status == Status::Running) {
+                return Err(Error::new(
+                    ErrorKind::Conflict,
+                    format!("cannot remove container {short}"),
+                    "it is running",
+                    "stop it first, or use `openpod rm -f`",
+                ));
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(Error::new(
+                    ErrorKind::Conflict,
+                    format!("cannot remove container {short}"),
+                    "a start, or the cleanup of its last run, did not end within 10 seconds",
+                    "try again",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Join bridge network `network` too, with `aliases` there, from the container's next
+    /// start on (`network connect`). A container that runs is refused: stop it first.
+    pub fn connect(&self, network: &str, aliases: &[String]) -> Result<()> {
+        let dirs = paths::dirs()?;
+        let network = match crate::network::parse_network_arg(network)? {
+            crate::network::NetworkMode::Bridge { network } => network,
+            _ => {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    format!(
+                        "cannot connect container {} to network {network}",
+                        self.short()
+                    ),
+                    format!("{network} is a network mode, not a network to join"),
+                    "connect it to a bridge network",
+                ));
+            }
+        };
+        crate::network::get_in(&dirs, &network)?;
+        state::change_settings(&dirs, &self.id, |spec| {
+            if spec.bridge_networks().contains(&network.as_str()) {
+                return Err(Error::new(
+                    ErrorKind::Conflict,
+                    format!(
+                        "cannot connect container {} to network {network}",
+                        self.short()
+                    ),
+                    "it is already connected to that network",
+                    "leave it as it is",
+                ));
+            }
+            spec.extra_networks.push(crate::spec::Attachment {
+                network: network.clone(),
+                aliases: aliases.to_vec(),
+            });
+            Ok(())
+        })
+    }
+
+    /// Leave network `network` from the container's next start on (`network disconnect`).
+    /// Its first network stays; a container that runs is refused.
+    pub fn disconnect(&self, network: &str) -> Result<()> {
+        let dirs = paths::dirs()?;
+        let network = match crate::network::parse_network_arg(network)? {
+            crate::network::NetworkMode::Bridge { network } => network,
+            _ => network.to_string(),
+        };
+        state::change_settings(&dirs, &self.id, |spec| {
+            if let Some(at) = spec
+                .extra_networks
+                .iter()
+                .position(|a| a.network == network)
+            {
+                spec.extra_networks.remove(at);
+                return Ok(());
+            }
+            let what = format!(
+                "cannot disconnect container {} from network {network}",
+                self.short()
+            );
+            if spec.bridge_networks().first() == Some(&network.as_str()) {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    what,
+                    "it is the container's first network",
+                    "create the container again with the networks it needs",
+                ));
+            }
+            Err(Error::new(
+                ErrorKind::NotFound,
+                what,
+                "it is not connected to that network",
+                "run `openpod inspect` to see its networks",
+            ))
+        })
+    }
+
+    fn short(&self) -> &str {
+        crate::id::short_id(&self.id)
+    }
+
     /// Delete the container. A running container is refused unless `force`, which kills it.
     pub fn remove(&self, force: bool) -> Result<()> {
         let dirs = paths::dirs()?;
@@ -471,6 +624,9 @@ impl ContainerHandle {
             let _ = self.wait();
             may_vanish = true;
         }
+        // Held while the record goes: a start (a restarter's too) cannot begin meanwhile.
+        #[cfg(target_os = "linux")]
+        let _quiet = self.quiet(&dirs, force)?;
         let gone = || may_vanish && !dirs.container_dir(&self.id).exists();
         // The last chance to find the container's cgroup: its record goes away now.
         #[cfg(target_os = "linux")]
@@ -536,6 +692,11 @@ fn info_of(dirs: &Dirs, id: &str) -> Result<ContainerInfo> {
         command: spec.command,
         state: st,
         mounts: spec.mounts.iter().map(MountInfo::from).collect(),
+        restart_count: crate::restart::record(dirs, id).count,
+        health: spec
+            .health
+            .as_ref()
+            .map(|_| crate::health::read(dirs, id).unwrap_or_default()),
     })
 }
 

@@ -193,6 +193,7 @@ mod kernel_tests {
             gateway: "10.76.3.1".into(),
             bridge: "opd-again".into(),
             created: 0,
+            labels: Default::default(),
         };
         // The table's lines in a fixed order: chains are listed in the order they were made.
         let listed = || {
@@ -242,9 +243,9 @@ mod kernel_tests {
         run("nft delete table ip openpod");
         crate::linux::net::prepare_bridge(&net).unwrap();
         assert_eq!(listed(), rules);
-        // The same bridge with another subnet (root's default bridge serves every data
-        // directory, and the default subnet is a setting): rules that are in place for
-        // one subnet are not in place for the other.
+        // The same bridge with another subnet (a bridge is named after its subnet, so
+        // two names fell together): rules that are in place for one subnet are not in
+        // place for the other.
         let moved = crate::network::Network {
             subnet: "10.76.4.0/24".into(),
             gateway: "10.76.4.1".into(),

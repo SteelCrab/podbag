@@ -69,22 +69,6 @@ fn eth0_address(sb: &Sandbox, name: &str) -> String {
         .to_string()
 }
 
-/// As root, every sandbox's user networks live in the host's one namespace, and separate
-/// data directories pick the same automatic subnets: tests that create networks take turns.
-fn network_turn() -> Option<std::fs::File> {
-    if !root_mode() {
-        return None;
-    }
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open("/tmp/openpod-test-networks.lock")
-        .unwrap();
-    lock.lock().unwrap();
-    Some(lock)
-}
-
 fn start(sb: &Sandbox, name: &str, options: &[&str], command: &[&str]) {
     let rootfs = rootfs();
     let mut args = vec!["run", "-d", "--name", name];
@@ -554,8 +538,9 @@ fn scenario_without_images() {
         &["--network", "app", "-v", "pgdata:/srv"],
         &["sleep", "30"],
     );
-    let web_volume = format!("{}:/www:ro", html.path().display());
-    let server = "while true; do nc -l -p 80 < /www/index.html; done";
+    // On /opt, which the shared root filesystem has: a new mount point would be made in it.
+    let web_volume = format!("{}:/opt:ro", html.path().display());
+    let server = "while true; do nc -l -p 80 < /opt/index.html; done";
     start(
         &sb,
         "web",
@@ -673,7 +658,10 @@ fn stale_pid_files_do_not_signal_other_processes() {
 #[test]
 fn published_port_is_closed_before_the_address_is_released() {
     let sb = Sandbox::new();
-    let work = "sleep 1; mkdir /d && i=0 && while [ $i -lt 3000 ]; do : > /d/$i; i=$((i+1)); done";
+    // The files go to a tmpfs on /mnt: the shared root filesystem must not keep them (a
+    // second run's `mkdir` failed on the first run's directory, and made no files).
+    let work =
+        "sleep 1; mkdir /mnt/d && i=0 && while [ $i -lt 3000 ]; do : > /mnt/d/$i; i=$((i+1)); done";
     let rootfs = rootfs();
     let args = [
         "run",
@@ -683,6 +671,8 @@ fn published_port_is_closed_before_the_address_is_released() {
         "gone",
         "-p",
         "18084:8080",
+        "--tmpfs",
+        "/mnt",
         "--rootfs",
         &rootfs,
         "sh",
@@ -730,4 +720,271 @@ fn open_connection_ends_with_the_container() {
         .lines()
         .any(|l| l.ends_with(" holder") && l.contains("Exited"))));
     let _ = openpod(&sb, &["rm", "holder"]);
+}
+
+#[test]
+fn labels_from_the_command_line() {
+    let _turn = network_turn();
+    let sb = Sandbox::new();
+    ok(&openpod(
+        &sb,
+        &["network", "create", "--label", "a=b", "--label", "c", "lab"],
+    ));
+    let net: serde_json::Value =
+        serde_json::from_str(&ok(&openpod(&sb, &["network", "inspect", "lab"]))).unwrap();
+    assert_eq!(net["labels"], serde_json::json!({"a": "b", "c": ""}));
+    let vol = ok(&openpod(
+        &sb,
+        &["volume", "create", "--label", "eq=x=y", "labvol"],
+    ));
+    assert_eq!(vol.trim(), "labvol");
+    let vol: serde_json::Value =
+        serde_json::from_str(&ok(&openpod(&sb, &["volume", "inspect", "labvol"]))).unwrap();
+    let vol = if vol.is_array() { vol[0].clone() } else { vol };
+    assert_eq!(vol["labels"], serde_json::json!({"eq": "x=y"}));
+    // A label without a key is refused, and nothing is made.
+    let bad = openpod(&sb, &["network", "create", "--label", "=v", "nolabel"]);
+    assert_eq!(bad.status.code(), Some(125), "{}", stderr(&bad));
+    assert!(stderr(&bad).contains("label"), "{}", stderr(&bad));
+    assert_ne!(
+        openpod(&sb, &["network", "inspect", "nolabel"])
+            .status
+            .code(),
+        Some(0)
+    );
+    ok(&openpod(&sb, &["network", "rm", "lab"]));
+    ok(&openpod(&sb, &["volume", "rm", "labvol"]));
+}
+
+#[test]
+fn containers_find_each_other_by_alias() {
+    let _turn = network_turn();
+    let sb = Sandbox::new();
+    ok(&openpod(&sb, &["network", "create", "app"]));
+    start(
+        &sb,
+        "db",
+        &[
+            "--network",
+            "app",
+            "--network-alias",
+            "database",
+            "--network-alias",
+            "store",
+        ],
+        &["sleep", "30"],
+    );
+    start(&sb, "web", &["--network", "app"], &["sleep", "30"]);
+    for name in ["db", "database", "store"] {
+        ok(&openpod(&sb, &["exec", "web", "ping", "-c1", "-W2", name]));
+    }
+    // Its own aliases name itself.
+    ok(&openpod(
+        &sb,
+        &["exec", "db", "ping", "-c1", "-W2", "store"],
+    ));
+    // The default network has no names, so no aliases either.
+    let bad = openpod(
+        &sb,
+        &[
+            "run",
+            "--rm",
+            "--network-alias",
+            "x",
+            "--rootfs",
+            &rootfs(),
+            "true",
+        ],
+    );
+    assert_eq!(bad.status.code(), Some(125), "{}", stderr(&bad));
+    assert!(stderr(&bad).contains("alias"), "{}", stderr(&bad));
+    ok(&openpod(&sb, &["rm", "-f", "db", "web"]));
+    ok(&openpod(&sb, &["network", "rm", "app"]));
+}
+
+#[test]
+fn a_container_on_two_networks_reaches_both() {
+    let _turn = network_turn();
+    let sb = Sandbox::new();
+    ok(&openpod(&sb, &["network", "create", "front"]));
+    ok(&openpod(&sb, &["network", "create", "back"]));
+    start(&sb, "web", &["--network", "front"], &["sleep", "30"]);
+    start(&sb, "db", &["--network", "back"], &["sleep", "30"]);
+    start(
+        &sb,
+        "api",
+        &["--network", "front", "--network", "back"],
+        &["sleep", "30"],
+    );
+    for name in ["web", "db"] {
+        ok(&openpod(&sb, &["exec", "api", "ping", "-c1", "-W2", name]));
+    }
+    // Each network's containers reach it; the networks stay apart.
+    ok(&openpod(&sb, &["exec", "web", "ping", "-c1", "-W2", "api"]));
+    ok(&openpod(&sb, &["exec", "db", "ping", "-c1", "-W2", "api"]));
+    let hosts = ok(&openpod(&sb, &["exec", "web", "cat", "/etc/hosts"]));
+    assert!(!hosts.contains("\tdb"), "{hosts}");
+    // An interface on each network, and one default route (through the first).
+    let addrs = ok(&openpod(&sb, &["exec", "api", "ip", "-o", "-4", "addr"]));
+    assert!(addrs.contains("eth0") && addrs.contains("eth1"), "{addrs}");
+    // (busybox's `ip route show` lists every route: pick the default ones.)
+    let routes = ok(&openpod(&sb, &["exec", "api", "ip", "route"]));
+    let defaults: Vec<&str> = routes
+        .lines()
+        .filter(|l| l.starts_with("default"))
+        .collect();
+    assert_eq!(defaults.len(), 1, "{routes}");
+    assert!(defaults[0].contains("dev eth0"), "{routes}");
+    ok(&openpod(&sb, &["rm", "-f", "web", "db", "api"]));
+    ok(&openpod(&sb, &["network", "rm", "front", "back"]));
+}
+
+#[test]
+fn the_addresses_of_all_networks_come_back() {
+    let _turn = network_turn();
+    let sb = Sandbox::new();
+    ok(&openpod(&sb, &["network", "create", "front"]));
+    ok(&openpod(&sb, &["network", "create", "back"]));
+    let members = |network: &str| {
+        network_record(&sb, network)["containers"]
+            .as_object()
+            .map_or(0, |m| m.len())
+    };
+    let rootfs = rootfs();
+    ok(&openpod(
+        &sb,
+        &[
+            "run",
+            "--rm",
+            "--network",
+            "front",
+            "--network",
+            "back",
+            "--rootfs",
+            &rootfs,
+            "true",
+        ],
+    ));
+    assert_eq!((members("front"), members("back")), (0, 0));
+    // A start that fails on its second network gives the first one's address back.
+    let failed = openpod(
+        &sb,
+        &[
+            "run",
+            "--rm",
+            "--network",
+            "front",
+            "--network",
+            "missing",
+            "--rootfs",
+            &rootfs,
+            "true",
+        ],
+    );
+    assert_ne!(failed.status.code(), Some(0));
+    assert_eq!(members("front"), 0);
+    ok(&openpod(&sb, &["network", "rm", "front", "back"]));
+}
+
+#[test]
+fn connect_and_disconnect_a_stopped_container() {
+    let _turn = network_turn();
+    let sb = Sandbox::new();
+    ok(&openpod(&sb, &["network", "create", "front"]));
+    ok(&openpod(&sb, &["network", "create", "back"]));
+    start(&sb, "web", &["--network", "front"], &["sleep", "300"]);
+    // A container that runs keeps its networks until it stops.
+    let busy = openpod(&sb, &["network", "connect", "back", "web"]);
+    assert_eq!(busy.status.code(), Some(125), "{}", stderr(&busy));
+    assert!(stderr(&busy).contains("stop"), "{}", stderr(&busy));
+    ok(&openpod(&sb, &["stop", "-t", "0", "web"]));
+    ok(&openpod(
+        &sb,
+        &["network", "connect", "--alias", "w", "back", "web"],
+    ));
+    // Twice is a conflict.
+    let twice = openpod(&sb, &["network", "connect", "back", "web"]);
+    assert_eq!(twice.status.code(), Some(125), "{}", stderr(&twice));
+    ok(&openpod(&sb, &["start", "web"]));
+    let addrs = ok(&openpod(&sb, &["exec", "web", "ip", "-o", "-4", "addr"]));
+    assert!(addrs.contains("eth1"), "{addrs}");
+    ok(&openpod(&sb, &["exec", "web", "ping", "-c1", "-W2", "w"]));
+    ok(&openpod(&sb, &["stop", "-t", "0", "web"]));
+    ok(&openpod(&sb, &["network", "disconnect", "back", "web"]));
+    // Its primary network stays.
+    let primary = openpod(&sb, &["network", "disconnect", "front", "web"]);
+    assert_eq!(primary.status.code(), Some(125), "{}", stderr(&primary));
+    ok(&openpod(&sb, &["start", "web"]));
+    let addrs = ok(&openpod(&sb, &["exec", "web", "ip", "-o", "-4", "addr"]));
+    assert!(!addrs.contains("eth1"), "{addrs}");
+    ok(&openpod(&sb, &["rm", "-f", "web"]));
+    ok(&openpod(&sb, &["network", "rm", "front", "back"]));
+}
+
+#[test]
+fn a_killed_watcher_gives_back_every_network() {
+    let _turn = network_turn();
+    let sb = Sandbox::new();
+    ok(&openpod(&sb, &["network", "create", "front"]));
+    ok(&openpod(&sb, &["network", "create", "back"]));
+    start(
+        &sb,
+        "k2",
+        &["--network", "front", "--network", "back"],
+        &["sleep", "30"],
+    );
+    let members = |network: &str| {
+        network_record(&sb, network)["containers"]
+            .as_object()
+            .map_or(0, |m| m.len())
+    };
+    assert_eq!((members("front"), members("back")), (1, 1));
+    // Its watcher dies without cleaning up (as at a crash or a reboot).
+    let info: serde_json::Value =
+        serde_json::from_str(&ok(&openpod(&sb, &["inspect", "k2"]))).unwrap();
+    let watcher = info["state"]["shim_pid"].as_u64().unwrap().to_string();
+    let killer: Vec<&str> = if root_mode() {
+        vec!["sudo", "-n", "kill", "-KILL", &watcher]
+    } else {
+        vec!["kill", "-KILL", &watcher]
+    };
+    assert!(
+        std::process::Command::new(killer[0])
+            .args(&killer[1..])
+            .status()
+            .unwrap()
+            .success()
+    );
+    // The next state check gives back its address on every network.
+    assert!(wait_until(10, || {
+        let ps = ok(&openpod(&sb, &["ps", "-a"]));
+        ps.lines()
+            .any(|l| l.ends_with(" k2") && l.contains("Exited"))
+    }));
+    assert_eq!((members("front"), members("back")), (0, 0));
+    ok(&openpod(&sb, &["rm", "-f", "k2"]));
+    ok(&openpod(&sb, &["network", "rm", "front", "back"]));
+}
+
+#[test]
+fn connect_waits_for_the_cleanup_of_the_last_run() {
+    let _turn = network_turn();
+    let sb = Sandbox::new();
+    ok(&openpod(&sb, &["network", "create", "front"]));
+    ok(&openpod(&sb, &["network", "create", "back"]));
+    start(&sb, "w", &["--network", "front"], &["true"]);
+    assert!(wait_until(10, || {
+        ok(&openpod(&sb, &["ps", "-a"]))
+            .lines()
+            .any(|l| l.ends_with(" w") && l.contains("Exited"))
+    }));
+    let info: serde_json::Value =
+        serde_json::from_str(&ok(&openpod(&sb, &["inspect", "w"]))).unwrap();
+    let id = info["id"].as_str().unwrap().to_string();
+    // The cleanup of its last run holds the lock for a moment after a stop returns.
+    let mut holder = hold_shim_lock(&sb, &id, "1");
+    ok(&openpod(&sb, &["network", "connect", "back", "w"]));
+    let _ = holder.wait();
+    ok(&openpod(&sb, &["rm", "w"]));
+    ok(&openpod(&sb, &["network", "rm", "front", "back"]));
 }

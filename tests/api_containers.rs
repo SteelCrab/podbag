@@ -649,3 +649,210 @@ fn signals_for_the_service_do_not_reach_its_containers() {
     let _ = attached.wait();
     let _ = sb.openpod().args(["rm", "-f", "att"]).output();
 }
+
+#[test]
+fn restart_policy_through_the_api() {
+    let s = setup();
+    let run = s.docker(&[
+        "run",
+        "-d",
+        "--name",
+        "flaky",
+        "--restart",
+        "on-failure:2",
+        &s.image,
+        "false",
+    ]);
+    assert_eq!(run.status.code(), Some(0), "{}", stderr(&run));
+    assert!(
+        !stderr(&run).to_lowercase().contains("restart"),
+        "{}",
+        stderr(&run)
+    );
+    let inspect = || -> serde_json::Value {
+        serde_json::from_str::<serde_json::Value>(&s.ok(&["inspect", "flaky"])).unwrap()[0].clone()
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let i = inspect();
+        if i["RestartCount"] == 2 && i["State"]["Status"] == "exited" {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "no two restarts: {i}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    std::thread::sleep(Duration::from_millis(1500));
+    let i = inspect();
+    assert_eq!(i["RestartCount"], 2, "{i}");
+    assert_eq!(
+        i["HostConfig"]["RestartPolicy"],
+        serde_json::json!({"Name": "on-failure", "MaximumRetryCount": 2})
+    );
+    // With AutoRemove a restart policy makes no sense (the docker CLI refuses it too).
+    let (body, head) = curl(
+        &s.service.socket,
+        &[
+            "-X",
+            "POST",
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            &serde_json::json!({
+                "Image": s.image,
+                "Cmd": ["true"],
+                "HostConfig": {"AutoRemove": true, "RestartPolicy": {"Name": "always"}}
+            })
+            .to_string(),
+            "/containers/create",
+        ],
+    );
+    assert!(head.starts_with("HTTP/1.1 400"), "{head}\n{body}");
+    s.ok(&["rm", "-f", "flaky"]);
+}
+
+#[test]
+fn health_through_the_api() {
+    let s = setup();
+    // An image with a check of its own.
+    s._reg.push(
+        "checked",
+        "v1",
+        &TestImage {
+            layers: vec![alpine_layer()],
+            config: serde_json::json!({
+                "Env": [PATH],
+                "Cmd": ["sleep", "300"],
+                "Healthcheck": {"Test": ["CMD-SHELL", "true"], "Interval": 1_000_000_000_u64}
+            }),
+        },
+    );
+    let checked = format!("{}/checked:v1", s._reg.host);
+    s.ok(&["pull", &checked]);
+    let inspect = |name: &str| -> serde_json::Value {
+        serde_json::from_str::<serde_json::Value>(&s.ok(&["inspect", name])).unwrap()[0].clone()
+    };
+    let wait_health = |name: &str, want: &str| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let i = inspect(name);
+            if i["State"]["Health"]["Status"] == want {
+                return i;
+            }
+            assert!(std::time::Instant::now() < deadline, "not {want}: {i}");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    };
+    // Events from before the first check on.
+    let mut events = s
+        .cmd(&[
+            "events",
+            "--filter",
+            "event=health_status",
+            "--format",
+            "{{.Actor.Attributes.name}} {{.Action}}",
+        ])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    let run = s.docker(&["run", "-d", "--name", "h1", &checked]);
+    assert_eq!(run.status.code(), Some(0), "{}", stderr(&run));
+    assert!(
+        !stderr(&run).to_lowercase().contains("health"),
+        "{}",
+        stderr(&run)
+    );
+    let h1 = wait_health("h1", "healthy");
+    assert!(
+        h1["State"]["Health"]["Log"]
+            .as_array()
+            .is_some_and(|l| !l.is_empty()),
+        "{h1}"
+    );
+    assert_eq!(
+        h1["Config"]["Healthcheck"]["Test"],
+        serde_json::json!(["CMD-SHELL", "true"])
+    );
+    assert!(s.ok(&["ps"]).contains("(healthy)"));
+    assert_eq!(
+        s.ok(&["ps", "--filter", "health=healthy", "--format", "{{.Names}}"])
+            .trim(),
+        "h1"
+    );
+    // Turned off: no health at all.
+    s.ok(&["run", "-d", "--name", "h2", "--no-healthcheck", &checked]);
+    assert!(inspect("h2")["State"]["Health"].is_null());
+    // A check of its own that fails.
+    s.ok(&[
+        "run",
+        "-d",
+        "--name",
+        "h3",
+        "--health-cmd",
+        "exit 1",
+        "--health-interval",
+        "1s",
+        "--health-retries",
+        "1",
+        &s.image,
+        "sleep",
+        "300",
+    ]);
+    wait_health("h3", "unhealthy");
+    assert_eq!(
+        s.ok(&[
+            "ps",
+            "--filter",
+            "health=unhealthy",
+            "--format",
+            "{{.Names}}"
+        ])
+        .trim(),
+        "h3"
+    );
+    std::thread::sleep(Duration::from_millis(800));
+    // SIGTERM, not SIGKILL: in root mode the child is sudo, which passes it on (a killed
+    // sudo would leave the docker CLI running with the pipe open).
+    // SAFETY: a signal to our own child, not reaped yet.
+    unsafe { libc::kill(events.id() as i32, libc::SIGTERM) };
+    let mut seen = String::new();
+    events
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut seen)
+        .unwrap();
+    let _ = events.wait();
+    assert!(seen.contains("h1 health_status: healthy"), "{seen}");
+    assert!(seen.contains("h3 health_status: unhealthy"), "{seen}");
+    s.ok(&["rm", "-f", "h1", "h2", "h3"]);
+}
+
+#[test]
+fn a_terminal_starts_with_the_size_that_was_asked_for() {
+    let s = setup();
+    let (body, head) = curl(
+        &s.service.socket,
+        &[
+            "-X",
+            "POST",
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            &serde_json::json!({
+                "Image": s.image,
+                "Cmd": ["stty", "size"],
+                "Tty": true,
+                "HostConfig": {"ConsoleSize": [30, 100]}
+            })
+            .to_string(),
+            "/containers/create?name=sized",
+        ],
+    );
+    assert!(head.starts_with("HTTP/1.1 201"), "{head}\n{body}");
+    s.ok(&["start", "sized"]);
+    assert_eq!(s.ok(&["wait", "sized"]).trim(), "0");
+    let logs = s.ok(&["logs", "sized"]);
+    assert_eq!(logs.trim(), "30 100", "{logs}");
+    s.ok(&["rm", "sized"]);
+}

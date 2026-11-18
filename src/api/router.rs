@@ -204,6 +204,26 @@ pub fn check_filters(
     Ok(())
 }
 
+/// One `label` filter value against an object's labels: `key` (any value) or `key=value`
+/// (the value is all that follows the first `=`).
+pub fn label_matches(want: &str, labels: &std::collections::BTreeMap<String, String>) -> bool {
+    match want.split_once('=') {
+        Some((k, v)) => labels.get(k).is_some_and(|x| x == v),
+        None => labels.contains_key(want),
+    }
+}
+
+/// Docker's `label` and `label!` filters: every wanted label is there, and no unwanted
+/// one.
+pub fn labels_match(
+    labels: &std::collections::BTreeMap<String, String>,
+    filters: &std::collections::BTreeMap<String, Vec<String>>,
+) -> bool {
+    let values = |key: &str| filters.get(key).map(Vec::as_slice).unwrap_or_default();
+    values("label").iter().all(|w| label_matches(w, labels))
+        && !values("label!").iter().any(|w| label_matches(w, labels))
+}
+
 /// 501: a Docker feature openpod does not have, and what to do instead.
 pub fn not_supported(what: &str, instead: &str) -> Reply {
     message(
@@ -215,6 +235,48 @@ pub fn not_supported(what: &str, instead: &str) -> Reply {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn labels_match_in_every_form() {
+        let labels: std::collections::BTreeMap<String, String> =
+            [("a", "b"), ("empty", ""), ("eq", "x=y")]
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+        let filters =
+            |pairs: &[(&str, &[&str])]| -> std::collections::BTreeMap<String, Vec<String>> {
+                pairs
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.iter().map(|s| s.to_string()).collect()))
+                    .collect()
+            };
+        let matches = |pairs: &[(&str, &[&str])]| labels_match(&labels, &filters(pairs));
+        // No label filter: everything.
+        assert!(matches(&[]));
+        assert!(matches(&[("name", &["x"])]));
+        // A key alone, a key with its value, a value with an equals sign, an empty value.
+        assert!(matches(&[("label", &["a"])]));
+        assert!(matches(&[("label", &["a=b"])]));
+        assert!(!matches(&[("label", &["a=c"])]));
+        assert!(matches(&[("label", &["eq=x=y"])]));
+        assert!(!matches(&[("label", &["eq=x"])]));
+        assert!(matches(&[("label", &["empty"])]));
+        assert!(matches(&[("label", &["empty="])]));
+        assert!(!matches(&[("label", &["a="])]));
+        assert!(!matches(&[("label", &["missing"])]));
+        // All wanted labels, and none of the unwanted.
+        assert!(matches(&[("label", &["a", "eq=x=y"])]));
+        assert!(!matches(&[("label", &["a", "missing"])]));
+        assert!(matches(&[("label!", &["missing"])]));
+        assert!(!matches(&[("label!", &["a"])]));
+        assert!(!matches(&[("label!", &["missing", "a=b"])]));
+        assert!(matches(&[("label!", &["a=c"])]));
+        assert!(!matches(&[("label", &["a"]), ("label!", &["eq"])]));
+        // An object without labels.
+        let none = std::collections::BTreeMap::new();
+        assert!(!labels_match(&none, &filters(&[("label", &["a"])])));
+        assert!(labels_match(&none, &filters(&[("label!", &["a"])])));
+    }
 
     #[test]
     fn version_prefixes_are_stripped() {

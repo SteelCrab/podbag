@@ -45,6 +45,27 @@ fn invalid(what: String, why: impl Into<String>, next: &str) -> Error {
     Error::new(ErrorKind::InvalidInput, what, why, next)
 }
 
+/// Check a network alias: a host name (letters, digits, `.`, `_` and `-`, at most 253, not
+/// starting with `-` or `.`). Anything else could break the hosts files it goes into.
+pub fn check_alias(alias: &str) -> Result<()> {
+    let fits = !alias.is_empty()
+        && alias.len() <= 253
+        && !alias.starts_with(['-', '.'])
+        && alias
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+    if fits {
+        Ok(())
+    } else {
+        Err(invalid(
+            format!("invalid network alias {alias:?}"),
+            "an alias is a host name: letters, digits, '.', '_' and '-', at most 253, \
+             not starting with '-' or '.'",
+            "choose another alias",
+        ))
+    }
+}
+
 /// A `--network` value: `bridge`, `host`, `none` or a network name.
 pub fn parse_network_arg(s: &str) -> Result<NetworkMode> {
     match s {
@@ -155,12 +176,43 @@ pub struct Network {
     /// The bridge device.
     pub bridge: String,
     pub created: u64,
+    /// Labels (Docker's `--label`; Compose finds a project's networks by them). Records
+    /// written before networks had labels have none.
+    #[serde(default)]
+    pub labels: Labels,
+}
+
+/// Labels of a network or a volume: key to value.
+pub type Labels = std::collections::BTreeMap<String, String>;
+
+/// Read `--label` values: `key=value`, or `key` for an empty value. A later value of a key
+/// replaces an earlier one.
+pub fn parse_labels<S: AsRef<str>>(args: &[S]) -> Result<Labels> {
+    args.iter()
+        .map(|arg| {
+            let arg = arg.as_ref();
+            let (key, value) = arg.split_once('=').unwrap_or((arg, ""));
+            if key.is_empty() {
+                return Err(invalid(
+                    format!("invalid label {arg:?}"),
+                    "a label needs a key",
+                    "write it as key=value or key",
+                ));
+            }
+            Ok((key.to_string(), value.to_string()))
+        })
+        .collect()
 }
 
 impl Network {
     /// Create a network; without `subnet`, the next free `10.78.<n>.0/24`.
     pub fn create(name: &str, subnet: Option<&str>) -> Result<Network> {
-        create_in(&crate::paths::dirs()?, name, subnet, &host_routes())
+        Self::create_with(name, subnet, Labels::new())
+    }
+
+    /// Create a network with labels.
+    pub fn create_with(name: &str, subnet: Option<&str>, labels: Labels) -> Result<Network> {
+        create_labeled_in(&crate::paths::dirs()?, name, subnet, labels, &host_routes())
     }
 
     pub fn get(name: &str) -> Result<Network> {
@@ -187,7 +239,13 @@ impl Network {
 
     /// Remove every network no container uses (not the default one). Returns them.
     pub fn prune() -> Result<Vec<Network>> {
-        let removed = prune_in(&crate::paths::dirs()?)?;
+        Self::prune_matching(&|_| true)
+    }
+
+    /// Remove the networks no container uses that `pick` chooses (never the default
+    /// one). Returns them.
+    pub fn prune_matching(pick: &dyn Fn(&Network) -> bool) -> Result<Vec<Network>> {
+        let removed = prune_matching_in(&crate::paths::dirs()?, pick)?;
         #[cfg(target_os = "linux")]
         // SAFETY: geteuid has no preconditions.
         if unsafe { libc::geteuid() } == 0 {
@@ -221,6 +279,13 @@ struct Record {
 struct Member {
     ip: Ipv4Addr,
     name: String,
+    /// Further names of the container on this network (`--network-alias`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    aliases: Vec<String>,
+    /// All the container's networks, its primary one first, when it has more than one:
+    /// its `/etc/hosts` names the containers of each.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    networks: Vec<String>,
     /// The container's hostname, for its own line in `/etc/hosts`. Records written
     /// before it was stored here have none: the container's config has it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -297,10 +362,18 @@ pub fn docker_id_of(name: &str) -> String {
     digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+#[cfg(test)]
 pub(crate) fn prune_in(dirs: &Dirs) -> Result<Vec<Network>> {
+    prune_matching_in(dirs, &|_| true)
+}
+
+pub(crate) fn prune_matching_in(
+    dirs: &Dirs,
+    pick: &dyn Fn(&Network) -> bool,
+) -> Result<Vec<Network>> {
     let mut removed = Vec::new();
     for network in list_in(dirs)? {
-        if network.name == DEFAULT {
+        if network.name == DEFAULT || !pick(&network) {
             continue;
         }
         // Checks its users again under the network lock.
@@ -427,6 +500,7 @@ fn default_record(dirs: &Dirs, host_routes: &[(Ipv4Addr, u8)]) -> Result<Record>
                 format!("opd-{}", &sha_id(&subnet)[..8])
             },
             created: crate::state::now(),
+            labels: Labels::new(),
         },
         containers: Default::default(),
     })
@@ -480,10 +554,22 @@ fn all_records(dirs: &Dirs) -> Result<Vec<Record>> {
 
 /// Create a network. Without `subnet`, the next free `10.78.<n>.0/24` that overlaps neither
 /// another network nor one of `host_routes`.
+#[cfg(test)]
 pub(crate) fn create_in(
     dirs: &Dirs,
     name: &str,
     subnet: Option<&str>,
+    host_routes: &[(Ipv4Addr, u8)],
+) -> Result<Network> {
+    create_labeled_in(dirs, name, subnet, Labels::new(), host_routes)
+}
+
+/// As `create_in`, with the network's labels.
+pub(crate) fn create_labeled_in(
+    dirs: &Dirs,
+    name: &str,
+    subnet: Option<&str>,
+    labels: Labels,
     host_routes: &[(Ipv4Addr, u8)],
 ) -> Result<Network> {
     check_name(name)?;
@@ -548,6 +634,7 @@ pub(crate) fn create_in(
         subnet: format!("{}/{}", cidr.0, cidr.1),
         gateway: Ipv4Addr::from(u32::from(cidr.0) + 1).to_string(),
         created: crate::state::now(),
+        labels,
     };
     write_record(
         dirs,
@@ -606,9 +693,19 @@ pub(crate) fn remove_in(dirs: &Dirs, name: &str) -> Result<Network> {
     Ok(record.network)
 }
 
+/// A container as it joins a network: its names there, and its other networks.
+pub(crate) struct Endpoint<'a> {
+    pub name: &'a str,
+    pub hostname: &'a str,
+    /// Further names on this network (`--network-alias`).
+    pub aliases: &'a [String],
+    /// All the container's networks, its primary one first, when it has more than one.
+    pub networks: &'a [String],
+}
+
 /// An address for container `id` in `network`: its old one, or the lowest free one after
 /// the gateway.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg(test)]
 pub(crate) fn allocate(
     dirs: &Dirs,
     network: &str,
@@ -616,13 +713,38 @@ pub(crate) fn allocate(
     name: &str,
     hostname: &str,
 ) -> Result<Ipv4Addr> {
+    join(
+        dirs,
+        network,
+        id,
+        &Endpoint {
+            name,
+            hostname,
+            aliases: &[],
+            networks: &[],
+        },
+    )
+}
+
+/// Container `id` joins `network`: its old address, or the lowest free one after the
+/// gateway. Its names there are written down for the hosts files.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn join(dirs: &Dirs, network: &str, id: &str, endpoint: &Endpoint) -> Result<Ipv4Addr> {
+    let name = endpoint.name;
     let _lock = lock(dirs)?;
     let mut record = load(dirs, network)?;
     if let Some(m) = record.containers.get_mut(id) {
         let ip = m.ip;
-        // A member from an earlier version's record learns its hostname at its next start.
-        if m.hostname.as_deref() != Some(hostname) {
-            m.hostname = Some(hostname.to_string());
+        // A member from an earlier version's record learns its hostname at its next start;
+        // names given since (`network connect`) take effect at the next start too.
+        let hostname = Some(endpoint.hostname.to_string());
+        if m.hostname != hostname
+            || m.aliases != endpoint.aliases
+            || m.networks != endpoint.networks
+        {
+            m.hostname = hostname;
+            m.aliases = endpoint.aliases.to_vec();
+            m.networks = endpoint.networks.to_vec();
             write_record(dirs, &record)?;
         }
         return Ok(ip);
@@ -651,7 +773,9 @@ pub(crate) fn allocate(
         Member {
             ip,
             name: name.to_string(),
-            hostname: Some(hostname.to_string()),
+            aliases: endpoint.aliases.to_vec(),
+            networks: endpoint.networks.to_vec(),
+            hostname: Some(endpoint.hostname.to_string()),
         },
     );
     write_record(dirs, &record)?;
@@ -671,46 +795,188 @@ pub(crate) fn release(dirs: &Dirs, network: &str, id: &str) -> Result<()> {
     Ok(())
 }
 
+/// A network's record with the lines of its containers, read once for a refresh.
+struct Loaded {
+    record: Record,
+    /// The names of its containers, in the record's order (none on the default network,
+    /// which gives no names).
+    block: crate::netfiles::PeerBlock,
+}
+
+impl Loaded {
+    fn read(dirs: &Dirs, network: &str) -> Option<Loaded> {
+        let record = read_record(dirs, network).ok().flatten()?;
+        let named = network != DEFAULT;
+        let block = {
+            let peers: Vec<crate::netfiles::Peer> = record
+                .containers
+                .values()
+                .filter(|_| named)
+                .map(|m| crate::netfiles::Peer {
+                    ip: m.ip,
+                    name: &m.name,
+                    aliases: &m.aliases,
+                })
+                .collect();
+            crate::netfiles::PeerBlock::new(&peers)
+        };
+        Some(Loaded { record, block })
+    }
+}
+
+/// The networks read so far by one refresh: each is read once.
+#[derive(Default)]
+struct Loads(std::collections::HashMap<String, Option<Loaded>>);
+
+impl Loads {
+    fn read(&mut self, dirs: &Dirs, network: &str) {
+        if !self.0.contains_key(network) {
+            self.0
+                .insert(network.to_string(), Loaded::read(dirs, network));
+        }
+    }
+
+    fn get(&self, network: &str) -> Option<&Loaded> {
+        self.0.get(network).and_then(Option::as_ref)
+    }
+}
+
+/// `/etc/hosts` of container `id`, a member of `networks` (its primary one first), from
+/// networks read already. None when it has an address on none of them.
+fn compose_hosts(loads: &Loads, dirs: &Dirs, id: &str, networks: &[&str]) -> Option<String> {
+    let mut own: Vec<(Ipv4Addr, &[String])> = Vec::with_capacity(networks.len());
+    let mut lists = Vec::with_capacity(networks.len());
+    let mut first: Option<&Member> = None;
+    for network in networks {
+        let Some(loaded) = loads.get(network) else {
+            continue;
+        };
+        // Its place in the network's block: the record's order.
+        let Some((place, m)) = loaded
+            .record
+            .containers
+            .iter()
+            .enumerate()
+            .find_map(|(place, (key, m))| (key == id).then_some((place, m)))
+        else {
+            continue;
+        };
+        first.get_or_insert(m);
+        own.push((m.ip, m.aliases.as_slice()));
+        if *network != DEFAULT {
+            lists.push((&loaded.block, Some(place)));
+        }
+    }
+    let m = first?;
+    let hostname = hostname_of(m, dirs, id)?;
+    Some(crate::netfiles::bridge_hosts(
+        &hostname, &m.name, &own, &lists,
+    ))
+}
+
+/// A member's hostname. A record of an earlier version has none: its config has it.
+fn hostname_of<'a>(m: &'a Member, dirs: &Dirs, id: &str) -> Option<std::borrow::Cow<'a, str>> {
+    match &m.hostname {
+        Some(hostname) => Some(std::borrow::Cow::Borrowed(hostname)),
+        None => Some(std::borrow::Cow::Owned(
+            crate::state::read_config(dirs, id).ok()?.hostname,
+        )),
+    }
+}
+
+/// `/etc/hosts` of container `id`, which has joined each of `networks` (its primary one
+/// first): localhost, a line of its own on each network, then the other containers of its
+/// user networks. What a start writes before the container runs.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn hosts_text(dirs: &Dirs, id: &str, networks: &[String]) -> Result<String> {
+    let _lock = lock(dirs)?;
+    let mut loads = Loads::default();
+    for network in networks {
+        loads.read(dirs, network);
+    }
+    let names: Vec<&str> = networks.iter().map(String::as_str).collect();
+    compose_hosts(&loads, dirs, id, &names).ok_or_else(|| {
+        Error::new(
+            ErrorKind::Internal,
+            "cannot write the container's /etc/hosts",
+            "it has no address on its networks",
+            "report this bug",
+        )
+    })
+}
+
 /// Rewrite the `/etc/hosts` of every container on a user network so it names all the
-/// network's containers (the default network has no names, as with Docker). Under the
-/// network lock: a start and a stop at the same moment cannot leave a stale list behind.
+/// network's containers (the default network has no names, as with Docker). A container
+/// on further networks gets their names too. Under the network lock: a start and a stop
+/// at the same moment cannot leave a stale list behind.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn refresh_hosts(dirs: &Dirs, network: &str) {
     if network == DEFAULT {
         return;
     }
     let Ok(_lock) = lock(dirs) else { return };
-    let Ok(Some(record)) = read_record(dirs, network) else {
+    let mut loads = Loads::default();
+    loads.read(dirs, network);
+    // The other networks of its containers: their lines go into those files too.
+    let others: std::collections::BTreeSet<String> = match loads.get(network) {
+        Some(loaded) => loaded
+            .record
+            .containers
+            .values()
+            .flat_map(|m| m.networks.iter())
+            .filter(|n| *n != network)
+            .cloned()
+            .collect(),
+        None => return,
+    };
+    for other in &others {
+        loads.read(dirs, other);
+    }
+    let Some(loaded) = loads.get(network) else {
         return;
     };
-    let peers: Vec<(String, Ipv4Addr)> = record
-        .containers
-        .values()
-        .map(|m| (m.name.clone(), m.ip))
-        .collect();
-    // The names are the same in every member's file: made once, not once for each.
-    let block = crate::netfiles::PeerBlock::new(&peers);
-    for (index, (id, m)) in record.containers.iter().enumerate() {
-        // A record of an earlier version has no hostnames: the member's config has it.
-        let from_config;
-        let hostname = match &m.hostname {
-            Some(hostname) => hostname.as_str(),
-            None => match crate::state::read_config(dirs, id) {
-                Ok(spec) => {
-                    from_config = spec.hostname;
-                    from_config.as_str()
-                }
-                Err(_) => continue,
-            },
+    for (place, (id, m)) in loaded.record.containers.iter().enumerate() {
+        let text = if m.networks.is_empty() {
+            // On this network alone (most containers): its own line and this list.
+            let Some(hostname) = hostname_of(m, dirs, id) else {
+                continue;
+            };
+            crate::netfiles::bridge_hosts(
+                &hostname,
+                &m.name,
+                &[(m.ip, m.aliases.as_slice())],
+                &[(&loaded.block, Some(place))],
+            )
+        } else {
+            let networks: Vec<&str> = m.networks.iter().map(String::as_str).collect();
+            let Some(text) = compose_hosts(&loads, dirs, id, &networks) else {
+                continue;
+            };
+            text
         };
-        let text = block.hosts_of(index, &m.name, hostname, m.ip);
         // A user mount may replace the file: then there is nothing to write.
         let _ = crate::netfiles::rewrite_in_place(&dirs.container_dir(id).join("hosts"), &text);
     }
 }
 
+/// Network `name`, and the address container `id` has in it while it runs.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) fn with_address_of(
+    dirs: &Dirs,
+    name: &str,
+    id: &str,
+) -> Result<(Network, Option<Ipv4Addr>)> {
+    if name != DEFAULT {
+        check_name(name)?;
+    }
+    let _lock = lock(dirs)?;
+    let record = load(dirs, name)?;
+    let ip = record.containers.get(id).map(|m| m.ip);
+    Ok((record.network, ip))
+}
+
 /// The containers with an address in `network`: (name, address), by address.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[cfg(test)]
 pub(crate) fn members(dirs: &Dirs, network: &str) -> Result<Vec<(String, Ipv4Addr)>> {
     let _lock = lock(dirs)?;
     let record = load(dirs, network)?;
@@ -734,6 +1000,69 @@ mod tests {
             runtime: tmp.join("run"),
             config: tmp.join("cfg"),
         }
+    }
+
+    fn labels(pairs: &[(&str, &str)]) -> Labels {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn labels_are_read_as_docker_writes_them() {
+        assert_eq!(
+            parse_labels(&["a=b", "c", "e=", "eq=x=y", "a=last"]).unwrap(),
+            labels(&[("a", "last"), ("c", ""), ("e", ""), ("eq", "x=y")])
+        );
+        assert!(parse_labels::<&str>(&[]).unwrap().is_empty());
+        for bad in ["", "=v"] {
+            let e = parse_labels(&[bad]).unwrap_err();
+            assert_eq!(e.kind, ErrorKind::InvalidInput, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_network_keeps_its_labels() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = dirs_in(tmp.path());
+        let wanted = labels(&[("com.docker.compose.project", "p"), ("empty", "")]);
+        let made = create_labeled_in(&dirs, "app", None, wanted.clone(), &[]).unwrap();
+        assert_eq!(made.labels, wanted);
+        assert_eq!(get_in(&dirs, "app").unwrap().labels, wanted);
+        assert!(
+            create_in(&dirs, "plain", None, &[])
+                .unwrap()
+                .labels
+                .is_empty()
+        );
+        // The default network has none.
+        assert!(get_in(&dirs, DEFAULT).unwrap().labels.is_empty());
+        // Only the networks that the caller picks are pruned.
+        let gone: Vec<String> = prune_matching_in(&dirs, &|n| n.labels.contains_key("empty"))
+            .unwrap()
+            .into_iter()
+            .map(|n| n.name)
+            .collect();
+        assert_eq!(gone, ["app"]);
+        assert!(get_in(&dirs, "plain").is_ok());
+    }
+
+    #[test]
+    fn records_without_labels_load() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = dirs_in(tmp.path());
+        create_in(&dirs, "old", None, &[]).unwrap();
+        // As an earlier version wrote it.
+        let path = record_path(&dirs, "old");
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let network = record["network"].as_object_mut().unwrap();
+        assert!(network.remove("labels").is_some());
+        std::fs::write(&path, serde_json::to_vec(&record).unwrap()).unwrap();
+        let old = get_in(&dirs, "old").unwrap();
+        assert!(old.labels.is_empty());
+        assert_eq!(old.name, "old");
     }
 
     #[test]
@@ -1163,6 +1492,168 @@ mod tests {
         }
         // The default network has no names.
         refresh_hosts(&dirs, DEFAULT);
+    }
+
+    /// A container `name` (ID: its first letter in hex, 32 times) with an empty hosts file,
+    /// on no network yet.
+    fn container(dirs: &Dirs, name: &str, hostname: &str) -> String {
+        let mut spec = crate::spec::spec_fixture();
+        spec.id = format!("{:02x}", name.bytes().next().unwrap_or(0)).repeat(32);
+        spec.name = name.into();
+        spec.hostname = hostname.into();
+        spec.network = NetworkMode::Bridge {
+            network: "app".into(),
+        };
+        crate::state::create(dirs, &spec).unwrap();
+        std::fs::write(dirs.container_dir(&spec.id).join("hosts"), "").unwrap();
+        spec.id
+    }
+
+    /// Container `id` joins `network` with `aliases`; `networks`: all of its networks when
+    /// it has more than one.
+    fn join_as(
+        dirs: &Dirs,
+        network: &str,
+        id: &str,
+        name: &str,
+        aliases: &[&str],
+        networks: &[&str],
+    ) -> Ipv4Addr {
+        let aliases: Vec<String> = aliases.iter().map(|a| a.to_string()).collect();
+        let networks: Vec<String> = networks.iter().map(|n| n.to_string()).collect();
+        join(
+            dirs,
+            network,
+            id,
+            &Endpoint {
+                name,
+                hostname: name,
+                aliases: &aliases,
+                networks: &networks,
+            },
+        )
+        .unwrap()
+    }
+
+    const LOCAL: &str = "127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n";
+
+    #[test]
+    fn aliases_reach_the_hosts_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = dirs_in(tmp.path());
+        create_in(&dirs, "app", None, &[]).unwrap();
+        let (web, db) = (container(&dirs, "web", "web"), container(&dirs, "db", "db"));
+        let web_ip = join_as(&dirs, "app", &web, "web", &["front", "api"], &[]);
+        let db_ip = join_as(&dirs, "app", &db, "db", &[], &[]);
+        refresh_hosts(&dirs, "app");
+        assert_eq!(
+            hosts_of(&dirs, &db),
+            format!("{LOCAL}{db_ip}\tdb\n{web_ip}\tweb front api\n")
+        );
+        assert_eq!(
+            hosts_of(&dirs, &web),
+            format!("{LOCAL}{web_ip}\tweb front api\n{db_ip}\tdb\n")
+        );
+        // The file a start writes is the same.
+        assert_eq!(
+            hosts_text(&dirs, &web, &["app".to_string()]).unwrap(),
+            hosts_of(&dirs, &web)
+        );
+    }
+
+    #[test]
+    fn a_member_of_two_networks_names_the_containers_of_both() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = dirs_in(tmp.path());
+        create_in(&dirs, "app", None, &[]).unwrap();
+        create_in(&dirs, "back", None, &[]).unwrap();
+        let web = container(&dirs, "web", "web");
+        let db = container(&dirs, "db", "db");
+        let cache = container(&dirs, "cache", "cache");
+        let both = ["app", "back"];
+        let web_app = join_as(&dirs, "app", &web, "web", &[], &both);
+        let web_back = join_as(&dirs, "back", &web, "web", &["w"], &both);
+        let db_ip = join_as(&dirs, "app", &db, "db", &[], &[]);
+        let cache_ip = join_as(&dirs, "back", &cache, "cache", &[], &[]);
+        // A line of its own on each network, its primary one first, then both lists.
+        let web_file =
+            format!("{LOCAL}{web_app}\tweb\n{web_back}\tweb w\n{db_ip}\tdb\n{cache_ip}\tcache\n");
+        refresh_hosts(&dirs, "app");
+        assert_eq!(hosts_of(&dirs, &web), web_file);
+        // The others see it on their own network only.
+        assert_eq!(
+            hosts_of(&dirs, &db),
+            format!("{LOCAL}{db_ip}\tdb\n{web_app}\tweb\n")
+        );
+        std::fs::write(dirs.container_dir(&web).join("hosts"), "").unwrap();
+        refresh_hosts(&dirs, "back");
+        assert_eq!(hosts_of(&dirs, &web), web_file);
+        assert_eq!(
+            hosts_of(&dirs, &cache),
+            format!("{LOCAL}{cache_ip}\tcache\n{web_back}\tweb w\n")
+        );
+        let networks: Vec<String> = both.iter().map(|n| n.to_string()).collect();
+        assert_eq!(hosts_text(&dirs, &web, &networks).unwrap(), web_file);
+        // It leaves one network: that network's containers forget it.
+        release(&dirs, "back", &web).unwrap();
+        refresh_hosts(&dirs, "back");
+        assert_eq!(
+            hosts_of(&dirs, &cache),
+            format!("{LOCAL}{cache_ip}\tcache\n")
+        );
+    }
+
+    #[test]
+    fn a_member_without_aliases_loads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = dirs_in(tmp.path());
+        create_in(&dirs, "app", None, &[]).unwrap();
+        let web = container(&dirs, "web", "web");
+        let web_ip = join_as(&dirs, "app", &web, "web", &["front"], &["app", "back"]);
+        // As an earlier version wrote it.
+        let path = record_path(&dirs, "app");
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let m = json["containers"][&web].as_object_mut().unwrap();
+        assert!(m.remove("aliases").is_some());
+        assert!(m.remove("networks").is_some());
+        std::fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+        refresh_hosts(&dirs, "app");
+        assert_eq!(hosts_of(&dirs, &web), format!("{LOCAL}{web_ip}\tweb\n"));
+    }
+
+    #[test]
+    fn an_alias_must_be_a_host_name() {
+        let long = "a".repeat(253);
+        for good in [
+            "db",
+            "web-1",
+            "my_app.local",
+            "A1",
+            "p-web-1",
+            long.as_str(),
+        ] {
+            check_alias(good).unwrap_or_else(|e| panic!("{good:?}: {e}"));
+        }
+        let too_long = "a".repeat(254);
+        for bad in [
+            "",
+            "a b",
+            "a\nb",
+            "a\tb",
+            "-a",
+            ".a",
+            "a#b",
+            "a/b",
+            "ä",
+            too_long.as_str(),
+        ] {
+            assert_eq!(
+                check_alias(bad).map_err(|e| e.kind),
+                Err(ErrorKind::InvalidInput),
+                "{bad:?}"
+            );
+        }
     }
 
     /// Not a test: how long the network work of one start takes with 250 members.

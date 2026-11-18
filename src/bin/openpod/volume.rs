@@ -6,7 +6,9 @@ use openpod::Volume;
 
 pub fn run(cmd: VolumeCmd) -> i32 {
     match cmd {
-        VolumeCmd::Create { name } => match Volume::create(name.as_deref()) {
+        VolumeCmd::Create { labels, name } => match openpod::network::parse_labels(&labels)
+            .and_then(|labels| Volume::create_with(name.as_deref(), labels))
+        {
             Ok(v) => {
                 println!("{}", v.name);
                 0

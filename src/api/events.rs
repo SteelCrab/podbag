@@ -14,6 +14,57 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const POLL: Duration = Duration::from_millis(250);
 
 static SUBSCRIBERS: Mutex<Vec<mpsc::Sender<Value>>> = Mutex::new(Vec::new());
+/// Whether the poller runs: one thread looks at the containers for every open stream.
+static POLLER: Mutex<bool> = Mutex::new(false);
+/// Pollers that run now (one at most).
+static POLLERS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Open a stream: its events arrive here (`Value::Null` now and then: the poller looks
+/// whether the stream is still open).
+fn subscribe() -> mpsc::Receiver<Value> {
+    let (tx, rx) = mpsc::channel();
+    SUBSCRIBERS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .push(tx);
+    let mut running = POLLER.lock().unwrap_or_else(|p| p.into_inner());
+    if !*running {
+        *running = true;
+        POLLERS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        std::thread::spawn(poll_containers);
+    }
+    rx
+}
+
+/// Send `ev` to every open stream; streams that closed go.
+fn broadcast(ev: &Value) {
+    let mut subscribers = SUBSCRIBERS.lock().unwrap_or_else(|p| p.into_inner());
+    subscribers.retain(|s| s.send(ev.clone()).is_ok());
+}
+
+/// The poller: container events from the changes of their state files, for all streams.
+/// It ends when no stream is left; the next stream starts it again.
+fn poll_containers() {
+    let mut cache = HashMap::new();
+    let mut known = snapshot(&mut cache);
+    loop {
+        std::thread::sleep(POLL);
+        {
+            let mut subscribers = SUBSCRIBERS.lock().unwrap_or_else(|p| p.into_inner());
+            subscribers.retain(|s| s.send(Value::Null).is_ok());
+            if subscribers.is_empty() {
+                *POLLER.lock().unwrap_or_else(|p| p.into_inner()) = false;
+                POLLERS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                return;
+            }
+        }
+        let current = snapshot(&mut cache);
+        for ev in changes(&known, &current) {
+            broadcast(&ev);
+        }
+        known = current;
+    }
+}
 
 fn now() -> Duration {
     SystemTime::now()
@@ -43,9 +94,7 @@ pub fn publish(kind: &str, action: &str, id: &str, attributes: &[(&str, String)]
         .iter()
         .map(|(k, v)| (k.to_string(), v.clone()))
         .collect();
-    let ev = event(kind, action, id, &attributes);
-    let mut subscribers = SUBSCRIBERS.lock().unwrap_or_else(|p| p.into_inner());
-    subscribers.retain(|s| s.send(ev.clone()).is_ok());
+    broadcast(&event(kind, action, id, &attributes));
 }
 
 #[derive(Clone, PartialEq)]
@@ -56,6 +105,8 @@ struct Seen {
     image: String,
     exit_code: Option<i32>,
     labels: BTreeMap<String, String>,
+    /// Its health while it runs, when it has a check.
+    health: Option<crate::health::Status>,
 }
 
 fn check(filters: &BTreeMap<String, Vec<String>>) -> Result<(), Reply> {
@@ -75,24 +126,32 @@ fn check(filters: &BTreeMap<String, Vec<String>>) -> Result<(), Reply> {
     )
 }
 
-/// The containers now. `labels` keeps each container's labels (fixed at create), so each
-/// config is read once.
-fn snapshot(labels: &mut HashMap<String, BTreeMap<String, String>>) -> HashMap<String, Seen> {
+/// The containers now. `labels` keeps each container's labels and whether it has a health
+/// check (both fixed at create), so each config is read once.
+fn snapshot(
+    labels: &mut HashMap<String, (BTreeMap<String, String>, bool)>,
+) -> HashMap<String, Seen> {
     let list = crate::ContainerHandle::list(true).unwrap_or_default();
     let ids: std::collections::HashSet<&str> = list.iter().map(|c| c.id.as_str()).collect();
     labels.retain(|id, _| ids.contains(id.as_str()));
     let dirs = crate::paths::dirs().ok();
     list.into_iter()
         .map(|c| {
-            let own = labels
+            let (own, checked) = labels
                 .entry(c.id.clone())
                 .or_insert_with(|| {
                     dirs.as_ref()
                         .and_then(|d| crate::state::read_config(d, &c.id).ok())
-                        .map(|s| s.labels)
+                        .map(|s| (s.labels, s.health.is_some()))
                         .unwrap_or_default()
                 })
                 .clone();
+            let health = (checked && c.state.status == Status::Running).then(|| {
+                dirs.as_ref()
+                    .and_then(|d| crate::health::read(d, &c.id))
+                    .unwrap_or_default()
+                    .status
+            });
             (
                 c.id.clone(),
                 Seen {
@@ -102,6 +161,7 @@ fn snapshot(labels: &mut HashMap<String, BTreeMap<String, String>>) -> HashMap<S
                     image: c.image,
                     exit_code: c.state.exit_code,
                     labels: own,
+                    health,
                 },
             )
         })
@@ -125,6 +185,19 @@ fn changes(before: &HashMap<String, Seen>, after: &HashMap<String, Seen>) -> Vec
         a
     };
     for (id, now) in after {
+        // A check's result that changed the health (a start's "starting" is no event).
+        let health = now
+            .health
+            .filter(|h| *h != crate::health::Status::Starting)
+            .filter(|h| before.get(id).and_then(|was| was.health) != Some(*h));
+        if let Some(h) = health {
+            out.push(event(
+                "container",
+                &format!("health_status: {}", h.name()),
+                id,
+                &attrs(now, false),
+            ));
+        }
         let ran = now.started.is_some();
         match before.get(id) {
             None => {
@@ -138,13 +211,19 @@ fn changes(before: &HashMap<String, Seen>, after: &HashMap<String, Seen>) -> Vec
             }
             Some(was) => {
                 let restarted = now.started != was.started && ran;
-                if was.status == Status::Running && (now.status != Status::Running || restarted) {
+                let was_running = was.status == Status::Running;
+                // The run it was in ended.
+                if was_running && (now.status != Status::Running || restarted) {
                     out.push(event("container", "die", id, &attrs(was, true)));
                 }
                 if restarted {
                     out.push(event("container", "start", id, &attrs(now, false)));
                 }
-                if now.status == Status::Exited && (was.status != Status::Exited || restarted) {
+                // A run that began after the last look has ended too (the end of the run
+                // it was in has its event above).
+                if now.status == Status::Exited
+                    && (restarted || (!was_running && was.status != Status::Exited))
+                {
                     out.push(event("container", "die", id, &attrs(now, true)));
                 }
             }
@@ -176,6 +255,15 @@ fn wanted(ev: &Value, filters: &BTreeMap<String, Vec<String>>) -> bool {
         values.is_empty()
             || values.iter().any(|want| match key.as_str() {
                 "type" => field(ev, "Type") == *want,
+                // As Docker: these three match the actions that begin with them.
+                "event"
+                    if matches!(
+                        want.as_str(),
+                        "health_status" | "exec_create" | "exec_start"
+                    ) =>
+                {
+                    field(ev, "Action").starts_with(want.as_str())
+                }
                 "event" => field(ev, "Action") == *want,
                 "container" => {
                     field(ev, "Type") == "container"
@@ -204,23 +292,19 @@ pub fn stream(req: &Request) -> Reply {
         return reply;
     }
     let until = req.query.int_param("until").filter(|u| *u > 0);
-    let (tx, rx) = mpsc::channel();
-    SUBSCRIBERS
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .push(tx);
+    let rx = subscribe();
     Reply::Stream {
         content_type: "application/json",
         body: Box::new(move |out| {
-            let mut labels = HashMap::new();
-            let mut known = snapshot(&mut labels);
             loop {
-                let mut batch: Vec<Value> = rx.try_iter().collect();
-                let current = snapshot(&mut labels);
-                batch.extend(changes(&known, &current));
-                known = current;
-                for ev in batch.iter().filter(|e| wanted(e, &filters)) {
-                    let mut line = serde_json::to_vec(ev).unwrap_or_default();
+                let first = match rx.recv_timeout(POLL) {
+                    Ok(ev) => Some(ev),
+                    Err(mpsc::RecvTimeoutError::Timeout) => None,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+                };
+                let batch = first.into_iter().chain(rx.try_iter());
+                for ev in batch.filter(|e| !e.is_null() && wanted(e, &filters)) {
+                    let mut line = serde_json::to_vec(&ev).unwrap_or_default();
                     line.push(b'\n');
                     out.write_all(&line)?;
                 }
@@ -228,7 +312,6 @@ pub fn stream(req: &Request) -> Reply {
                 if until.is_some_and(|u| now().as_secs() >= u as u64) || client_gone(out) {
                     return Ok(());
                 }
-                std::thread::sleep(POLL);
             }
         }),
     }
@@ -246,11 +329,57 @@ mod tests {
             image: "i".into(),
             exit_code: Some(0),
             labels: BTreeMap::new(),
+            health: None,
         }
     }
 
     fn filter(key: &str, value: &str) -> BTreeMap<String, Vec<String>> {
         BTreeMap::from([(key.to_string(), vec![value.to_string()])])
+    }
+
+    #[test]
+    fn a_run_that_ends_gives_one_die() {
+        let id = "c1".to_string();
+        let running = HashMap::from([(id.clone(), seen(Status::Running, Some(5)))]);
+        let exited = HashMap::from([(id.clone(), seen(Status::Exited, Some(5)))]);
+        let actions: Vec<String> = changes(&running, &exited)
+            .iter()
+            .map(|e| e["Action"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(actions, ["die"]);
+        // A new run that began and ended between the two looks: the old run's end, the
+        // start, and the new run's end.
+        let again = HashMap::from([(id, seen(Status::Exited, Some(9)))]);
+        let actions: Vec<String> = changes(&running, &again)
+            .iter()
+            .map(|e| e["Action"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(actions, ["die", "start", "die"]);
+    }
+
+    #[test]
+    fn one_poller_serves_every_stream() {
+        let running = || POLLERS.load(std::sync::atomic::Ordering::SeqCst);
+        let first = subscribe();
+        let second = subscribe();
+        assert_eq!(running(), 1);
+        // Both hear what the service does.
+        publish("volume", "create", "v1", &[]);
+        for rx in [&first, &second] {
+            let got = rx.iter().find(|ev| !ev.is_null()).expect("an event");
+            assert_eq!(got["Action"], "create");
+        }
+        // The last stream gone, the poller ends.
+        drop((first, second));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while running() > 0 {
+            assert!(std::time::Instant::now() < deadline, "the poller stayed");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // And a new stream starts it again.
+        let third = subscribe();
+        assert_eq!(running(), 1);
+        drop(third);
     }
 
     #[test]

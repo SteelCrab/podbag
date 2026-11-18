@@ -120,6 +120,7 @@ fn docker_volume_in_use_is_a_conflict() {
 
 #[test]
 fn docker_network_lifecycle() {
+    let _turn = network_turn();
     let s = setup();
     let id = s.ok(&["network", "create", "--subnet", "10.79.5.0/24", "apiobj-n1"]);
     assert_eq!(id.len(), 64, "{id}");
@@ -190,4 +191,343 @@ fn docker_network_lifecycle() {
     assert!(stderr(&out).contains("pre-defined"), "{}", stderr(&out));
     let out = s.docker(&["network", "create", "-d", "overlay", "apiobj-n3"]);
     assert_ne!(out.status.code(), Some(0));
+}
+
+/// A service without an image.
+fn bare() -> Setup {
+    let reg = FakeRegistry::start(false);
+    let sb = Sandbox::new();
+    let service = Service::start(&sb, &["--timeout", "0"]);
+    Setup {
+        _reg: reg,
+        sb,
+        service,
+        image: String::new(),
+    }
+}
+
+impl Setup {
+    /// A `GET` with `filters`, as JSON.
+    fn get(&self, path: &str, filters: &str) -> serde_json::Value {
+        let (body, head) = curl(
+            &self.service.socket,
+            &[
+                "-G",
+                "--data-urlencode",
+                &format!("filters={filters}"),
+                path,
+            ],
+        );
+        serde_json::from_str(&body)
+            .unwrap_or_else(|e| panic!("{path} {filters}: {e}: {head} {body}"))
+    }
+}
+
+/// The names in a list of networks or volumes.
+fn names_in(list: &serde_json::Value) -> Vec<String> {
+    let mut names: Vec<String> = list
+        .as_array()
+        .unwrap_or_else(|| panic!("not a list: {list}"))
+        .iter()
+        .map(|v| v["Name"].as_str().unwrap().to_string())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn labels_on_networks_and_volumes() {
+    let _turn = network_turn();
+    let s = bare();
+    let labels = |kind: &str, name: &str| -> serde_json::Value {
+        serde_json::from_str(&s.ok(&[kind, "inspect", "--format", "{{json .Labels}}", name]))
+            .unwrap()
+    };
+    // Networks.
+    s.ok(&[
+        "network", "create", "--label", "a=b", "--label", "c", "--label", "eq=x=y", "n1",
+    ]);
+    s.ok(&["network", "create", "n2"]);
+    assert_eq!(
+        labels("network", "n1"),
+        serde_json::json!({"a": "b", "c": "", "eq": "x=y"})
+    );
+    assert_eq!(labels("network", "n2"), serde_json::json!({}));
+    let networks = |filters: &[&str]| {
+        let mut args = vec!["network", "ls", "--format", "{{.Name}}"];
+        for f in filters {
+            args.extend(["--filter", f]);
+        }
+        s.lines(&args)
+    };
+    assert_eq!(networks(&["label=a=b"]), ["n1"]);
+    assert_eq!(networks(&["label=a"]), ["n1"]);
+    assert_eq!(networks(&["label=c"]), ["n1"]);
+    assert_eq!(networks(&["label=eq=x=y"]), ["n1"]);
+    assert!(networks(&["label=a=x"]).is_empty());
+    assert!(networks(&["label=zz"]).is_empty());
+    // Every label that was asked for must be there.
+    assert!(networks(&["label=a", "label=zz"]).is_empty());
+    assert_eq!(networks(&["label=a", "label=c"]), ["n1"]);
+    // Pruning with a label takes the unused networks that have it, or do not have it.
+    s.ok(&["network", "create", "--label", "keep=1", "n3"]);
+    s.ok(&["network", "prune", "-f", "--filter", "label=a=b"]);
+    assert_eq!(networks(&["type=custom"]), ["n2", "n3"]);
+    s.ok(&["network", "prune", "-f", "--filter", "label!=keep"]);
+    assert_eq!(networks(&["type=custom"]), ["n3"]);
+
+    // Volumes.
+    s.ok(&["volume", "create", "--label", "a=b", "--label", "c", "v1"]);
+    s.ok(&["volume", "create", "v2"]);
+    assert_eq!(
+        labels("volume", "v1"),
+        serde_json::json!({"a": "b", "c": ""})
+    );
+    assert_eq!(labels("volume", "v2"), serde_json::json!({}));
+    let volumes = |filters: &[&str]| {
+        let mut args = vec!["volume", "ls", "--format", "{{.Name}}"];
+        for f in filters {
+            args.extend(["--filter", f]);
+        }
+        s.lines(&args)
+    };
+    assert_eq!(volumes(&["label=a=b"]), ["v1"]);
+    assert_eq!(volumes(&["label=c"]), ["v1"]);
+    assert!(volumes(&["label=a=x"]).is_empty());
+    assert!(volumes(&["label=a", "label=zz"]).is_empty());
+    // Creating a volume that exists returns it as it is.
+    s.ok(&["volume", "create", "--label", "other=1", "v1"]);
+    assert_eq!(
+        labels("volume", "v1"),
+        serde_json::json!({"a": "b", "c": ""})
+    );
+    s.ok(&["volume", "create", "--label", "keep=1", "v3"]);
+    s.ok(&["volume", "prune", "-a", "-f", "--filter", "label=a=b"]);
+    assert_eq!(volumes(&[]), ["v2", "v3"]);
+    s.ok(&["volume", "prune", "-a", "-f", "--filter", "label!=keep"]);
+    assert_eq!(volumes(&[]), ["v3"]);
+}
+
+#[test]
+fn label_filters_in_every_form() {
+    let _turn = network_turn();
+    let s = bare();
+    s.ok(&[
+        "network", "create", "--label", "a=b", "--label", "e=", "--label", "eq=x=y", "n1",
+    ]);
+    s.ok(&["network", "create", "--label", "a=other", "n2"]);
+    s.ok(&[
+        "volume", "create", "--label", "a=b", "--label", "e=", "--label", "eq=x=y", "v1",
+    ]);
+    s.ok(&["volume", "create", "--label", "a=other", "v2"]);
+    let cases: [(&str, &[&str]); 9] = [
+        // As a list (the docker CLI) and as a map (older clients, Compose).
+        (r#"{"label":["a=b"]}"#, &["1"]),
+        (r#"{"label":{"a=b":true}}"#, &["1"]),
+        // A key alone: any value.
+        (r#"{"label":["a"]}"#, &["1", "2"]),
+        // Several: all of them.
+        (r#"{"label":["a=b","nope"]}"#, &[]),
+        (r#"{"label":{"a":true,"eq=x=y":true}}"#, &["1"]),
+        // An empty value is a value.
+        (r#"{"label":["e="]}"#, &["1"]),
+        (r#"{"label":["e=x"]}"#, &[]),
+        // A value with an equals sign.
+        (r#"{"label":["eq=x=y"]}"#, &["1"]),
+        (r#"{"label":["eq=x"]}"#, &[]),
+    ];
+    for (filters, want) in cases {
+        let networks = names_in(&s.get("/networks", filters));
+        let want_networks: Vec<String> = want.iter().map(|n| format!("n{n}")).collect();
+        assert_eq!(networks, want_networks, "networks with {filters}");
+        let volumes = names_in(&s.get("/volumes", filters)["Volumes"]);
+        let want_volumes: Vec<String> = want.iter().map(|n| format!("v{n}")).collect();
+        assert_eq!(volumes, want_volumes, "volumes with {filters}");
+    }
+}
+
+impl Setup {
+    /// `POST path` with a JSON body: (status code, body).
+    fn post(&self, path: &str, body: &serde_json::Value) -> (u16, String) {
+        let (body, head) = curl(
+            &self.service.socket,
+            &[
+                "-X",
+                "POST",
+                "-H",
+                "Content-Type: application/json",
+                "-d",
+                &body.to_string(),
+                path,
+            ],
+        );
+        let code = head
+            .lines()
+            .next()
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|c| c.parse().ok())
+            .unwrap_or(0);
+        (code, body)
+    }
+
+    fn fails(&self, args: &[&str]) -> String {
+        let out = self.docker(args);
+        assert_ne!(out.status.code(), Some(0), "docker {args:?} succeeded");
+        stderr(&out)
+    }
+
+    fn inspect(&self, what: &str) -> serde_json::Value {
+        let text = self.ok(&["inspect", what]);
+        serde_json::from_str::<serde_json::Value>(&text).unwrap()[0].clone()
+    }
+}
+
+#[test]
+fn aliases_and_networks_through_the_api() {
+    let _turn = network_turn();
+    let s = setup();
+    s.ok(&["network", "create", "front"]);
+    s.ok(&["network", "create", "back"]);
+    // As Compose creates a container: every network with its aliases.
+    let (code, body) = s.post(
+        "/containers/create?name=web",
+        &serde_json::json!({
+            "Image": s.image,
+            "Cmd": ["sleep", "300"],
+            "HostConfig": {"NetworkMode": "front"},
+            "NetworkingConfig": {"EndpointsConfig": {
+                "front": {"Aliases": ["web", "p-web-1"]},
+                "back": {"Aliases": ["w"]}
+            }}
+        }),
+    );
+    assert_eq!(code, 201, "{body}");
+    let reply: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(reply["Warnings"], serde_json::json!([]), "{body}");
+    s.ok(&["start", "web"]);
+    let web = s.inspect("web");
+    let networks = &web["NetworkSettings"]["Networks"];
+    for (name, alias) in [("front", "p-web-1"), ("back", "w")] {
+        let id = s.ok(&["network", "inspect", "--format", "{{.Id}}", name]);
+        let endpoint = &networks[name];
+        assert_eq!(endpoint["NetworkID"], id.trim(), "{networks}");
+        assert!(
+            endpoint["Aliases"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|x| x == alias)),
+            "{networks}"
+        );
+        assert!(
+            !endpoint["IPAddress"].as_str().unwrap_or("").is_empty(),
+            "{networks}"
+        );
+    }
+    // The list shows the same network IDs (Compose compares them).
+    let list = s.get("/containers/json", r#"{"name":["web"]}"#);
+    let listed = &list[0]["NetworkSettings"]["Networks"];
+    assert_eq!(listed["back"]["NetworkID"], networks["back"]["NetworkID"]);
+    // (The docker CLI lists them in no fixed order.)
+    let mut listed: Vec<String> = s
+        .ok(&["ps", "--format", "{{.Networks}}"])
+        .trim()
+        .split(',')
+        .map(String::from)
+        .collect();
+    listed.sort();
+    assert_eq!(listed, ["back", "front"]);
+    // Another container of `back` finds it by its alias there.
+    s.ok(&[
+        "run",
+        "-d",
+        "--name",
+        "cache",
+        "--network",
+        "back",
+        &s.image,
+        "sleep",
+        "300",
+    ]);
+    s.ok(&["exec", "cache", "ping", "-c1", "-W2", "w"]);
+    s.ok(&["rm", "-f", "web", "cache"]);
+    s.ok(&["network", "rm", "front", "back"]);
+}
+
+#[test]
+fn an_alias_cannot_break_the_hosts_file() {
+    let _turn = network_turn();
+    let s = setup();
+    s.ok(&["network", "create", "front"]);
+    for alias in ["a b", "x\ny", "#c", ""] {
+        let (code, body) = s.post(
+            "/containers/create",
+            &serde_json::json!({
+                "Image": s.image,
+                "Cmd": ["true"],
+                "HostConfig": {"NetworkMode": "front"},
+                "NetworkingConfig": {"EndpointsConfig": {"front": {"Aliases": [alias]}}}
+            }),
+        );
+        assert_eq!(code, 400, "{alias:?}: {body}");
+    }
+    assert!(s.ok(&["ps", "-aq"]).is_empty());
+    s.ok(&["network", "rm", "front"]);
+}
+
+#[test]
+fn connect_and_disconnect_through_the_api() {
+    let _turn = network_turn();
+    let s = setup();
+    s.ok(&["network", "create", "front"]);
+    s.ok(&["network", "create", "back"]);
+    s.ok(&[
+        "create",
+        "--name",
+        "web",
+        "--network",
+        "front",
+        &s.image,
+        "sleep",
+        "300",
+    ]);
+    // Before its start, as Compose does for older engines.
+    s.ok(&["network", "connect", "--alias", "w", "back", "web"]);
+    assert!(
+        s.fails(&["network", "connect", "back", "web"])
+            .contains("already")
+    );
+    s.ok(&["start", "web"]);
+    let networks = s.inspect("web")["NetworkSettings"]["Networks"].clone();
+    assert!(
+        networks["front"].is_object() && networks["back"].is_object(),
+        "{networks}"
+    );
+    assert!(
+        networks["back"]["Aliases"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|x| x == "w")),
+        "{networks}"
+    );
+    // A running container keeps its networks until it stops.
+    s.ok(&["network", "create", "third"]);
+    assert!(
+        s.fails(&["network", "connect", "third", "web"])
+            .contains("stop")
+    );
+    assert!(
+        s.fails(&["network", "disconnect", "back", "web"])
+            .contains("stop")
+    );
+    s.ok(&["stop", "-t", "0", "web"]);
+    s.ok(&["network", "disconnect", "back", "web"]);
+    assert!(
+        s.fails(&["network", "disconnect", "back", "web"])
+            .contains("not connected")
+    );
+    // Its primary network stays; the host's network is not one to join.
+    s.fails(&["network", "disconnect", "front", "web"]);
+    s.fails(&["network", "connect", "host", "web"]);
+    let networks = s.inspect("web")["NetworkSettings"]["Networks"].clone();
+    assert!(networks["back"].is_null(), "{networks}");
+    s.ok(&["rm", "-f", "web"]);
+    s.ok(&["network", "rm", "front", "back", "third"]);
 }

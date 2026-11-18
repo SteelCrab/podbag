@@ -1148,3 +1148,51 @@ fn a_keeper_without_cgroups_leaves_limits_to_a_shim() {
     assert_eq!(started, Some(0), "{err}");
     assert_eq!(limit, (32u64 << 20).to_string(), "{group:?}");
 }
+
+#[test]
+fn no_process_between_probes() {
+    let sb = kept(300);
+    let id = op(
+        &sb,
+        &[
+            "run",
+            "-d",
+            "--name",
+            "h",
+            "--health-cmd",
+            "true",
+            "--health-interval",
+            "2s",
+            "--rootfs",
+            &rootfs(),
+            "sleep",
+            "300",
+        ],
+    );
+    let id = id.trim().to_string();
+    assert!(wait_for(Duration::from_secs(15), || {
+        inspect(&sb, "h")["health"]["status"] == "healthy"
+    }));
+    // Between its checks the container costs no process: a probe lives for a moment.
+    let probes = || {
+        let out = Command::new("ps").args(["-eo", "args="]).output().unwrap();
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| l.contains("__health") && l.contains(&id))
+            .count()
+    };
+    let samples = 60;
+    let mut seen = 0;
+    for _ in 0..samples {
+        if probes() > 0 {
+            seen += 1;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        seen * 4 <= samples,
+        "a probe ran in {seen} of {samples} samples"
+    );
+    assert_eq!(processes(&sb), (1, 0), "one keeper, no shim");
+    op(&sb, &["rm", "-f", "h"]);
+}

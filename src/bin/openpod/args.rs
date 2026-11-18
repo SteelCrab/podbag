@@ -129,6 +129,16 @@ pub enum Cmd {
     Store { op: String },
     #[command(name = "__session", hide = true)]
     Session,
+    /// Start an ended container again when its restart policy says so
+    #[command(name = "__restart", hide = true)]
+    Restarter { id: String },
+    /// Run a container's health check once
+    #[command(name = "__health", hide = true)]
+    Probe {
+        id: String,
+        #[arg(long)]
+        start_period: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -138,6 +148,9 @@ pub enum NetworkCmd {
         /// Subnet in CIDR form (default: the next free 10.78.<n>.0/24)
         #[arg(long)]
         subnet: Option<String>,
+        /// A label, as key=value or key (may be repeated)
+        #[arg(long = "label", value_name = "KEY=VALUE")]
+        labels: Vec<String>,
         name: String,
     },
     /// List networks
@@ -149,12 +162,27 @@ pub enum NetworkCmd {
     },
     /// Show a network's details as JSON
     Inspect { name: String },
+    /// Connect a stopped container to a further network (from its next start on)
+    Connect {
+        /// A further name of the container on this network (may be repeated)
+        #[arg(long = "alias", value_name = "ALIAS")]
+        aliases: Vec<String>,
+        network: String,
+        container: String,
+    },
+    /// Disconnect a stopped container from a further network
+    Disconnect { network: String, container: String },
 }
 
 #[derive(Subcommand)]
 pub enum VolumeCmd {
     /// Create a volume (a random name when none is given)
-    Create { name: Option<String> },
+    Create {
+        /// A label, as key=value or key (may be repeated)
+        #[arg(long = "label", value_name = "KEY=VALUE")]
+        labels: Vec<String>,
+        name: Option<String>,
+    },
     /// List volumes
     Ls {
         /// Show only names
@@ -227,6 +255,30 @@ pub struct RunArgs {
     /// Remove the container when it exits
     #[arg(long)]
     pub rm: bool,
+    /// Start it again after it ends: no, always, unless-stopped, on-failure[:max]
+    #[arg(long, value_name = "POLICY")]
+    pub restart: Option<String>,
+    /// A command that checks the container's health (run with /bin/sh -c)
+    #[arg(long = "health-cmd", value_name = "COMMAND")]
+    pub health_cmd: Option<String>,
+    /// Time between checks (30s, 1m, 500ms)
+    #[arg(long = "health-interval", value_name = "DURATION")]
+    pub health_interval: Option<String>,
+    /// Time a check may take
+    #[arg(long = "health-timeout", value_name = "DURATION")]
+    pub health_timeout: Option<String>,
+    /// Failures in a row before it is unhealthy
+    #[arg(long = "health-retries", value_name = "N")]
+    pub health_retries: Option<u32>,
+    /// Time after the start in which failures do not count
+    #[arg(long = "health-start-period", value_name = "DURATION")]
+    pub health_start_period: Option<String>,
+    /// Time between checks in the start period
+    #[arg(long = "health-start-interval", value_name = "DURATION")]
+    pub health_start_interval: Option<String>,
+    /// No health check, not even the image's
+    #[arg(long = "no-healthcheck")]
+    pub no_healthcheck: bool,
     /// Run in the background and print the container ID
     #[arg(short = 'd', long)]
     pub detach: bool,
@@ -266,9 +318,13 @@ pub struct RunArgs {
     /// Mount a tmpfs (TARGET[:OPTIONS])
     #[arg(long)]
     pub tmpfs: Vec<String>,
-    /// Connect to a network: bridge (default), host, none, or a network name
+    /// Connect to a network: bridge (default), host, none, or a network name; given
+    /// again, the container joins further bridge networks too (eth1, eth2, …)
     #[arg(long, alias = "net")]
-    pub network: Option<String>,
+    pub network: Vec<String>,
+    /// A further name on the container's (first) network, for the other containers there
+    #[arg(long = "network-alias", alias = "net-alias", value_name = "ALIAS")]
+    pub network_alias: Vec<String>,
     /// Publish a port ([IP:][HOST_PORT:]CONTAINER_PORT[/tcp|udp])
     #[arg(short = 'p', long = "publish")]
     pub publish: Vec<String>,

@@ -4,12 +4,13 @@ A daemonless, rootless container engine that runs Docker/OCI images from a singl
 
 ## Status
 
-Early development (milestone M9). What works:
+Early development (milestones M0 to M10 and M8a/M8b of the plan). What works:
 
 ```sh
 openpod run alpine echo hello            # pulls the image if needed; the container stays
 openpod run --rm -it alpine sh           # interactive shell, removed on exit
 openpod run -d --name web nginx:alpine   # in the background
+openpod run -d --restart on-failure:3 myjob   # started again when it fails (no, always, …)
 openpod run -m 512m --cpus 1.5 --pids-limit 200 alpine sh   # resource limits
 openpod run -v ./src:/work:ro -v pgdata:/var/lib/pg --tmpfs /run alpine sh   # volumes
 openpod volume create|ls|rm|inspect
@@ -44,6 +45,23 @@ every container its own `openpod __shim` process instead; `keeper_linger = 10000
 cgroup namespaces, plus a user namespace when run without root. Identical files in
 different images are stored once and share page cache. The store keeps at most 10 GiB by
 default.
+
+Restart policies (`--restart no|always|unless-stopped|on-failure[:N]`, Docker's
+`RestartPolicy`) need no daemon either: when a container ends, whoever cleaned up after it
+starts a small `openpod __restart` process that waits (100 ms, then twice as long each
+time, at most a minute; 100 ms again after a run of 10 seconds) and starts the container
+again. `stop` and `kill` end the restarts until the next `start`; `--rm` does not go with a
+policy. Nothing starts containers when the machine starts, so `always` and
+`unless-stopped` behave the same; `inspect` shows the restarts since the last `start`.
+
+Health checks (`--health-cmd`, `--health-interval`, `--health-timeout`, `--health-retries`,
+`--health-start-period`, `--health-start-interval`, Docker's `Healthcheck`, and an image's
+`HEALTHCHECK`) cost no process between checks either: when one is due, the keeper (or the
+container's own helper) starts `openpod __health`, which runs the check in the container,
+keeps the result with the last five checks, and ends. A check that runs past its timeout
+is ended. `inspect` and `ps` show the health (`starting`, `healthy`, `unhealthy`);
+`--no-healthcheck` turns an image's check off. Images pulled with an earlier openpod have
+their check after the next pull.
 
 Not yet: macOS and Windows.
 
@@ -140,13 +158,19 @@ settings (`/proc/sys`, `/proc/sysrq-trigger`, …). `exec` applies the same.
 |---|---|
 | `--network bridge` (default) | the default network: bridge `openpod0`, `10.77.0.0/16` (`default_subnet` in `config.toml`) |
 | `--network NAME` | a network from `openpod network create`; containers on it find each other by name |
+| `--network A --network B` | further bridge networks too (`eth1`, …); the default route stays on the first |
+| `--network-alias NAME` | a further name on the (first) user network |
 | `--network host` | the host's network |
 | `--network none` | loopback only |
 | `-p [IP:][HOST:]CONTAINER[/tcp\|udp]` | publish a port; without a host port the kernel picks one (`ps`, `inspect`) |
 
 New networks get `10.78.<n>.0/24` unless `--subnet` says otherwise; a subnet that overlaps
-another network or a host route is refused. Names on a network are written into each
-container's `/etc/hosts`, which openpod rewrites as containers start and stop.
+another network or a host route is refused. Names on a network (container names and
+aliases) are written into each container's `/etc/hosts`, which openpod rewrites as
+containers start and stop; when two containers share an alias, the first line answers
+(there is no DNS server to rotate them). `openpod network connect [--alias NAME] NET
+CONTAINER` and `network disconnect NET CONTAINER` change a stopped container's further
+networks for its next start; a running container is refused.
 
 As root, bridges live in the host's network namespace with an nftables table `openpod` for
 NAT (no other table is touched), and IPv4 forwarding is turned on. Without root, one
@@ -185,16 +209,26 @@ prune).
 
 Settings openpod does not have are refused with a reason (devices, `--privileged`,
 `--read-only`, `--pid host`, `--volumes-from`, `--link`, port ranges, other network or
-volume drivers), or accepted with a warning when ignoring them is harmless (restart
-policies, health checks, `--dns`, `--add-host`, ulimits, log drivers, network aliases).
+volume drivers), or accepted with a warning when ignoring them is harmless (`--dns`,
+`--add-host`, ulimits, log drivers, fixed addresses).
 Features it lacks answer 501 with what to do instead: `build` (use buildx, later),
 `commit`, `cp`, `export`, `diff`, `top`, `stats`, `pause`, `rename`, `update`, `push`,
-`search`, `save`/`load`, `network connect`, swarm and plugins.
+`search`, `save`/`load`, swarm and plugins. `network connect` and `disconnect` work on
+containers that do not run.
 
 Differences from Docker: `docker attach` to a container that another process started
 reads its output from the log and cannot send input; a client that leaves an attached
-`exec` ends its command (Docker leaves it running); volumes and networks keep no labels
-yet. Compose and buildx come in the next milestones.
+`exec` ends its command (Docker leaves it running). Volumes and networks keep their
+labels (`--label` on `network create` and `volume create`, and the `label` filters of
+`ls` and `prune`). `network connect` changes a stopped container only.
+
+Docker Compose works through the same socket: `docker compose up` (again without making
+anything new when nothing changed), `down` (`-v`), `ps`, `logs`, `exec`, `run`, with the
+project's networks and volumes, several networks per service, services that reach each
+other by service and container name, `depends_on` with `condition: service_healthy`,
+restart policies and health checks. Names live in each container's `/etc/hosts` (there is
+no DNS server): when replicas share a name, the first one answers. Building images
+(`build:`) comes with buildx in the next milestone.
 
 ## Requirements
 

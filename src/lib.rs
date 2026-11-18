@@ -22,6 +22,7 @@ pub mod elf;
 #[doc(hidden)]
 pub mod envcheck;
 mod error;
+pub mod health;
 #[cfg(unix)]
 #[doc(hidden)]
 pub mod helper;
@@ -46,6 +47,7 @@ pub mod netlink;
 pub mod network;
 #[doc(hidden)]
 pub mod paths;
+pub mod restart;
 #[doc(hidden)]
 pub mod seccomp;
 #[cfg(unix)]

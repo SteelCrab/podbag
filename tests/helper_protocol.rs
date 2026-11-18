@@ -86,6 +86,11 @@ fn shim_reports_unsupported_and_removes_the_container_directory() {
         mounts: Vec::new(),
         network: openpod::network::NetworkMode::Host,
         publish: Vec::new(),
+        aliases: Vec::new(),
+        restart: Default::default(),
+        health: None,
+        console_size: None,
+        extra_networks: Vec::new(),
     };
     state::write_config(&dirs, &spec).unwrap();
     let mut h = helper::spawn_shim(

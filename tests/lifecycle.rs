@@ -919,6 +919,7 @@ fn rm_f_of_a_container_that_removes_itself_succeeds() {
 
 #[test]
 fn rm_f_ends_every_container_before_it_removes_the_first() {
+    let _turn = network_turn();
     // With many containers on one command line, all of them end at about the same
     // moment; one after another, each would wait for the removal of those before it.
     let sb = Sandbox::new();
@@ -1058,4 +1059,416 @@ fn rm_fv_of_many_reports_volumes_it_could_not_remove() {
     let err = stderr(&out);
     assert_eq!(err.matches(".lock").count(), 2, "{err}");
     assert!(stdout(&openpod(&sb, &["ps", "-aq"])).is_empty());
+}
+
+/// Wait up to `secs` for `f` to give a value.
+fn wait_until<T>(secs: u64, what: &str, mut f: impl FnMut() -> Option<T>) -> T {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    loop {
+        if let Some(v) = f() {
+            return v;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{what} did not happen in {secs} s"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn restarts(info: &serde_json::Value) -> u64 {
+    info["restart_count"].as_u64().unwrap_or(0)
+}
+
+#[test]
+fn a_container_that_fails_is_started_again() {
+    let sb = Sandbox::new();
+    // Fails twice, then succeeds: a count in a volume survives the restarts. (On /mnt,
+    // which the shared root filesystem has: a new mount point would be made in it.)
+    let c = start(
+        &sb,
+        &["--restart", "on-failure", "-v", "count:/mnt"],
+        &[
+            "sh",
+            "-c",
+            "n=$(( $(cat /mnt/n 2>/dev/null || echo 0) + 1 )); echo $n > /mnt/n; [ $n -ge 3 ]",
+        ],
+    );
+    let info = wait_until(20, "a successful run", || {
+        let i = inspect(&sb, &c);
+        (i["state"]["status"] == "exited" && i["state"]["exit_code"] == 0).then_some(i)
+    });
+    assert_eq!(restarts(&info), 2, "{info}");
+    ok(&openpod(&sb, &["rm", &c]));
+}
+
+#[test]
+fn on_failure_gives_up_after_its_limit() {
+    let sb = Sandbox::new();
+    let c = start(&sb, &["--restart", "on-failure:2"], &["false"]);
+    wait_until(20, "two restarts", || {
+        let i = inspect(&sb, &c);
+        (restarts(&i) == 2 && i["state"]["status"] == "exited").then_some(())
+    });
+    // A third would come 400 ms after the last end.
+    std::thread::sleep(Duration::from_millis(1500));
+    let info = inspect(&sb, &c);
+    assert_eq!(restarts(&info), 2, "{info}");
+    assert_eq!(info["state"]["status"], "exited", "{info}");
+    assert_eq!(info["state"]["exit_code"], 1, "{info}");
+    ok(&openpod(&sb, &["rm", &c]));
+}
+
+#[test]
+fn always_starts_a_clean_exit_again() {
+    let sb = Sandbox::new();
+    let c = start(&sb, &["--restart", "always"], &["true"]);
+    wait_until(20, "two restarts", || {
+        (restarts(&inspect(&sb, &c)) >= 2).then_some(())
+    });
+    ok(&openpod(&sb, &["rm", "-f", &c]));
+    std::thread::sleep(Duration::from_millis(1500));
+    assert!(ok(&openpod(&sb, &["ps", "-aq"])).is_empty());
+}
+
+#[test]
+fn a_stopped_container_stays_stopped() {
+    let sb = Sandbox::new();
+    let c = start(&sb, &["--restart", "always"], &["sleep", "300"]);
+    wait_for_status(&sb, &c, "running");
+    ok(&openpod(&sb, &["stop", "-t", "1", &c]));
+    std::thread::sleep(Duration::from_millis(1500));
+    let info = inspect(&sb, &c);
+    assert_eq!(info["state"]["status"], "exited", "{info}");
+    assert_eq!(restarts(&info), 0, "{info}");
+    // Started again by the user, then killed: it stays stopped too.
+    ok(&openpod(&sb, &["start", &c]));
+    wait_for_status(&sb, &c, "running");
+    ok(&openpod(&sb, &["kill", &c]));
+    wait_for_status(&sb, &c, "exited");
+    std::thread::sleep(Duration::from_millis(1500));
+    let info = inspect(&sb, &c);
+    assert_eq!(info["state"]["status"], "exited", "{info}");
+    assert_eq!(restarts(&info), 0, "{info}");
+    ok(&openpod(&sb, &["rm", &c]));
+}
+
+#[test]
+fn stop_during_the_delay_ends_the_restarts() {
+    let sb = Sandbox::new();
+    let c = start(&sb, &["--restart", "always"], &["sh", "-c", "exit 3"]);
+    // The delay is 800 ms by now.
+    wait_until(20, "three restarts", || {
+        (restarts(&inspect(&sb, &c)) >= 3).then_some(())
+    });
+    ok(&openpod(&sb, &["stop", &c]));
+    // A start that was under way when the stop came ends by itself.
+    std::thread::sleep(Duration::from_millis(500));
+    let before = restarts(&inspect(&sb, &c));
+    std::thread::sleep(Duration::from_millis(2500));
+    let info = inspect(&sb, &c);
+    assert_eq!(restarts(&info), before, "{info}");
+    assert_eq!(info["state"]["status"], "exited", "{info}");
+    ok(&openpod(&sb, &["rm", &c]));
+}
+
+/// Processes of this machine whose command line has every one of `words`.
+fn processes_with(words: &[&str]) -> Vec<String> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+        let Ok(cmdline) = std::fs::read(entry.path().join("cmdline")) else {
+            continue;
+        };
+        let line = String::from_utf8_lossy(&cmdline).replace('\0', " ");
+        if words.iter().all(|w| line.contains(w)) {
+            found.push(line);
+        }
+    }
+    found
+}
+
+#[test]
+fn rm_during_the_delay_removes_it_for_good() {
+    let sb = Sandbox::new();
+    let c = start(&sb, &["--restart", "always"], &["sh", "-c", "exit 3"]);
+    wait_until(20, "three restarts", || {
+        (restarts(&inspect(&sb, &c)) >= 3).then_some(())
+    });
+    // It may be starting at this moment: -f.
+    ok(&openpod(&sb, &["rm", "-f", &c]));
+    std::thread::sleep(Duration::from_millis(2500));
+    assert!(ok(&openpod(&sb, &["ps", "-aq"])).is_empty());
+    let left = processes_with(&["__restart", &c]);
+    assert!(left.is_empty(), "{left:?}");
+}
+
+#[test]
+fn a_failing_container_is_not_started_in_a_busy_loop() {
+    let sb = Sandbox::new();
+    let c = start(&sb, &["--restart", "always"], &["false"]);
+    std::thread::sleep(Duration::from_secs(3));
+    // 100, 200, 400, 800, 1600 ms between them: about four in three seconds.
+    let n = restarts(&inspect(&sb, &c));
+    assert!((2..=6).contains(&n), "{n} restarts in 3 s");
+    ok(&openpod(&sb, &["rm", "-f", &c]));
+}
+
+#[test]
+fn restart_and_rm_do_not_go_together() {
+    let sb = Sandbox::new();
+    let rootfs = rootfs();
+    let both = openpod(
+        &sb,
+        &[
+            "run",
+            "--rm",
+            "--restart",
+            "always",
+            "--rootfs",
+            &rootfs,
+            "true",
+        ],
+    );
+    assert_eq!(both.status.code(), Some(125), "{}", stderr(&both));
+    assert!(stderr(&both).contains("--rm"), "{}", stderr(&both));
+    let odd = openpod(
+        &sb,
+        &[
+            "run",
+            "-d",
+            "--restart",
+            "sometimes",
+            "--rootfs",
+            &rootfs,
+            "true",
+        ],
+    );
+    assert_eq!(odd.status.code(), Some(125), "{}", stderr(&odd));
+    assert!(stderr(&odd).contains("restart"), "{}", stderr(&odd));
+    assert!(ok(&openpod(&sb, &["ps", "-aq"])).is_empty());
+}
+
+fn health(info: &serde_json::Value) -> String {
+    info["health"]["status"].as_str().unwrap_or("").to_string()
+}
+
+#[test]
+fn a_healthy_container_says_so() {
+    let sb = Sandbox::new();
+    let c = start(
+        &sb,
+        &["--health-cmd", "true", "--health-interval", "1s"],
+        &["sleep", "300"],
+    );
+    // Starting until its first check.
+    assert_eq!(health(&inspect(&sb, &c)), "starting");
+    wait_until(15, "healthy", || {
+        (health(&inspect(&sb, &c)) == "healthy").then_some(())
+    });
+    let ps = ok(&openpod(&sb, &["ps"]));
+    assert!(ps.contains("(healthy)"), "{ps}");
+    ok(&openpod(&sb, &["rm", "-f", &c]));
+}
+
+#[test]
+fn an_unhealthy_container_says_so_after_its_retries() {
+    let sb = Sandbox::new();
+    let c = start(
+        &sb,
+        &[
+            "--health-cmd",
+            "exit 1",
+            "--health-interval",
+            "1s",
+            "--health-retries",
+            "2",
+        ],
+        &["sleep", "300"],
+    );
+    let info = wait_until(20, "unhealthy", || {
+        let i = inspect(&sb, &c);
+        (health(&i) == "unhealthy").then_some(i)
+    });
+    assert_eq!(info["health"]["failing_streak"], 2, "{info}");
+    let ps = ok(&openpod(&sb, &["ps"]));
+    assert!(ps.contains("(unhealthy)"), "{ps}");
+    ok(&openpod(&sb, &["rm", "-f", &c]));
+}
+
+#[test]
+fn a_start_period_forgives_early_failures() {
+    let sb = Sandbox::new();
+    // Fails for its first two seconds; with one retry it would be unhealthy at once.
+    // (The file goes to a tmpfs: the shared root filesystem must not keep it.)
+    let c = start(
+        &sb,
+        &[
+            "--tmpfs",
+            "/mnt",
+            "--health-cmd",
+            "test -e /mnt/ready",
+            "--health-interval",
+            "500ms",
+            "--health-retries",
+            "1",
+            "--health-start-period",
+            "6s",
+            "--health-start-interval",
+            "500ms",
+        ],
+        &["sh", "-c", "sleep 2; touch /mnt/ready; sleep 300"],
+    );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let info = loop {
+        let i = inspect(&sb, &c);
+        assert_ne!(health(&i), "unhealthy", "{i}");
+        if health(&i) == "healthy" {
+            break i;
+        }
+        assert!(Instant::now() < deadline, "never healthy: {i}");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let log = info["health"]["log"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(log.iter().any(|p| p["exit_code"] != 0), "{info}");
+    ok(&openpod(&sb, &["rm", "-f", &c]));
+}
+
+#[test]
+fn a_probe_that_hangs_is_ended_at_its_timeout() {
+    let sb = Sandbox::new();
+    let c = start(
+        &sb,
+        &[
+            "--health-cmd",
+            "sleep 60",
+            "--health-interval",
+            "1s",
+            "--health-timeout",
+            "1s",
+        ],
+        &["sleep", "300"],
+    );
+    let info = wait_until(20, "two probes that ran too long", || {
+        let i = inspect(&sb, &c);
+        (i["health"]["log"].as_array().map_or(0, Vec::len) >= 2).then_some(i)
+    });
+    let probe = &info["health"]["log"][0];
+    assert_eq!(probe["exit_code"], -1, "{info}");
+    assert!(
+        probe["output"].as_str().unwrap_or("").contains("timeout"),
+        "{info}"
+    );
+    // The checks that ran too long do not stay: one at a time at most.
+    let left = ok(&openpod(
+        &sb,
+        &["exec", &c, "sh", "-c", "pgrep -f '^sleep 60$' | wc -l"],
+    ));
+    assert!(left.trim().parse::<u32>().unwrap() <= 1, "{left}");
+    ok(&openpod(&sb, &["rm", "-f", &c]));
+}
+
+#[test]
+fn no_probe_outlives_its_container() {
+    let sb = Sandbox::new();
+    let c = start(
+        &sb,
+        &[
+            "--health-cmd",
+            "sleep 30",
+            "--health-interval",
+            "1s",
+            "--health-timeout",
+            "20s",
+        ],
+        &["sleep", "300"],
+    );
+    wait_until(15, "a probe", || {
+        (!processes_with(&["__health", &c]).is_empty()).then_some(())
+    });
+    ok(&openpod(&sb, &["rm", "-f", &c]));
+    std::thread::sleep(Duration::from_millis(1500));
+    let left: Vec<String> = processes_with(&["__health", &c])
+        .into_iter()
+        .chain(processes_with(&["__exec", &c]))
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+}
+
+#[test]
+fn rm_f_waits_for_a_start_in_progress() {
+    let sb = Sandbox::new();
+    let c = start(&sb, &[], &["true"]);
+    wait_for_status(&sb, &c, "exited");
+    let full = inspect(&sb, &c)["id"].as_str().unwrap().to_string();
+    // A start under way holds the lock: the record must stay until it lets go.
+    let mut holder = hold_shim_lock(&sb, &full, "1.5");
+    let began = Instant::now();
+    let rm = openpod(&sb, &["rm", "-f", &c]);
+    assert_eq!(rm.status.code(), Some(0), "{}", stderr(&rm));
+    assert!(
+        began.elapsed() >= Duration::from_millis(1000),
+        "removed while a start held the lock ({:?})",
+        began.elapsed()
+    );
+    let _ = holder.wait();
+    assert!(ok(&openpod(&sb, &["ps", "-aq"])).is_empty());
+}
+
+#[test]
+fn a_restart_that_meets_a_stop_does_not_start() {
+    let sb = Sandbox::new();
+    let c = start(&sb, &["--restart", "always"], &["sleep", "300"]);
+    wait_for_status(&sb, &c, "running");
+    ok(&openpod(&sb, &["stop", "-t", "0", &c]));
+    wait_for_status(&sb, &c, "exited");
+    // A restarter that decided to start it (no mark then) waits for the lock...
+    let full = inspect(&sb, &c)["id"].as_str().unwrap().to_string();
+    let mark = sb.data().join("containers").join(&full).join("stopped");
+    if root_mode() {
+        let _ = std::process::Command::new("sudo")
+            .args(["-n", "rm", "-f"])
+            .arg(&mark)
+            .status();
+    } else {
+        let _ = std::fs::remove_file(&mark);
+    }
+    let mut holder = hold_shim_lock(&sb, &full, "1");
+    let mut restarter = sb.openpod().args(["__restart", &full]).spawn().unwrap();
+    std::thread::sleep(Duration::from_millis(400));
+    // ...while the user stops it.
+    mark_stopped(&sb, &full);
+    let _ = holder.wait();
+    let _ = restarter.wait();
+    std::thread::sleep(Duration::from_millis(500));
+    let info = inspect(&sb, &c);
+    assert_eq!(info["state"]["status"], "exited", "{info}");
+    ok(&openpod(&sb, &["rm", "-f", &c]));
+}
+
+#[test]
+fn a_start_does_not_meet_the_last_runs_scope() {
+    // Without the keeper, rootless, each run of a container gets a systemd scope; the last
+    // run's scope can still be there for a moment when the next run starts.
+    if root_mode() || std::env::var("OPENPOD_TEST_KEEPER").as_deref() != Ok("0") {
+        return;
+    }
+    let sb = Sandbox::new();
+    let c = start(&sb, &["--memory", "64m"], &["true"]);
+    wait_for_status(&sb, &c, "exited");
+    let full = inspect(&sb, &c)["id"].as_str().unwrap().to_string();
+    // A unit with the name a scope of the last run would have.
+    let mut squatter = std::process::Command::new("systemd-run")
+        .args(["--user", "--scope", "--quiet", "--collect"])
+        .arg(format!("--unit=openpod-{full}"))
+        .args(["sleep", "5"])
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    ok(&openpod(&sb, &["start", &c]));
+    let _ = squatter.kill();
+    let _ = squatter.wait();
+    ok(&openpod(&sb, &["rm", "-f", &c]));
 }

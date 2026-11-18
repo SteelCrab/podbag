@@ -16,7 +16,6 @@ pub(super) fn files(
     dirs: &Dirs,
     rootless: bool,
     own: Own<'_>,
-    peers: &[(String, std::net::Ipv4Addr)],
 ) -> Result<Vec<Mount>> {
     let dir = dirs.container_dir(&spec.id);
     let read = |p: &str| std::fs::read_to_string(p).unwrap_or_default();
@@ -25,10 +24,7 @@ pub(super) fn files(
     let systemd = std::fs::read_to_string("/run/systemd/resolve/resolv.conf").ok();
     let wanted = [
         ("hostname", format!("{}\n", spec.hostname)),
-        (
-            "hosts",
-            netfiles::hosts_file(own, peers, &read("/etc/hosts")),
-        ),
+        ("hosts", netfiles::hosts_file(&own, &read("/etc/hosts"))),
         (
             "resolv.conf",
             netfiles::resolv_conf(
@@ -71,15 +67,56 @@ pub(super) fn files(
     Ok(mounts)
 }
 
-/// The container's network and address, for a bridge container.
-pub(super) fn bridge_address(
+/// The container's networks and its address on each, its primary network first (none
+/// with the host's network or none). On an error, the addresses given so far stay
+/// recorded: [`detach`] gives them back.
+pub(super) fn bridge_addresses(
     dirs: &Dirs,
     spec: &ContainerSpec,
-    network: &str,
-) -> Result<(crate::network::Network, std::net::Ipv4Addr)> {
-    let net = crate::network::get_in(dirs, network)?;
-    let ip = crate::network::allocate(dirs, network, &spec.id, &spec.name, &spec.hostname)?;
-    Ok((net, ip))
+) -> Result<Vec<(crate::network::Network, std::net::Ipv4Addr)>> {
+    let networks = spec.bridge_networks();
+    // Written down only for a container on several networks: its hosts file names the
+    // containers of each.
+    let all: Vec<String> = if networks.len() > 1 {
+        networks.iter().map(|n| n.to_string()).collect()
+    } else {
+        Vec::new()
+    };
+    let mut out = Vec::with_capacity(networks.len());
+    for (index, network) in networks.iter().enumerate() {
+        let net = crate::network::get_in(dirs, network)?;
+        let ip = crate::network::join(
+            dirs,
+            network,
+            &spec.id,
+            &crate::network::Endpoint {
+                name: &spec.name,
+                hostname: &spec.hostname,
+                aliases: spec.aliases_on(index),
+                networks: &all,
+            },
+        )?;
+        out.push((net, ip));
+    }
+    Ok(out)
+}
+
+/// What the container's `/etc/hosts` is made of: with addresses, the names of its
+/// networks' containers.
+pub(super) fn own<'a>(
+    dirs: &Dirs,
+    spec: &'a ContainerSpec,
+    addresses: &[(crate::network::Network, std::net::Ipv4Addr)],
+) -> Result<Own<'a>> {
+    if addresses.is_empty() {
+        return Ok(own_without_address(spec));
+    }
+    let networks: Vec<String> = spec
+        .bridge_networks()
+        .iter()
+        .map(|n| n.to_string())
+        .collect();
+    crate::network::hosts_text(dirs, &spec.id, &networks).map(Own::Bridge)
 }
 
 /// Rootless bridge containers live in the network session: start it if needed, count
@@ -105,20 +142,24 @@ pub(super) fn join_session(dirs: &Dirs, spec: &ContainerSpec) -> Result<u32> {
     Ok(pid)
 }
 
-/// Connect the new container `pid` as its network mode says (runs while it waits). With a
-/// session, the bridge lives in the session's network namespace.
+/// Connect the new container `pid` to each of its networks (runs while it waits): `eth0`
+/// on the first, with the default route, `eth1` on the next, and so on. With a session,
+/// the bridges live in the session's network namespace.
 pub(super) fn attach(
     spec: &ContainerSpec,
-    bridge: Option<&(crate::network::Network, std::net::Ipv4Addr)>,
+    addresses: &[(crate::network::Network, std::net::Ipv4Addr)],
     session: Option<u32>,
     pid: u32,
 ) -> Result<()> {
-    let Some((net, ip)) = bridge else {
+    let Some((first, _)) = addresses.first() else {
         return Ok(());
     };
     let connect = || -> Result<()> {
-        let index = crate::linux::net::prepare_bridge(net)?;
-        crate::linux::net::connect(net, index, &spec.id, pid, *ip)
+        for (interface, (net, ip)) in addresses.iter().enumerate() {
+            let index = crate::linux::net::prepare_bridge(net)?;
+            crate::linux::net::connect(net, index, &spec.id, pid, *ip, interface)?;
+        }
+        Ok(())
     };
     match session {
         None => connect(),
@@ -126,7 +167,7 @@ pub(super) fn attach(
             crate::linux::net::in_netns(holder, || -> std::io::Result<Result<()>> { Ok(connect()) })
                 .map_err(|e| {
                     Error::io(
-                        format!("cannot connect the container to network {}", net.name),
+                        format!("cannot connect the container to network {}", first.name),
                         &e,
                         "check the rootless network session (pasta)",
                     )
@@ -135,27 +176,17 @@ pub(super) fn attach(
     }
 }
 
-/// The other containers on a user network, by name (the default network has no names).
-pub(super) fn peers(dirs: &Dirs, spec: &ContainerSpec) -> Vec<(String, std::net::Ipv4Addr)> {
-    match &spec.network {
-        NetworkMode::Bridge { network } if network != crate::network::DEFAULT => {
-            crate::network::members(dirs, network).unwrap_or_default()
-        }
-        _ => Vec::new(),
-    }
-}
-
-/// A container on a user network has started: tell the others its name.
+/// A container on user networks has started: tell the others its names.
 pub(super) fn announce(dirs: &Dirs, spec: &ContainerSpec) {
-    if let NetworkMode::Bridge { network } = &spec.network {
+    for network in spec.bridge_networks() {
         crate::network::refresh_hosts(dirs, network);
     }
 }
 
-/// Give back what a container held on its network: its address (the others forget its
-/// name), and its place in the rootless session.
+/// Give back what a container held on its networks: its addresses (the others forget its
+/// names), and its place in the rootless session.
 pub(super) fn detach(dirs: &Dirs, spec: &ContainerSpec, session: bool) {
-    if let NetworkMode::Bridge { network } = &spec.network {
+    for network in spec.bridge_networks() {
         if let Err(e) = crate::network::release(dirs, network, &spec.id) {
             eprintln!("openpod: {e}");
         }

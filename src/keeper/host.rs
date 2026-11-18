@@ -79,6 +79,10 @@ struct Kept {
     exit: Option<i32>,
     /// After the exit: how long to keep reading output that others still hold open.
     drain_until: Option<Instant>,
+    /// Its health checks, while it runs.
+    health: Option<crate::health::Schedule>,
+    /// The environment its checks get: its client's settings.
+    probe_env: Vec<(String, String)>,
 }
 
 /// What a connection's request will be for.
@@ -119,6 +123,8 @@ struct Keeper {
     finishers: Vec<u32>,
     /// Children that ended before anyone claimed them: PID, exit code, when.
     early: Vec<(u32, i32, Instant)>,
+    /// Health checks killed with their container, not reaped yet.
+    dead_probes: Vec<u32>,
     /// One buffer for all output.
     buf: Vec<u8>,
     /// After a SIGTERM: when the containers that still run are killed.
@@ -340,6 +346,7 @@ impl Keeper {
             pending: Vec::new(),
             finishers: Vec::new(),
             early: Vec::new(),
+            dead_probes: Vec::new(),
             buf: vec![0u8; 64 * 1024],
             kill_at: None,
             linger: Duration::from_millis(linger_ms),
@@ -413,6 +420,16 @@ impl Keeper {
                     .iter()
                     .flatten()
                     .filter_map(|c| c.drain_until)
+                    // The next health check, or one that hangs.
+                    .chain(
+                        self.containers
+                            .iter()
+                            .flatten()
+                            .filter(|c| c.exit.is_none())
+                            .filter_map(|c| {
+                                c.health.as_ref().map(crate::health::Schedule::next_at)
+                            }),
+                    )
                     .chain(self.kill_at)
                     .chain(self.pending.iter().flatten().map(|p| p.until))
                     .min()
@@ -464,6 +481,22 @@ impl Keeper {
             {
                 // SAFETY: a signal to our own child, not reaped yet.
                 unsafe { libc::kill(c.pid as libc::pid_t, libc::SIGKILL) };
+            }
+        }
+        for c in self.containers.iter_mut().flatten() {
+            if c.exit.is_some() {
+                continue;
+            }
+            let Some(schedule) = c.health.as_mut() else {
+                continue;
+            };
+            let (id, env) = (&c.id, &c.probe_env);
+            let hung = schedule.tick(now, |in_start_period| {
+                crate::health::spawn_probe(id, in_start_period, crate::health::probe_env(env))
+            });
+            if let Some(pid) = hung {
+                // SAFETY: a signal to our own child, not reaped yet.
+                unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
             }
         }
         for slot in 0..self.containers.len() {
@@ -775,6 +808,16 @@ impl Keeper {
             .map(|at| self.early.swap_remove(at).1);
         let log = LogWriter::open(&dirs.container_dir(&h.id), LOG_FILE_LIMIT).ok();
         let pid = h.pid;
+        let health = crate::state::read_config(&dirs, &h.id)
+            .ok()
+            .and_then(|spec| spec.health)
+            .filter(|_| exit.is_none())
+            .map(|config| crate::health::Schedule::new(&config, now));
+        let probe_env = if health.is_some() {
+            super::handover::saved_env(&dirs, &h.id)
+        } else {
+            Vec::new()
+        };
         let taken = self.take_in(Kept {
             id: h.id,
             pid,
@@ -788,6 +831,8 @@ impl Keeper {
             late: Vec::new(),
             exit,
             drain_until: exit.map(|_| now + crate::shim::DRAIN),
+            health,
+            probe_env,
         });
         if taken {
             self.idle_since = now;
@@ -931,7 +976,13 @@ impl Keeper {
         let pid = unsafe { libc::fork() };
         if pid == 0 {
             self.shed();
-            finisher(kept);
+            // A keeper that is shutting down starts nothing again.
+            let relaunch = if self.terminating {
+                crate::restart::Relaunch::Never
+            } else {
+                crate::restart::Relaunch::Direct
+            };
+            finisher(kept, relaunch);
         }
         if pid < 0 {
             // No process now: try again shortly.
@@ -1060,8 +1111,24 @@ impl Keeper {
             {
                 c.exit = Some(code);
                 c.drain_until = Some(now + crate::shim::DRAIN);
+                // The container ended: its check goes with it.
+                if let Some(probe) = c.health.take().and_then(|h| h.probe()) {
+                    // SAFETY: a signal to our own child, not reaped yet.
+                    unsafe { libc::kill(probe as libc::pid_t, libc::SIGKILL) };
+                    self.dead_probes.push(probe);
+                }
             } else if let Some(at) = self.finishers.iter().position(|f| *f == pid) {
                 self.finishers.swap_remove(at);
+            } else if let Some(schedule) = self
+                .containers
+                .iter_mut()
+                .flatten()
+                .filter_map(|c| c.health.as_mut())
+                .find(|h| h.probe() == Some(pid))
+            {
+                schedule.ended(pid, now);
+            } else if let Some(at) = self.dead_probes.iter().position(|p| *p == pid) {
+                self.dead_probes.swap_remove(at);
             } else {
                 // A container whose starter has not handed it over yet (or never will).
                 self.early
@@ -1153,7 +1220,7 @@ fn starter(
 
 /// The finisher: a fork of the keeper that does what follows a kept container's end, with
 /// the settings of the client that started the container. Never returns.
-fn finisher(kept: Kept) -> ! {
+fn finisher(kept: Kept, relaunch: crate::restart::Relaunch) -> ! {
     crate::signals::restore_default(&[libc::SIGCHLD, libc::SIGTERM, libc::SIGHUP, libc::SIGINT]);
     // SAFETY: prctl with a valid name.
     unsafe { libc::prctl(libc::PR_SET_NAME, c"openpod-finish".as_ptr()) };
@@ -1212,11 +1279,14 @@ fn finisher(kept: Kept) -> ! {
                 rootless && matches!(spec.network, crate::network::NetworkMode::Bridge { .. });
             crate::shim::finish(&dirs, &spec, st, code, oom, session, listener, &waiters);
             if let Some(g) = group.filter(|g| g.starts_with(crate::cgroup::ROOT)) {
-                crate::cgroup::remove_dir(&g);
+                if crate::cgroup::remove_dir(&g) {
+                    crate::state::forget_cgroup(&dirs, &id, &g.to_string_lossy());
+                }
             }
             if spec.auto_remove {
                 crate::shim::remove_container(&dirs, &spec);
             }
+            crate::restart::after_exit(&dirs, &spec, code, relaunch);
         }
         // The record is gone or unreadable: at least tell those who wait.
         _ => {
@@ -1275,6 +1345,8 @@ mod tests {
             late: Vec::new(),
             exit: None,
             drain_until: None,
+            health: None,
+            probe_env: Vec::new(),
         };
         (kept, [out_w, err_w])
     }

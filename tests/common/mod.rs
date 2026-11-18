@@ -13,6 +13,75 @@ pub fn rootfs() -> String {
 }
 
 /// True when the tests run openpod as root (`dev/vm.sh test-root`).
+/// As root, every sandbox's user networks live in the host's one namespace, and separate
+/// data directories pick the same automatic subnets: tests that create networks take turns.
+pub fn network_turn() -> Option<std::fs::File> {
+    if !root_mode() {
+        return None;
+    }
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open("/tmp/openpod-test-networks.lock")
+        .unwrap();
+    lock.lock().unwrap();
+    Some(lock)
+}
+
+/// Hold container `c`'s shim lock for `secs`, as a start or a cleanup does; returns the
+/// holder once it holds the lock.
+pub fn hold_shim_lock(sb: &Sandbox, c: &str, secs: &str) -> std::process::Child {
+    let lock = sb.data().join("containers").join(c).join("shim.lock");
+    let mut cmd = if root_mode() {
+        let mut cmd = std::process::Command::new("sudo");
+        cmd.args(["-n", "flock"]);
+        cmd
+    } else {
+        std::process::Command::new("flock")
+    };
+    let holder = cmd.arg(&lock).args(["sleep", secs]).spawn().unwrap();
+    // flock(1) has the lock once a try from here fails.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let mut probe = if root_mode() {
+            let mut p = std::process::Command::new("sudo");
+            p.args(["-n", "flock", "-n"]);
+            p
+        } else {
+            let mut p = std::process::Command::new("flock");
+            p.arg("-n");
+            p
+        };
+        let free = probe.arg(&lock).arg("true").status().unwrap().success();
+        if !free {
+            return holder;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the lock was never taken"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// Write the mark that the user stopped container `c`.
+pub fn mark_stopped(sb: &Sandbox, c: &str) {
+    let mark = sb.data().join("containers").join(c).join("stopped");
+    if root_mode() {
+        assert!(
+            std::process::Command::new("sudo")
+                .args(["-n", "touch"])
+                .arg(&mark)
+                .status()
+                .unwrap()
+                .success()
+        );
+    } else {
+        std::fs::write(mark, "").unwrap();
+    }
+}
+
 pub fn root_mode() -> bool {
     std::env::var("OPENPOD_TEST_ROOT").as_deref() == Ok("1")
 }

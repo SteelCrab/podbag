@@ -109,6 +109,10 @@ fn setup_and_exec(
     if let Some(sock) = tty_socket {
         // Open the terminal in the container's own /dev/pts, so the command can find it.
         let (master, slave) = super::pty::open(None)?;
+        // Before the command runs: it may ask for the size at once.
+        if let Some((rows, cols)) = spec.console_size {
+            super::pty::set_size(std::os::fd::AsRawFd::as_raw_fd(&master), rows, cols);
+        }
         super::pty::send_fd(sock, std::os::fd::AsRawFd::as_raw_fd(&master)).map_err(|e| {
             os_error(
                 "cannot hand over the container terminal",

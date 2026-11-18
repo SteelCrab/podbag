@@ -244,6 +244,7 @@ struct RawRun {
     working_dir: Option<String>,
     user: Option<String>,
     volumes: Option<std::collections::BTreeMap<String, serde_json::Value>>,
+    healthcheck: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -291,6 +292,12 @@ pub fn parse_config(body: &[u8]) -> Result<ConfigFile> {
             workdir: non_empty(run.working_dir),
             user: non_empty(run.user),
             volumes: run.volumes.unwrap_or_default().into_keys().collect(),
+            // A check that cannot be read is left out, as the image would run without it.
+            healthcheck: run.healthcheck.and_then(|h| {
+                crate::health::HealthSettings::from_docker(&h)
+                    .ok()
+                    .flatten()
+            }),
         },
     })
 }

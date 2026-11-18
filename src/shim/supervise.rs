@@ -167,6 +167,8 @@ impl Io {
                 "report this bug",
             )
         })?;
+        // A terminal of the caller's own is the better guess (the container's init set
+        // the size the settings ask for).
         if attached {
             linux::pty::copy_size(0, master.as_raw_fd());
         }
@@ -410,26 +412,23 @@ pub(super) fn run(
         }
         super::net::detach(dirs, spec, session.is_some());
     };
-    // A bridge container's address, then its /etc files (first among its mounts).
-    let bridge = match &spec.network {
-        crate::network::NetworkMode::Bridge { network } => {
-            match super::net::bridge_address(dirs, spec, network) {
-                Ok(b) => Some(b),
-                Err(e) => {
-                    undo(group);
-                    return failed(status, e);
-                }
-            }
+    // A bridge container's addresses, then its /etc files (first among its mounts).
+    let addresses = match super::net::bridge_addresses(dirs, spec) {
+        Ok(a) => a,
+        Err(e) => {
+            undo(group);
+            return failed(status, e);
         }
-        _ => None,
     };
-    let own = match &bridge {
-        Some((_, ip)) => crate::netfiles::Own::Address(&spec.name, &spec.hostname, *ip),
-        None => super::net::own_without_address(spec),
+    let own = match super::net::own(dirs, spec, &addresses) {
+        Ok(own) => own,
+        Err(e) => {
+            undo(group);
+            return failed(status, e);
+        }
     };
     let mut run_spec = spec.clone();
-    let peers = super::net::peers(dirs, spec);
-    match super::net::files(spec, dirs, rootless, own, &peers) {
+    match super::net::files(spec, dirs, rootless, own) {
         Ok(mut files) => {
             files.append(&mut run_spec.mounts);
             run_spec.mounts = files;
@@ -439,7 +438,7 @@ pub(super) fn run(
             return failed(status, e);
         }
     }
-    let mut attach = |pid: u32| super::net::attach(spec, bridge.as_ref(), session, pid);
+    let mut attach = |pid: u32| super::net::attach(spec, &addresses, session, pid);
     let child = match linux::spawn(
         &run_spec,
         io.stdio,
@@ -485,6 +484,8 @@ pub(super) fn run(
     let created = state::read_state(dirs, id)
         .map(|s| s.created)
         .unwrap_or_else(|_| state::now());
+    // Each start begins a new health.
+    crate::health::reset(dirs, id);
     let st = State {
         status: Status::Running,
         pid: Some(child.pid),
@@ -503,7 +504,7 @@ pub(super) fn run(
             .as_ref()
             .map(|g| g.path().to_string_lossy().into_owned()),
         oom: None,
-        ip: bridge.as_ref().map(|(_, ip)| ip.to_string()),
+        ip: addresses.first().map(|(_, ip)| ip.to_string()),
         ports: published.iter().map(|(m, _)| *m).collect(),
     };
     let _ = state::write_state(dirs, id, &st);
@@ -536,8 +537,8 @@ pub(super) fn run(
             }
         };
     }
-    let relays = bridge
-        .as_ref()
+    let relays = addresses
+        .first()
         .map(|(_, ip)| super::proxy::serve(published, *ip, session));
 
     let echo = io
@@ -557,6 +558,7 @@ pub(super) fn run(
         echo.as_ref(),
         &listener,
         &sig_r,
+        spec.health.as_ref(),
     );
     // Published ports close first: the address goes back to the network below.
     if let Some(relays) = relays {
@@ -578,8 +580,21 @@ pub(super) fn run(
         echo.finish();
     }
     if let Some(group) = group {
-        group.remove();
+        let path = group.path().to_string_lossy().into_owned();
+        if group.remove() {
+            state::forget_cgroup(dirs, id, &path);
+        }
     }
+    // Rootless, this process may be in the network session's user namespace and in the
+    // container's systemd scope: what it starts would stay in both.
+    let relaunch = if rootless
+        && (session.is_some() || matches!(spec.cgroup, cgroup::Placement::Scope { .. }))
+    {
+        crate::restart::Relaunch::UserManager
+    } else {
+        crate::restart::Relaunch::Direct
+    };
+    crate::restart::after_exit(dirs, spec, code, relaunch);
     Outcome {
         code,
         started: true,
@@ -621,6 +636,8 @@ enum Source {
     Signal,
     Control,
     Output(usize),
+    /// The health check that runs now ended.
+    Probe,
 }
 
 /// The poll loop. Returns the container's exit code and the connections waiting for it.
@@ -634,11 +651,15 @@ fn serve(
     echo: Option<&Echo>,
     listener: &UnixListener,
     sig_r: &OwnedFd,
+    health: Option<&crate::health::HealthConfig>,
 ) -> (i32, Vec<UnixStream>) {
     let mut exit: Option<i32> = None;
     let mut drain_until: Option<Instant> = None;
     let mut waiters: Vec<UnixStream> = Vec::new();
     let mut buf = vec![0u8; 64 * 1024];
+    let mut schedule = health.map(|c| crate::health::Schedule::new(c, Instant::now()));
+    // The running probe's pidfd: its end wakes the loop.
+    let mut probe_fd: Option<OwnedFd> = None;
 
     loop {
         if exit.is_some()
@@ -675,13 +696,26 @@ fn serve(
                 watch(o.fd.as_raw_fd(), Source::Output(i));
             }
         }
-        let timeout = if held {
+        if let Some(fd) = &probe_fd {
+            watch(fd.as_raw_fd(), Source::Probe);
+        }
+        let probing = schedule.as_ref().and_then(|s| s.probe()).is_some();
+        let mut timeout = if held {
             20
-        } else if exit.is_some() || pidfd.is_none() {
+        } else if exit.is_some() || pidfd.is_none() || (probing && probe_fd.is_none()) {
             100
         } else {
             -1
         };
+        // The next check, or a check that hangs.
+        if let (None, Some(s)) = (exit, &schedule) {
+            let wait = s
+                .next_at()
+                .saturating_duration_since(Instant::now())
+                .as_millis()
+                .clamp(1, 60_000) as i32;
+            timeout = if timeout < 0 { wait } else { timeout.min(wait) };
+        }
         // SAFETY: fds is a valid array of pollfd of the given length.
         let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) };
         if n < 0 {
@@ -719,6 +753,7 @@ fn serve(
                     let master = io.master.as_ref().map(|m| m.as_raw_fd());
                     accept_requests(listener, id, pid, exit, master, &mut waiters)
                 }
+                Source::Probe => probe_fd = None,
                 Source::Output(i) => {
                     let o = &io.outputs[i];
                     // SAFETY: reading into a valid buffer from a descriptor we own.
@@ -739,6 +774,37 @@ fn serve(
         }
         for i in closed.into_iter().rev() {
             io.outputs.remove(i);
+        }
+        if let Some(s) = schedule.as_mut() {
+            let now = Instant::now();
+            if let Some(probe) = s.probe() {
+                if exit.is_some() {
+                    // The container ended: its check goes with it.
+                    // SAFETY: a signal to our own child, not reaped yet.
+                    unsafe { libc::kill(probe as libc::pid_t, libc::SIGKILL) };
+                    let _ = linux::wait(probe);
+                    s.ended(probe, now);
+                    probe_fd = None;
+                } else if try_reap(probe).is_some() {
+                    s.ended(probe, now);
+                    probe_fd = None;
+                }
+            }
+            if exit.is_none() {
+                let hung = s.tick(now, |in_start_period| {
+                    crate::health::spawn_probe(id, in_start_period, None)
+                });
+                if let Some(pid) = hung {
+                    // SAFETY: a signal to our own child, not reaped yet.
+                    unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+                }
+                if let (Some(pid), None) = (s.probe(), &probe_fd) {
+                    // SAFETY: pidfd_open on our own child; a new descriptor or -1.
+                    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) };
+                    // SAFETY: a fresh descriptor that nothing else owns.
+                    probe_fd = (fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(fd as i32) });
+                }
+            }
         }
     }
 

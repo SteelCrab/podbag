@@ -130,7 +130,19 @@ pub fn map_create(
             c = c.publish(p);
         }
     }
+    let (aliases, extra) = endpoints(
+        &body["NetworkingConfig"]["EndpointsConfig"],
+        &network,
+        &mut warnings,
+    )?;
+    crate::spec::check_networks(&network, &aliases, &extra)?;
     c = c.network(network);
+    for alias in aliases {
+        c = c.network_alias(alias);
+    }
+    for a in extra {
+        c = c.extra_network(a.network, a.aliases);
+    }
     if let Some(memory) = host["Memory"].as_u64().filter(|m| *m > 0) {
         c = c.memory(memory);
     }
@@ -168,8 +180,33 @@ pub fn map_create(
             SecurityOpt::SeccompUnconfined => c.seccomp(false),
         };
     }
-    if host["AutoRemove"].as_bool().unwrap_or(false) {
+    let auto_remove = host["AutoRemove"].as_bool().unwrap_or(false);
+    if auto_remove {
         c = c.remove_on_exit(true);
+    }
+    let policy = &host["RestartPolicy"];
+    let restart = crate::restart::RestartPolicy::from_docker(
+        policy["Name"].as_str().unwrap_or(""),
+        policy["MaximumRetryCount"].as_i64().unwrap_or(0),
+    )?;
+    if auto_remove && restart != crate::restart::RestartPolicy::No {
+        return Err(invalid(
+            "cannot create the container",
+            "AutoRemove and a restart policy do not go together",
+            "drop one of them",
+        ));
+    }
+    c = c.restart(restart);
+    if let Some(settings) = crate::health::HealthSettings::from_docker(&body["Healthcheck"])? {
+        c = c.health(settings);
+    }
+    // `[rows, columns]`: the terminal's first size (0: none given).
+    let size = &host["ConsoleSize"];
+    if let (Some(rows), Some(cols)) = (size[0].as_u64(), size[1].as_u64()) {
+        c = c.console_size(
+            u16::try_from(rows).unwrap_or(u16::MAX),
+            u16::try_from(cols).unwrap_or(u16::MAX),
+        );
     }
     warnings.extend(ignored(body));
     Ok((c, warnings))
@@ -235,12 +272,6 @@ fn ignored(body: &Value) -> Vec<String> {
         Value::Array(a) => !a.is_empty(),
         Value::Object(o) => !o.is_empty(),
     };
-    let restart = host["RestartPolicy"]["Name"].as_str().unwrap_or("");
-    if !matches!(restart, "" | "no") {
-        note(format!(
-            "restart policy {restart} is ignored: openpod does not restart containers yet"
-        ));
-    }
     for (key, what) in [
         ("Dns", "dns servers"),
         ("DnsSearch", "dns search domains"),
@@ -268,10 +299,6 @@ fn ignored(body: &Value) -> Vec<String> {
             "log driver {driver} is ignored: openpod writes logs as json-file"
         ));
     }
-    let test = body["Healthcheck"]["Test"].as_array();
-    if test.is_some_and(|t| !t.is_empty() && t[0] != "NONE") {
-        note("healthcheck is ignored: openpod does not run health checks yet".to_string());
-    }
     for (key, what) in [
         ("StopSignal", "stop signal"),
         ("StopTimeout", "stop timeout"),
@@ -281,20 +308,6 @@ fn ignored(body: &Value) -> Vec<String> {
         if set(&body[key]) {
             note(format!("{what} setting is ignored by openpod"));
         }
-    }
-    let endpoints = body["NetworkingConfig"]["EndpointsConfig"].as_object();
-    for (net, cfg) in endpoints.into_iter().flatten() {
-        if set(&cfg["Aliases"]) {
-            note(format!(
-                "network aliases on {net} are ignored: containers are found by name"
-            ));
-        }
-        if set(&cfg["IPAMConfig"]["IPv4Address"]) {
-            note(format!("a fixed address on {net} is ignored"));
-        }
-    }
-    if endpoints.is_some_and(|e| e.len() > 1) {
-        note("only the network in HostConfig.NetworkMode is joined".to_string());
     }
     out
 }
@@ -473,6 +486,68 @@ fn parse_mount(m: &Value) -> Result<(MountRequest, Option<String>)> {
         }
     };
     Ok((request, warning))
+}
+
+/// The aliases on the primary network, and the further networks, of an
+/// `EndpointsConfig` (Compose names every network of a service there).
+fn endpoints(
+    v: &Value,
+    primary: &NetworkMode,
+    warnings: &mut Vec<String>,
+) -> Result<(Vec<String>, Vec<crate::spec::Attachment>)> {
+    // The keys the docker CLI and Compose use for the primary network.
+    let primary_keys: Vec<&str> = match primary {
+        NetworkMode::Bridge { network } if network == crate::network::DEFAULT => {
+            vec![crate::network::DEFAULT, "default"]
+        }
+        NetworkMode::Bridge { network } => vec![network.as_str()],
+        NetworkMode::Host => vec!["host"],
+        NetworkMode::None => vec!["none"],
+    };
+    let mut aliases = Vec::new();
+    let mut extra = Vec::new();
+    for (key, cfg) in v.as_object().into_iter().flatten() {
+        let names = match &cfg["Aliases"] {
+            Value::Null => Vec::new(),
+            Value::Array(list) => list
+                .iter()
+                .map(|a| {
+                    a.as_str().map(str::to_string).ok_or_else(|| {
+                        invalid(
+                            "cannot create the container",
+                            format!("the aliases on network {key} are not all strings"),
+                            "give the aliases as strings",
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?,
+            _ => {
+                return Err(invalid(
+                    "cannot create the container",
+                    format!("the aliases on network {key} are not a list"),
+                    "give the aliases as a list of strings",
+                ));
+            }
+        };
+        if cfg["IPAMConfig"]["IPv4Address"]
+            .as_str()
+            .is_some_and(|a| !a.is_empty())
+        {
+            warnings.push(format!("a fixed address on {key} is ignored"));
+        }
+        if primary_keys.contains(&key.as_str()) {
+            aliases = names;
+        } else {
+            extra.push(crate::spec::Attachment {
+                network: match key.as_str() {
+                    "default" => crate::network::DEFAULT.to_string(),
+                    other => other.to_string(),
+                },
+                aliases: names,
+            });
+        }
+    }
+    Ok((aliases, extra))
 }
 
 fn network_mode(mode: &str) -> Result<NetworkMode> {
@@ -794,6 +869,84 @@ mod tests {
         }
     }
 
+    fn with_endpoints(mode: &str, endpoints: Value) -> Result<(Container, Vec<String>)> {
+        map_create(
+            &json!({
+                "Image": "alpine",
+                "HostConfig": {"NetworkMode": mode},
+                "NetworkingConfig": {"EndpointsConfig": endpoints}
+            }),
+            None,
+            &image(),
+        )
+    }
+
+    #[test]
+    fn endpoints_give_aliases_and_further_networks() {
+        // As Compose sends them: every network of the service, each with its aliases.
+        let (c, warnings) = with_endpoints(
+            "app",
+            json!({
+                "app": {"Aliases": ["web", "p-web-1"]},
+                "back": {"Aliases": ["w"], "IPAMConfig": {"IPv4Address": "10.9.9.9"}},
+                "zed": {}
+            }),
+        )
+        .unwrap();
+        let f = fields(&c);
+        assert_eq!(f["aliases"], json!(["web", "p-web-1"]));
+        assert_eq!(
+            f["extra_networks"],
+            json!([{"network": "back", "aliases": ["w"]}, {"network": "zed"}])
+        );
+        let text = warnings.join("\n");
+        assert!(text.contains("fixed address"), "{warnings:?}");
+        assert!(
+            !text.contains("alias") && !text.contains("only the network"),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn the_key_of_the_primary_network_may_be_its_mode() {
+        // The docker CLI names the default network "default" or "bridge".
+        for (mode, key) in [("default", "default"), ("bridge", "bridge"), ("", "bridge")] {
+            let (c, _) = with_endpoints(mode, json!({ key: {} })).unwrap();
+            let f = fields(&c);
+            assert_eq!(
+                f["network"],
+                serde_json::to_value(NetworkMode::default()).unwrap()
+            );
+            assert_eq!(f["extra_networks"], json!([]), "{mode} {key}");
+        }
+        let (c, _) = with_endpoints("host", json!({"host": {}})).unwrap();
+        assert_eq!(
+            fields(&c)["network"],
+            serde_json::to_value(NetworkMode::Host).unwrap()
+        );
+    }
+
+    #[test]
+    fn aliases_need_a_user_network() {
+        for (mode, endpoints) in [
+            ("default", json!({"default": {"Aliases": ["a"]}})),
+            ("bridge", json!({"bridge": {"Aliases": ["a"]}})),
+            ("host", json!({"host": {"Aliases": ["a"]}})),
+            // The host's network or none with a user network.
+            ("host", json!({"app": {}})),
+            ("none", json!({"none": {}, "app": {}})),
+            // An alias that would break the hosts file.
+            ("app", json!({"app": {"Aliases": ["a b"]}})),
+            ("app", json!({"app": {}, "back": {"Aliases": ["x\ny"]}})),
+            ("app", json!({"app": {"Aliases": "web"}})),
+        ] {
+            match with_endpoints(mode, endpoints.clone()) {
+                Err(e) => assert_eq!(e.kind, ErrorKind::InvalidInput, "{mode} {endpoints}: {e}"),
+                Ok(_) => panic!("{mode} {endpoints} was accepted"),
+            }
+        }
+    }
+
     #[test]
     fn create_warns_about_ignored_fields() {
         let body = json!({
@@ -811,24 +964,20 @@ mod tests {
                 "SecurityOpt": ["apparmor=unconfined"],
                 "NetworkMode": "host",
                 "PortBindings": {"80/tcp": [{"HostPort": "80"}]}
-            },
-            "NetworkingConfig": {"EndpointsConfig": {"host": {"Aliases": ["a"]}}}
+            }
         });
         let (c, warnings) = map_create(&body, None, &image()).unwrap();
         let text = warnings.join("\n").to_lowercase();
         for word in [
-            "restart policy",
             "dns",
             "extra hosts",
             "log driver",
             "init",
             "shm size",
             "ulimits",
-            "healthcheck",
             "stop signal",
             "apparmor",
             "published ports",
-            "aliases",
         ] {
             assert!(text.contains(word), "no warning about {word}: {warnings:?}");
         }
@@ -837,5 +986,10 @@ mod tests {
             json!([]),
             "dropped with the host network"
         );
+        // Taken, not ignored.
+        assert_eq!(fields(&c)["restart"], json!("always"));
+        assert_eq!(fields(&c)["health"]["test"], json!(["CMD", "true"]));
+        assert!(!text.contains("health"), "{warnings:?}");
+        assert!(!text.contains("restart"), "{warnings:?}");
     }
 }

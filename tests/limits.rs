@@ -29,6 +29,25 @@ fn inspect(sb: &Sandbox, c: &str) -> serde_json::Value {
     serde_json::from_str(&ok(&openpod(sb, &["inspect", c]))).unwrap()
 }
 
+/// The cgroup path of a running container (an ended one's state no longer names a cgroup
+/// that is gone, so the path is read while it runs).
+fn running_cgroup(sb: &Sandbox, c: &str, secs: u64) -> String {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    loop {
+        let info = inspect(sb, c);
+        if info["state"]["status"] == "running" {
+            if let Some(path) = info["state"]["cgroup"].as_str() {
+                return path.to_string();
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{c} never ran with a cgroup: {info}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 /// Wait until the container has exited; returns its `inspect` record.
 fn wait_exited(sb: &Sandbox, c: &str, secs: u64) -> serde_json::Value {
     let deadline = Instant::now() + Duration::from_secs(secs);
@@ -138,10 +157,13 @@ fn invalid_limits_are_rejected() {
 #[test]
 fn cgroup_is_removed_after_exit() {
     let sb = Sandbox::new();
-    start(&sb, "brief", &["--memory", "64m"], &["true"]);
+    start(&sb, "brief", &["--memory", "64m"], &["sleep", "1"]);
+    let path = running_cgroup(&sb, "brief", 10);
     let info = wait_exited(&sb, "brief", 10);
-    let path = info["state"]["cgroup"].as_str().expect("a cgroup path");
-    wait_gone(path, 3);
+    wait_gone(&path, 3);
+    // The state names no cgroup that is gone (a later check would remove the next run's,
+    // which gets the same path).
+    assert!(info["state"]["cgroup"].is_null(), "{info}");
     ok(&openpod(&sb, &["rm", "brief"]));
 }
 
@@ -256,6 +278,7 @@ fn budget_exceeded_kills_one_container_with_a_reason() {
     // Each holds 48 MiB: dd keeps its buffer while it waits to write into the pipe.
     let hog = ["sh", "-c", "dd if=/dev/zero bs=48M count=1 | sleep 60"];
     start(&sb, "a", &[], &hog);
+    let a_cgroup = running_cgroup(&sb, "a", 10);
     std::thread::sleep(Duration::from_secs(2));
     start(&sb, "b", &[], &hog);
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -285,7 +308,7 @@ fn budget_exceeded_kills_one_container_with_a_reason() {
         "{}",
         ps_line(&sb, name)
     );
-    let dir = parent_dir(killed["state"]["cgroup"].as_str().unwrap(), &parent);
+    let dir = parent_dir(&a_cgroup, &parent);
     ok(&openpod(&sb, &["rm", "-f", "a", "b"]));
     remove_parent(&dir, &parent);
 }
@@ -313,7 +336,7 @@ fn exec_runs_in_the_container_cgroup() {
 fn exec_child_does_not_leave_the_cgroup_behind() {
     let sb = Sandbox::new();
     start(&sb, "y", &["--memory", "64m"], &["sleep", "2"]);
-    std::thread::sleep(Duration::from_millis(200));
+    let path = running_cgroup(&sb, "y", 10);
     let mut exec = sb
         .openpod()
         .args(["exec", "y", "sleep", "30"])
@@ -321,9 +344,8 @@ fn exec_child_does_not_leave_the_cgroup_behind() {
         .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();
-    let info = wait_exited(&sb, "y", 10);
-    let path = info["state"]["cgroup"].as_str().expect("a cgroup path");
-    wait_gone(path, 3);
+    wait_exited(&sb, "y", 10);
+    wait_gone(&path, 3);
     let deadline = Instant::now() + Duration::from_secs(5);
     while exec.try_wait().unwrap().is_none() {
         assert!(Instant::now() < deadline, "exec outlived its container");

@@ -78,6 +78,120 @@ pub struct ContainerSpec {
     /// Published ports (`-p`).
     #[serde(default)]
     pub publish: Vec<crate::network::PortMapping>,
+    /// Further names of the container on its primary network (`--network-alias`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
+    /// When the container is started again after it ended (`--restart`).
+    #[serde(default)]
+    pub restart: crate::restart::RestartPolicy,
+    /// Its health check: its own, or its image's (`--health-cmd`, `HEALTHCHECK`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health: Option<crate::health::HealthConfig>,
+    /// The first size of its terminal (rows, columns), with `tty` (Docker's
+    /// `ConsoleSize`): output before the first resize is laid out for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub console_size: Option<(u16, u16)>,
+    /// Bridge networks beyond the one in `network`, in order: `eth1`, `eth2`, …
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_networks: Vec<Attachment>,
+}
+
+/// A further network of a container (`--network` given again; an entry of Docker's
+/// `EndpointsConfig`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attachment {
+    pub network: String,
+    /// Further names of the container on this network.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
+}
+
+/// At most this many networks for one container: `eth0` to `eth15`.
+pub const MAX_NETWORKS: usize = 16;
+
+/// Check a container's networks: further networks join a bridge network, no network
+/// comes twice, and aliases are host names on a user network (the default network gives
+/// no names, as with Docker).
+pub fn check_networks(
+    network: &crate::network::NetworkMode,
+    aliases: &[String],
+    extra: &[Attachment],
+) -> Result<()> {
+    use crate::network::{DEFAULT, NetworkMode};
+    let invalid = |why: String, next: &str| {
+        Err(Error::new(
+            ErrorKind::InvalidInput,
+            "invalid network settings",
+            why,
+            next,
+        ))
+    };
+    let primary = match network {
+        NetworkMode::Bridge { network } => network.as_str(),
+        NetworkMode::Host | NetworkMode::None => {
+            let mode = if *network == NetworkMode::Host {
+                "host"
+            } else {
+                "none"
+            };
+            if !extra.is_empty() {
+                return invalid(
+                    format!("a container with --network {mode} cannot join other networks"),
+                    "give only bridge networks, or only one network mode",
+                );
+            }
+            if !aliases.is_empty() {
+                return invalid(
+                    "network aliases are only for user-defined networks".to_string(),
+                    "create a network with `openpod network create` and use it",
+                );
+            }
+            return Ok(());
+        }
+    };
+    if extra.len() + 1 > MAX_NETWORKS {
+        return invalid(
+            format!("a container joins at most {MAX_NETWORKS} networks"),
+            "give fewer networks",
+        );
+    }
+    let mut seen = vec![primary];
+    for a in extra {
+        if matches!(a.network.as_str(), "host" | "none") {
+            return invalid(
+                format!(
+                    "--network {} cannot be joined with other networks",
+                    a.network
+                ),
+                "give only bridge networks, or only one network mode",
+            );
+        }
+        if seen.contains(&a.network.as_str()) {
+            return invalid(
+                format!("network {} is given twice", a.network),
+                "give each network once",
+            );
+        }
+        seen.push(&a.network);
+    }
+    let lists = std::iter::once((primary, aliases)).chain(
+        extra
+            .iter()
+            .map(|a| (a.network.as_str(), a.aliases.as_slice())),
+    );
+    for (network, aliases) in lists {
+        if network == DEFAULT && !aliases.is_empty() {
+            return invalid(
+                "network aliases are only for user-defined networks; the default network gives no names"
+                    .to_string(),
+                "create a network with `openpod network create` and use it",
+            );
+        }
+        for alias in aliases {
+            crate::network::check_alias(alias)?;
+        }
+    }
+    Ok(())
 }
 
 /// The security settings of a container (and of commands `exec` runs in it).
@@ -195,7 +309,29 @@ impl ContainerSpec {
                 );
             }
         }
-        Ok(())
+        check_networks(&self.network, &self.aliases, &self.extra_networks)
+    }
+
+    /// The bridge networks the container joins, its primary one first; none with the
+    /// host's network or none.
+    pub fn bridge_networks(&self) -> Vec<&str> {
+        match &self.network {
+            crate::network::NetworkMode::Bridge { network } => std::iter::once(network.as_str())
+                .chain(self.extra_networks.iter().map(|a| a.network.as_str()))
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The container's aliases on network number `index` of [`Self::bridge_networks`].
+    pub fn aliases_on(&self, index: usize) -> &[String] {
+        match index {
+            0 => &self.aliases,
+            n => self
+                .extra_networks
+                .get(n - 1)
+                .map_or(&[][..], |a| a.aliases.as_slice()),
+        }
     }
 
     /// The environment the command gets: defaults first, then the caller's values.
@@ -242,12 +378,116 @@ pub(crate) fn spec_fixture() -> ContainerSpec {
         mounts: Vec::new(),
         network: crate::network::NetworkMode::Host,
         publish: Vec::new(),
+        aliases: Vec::new(),
+        restart: Default::default(),
+        health: None,
+        console_size: None,
+        extra_networks: Vec::new(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn further_networks_and_aliases_are_checked() {
+        use crate::network::NetworkMode;
+        let mut spec = spec_fixture();
+        spec.network = NetworkMode::Bridge {
+            network: "app".into(),
+        };
+        spec.aliases = vec!["web".into(), "p-web-1".into()];
+        spec.extra_networks = vec![Attachment {
+            network: "back".into(),
+            aliases: vec!["w".into()],
+        }];
+        spec.validate().unwrap();
+        assert_eq!(spec.bridge_networks(), ["app", "back"]);
+        assert_eq!(spec.aliases_on(0), ["web", "p-web-1"]);
+        assert_eq!(spec.aliases_on(1), ["w"]);
+        assert!(spec.aliases_on(2).is_empty());
+        let refused = |change: &dyn Fn(&mut ContainerSpec)| {
+            let mut s = spec.clone();
+            change(&mut s);
+            s.validate().map_err(|e| e.kind)
+        };
+        let invalid = Err(ErrorKind::InvalidInput);
+        // The host's network or none: no further networks, no aliases.
+        assert_eq!(refused(&|s| s.network = NetworkMode::Host), invalid);
+        assert_eq!(
+            refused(&|s| {
+                s.network = NetworkMode::None;
+                s.extra_networks.clear();
+            }),
+            invalid
+        );
+        // One network twice.
+        assert_eq!(
+            refused(&|s| s.extra_networks[0].network = "app".into()),
+            invalid
+        );
+        assert_eq!(
+            refused(&|s| s.extra_networks.push(s.extra_networks[0].clone())),
+            invalid
+        );
+        assert_eq!(
+            refused(&|s| s.extra_networks[0].network = "host".into()),
+            invalid
+        );
+        // An alias that would break the hosts file.
+        assert_eq!(refused(&|s| s.aliases.push("a b".into())), invalid);
+        assert_eq!(
+            refused(&|s| s.extra_networks[0].aliases.push("x\ny".into())),
+            invalid
+        );
+        // Aliases on the default network, which has no names.
+        assert_eq!(
+            refused(&|s| {
+                s.network = NetworkMode::default();
+            }),
+            invalid
+        );
+        assert_eq!(
+            refused(&|s| s.extra_networks[0].network = crate::network::DEFAULT.into()),
+            invalid
+        );
+        // The default network without aliases is a network like the others.
+        let mut both = spec.clone();
+        both.network = NetworkMode::default();
+        both.aliases.clear();
+        both.validate().unwrap();
+        // At most 16 networks (eth0 to eth15).
+        assert_eq!(
+            refused(&|s| {
+                s.extra_networks = (0..16)
+                    .map(|i| Attachment {
+                        network: format!("n{i}"),
+                        aliases: Vec::new(),
+                    })
+                    .collect();
+            }),
+            invalid
+        );
+    }
+
+    #[test]
+    fn settings_without_a_restart_policy_load() {
+        let mut json = serde_json::to_value(spec_fixture()).unwrap();
+        json.as_object_mut().unwrap().remove("restart");
+        let spec: ContainerSpec = serde_json::from_value(json).unwrap();
+        assert_eq!(spec.restart, crate::restart::RestartPolicy::No);
+    }
+
+    #[test]
+    fn settings_without_further_networks_load() {
+        let mut json = serde_json::to_value(spec_fixture()).unwrap();
+        let map = json.as_object_mut().unwrap();
+        map.remove("aliases");
+        map.remove("extra_networks");
+        let spec: ContainerSpec = serde_json::from_value(json).unwrap();
+        assert!(spec.aliases.is_empty() && spec.extra_networks.is_empty());
+    }
     use crate::ErrorKind;
 
     #[test]

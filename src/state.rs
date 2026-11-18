@@ -408,6 +408,56 @@ pub fn hold_shim_lock(dirs: &Dirs, id: &str) -> Result<std::fs::File> {
     try_shim_lock(dirs, id)?.ok_or_else(|| already_running(id))
 }
 
+/// Change container `id`'s settings while nothing runs it (`network connect` and
+/// `disconnect`): the next start uses them. A container that runs is refused, and so is a
+/// change that leaves invalid settings.
+pub fn change_settings(
+    dirs: &Dirs,
+    id: &str,
+    change: impl FnOnce(&mut ContainerSpec) -> Result<()>,
+) -> Result<()> {
+    // Held by the shim or the keeper while the container runs; held here, no start can
+    // read the settings half changed.
+    let _lock = hold_when_idle(dirs, id, "change the networks of")?;
+    let mut spec = read_config(dirs, id)?;
+    change(&mut spec)?;
+    spec.validate()?;
+    write_config(dirs, &spec)
+}
+
+/// Hold the shim lock of a container that does not run. A start under way or the cleanup
+/// of an ended run holds it for a moment (the cleanup goes on after a `stop` returned):
+/// wait for it; a container that runs is refused. `doing` names what the caller does.
+fn hold_when_idle(dirs: &Dirs, id: &str, doing: &str) -> Result<std::fs::File> {
+    let refused = |why: &str, next: &str| {
+        Error::new(
+            ErrorKind::Conflict,
+            format!("cannot {doing} container {}", id::short_id(id)),
+            why,
+            next,
+        )
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if let Some(lock) = try_shim_lock(dirs, id)? {
+            return Ok(lock);
+        }
+        if read_state(dirs, id).is_ok_and(|s| s.status == Status::Running) {
+            return Err(refused(
+                "it is running",
+                "stop it, change it, and start it again",
+            ));
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(refused(
+                "a start, or the cleanup of its last run, did not end within 10 seconds",
+                "try again",
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 fn already_running(id: &str) -> Error {
     Error::new(
         ErrorKind::Conflict,
@@ -440,7 +490,7 @@ pub fn wait_for_previous_shim(dirs: &Dirs, id: &str, limit: std::time::Duration)
 }
 
 /// The shim lock, if no shim holds it.
-fn try_shim_lock(dirs: &Dirs, id: &str) -> Result<Option<std::fs::File>> {
+pub(crate) fn try_shim_lock(dirs: &Dirs, id: &str) -> Result<Option<std::fs::File>> {
     let file = open_shim_lock(dirs, id)?;
     match file.try_lock() {
         Ok(()) => Ok(Some(file)),
@@ -485,6 +535,20 @@ pub fn reconcile(dirs: &Dirs, id: &str) -> Result<State> {
     Ok(state)
 }
 
+/// The cgroup `path` of container `id`'s last run is gone: the state stops naming it.
+/// A state check removes a cgroup that an ended container's state names, and the next run
+/// makes its cgroup at the same path; a name left behind would let a check remove the next
+/// run's group in the middle of its start. Called by whoever holds the shim lock.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn forget_cgroup(dirs: &Dirs, id: &str, path: &str) {
+    if let Ok(mut state) = read_state(dirs, id) {
+        if state.status == Status::Exited && state.cgroup.as_deref() == Some(path) {
+            state.cgroup = None;
+            let _ = write_state(dirs, id, &state);
+        }
+    }
+}
+
 /// Whether container `id`'s shim still runs (it holds its lock), without changing state.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn shim_running(dirs: &Dirs, id: &str) -> bool {
@@ -509,14 +573,15 @@ fn settle(dirs: &Dirs, id: &str, seen: State) -> Result<State> {
         // The shim did not give back the container's address (or, rootless, its place
         // in the network session); do it now.
         if let Ok(spec) = read_config(dirs, id) {
-            if let crate::network::NetworkMode::Bridge { network } = &spec.network {
+            let networks = spec.bridge_networks();
+            for network in &networks {
                 let _ = crate::network::release(dirs, network, id);
                 crate::network::refresh_hosts(dirs, network);
-                // SAFETY: geteuid has no preconditions.
-                #[cfg(target_os = "linux")]
-                if unsafe { libc::geteuid() } != 0 {
-                    crate::linux::session::release(dirs, id);
-                }
+            }
+            // SAFETY: geteuid has no preconditions.
+            #[cfg(target_os = "linux")]
+            if !networks.is_empty() && unsafe { libc::geteuid() } != 0 {
+                crate::linux::session::release(dirs, id);
             }
         }
         // The shim did not remove the container's cgroup (root mode); do it now.

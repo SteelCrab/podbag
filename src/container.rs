@@ -49,6 +49,16 @@ pub struct Container {
     publish: Vec<crate::network::PortMapping>,
     #[serde(default)]
     labels: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    aliases: Vec<String>,
+    #[serde(default)]
+    extra_networks: Vec<crate::spec::Attachment>,
+    #[serde(default)]
+    restart: crate::restart::RestartPolicy,
+    #[serde(default)]
+    health: Option<crate::health::HealthSettings>,
+    #[serde(default)]
+    console_size: Option<(u16, u16)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,6 +141,11 @@ impl Container {
             network: None,
             publish: Vec::new(),
             labels: std::collections::BTreeMap::new(),
+            aliases: Vec::new(),
+            extra_networks: Vec::new(),
+            restart: Default::default(),
+            health: None,
+            console_size: None,
         }
     }
 
@@ -144,6 +159,44 @@ impl Container {
     /// with [`crate::network::Network::create`]), the host's network, or none.
     pub fn network(mut self, mode: crate::network::NetworkMode) -> Container {
         self.network = Some(mode);
+        self
+    }
+
+    /// A further name of the container on its network (`--network-alias`): the other
+    /// containers there find it by this name too. User networks only.
+    pub fn network_alias(mut self, alias: impl Into<String>) -> Container {
+        self.aliases.push(alias.into());
+        self
+    }
+
+    /// Join a further bridge network too (`--network` given again), with names of its own
+    /// there. Its interface is `eth1`, `eth2`, … in the order of these calls; the default
+    /// route stays on the first network.
+    pub fn extra_network(mut self, network: impl Into<String>, aliases: Vec<String>) -> Container {
+        self.extra_networks.push(crate::spec::Attachment {
+            network: network.into(),
+            aliases,
+        });
+        self
+    }
+
+    /// Start the container again after it ends, as `policy` says (`--restart`). Not with
+    /// [`Container::auto_remove`].
+    pub fn restart(mut self, policy: crate::restart::RestartPolicy) -> Container {
+        self.restart = policy;
+        self
+    }
+
+    /// Its health check (`--health-cmd` and the like): fields it leaves out come from the
+    /// image's check. [`crate::health::HealthSettings::none`] turns the image's off.
+    pub fn health(mut self, settings: crate::health::HealthSettings) -> Container {
+        self.health = Some(settings);
+        self
+    }
+
+    /// The first size of its terminal, with [`Container::tty`] (Docker's `ConsoleSize`).
+    pub fn console_size(mut self, rows: u16, cols: u16) -> Container {
+        self.console_size = (rows > 0 && cols > 0).then_some((rows, cols));
         self
     }
 
@@ -778,8 +831,33 @@ mod linux_launch {
                 crate::network::NetworkMode::Bridge { .. } => {}
             }
         }
+        crate::spec::check_networks(&network, &c.aliases, &c.extra_networks)?;
+        // Without the keeper, a rootless bridge container's shim is in the network
+        // session's user namespace: only the user's service manager can start its restarter.
+        if c.restart != crate::restart::RestartPolicy::No
+            && rootless
+            && matches!(network, crate::network::NetworkMode::Bridge { .. })
+            && !crate::keeper::enabled(&dirs)
+            && !(crate::cgroup::systemd_run().is_some() && crate::cgroup::user_manager())
+        {
+            eprintln!(
+                "openpod: warning: the restart policy needs the keeper or a systemd user session; \
+                 this container will not be started again"
+            );
+        }
+        if c.auto_remove && c.restart != crate::restart::RestartPolicy::No {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "cannot run the container",
+                "--restart and --rm do not go together: one starts it again, the other removes it",
+                "drop one of them",
+            ));
+        }
         if let crate::network::NetworkMode::Bridge { network } = &network {
             crate::network::get_in(&dirs, network)?;
+        }
+        for a in &c.extra_networks {
+            crate::network::get_in(&dirs, &a.network)?;
         }
         let id = id::new_id()?;
         let short = id::short_id(&id).to_string();
@@ -790,6 +868,13 @@ mod linux_launch {
             Source::Image(image) => image.config.volumes.clone(),
             Source::Rootfs(_) => Vec::new(),
         };
+        let health = crate::health::resolve(
+            c.health.as_ref(),
+            match &c.source {
+                Source::Image(image) => image.config.healthcheck.as_ref(),
+                Source::Rootfs(_) => None,
+            },
+        )?;
         let requests = volume::with_image_volumes(c.mounts.clone(), &image_volumes)?;
         // Declared before the lock below, so on an early return the lock goes first: the
         // cleanup takes the volume lock exclusively, and a shared lock held by this same
@@ -843,6 +928,11 @@ mod linux_launch {
                     mounts: mounts.clone(),
                     network: network.clone(),
                     publish: c.publish.clone(),
+                    aliases: c.aliases.clone(),
+                    restart: c.restart,
+                    health: health.clone(),
+                    console_size: c.console_size,
+                    extra_networks: c.extra_networks.clone(),
                 };
                 spec.validate()?;
                 state::create(&dirs, &spec)?;
@@ -909,6 +999,11 @@ mod linux_launch {
                     mounts: mounts.clone(),
                     network: network.clone(),
                     publish: c.publish.clone(),
+                    aliases: c.aliases.clone(),
+                    restart: c.restart,
+                    health: health.clone(),
+                    console_size: c.console_size,
+                    extra_networks: c.extra_networks.clone(),
                 };
                 spec.validate()?;
                 state::create(&dirs, &spec)?;
@@ -1000,7 +1095,9 @@ mod linux_launch {
                     )
                 })?,
                 slice: slice.clone(),
-                unit: Some(format!("openpod-{id}")),
+                // A name of this run's own: the last run's scope can still be there for a
+                // moment (systemd removes it after its last process).
+                unit: Some(format!("openpod-{id}-{}", &id::new_id()?[..8])),
                 delegate: true,
             }),
             _ => None,

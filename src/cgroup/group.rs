@@ -147,11 +147,10 @@ impl Group {
             .and_then(|events| oom_reason(&events))
     }
 
-    /// Remove the group once its processes are gone.
-    pub fn remove(self) {
-        if self.owned {
-            remove_dir(&self.path);
-        }
+    /// Remove the group once its processes are gone. True when nothing is left for us to
+    /// remove (systemd removes a scope's groups itself).
+    pub fn remove(self) -> bool {
+        !self.owned || remove_dir(&self.path)
     }
 }
 
@@ -162,15 +161,16 @@ pub fn try_remove_dir(path: &Path) {
 
 /// Remove an empty cgroup directory. Processes that are still ending keep it busy for a
 /// moment, so retry for up to a second. If it is still busy, the next state check
-/// (`state::reconcile`) tries again.
-pub fn remove_dir(path: &Path) {
+/// (`state::reconcile`) tries again. True when the directory is gone.
+pub fn remove_dir(path: &Path) -> bool {
     let deadline = Instant::now() + Duration::from_secs(1);
     loop {
         match std::fs::remove_dir(path) {
             Err(e) if e.raw_os_error() == Some(libc::EBUSY) && Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(10));
             }
-            _ => return,
+            Ok(()) => return true,
+            Err(e) => return e.kind() == std::io::ErrorKind::NotFound,
         }
     }
 }

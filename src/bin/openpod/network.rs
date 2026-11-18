@@ -6,7 +6,13 @@ use openpod::network::Network;
 
 pub fn run(cmd: NetworkCmd) -> i32 {
     match cmd {
-        NetworkCmd::Create { subnet, name } => match Network::create(&name, subnet.as_deref()) {
+        NetworkCmd::Create {
+            subnet,
+            labels,
+            name,
+        } => match openpod::network::parse_labels(&labels)
+            .and_then(|labels| Network::create_with(&name, subnet.as_deref(), labels))
+        {
             Ok(n) => {
                 println!("{}", n.id);
                 0
@@ -49,6 +55,27 @@ pub fn run(cmd: NetworkCmd) -> i32 {
             }
             code
         }
+        #[cfg(unix)]
+        NetworkCmd::Connect {
+            aliases,
+            network,
+            container,
+        } => match openpod::ContainerHandle::get(&container)
+            .and_then(|h| h.connect(&network, &aliases))
+        {
+            Ok(()) => 0,
+            Err(e) => report(&e),
+        },
+        #[cfg(unix)]
+        NetworkCmd::Disconnect { network, container } => {
+            match openpod::ContainerHandle::get(&container).and_then(|h| h.disconnect(&network)) {
+                Ok(()) => 0,
+                Err(e) => report(&e),
+            }
+        }
+        // Containers need Linux.
+        #[cfg(not(unix))]
+        NetworkCmd::Connect { .. } | NetworkCmd::Disconnect { .. } => crate::unsupported(),
         NetworkCmd::Inspect { name } => match Network::get(&name) {
             Ok(n) => {
                 println!("{}", serde_json::to_string_pretty(&n).unwrap_or_default());

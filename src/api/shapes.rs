@@ -15,13 +15,17 @@ pub struct Facts<'a> {
     /// The image name as `docker ps` shows it (or a `--rootfs` directory).
     pub image: &'a str,
     pub mounts: &'a [MountInfo],
-    /// The container's bridge network, if it has one.
-    pub network: Option<&'a crate::network::Network>,
+    /// The container's networks, its primary one first (`host` or `none` alone).
+    pub networks: &'a [Attached<'a>],
     /// The container's directory.
     pub dir: &'a Path,
     /// Where named volumes live (`<data>/volumes`).
     pub volumes: &'a Path,
     pub now: u64,
+    /// How many times the restart policy started it again.
+    pub restart_count: u32,
+    /// Its health since its last start, when it has a check.
+    pub health: Option<&'a crate::health::Health>,
 }
 
 /// One entry of `GET /containers/json`.
@@ -53,10 +57,61 @@ pub fn list_entry(f: &Facts) -> Value {
         "Ports": ports,
         "Labels": f.spec.labels,
         "State": state_name(f.state.status),
-        "Status": status_text(f.state, f.now),
+        "Status": format!(
+            "{}{}",
+            status_text(f.state, f.now),
+            f.health
+                .filter(|_| f.state.status == Status::Running)
+                .map_or("", |h| h.status.ps_suffix())
+        ),
         "HostConfig": {"NetworkMode": network_mode(f)},
         "NetworkSettings": {"Networks": networks(f)},
         "Mounts": mounts(f),
+    })
+}
+
+/// One network of a container, for inspect and the list.
+pub struct Attached<'a> {
+    /// `host`, `none`, or a bridge network's name.
+    pub name: &'a str,
+    /// The bridge network: None for `host` and `none`, or when it is gone.
+    pub network: Option<crate::network::Network>,
+    /// The container's address there, while it runs.
+    pub ip: Option<std::net::Ipv4Addr>,
+    /// Its further names there.
+    pub aliases: &'a [String],
+}
+
+/// `State.Health`.
+fn health_json(h: &crate::health::Health) -> Value {
+    let log: Vec<Value> = h
+        .log
+        .iter()
+        .map(|p| {
+            json!({
+                "Start": p.start,
+                "End": p.end,
+                "ExitCode": p.exit_code,
+                "Output": p.output,
+            })
+        })
+        .collect();
+    json!({
+        "Status": h.status.name(),
+        "FailingStreak": h.failing_streak,
+        "Log": log,
+    })
+}
+
+/// `Config.Healthcheck`: durations in nanoseconds.
+fn healthcheck_json(c: &crate::health::HealthConfig) -> Value {
+    json!({
+        "Test": c.test,
+        "Interval": c.interval_ms * 1_000_000,
+        "Timeout": c.timeout_ms * 1_000_000,
+        "Retries": c.retries,
+        "StartPeriod": c.start_period_ms * 1_000_000,
+        "StartInterval": c.start_interval_ms * 1_000_000,
     })
 }
 
@@ -65,7 +120,7 @@ pub fn inspect(f: &Facts) -> Value {
     let st = f.state;
     let running = st.status == Status::Running;
     let path = |name: &str| f.dir.join(name).display().to_string();
-    let (gateway, prefix) = match f.network {
+    let (gateway, prefix) = match f.networks.first().and_then(|a| a.network.as_ref()) {
         Some(n) => (n.gateway.clone(), prefix_len(&n.subnet)),
         None => (String::new(), 0),
     };
@@ -86,6 +141,7 @@ pub fn inspect(f: &Facts) -> Value {
             "Error": "",
             "StartedAt": rfc3339(st.started),
             "FinishedAt": rfc3339(st.finished),
+            "Health": f.health.map(health_json),
         },
         "Image": f.spec.image.clone().unwrap_or_default(),
         "ResolvConfPath": path("resolv.conf"),
@@ -93,7 +149,7 @@ pub fn inspect(f: &Facts) -> Value {
         "HostsPath": path("hosts"),
         "LogPath": path("log.json"),
         "Name": format!("/{}", f.spec.name),
-        "RestartCount": 0,
+        "RestartCount": f.restart_count,
         "Driver": "overlay",
         "Platform": "linux",
         "MountLabel": "",
@@ -120,6 +176,7 @@ pub fn inspect(f: &Facts) -> Value {
             "Entrypoint": null,
             "OnBuild": null,
             "Labels": f.spec.labels,
+            "Healthcheck": f.spec.health.as_ref().map(healthcheck_json),
         },
         "NetworkSettings": {
             "Bridge": "",
@@ -203,32 +260,45 @@ fn prefix_len(subnet: &str) -> u32 {
         .unwrap_or(0)
 }
 
+/// `NetworkSettings.Networks`: an endpoint for each of the container's networks.
 fn networks(f: &Facts) -> Value {
-    let name = network_mode(f);
-    let mut endpoint = json!({
-        "IPAMConfig": null,
-        "Links": null,
-        "Aliases": null,
-        "MacAddress": "",
-        "NetworkID": "",
-        "EndpointID": "",
-        "Gateway": "",
-        "IPAddress": "",
-        "IPPrefixLen": 0,
-        "IPv6Gateway": "",
-        "GlobalIPv6Address": "",
-        "GlobalIPv6PrefixLen": 0,
-        "DriverOpts": null,
-    });
-    if let Some(n) = f.network {
-        endpoint["NetworkID"] = json!(n.id);
-        if let Some(ip) = &f.state.ip {
-            endpoint["IPAddress"] = json!(ip);
-            endpoint["Gateway"] = json!(n.gateway);
-            endpoint["IPPrefixLen"] = json!(prefix_len(&n.subnet));
+    let mut out = serde_json::Map::new();
+    for a in f.networks {
+        let mut endpoint = json!({
+            "IPAMConfig": null,
+            "Links": null,
+            "Aliases": null,
+            "MacAddress": "",
+            "NetworkID": "",
+            "EndpointID": "",
+            "Gateway": "",
+            "IPAddress": "",
+            "IPPrefixLen": 0,
+            "IPv6Gateway": "",
+            "GlobalIPv6Address": "",
+            "GlobalIPv6PrefixLen": 0,
+            "DriverOpts": null,
+            "DNSNames": null,
+        });
+        if let Some(n) = &a.network {
+            // The full ID, as network inspect shows it: Compose compares the two.
+            endpoint["NetworkID"] = json!(n.docker_id());
+            if a.name != crate::network::DEFAULT {
+                endpoint["Aliases"] = json!(a.aliases);
+                let mut names: Vec<&str> = vec![&f.spec.name];
+                names.extend(a.aliases.iter().map(String::as_str));
+                names.push(crate::id::short_id(&f.spec.id));
+                endpoint["DNSNames"] = json!(names);
+            }
+            if let Some(ip) = a.ip {
+                endpoint["IPAddress"] = json!(ip.to_string());
+                endpoint["Gateway"] = json!(n.gateway);
+                endpoint["IPPrefixLen"] = json!(prefix_len(&n.subnet));
+            }
         }
+        out.insert(a.name.to_string(), endpoint);
     }
-    json!({ name: endpoint })
+    Value::Object(out)
 }
 
 fn host_config(f: &Facts) -> Value {
@@ -257,7 +327,10 @@ fn host_config(f: &Facts) -> Value {
         "Binds": binds,
         "NetworkMode": network_mode(f),
         "PortBindings": bound_ports(&f.spec.publish, true),
-        "RestartPolicy": {"Name": "no", "MaximumRetryCount": 0},
+        "RestartPolicy": {
+            "Name": f.spec.restart.docker().0,
+            "MaximumRetryCount": f.spec.restart.docker().1,
+        },
         "AutoRemove": f.spec.auto_remove,
         "LogConfig": {"Type": "json-file", "Config": {}},
         "Memory": limits.memory.unwrap_or(0),
@@ -345,7 +418,14 @@ mod tests {
             gateway: "10.78.0.1".into(),
             bridge: "op0".into(),
             created: 1,
+            labels: Default::default(),
         };
+        let attached = [Attached {
+            name: "bridge",
+            network: Some(net.clone()),
+            ip: Some("10.78.0.2".parse().unwrap()),
+            aliases: &[],
+        }];
         let mounts = vec![
             MountInfo {
                 kind: "volume".into(),
@@ -365,10 +445,12 @@ mod tests {
             state: &state,
             image: "alpine",
             mounts: &mounts,
-            network: Some(&net),
+            networks: &attached,
             dir: Path::new("/d/c"),
             volumes: Path::new("/d/volumes"),
             now: 1061,
+            restart_count: 0,
+            health: None,
         };
         let i = inspect(&facts);
         for key in [
@@ -407,7 +489,9 @@ mod tests {
         assert_eq!(bridge["IPAddress"], "10.78.0.2");
         assert_eq!(bridge["IPPrefixLen"], 24);
         assert_eq!(bridge["Gateway"], "10.78.0.1");
-        assert_eq!(bridge["NetworkID"], "abcdef123456");
+        assert_eq!(bridge["NetworkID"], net.docker_id());
+        // The default network gives no names.
+        assert_eq!(bridge["Aliases"], serde_json::Value::Null);
         assert_eq!(i["HostConfig"]["NetworkMode"], "bridge");
         assert_eq!(
             i["HostConfig"]["PortBindings"],
@@ -454,10 +538,12 @@ mod tests {
             state: &state,
             image: "/r",
             mounts: &[],
-            network: None,
+            networks: &[],
             dir: Path::new("/d/c"),
             volumes: Path::new("/d/volumes"),
             now: 1012,
+            restart_count: 0,
+            health: None,
         };
         let i = inspect(&facts);
         assert_eq!(i["State"]["Status"], "exited");

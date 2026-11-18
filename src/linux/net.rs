@@ -80,8 +80,15 @@ pub fn prepare_bridge(net: &Network) -> Result<u32> {
 }
 
 /// The host side of a container's veth pair: `op` and the first 10 hex digits of its ID.
-pub fn veth_name(container_id: &str) -> String {
-    format!("op{}", &container_id[..10.min(container_id.len())])
+/// The host side of a container's veth pair for its interface number `interface` (`eth0`
+/// has no number, as before containers had further networks).
+pub fn veth_name(container_id: &str, interface: usize) -> String {
+    let base = format!("op{}", &container_id[..10.min(container_id.len())]);
+    if interface == 0 {
+        base
+    } else {
+        format!("{base}{interface}")
+    }
 }
 
 /// Run `f` in a thread that joined the network namespace of process `pid`.
@@ -105,22 +112,25 @@ pub fn in_netns<T: Send, E: From<std::io::Error> + Send>(
 }
 
 /// Connect process `pid` (a new container, in its own network namespace) to the network:
-/// a veth pair on the bridge `bridge_index`, `eth0` inside with `ip`, and a default route.
+/// a veth pair on the bridge `bridge_index`, `eth<interface>` inside with `ip`, and for
+/// `eth0` the default route.
 pub fn connect(
     net: &Network,
     bridge_index: u32,
     container_id: &str,
     pid: u32,
     ip: Ipv4Addr,
+    interface: usize,
 ) -> Result<()> {
     let fail = |what: &str, e: std::io::Error| net_error(&net.name, what, e);
     let (_, prefix) = net.cidr();
     let gateway: Ipv4Addr = net.gateway.parse().unwrap_or(Ipv4Addr::UNSPECIFIED);
-    let host_side = veth_name(container_id);
+    let host_side = veth_name(container_id, interface);
+    let inside = format!("eth{interface}");
     let ns = std::fs::File::open(format!("/proc/{pid}/ns/net"))
         .map_err(|e| fail("open the container's network namespace", e))?;
     let mut s = Socket::route().map_err(|e| fail("netlink", e))?;
-    let made = match s.request(route::new_veth(&host_side, "eth0", ns.as_raw_fd())) {
+    let made = match s.request(route::new_veth(&host_side, &inside, ns.as_raw_fd())) {
         // Left by this container's last run: the kernel takes a network namespace (and
         // the veth pair with it) down a moment after its last process. Remove the old
         // device and make the pair again.
@@ -128,7 +138,7 @@ pub fn connect(
             if let Ok(Some(old)) = s.link_index(&host_side) {
                 let _ = s.request(route::del_link(old));
             }
-            s.request(route::new_veth(&host_side, "eth0", ns.as_raw_fd()))
+            s.request(route::new_veth(&host_side, &inside, ns.as_raw_fd()))
         }
         made => made,
     };
@@ -146,14 +156,17 @@ pub fn connect(
         if let Some(lo) = s.link_index("lo")? {
             s.request(route::set_up(lo))?;
         }
-        let eth0 = s
-            .link_index("eth0")?
-            .ok_or_else(|| std::io::Error::other("eth0 is missing"))?;
-        s.request(route::add_address(eth0, ip.octets(), prefix))?;
-        s.request(route::set_up(eth0))?;
-        s.request(route::add_default_route(gateway.octets()))
+        let link = s
+            .link_index(&inside)?
+            .ok_or_else(|| std::io::Error::other(format!("{inside} is missing")))?;
+        s.request(route::add_address(link, ip.octets(), prefix))?;
+        s.request(route::set_up(link))?;
+        if interface == 0 {
+            s.request(route::add_default_route(gateway.octets()))?;
+        }
+        Ok(())
     })
-    .map_err(|e| fail("set up eth0 in the container", e))
+    .map_err(|e| fail(&format!("set up {inside} in the container"), e))
 }
 
 /// Remove a network's bridge device and its NAT chain from the calling thread's network

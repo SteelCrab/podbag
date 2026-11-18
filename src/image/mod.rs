@@ -260,6 +260,9 @@ pub struct ImageConfig {
     /// Paths the image declares as volumes (`Volumes`); each becomes an anonymous volume.
     #[serde(default)]
     pub volumes: Vec<String>,
+    /// Its health check (`HEALTHCHECK`). Images pulled before openpod read it have none.
+    #[serde(default)]
+    pub healthcheck: Option<crate::health::HealthSettings>,
 }
 
 #[cfg(test)]

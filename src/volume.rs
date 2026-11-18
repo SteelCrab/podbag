@@ -16,6 +16,9 @@ pub struct Volume {
     pub created: u64,
     /// Made for one container (`-v /target` or an image's `Volumes`).
     pub anonymous: bool,
+    /// Labels (Docker's `--label`; Compose finds a project's volumes by them).
+    #[serde(default)]
+    pub labels: crate::network::Labels,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -23,6 +26,9 @@ struct Meta {
     name: String,
     created: u64,
     anonymous: bool,
+    /// Missing in the files of volumes made before volumes had labels.
+    #[serde(default)]
+    labels: crate::network::Labels,
 }
 
 const META: &str = "meta.json";
@@ -31,9 +37,15 @@ impl Volume {
     /// Create a volume, or return the one with this name. No name: a new anonymous-style
     /// name (64 hex digits), like `docker volume create`.
     pub fn create(name: Option<&str>) -> Result<Volume> {
+        Self::create_with(name, Default::default())
+    }
+
+    /// As `create`, with labels for a new volume. A volume that exists is returned as it
+    /// is: its labels do not change.
+    pub fn create_with(name: Option<&str>, labels: crate::network::Labels) -> Result<Volume> {
         let dirs = crate::paths::dirs()?;
         let _lock = lock_shared(&dirs)?;
-        create_in(&dirs, name, false).map(|(v, _)| v)
+        create_labeled_in(&dirs, name, false, labels).map(|(v, _)| v)
     }
 
     pub fn get(name: &str) -> Result<Volume> {
@@ -48,7 +60,12 @@ impl Volume {
     /// Delete the volumes no container mounts: anonymous ones, or all with `all`. Returns
     /// their names and the bytes their files took.
     pub fn prune(all: bool) -> Result<(Vec<String>, u64)> {
-        prune_in(&crate::paths::dirs()?, all)
+        Self::prune_matching(all, &|_| true)
+    }
+
+    /// As `prune`, for the volumes that `pick` chooses.
+    pub fn prune_matching(all: bool, pick: &dyn Fn(&Volume) -> bool) -> Result<(Vec<String>, u64)> {
+        prune_matching_in(&crate::paths::dirs()?, all, pick)
     }
 
     /// Delete a volume and its files. A volume that any container (running or not) mounts
@@ -88,14 +105,26 @@ fn volume_of(dirs: &Dirs, meta: Meta) -> Volume {
         name: meta.name,
         created: meta.created,
         anonymous: meta.anonymous,
+        labels: meta.labels,
     }
 }
 
 /// Create a volume unless it exists. Returns it and whether it is new.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn create_in(
     dirs: &Dirs,
     name: Option<&str>,
     anonymous: bool,
+) -> Result<(Volume, bool)> {
+    create_labeled_in(dirs, name, anonymous, Default::default())
+}
+
+/// As `create_in`, with the labels of a new volume (one that exists keeps its own).
+pub(crate) fn create_labeled_in(
+    dirs: &Dirs,
+    name: Option<&str>,
+    anonymous: bool,
+    labels: crate::network::Labels,
 ) -> Result<(Volume, bool)> {
     let name = match name {
         Some(n) => {
@@ -133,6 +162,7 @@ pub(crate) fn create_in(
         name,
         created: crate::state::now(),
         anonymous,
+        labels,
     };
     let json = serde_json::to_vec(&meta).unwrap_or_default();
     let tmp = dir.join(".meta.json.tmp");
@@ -251,11 +281,20 @@ pub(crate) fn remove_in(dirs: &Dirs, name: &str, force: bool) -> Result<()> {
     remove_files(dirs, name)
 }
 
+#[cfg(test)]
 pub(crate) fn prune_in(dirs: &Dirs, all: bool) -> Result<(Vec<String>, u64)> {
+    prune_matching_in(dirs, all, &|_| true)
+}
+
+pub(crate) fn prune_matching_in(
+    dirs: &Dirs,
+    all: bool,
+    pick: &dyn Fn(&Volume) -> bool,
+) -> Result<(Vec<String>, u64)> {
     let mut gone = Vec::new();
     let mut bytes = 0;
     for v in list_in(dirs)? {
-        if !all && !v.anonymous {
+        if (!all && !v.anonymous) || !pick(&v) {
             continue;
         }
         let size = tree_size(&dirs.volume_dir(&v.name));
@@ -634,6 +673,53 @@ mod tests {
             runtime: tmp.join("run"),
             config: tmp.join("cfg"),
         }
+    }
+
+    #[test]
+    fn a_volume_keeps_its_labels() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = dirs_in(tmp.path());
+        let labels: crate::network::Labels = [("a", "b"), ("empty", "")]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let (made, new) = create_labeled_in(&dirs, Some("db"), false, labels.clone()).unwrap();
+        assert!(new);
+        assert_eq!(made.labels, labels);
+        assert_eq!(get_in(&dirs, "db").unwrap().labels, labels);
+        // A volume that exists is returned as it is.
+        let other: crate::network::Labels =
+            [("x".to_string(), "y".to_string())].into_iter().collect();
+        let (again, new) = create_labeled_in(&dirs, Some("db"), false, other).unwrap();
+        assert!(!new);
+        assert_eq!(again.labels, labels);
+        assert!(
+            create_in(&dirs, Some("plain"), false)
+                .unwrap()
+                .0
+                .labels
+                .is_empty()
+        );
+        // Only the volumes that the caller picks are pruned.
+        let (gone, _) = prune_matching_in(&dirs, true, &|v| v.labels.contains_key("a")).unwrap();
+        assert_eq!(gone, ["db"]);
+        assert!(get_in(&dirs, "plain").is_ok());
+    }
+
+    #[test]
+    fn records_without_labels_load() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = dirs_in(tmp.path());
+        create_in(&dirs, Some("old"), false).unwrap();
+        // As an earlier version wrote it.
+        let path = dirs.volume_dir("old").join(META);
+        let mut meta: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(meta.as_object_mut().unwrap().remove("labels").is_some());
+        std::fs::write(&path, serde_json::to_vec(&meta).unwrap()).unwrap();
+        let old = get_in(&dirs, "old").unwrap();
+        assert!(old.labels.is_empty());
+        assert_eq!(old.name, "old");
     }
 
     #[test]

@@ -56,6 +56,16 @@ pub fn shim_main(id: &str, mode: Option<crate::helper::ShimMode>, keep_on_failur
             // Another shim serves it: leave the container alone.
             Err(e) => return status.fail(e),
         };
+        // The user stopped it (or is removing it) since a restarter decided to start it.
+        // A start by the user clears the mark before it gets here.
+        if crate::restart::stopped_by_user(&dirs, id) {
+            return status.fail(crate::Error::new(
+                crate::ErrorKind::Conflict,
+                format!("cannot start container {}", spec.name),
+                "it was stopped by the user",
+                "start it with `openpod start`",
+            ));
+        }
         let outcome = supervise::run(&spec, &dirs, &mut status, &_lock);
         // A failed `run` leaves no trace, a failed `start` keeps the container; a finished
         // container stays unless --rm. With --rm it goes even when its start failed, like
