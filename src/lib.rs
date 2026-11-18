@@ -2,6 +2,9 @@
 //!
 //! The command-line tool is a thin layer over this library.
 
+#[cfg(unix)]
+#[doc(hidden)]
+pub mod api;
 #[doc(hidden)]
 pub mod caps;
 #[doc(hidden)]

@@ -351,6 +351,7 @@ dependencies = [
  "clap",
  "flate2",
  "http",
+ "httparse",
  "libc",
  "rustix",
  "ruzstd",

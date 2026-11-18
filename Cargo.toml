@@ -26,6 +26,7 @@ flate2 = { version = "1", default-features = false, features = ["rust_backend"] 
 ruzstd = "0.9"
 tar = { version = "0.4", default-features = false }
 sha2 = "0.11"
+httparse = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

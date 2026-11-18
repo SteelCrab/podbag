@@ -688,7 +688,7 @@ impl Store {
         let (full_name, record) = self.find(name)?;
         if let Some(container) = in_use().get(&record.digest) {
             return Err(Error::new(
-                ErrorKind::InvalidInput,
+                ErrorKind::Conflict,
                 format!("cannot remove image {full_name}"),
                 format!("container {} uses it", crate::id::short_id(container)),
                 "remove the container first",
@@ -715,6 +715,48 @@ impl Store {
             self.collect_garbage()?;
         }
         Ok(removed)
+    }
+
+    /// Give the image `source` (a name or digest prefix) the name `target` too. The image
+    /// `target` named before loses it, and goes when it has no name left and no container
+    /// uses it. Returns the full new name.
+    pub fn tag(
+        &self,
+        source: &str,
+        target: &str,
+        in_use: &dyn Fn() -> HashMap<String, String>,
+    ) -> Result<String> {
+        let _lock = self.lock(true)?;
+        let (_, record) = self.find(source)?;
+        let reference = Reference::parse(target)?;
+        if reference.digest.is_some() {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!("cannot name image {source} {target}"),
+                "a name with a digest belongs to the image it was pulled as",
+                "use a tag, like name:1",
+            ));
+        }
+        let name = reference.name();
+        let digest = record.digest;
+        let replaced = self.update_refs(|refs| {
+            let old = refs.insert(
+                name.clone(),
+                RefEntry {
+                    digest: digest.clone(),
+                    last_used: now(),
+                },
+            );
+            old.map(|o| o.digest)
+                .filter(|d| *d != digest && !refs.values().any(|r| r.digest == *d))
+        })?;
+        if let Some(unnamed) = replaced {
+            if !in_use().contains_key(&unnamed) {
+                self.delete_image(&unnamed)?;
+                self.collect_garbage()?;
+            }
+        }
+        Ok(name)
     }
 
     /// Remove every image that no container uses.
@@ -1444,6 +1486,54 @@ mod tests {
             let e = s.read_layer_index(&id).unwrap_err();
             assert_eq!(e.kind, ErrorKind::Internal, "{entry}");
         }
+    }
+
+    #[test]
+    fn tagging_adds_a_name_and_drops_the_image_it_replaces() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = open(&tmp);
+        let a = s
+            .import_for_test("a", vec![file_layer(&[("x", b"1")])], 1)
+            .unwrap();
+        let b = s
+            .import_for_test("b", vec![file_layer(&[("y", b"2")])], 2)
+            .unwrap();
+        let name = s.tag("a", "mine:1", &HashMap::new).unwrap();
+        assert_eq!(name, "docker.io/library/mine:1");
+        assert_eq!(s.find("mine:1").unwrap().1.digest, a.digest);
+        // b loses its only name, so it goes.
+        s.tag("a", "b", &HashMap::new).unwrap();
+        assert_eq!(s.find("b").unwrap().1.digest, a.digest);
+        assert!(!s.image_dir(&b.digest).exists());
+        assert_eq!(s.objects.total_size().unwrap().0, 1, "b's object is swept");
+    }
+
+    #[test]
+    fn a_replaced_image_that_a_container_uses_stays() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = open(&tmp);
+        s.import_for_test("a", vec![file_layer(&[("x", b"1")])], 1)
+            .unwrap();
+        let b = s
+            .import_for_test("b", vec![file_layer(&[("y", b"2")])], 2)
+            .unwrap();
+        let in_use = || HashMap::from([(b.digest.clone(), "c".repeat(64))]);
+        s.tag("a", "b", &in_use).unwrap();
+        assert!(s.image_dir(&b.digest).join("image.json").exists());
+    }
+
+    #[test]
+    fn a_name_with_a_digest_is_not_given_to_an_image() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = open(&tmp);
+        let a = s
+            .import_for_test("a", vec![file_layer(&[("x", b"1")])], 1)
+            .unwrap();
+        let e = s
+            .tag("a", &format!("x@{}", a.digest), &HashMap::new)
+            .unwrap_err();
+        assert_eq!(e.kind, ErrorKind::InvalidInput);
+        assert!(s.find("x").is_err());
     }
 
     #[test]

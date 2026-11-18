@@ -4,7 +4,7 @@ A daemonless, rootless container engine that runs Docker/OCI images from a singl
 
 ## Status
 
-Early development (milestone M2b). What works:
+Early development (milestone M8a). What works:
 
 ```sh
 openpod run alpine echo hello            # pulls the image if needed; the container stays
@@ -26,6 +26,7 @@ openpod system df | openpod system prune -f
 openpod run --rootfs ./rootfs sh         # a plain directory instead of an image
 openpod check                            # is this system ready? (exit 1 if not)
 openpod check-image myapp:1              # programs that cannot run in the image (exit 1)
+openpod system service &                 # the Docker API, for the docker CLI (see below)
 ```
 
 There is no daemon: each container has a small `openpod __shim` process that keeps its
@@ -141,6 +142,46 @@ session process per user holds a user and a network namespace; the bridges live 
 starts the session and the last one stops it. Rootless bridge containers share the
 session's user namespace. Published ports are relayed by each container's shim in both
 modes, so the container sees the gateway as the client address.
+
+## Docker API
+
+`openpod system service` serves the Docker Engine API (version 1.47; clients down to 1.24
+work) on a Unix socket, so the `docker` CLI can drive openpod. It is not a daemon in the
+usual sense: containers do not depend on it, and it ends after 60 seconds without a
+connection (`--timeout`, 0 for never).
+
+```sh
+openpod system service &                                   # rootless
+export DOCKER_HOST=unix://$XDG_RUNTIME_DIR/openpod/docker.sock   # root: /run/openpod/docker.sock
+docker run --rm -it alpine sh
+docker context create openpod --docker host=$DOCKER_HOST   # or keep it as a context
+```
+
+With systemd, the service can start on the first connection instead:
+`openpod system service --print-units` prints a socket and a service unit (for
+`~/.config/systemd/user/`, or `/etc/systemd/system/` as root); enable the socket unit.
+The socket is private to its user (0600; 0660 as root).
+
+What works: `version`, `info`, `system df`, `events` (live: there is no history, so
+`--since` in the past shows nothing older); `pull`, `images`, `image inspect`, `tag`, `rmi`,
+`image prune`; `run` (attached, `-d`, `-i`, `-t`, `--rm`), `create`, `start [-a]`, `stop`,
+`restart`, `kill`, `wait`, `rm`, `logs` (`-f`, `--tail`, `-t`, `--since`), `attach`, `ps`
+(with `label`, `name`, `id`, `status` filters), `inspect`, `port`, `exec` (`-i`, `-t`, `-d`,
+`-e`, `-w`, `-u`), `container prune`; `volume` and `network` (create, ls, inspect, rm,
+prune).
+
+Settings openpod does not have are refused with a reason (devices, `--privileged`,
+`--read-only`, `--pid host`, `--volumes-from`, `--link`, port ranges, other network or
+volume drivers), or accepted with a warning when ignoring them is harmless (restart
+policies, health checks, `--dns`, `--add-host`, ulimits, log drivers, network aliases).
+Features it lacks answer 501 with what to do instead: `build` (use buildx, later),
+`commit`, `cp`, `export`, `diff`, `top`, `stats`, `pause`, `rename`, `update`, `push`,
+`search`, `save`/`load`, `network connect`, swarm and plugins.
+
+Differences from Docker: `docker attach` to a container that another process started
+reads its output from the log and cannot send input; a client that leaves an attached
+`exec` ends its command (Docker leaves it running); volumes and networks keep no labels
+yet. Compose and buildx come in the next milestones.
 
 ## Requirements
 

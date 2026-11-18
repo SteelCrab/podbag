@@ -108,6 +108,61 @@ pub fn rm(targets: &[String], force: bool, volumes: bool) -> i32 {
     })
 }
 
+/// `openpod start`: in the background, or with `-a` attached to this terminal (one
+/// container); `-i` connects stdin.
+pub fn start(targets: &[String], attach: bool, interactive: bool) -> i32 {
+    if !attach {
+        return each(targets, |h| h.start().map(|()| println!("{}", h.id())));
+    }
+    if targets.len() != 1 {
+        eprintln!("openpod: start -a takes one container");
+        return 125;
+    }
+    let handle = match ContainerHandle::get(&targets[0]) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("openpod: {e}");
+            return e.exit_code();
+        }
+    };
+    let tty = openpod::state::read_config(
+        &match openpod::paths::dirs() {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("openpod: {e}");
+                return e.exit_code();
+            }
+        },
+        handle.id(),
+    )
+    .map(|s| s.tty)
+    .unwrap_or(false);
+    use std::process::Stdio;
+    let result = crate::run::foreground(tty && interactive, |_| {
+        let stdin = if interactive {
+            Stdio::inherit()
+        } else {
+            Stdio::null()
+        };
+        handle.start_attached(stdin, Stdio::inherit(), Stdio::inherit())
+    });
+    match result {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("openpod: {e}");
+            e.exit_code()
+        }
+    }
+}
+
+/// `openpod restart`.
+pub fn restart(targets: &[String], seconds: u64) -> i32 {
+    each(targets, |h| {
+        h.restart(Duration::from_secs(seconds))
+            .map(|()| println!("{}", h.id()))
+    })
+}
+
 pub fn stop(targets: &[String], seconds: u64) -> i32 {
     each(targets, |h| {
         h.stop(Duration::from_secs(seconds))
@@ -142,6 +197,7 @@ pub fn exec(a: ExecArgs) -> i32 {
         user: a.user,
         tty: a.tty,
         interactive: a.interactive,
+        size: None,
     };
     let forwarded = [libc::SIGINT, libc::SIGQUIT, libc::SIGTERM, libc::SIGHUP];
     openpod::signals::block(&forwarded);

@@ -11,6 +11,27 @@ pub struct Cli {
 pub enum Cmd {
     /// Run a command in a new container
     Run(RunArgs),
+    /// Create a container without starting it
+    Create(RunArgs),
+    /// Start created or stopped containers
+    Start {
+        /// Attach to its output (and wait for it to end)
+        #[arg(short, long)]
+        attach: bool,
+        /// Connect stdin (with --attach)
+        #[arg(short, long)]
+        interactive: bool,
+        #[arg(required = true)]
+        containers: Vec<String>,
+    },
+    /// Stop and start containers
+    Restart {
+        /// Seconds to wait before killing
+        #[arg(short, long, default_value_t = 10)]
+        time: u64,
+        #[arg(required = true)]
+        containers: Vec<String>,
+    },
     /// Download an image from a registry
     Pull { image: String },
     /// List stored images
@@ -93,7 +114,14 @@ pub enum Cmd {
         cmd: SystemCmd,
     },
     #[command(name = "__shim", hide = true)]
-    Shim { id: String },
+    Shim {
+        id: String,
+        /// detached or attached
+        #[arg(long)]
+        mode: Option<String>,
+        #[arg(long)]
+        keep_on_failure: bool,
+    },
     #[command(name = "__store", hide = true)]
     Store { op: String },
     #[command(name = "__session", hide = true)]
@@ -151,6 +179,21 @@ pub enum SystemCmd {
         /// Do not ask for confirmation
         #[arg(short, long)]
         force: bool,
+    },
+    /// Serve the Docker Engine API on a Unix socket, for the docker CLI
+    ///
+    /// Point the CLI at it with DOCKER_HOST=unix://<socket>. Containers do not depend on
+    /// the service; it ends after --timeout seconds without a connection.
+    Service {
+        /// The socket (default: docker.sock in the openpod runtime directory)
+        #[arg(long)]
+        socket: Option<std::path::PathBuf>,
+        /// End after this many seconds without a connection (0: never)
+        #[arg(long, default_value_t = 60)]
+        timeout: u64,
+        /// Print systemd units that start the service on the first connection
+        #[arg(long)]
+        print_units: bool,
     },
 }
 
@@ -251,28 +294,10 @@ pub struct RunArgs {
     pub args: Vec<String>,
 }
 
-/// A signal by name (`TERM`, `SIGTERM`) or number. Names give Linux numbers on every
-/// host: the container always runs on Linux (on macOS and Windows, inside a VM).
-#[cfg_attr(not(unix), allow(dead_code))]
+/// A signal by name (`TERM`, `SIGTERM`) or number.
+#[cfg(unix)]
 pub fn parse_signal(s: &str) -> Option<i32> {
-    if let Ok(n) = s.parse::<i32>() {
-        return (n > 0 && n < 65).then_some(n);
-    }
-    let name = s.to_ascii_uppercase();
-    let name = name.strip_prefix("SIG").unwrap_or(&name);
-    Some(match name {
-        "HUP" => 1,
-        "INT" => 2,
-        "QUIT" => 3,
-        "KILL" => 9,
-        "USR1" => 10,
-        "USR2" => 12,
-        "TERM" => 15,
-        "CONT" => 18,
-        "STOP" => 19,
-        "WINCH" => 28,
-        _ => return None,
-    })
+    openpod::signals::parse(s)
 }
 
 /// Parse a `-e` value like `docker run`: `NAME=VALUE`, or `NAME` to copy the caller's value.

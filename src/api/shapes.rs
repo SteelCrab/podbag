@@ -1,0 +1,471 @@
+//! Docker's JSON for `GET /containers/json` and `GET /containers/{id}/json`.
+
+use super::docker::{rfc3339, state_name, status_text};
+use crate::containers::MountInfo;
+use crate::network::{NetworkMode, PortMapping, Proto};
+use crate::spec::ContainerSpec;
+use crate::state::{State, Status};
+use serde_json::{Value, json};
+use std::path::Path;
+
+/// What both shapes are made from.
+pub struct Facts<'a> {
+    pub spec: &'a ContainerSpec,
+    pub state: &'a State,
+    /// The image name as `docker ps` shows it (or a `--rootfs` directory).
+    pub image: &'a str,
+    pub mounts: &'a [MountInfo],
+    /// The container's bridge network, if it has one.
+    pub network: Option<&'a crate::network::Network>,
+    /// The container's directory.
+    pub dir: &'a Path,
+    /// Where named volumes live (`<data>/volumes`).
+    pub volumes: &'a Path,
+    pub now: u64,
+}
+
+/// One entry of `GET /containers/json`.
+pub fn list_entry(f: &Facts) -> Value {
+    let running = f.state.status == Status::Running;
+    let ports: Vec<Value> = if running {
+        f.state
+            .ports
+            .iter()
+            .map(|p| {
+                json!({
+                    "IP": p.host_ip.to_string(),
+                    "PrivatePort": p.container_port,
+                    "PublicPort": p.host_port,
+                    "Type": proto(p),
+                })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    json!({
+        "Id": f.spec.id,
+        "Names": [format!("/{}", f.spec.name)],
+        "Image": f.image,
+        "ImageID": f.spec.image.clone().unwrap_or_default(),
+        "Command": f.spec.command.join(" "),
+        "Created": f.state.created,
+        "Ports": ports,
+        "Labels": f.spec.labels,
+        "State": state_name(f.state.status),
+        "Status": status_text(f.state, f.now),
+        "HostConfig": {"NetworkMode": network_mode(f)},
+        "NetworkSettings": {"Networks": networks(f)},
+        "Mounts": mounts(f),
+    })
+}
+
+/// `GET /containers/{id}/json`.
+pub fn inspect(f: &Facts) -> Value {
+    let st = f.state;
+    let running = st.status == Status::Running;
+    let path = |name: &str| f.dir.join(name).display().to_string();
+    let (gateway, prefix) = match f.network {
+        Some(n) => (n.gateway.clone(), prefix_len(&n.subnet)),
+        None => (String::new(), 0),
+    };
+    json!({
+        "Id": f.spec.id,
+        "Created": rfc3339(Some(st.created)),
+        "Path": f.spec.command.first().cloned().unwrap_or_default(),
+        "Args": f.spec.command.iter().skip(1).collect::<Vec<_>>(),
+        "State": {
+            "Status": state_name(st.status),
+            "Running": running,
+            "Paused": false,
+            "Restarting": false,
+            "OOMKilled": st.oom.is_some(),
+            "Dead": false,
+            "Pid": if running { st.pid.unwrap_or(0) } else { 0 },
+            "ExitCode": st.exit_code.unwrap_or(0),
+            "Error": "",
+            "StartedAt": rfc3339(st.started),
+            "FinishedAt": rfc3339(st.finished),
+        },
+        "Image": f.spec.image.clone().unwrap_or_default(),
+        "ResolvConfPath": path("resolv.conf"),
+        "HostnamePath": path("hostname"),
+        "HostsPath": path("hosts"),
+        "LogPath": path("log.json"),
+        "Name": format!("/{}", f.spec.name),
+        "RestartCount": 0,
+        "Driver": "overlay",
+        "Platform": "linux",
+        "MountLabel": "",
+        "ProcessLabel": "",
+        "AppArmorProfile": "",
+        "ExecIDs": null,
+        "HostConfig": host_config(f),
+        "Config": {
+            "Hostname": f.spec.hostname,
+            "Domainname": "",
+            "User": f.spec.user.clone().unwrap_or_default(),
+            "AttachStdin": false,
+            "AttachStdout": false,
+            "AttachStderr": false,
+            "ExposedPorts": exposed(f),
+            "Tty": f.spec.tty,
+            "OpenStdin": f.spec.interactive,
+            "StdinOnce": false,
+            "Env": f.spec.env.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>(),
+            "Cmd": f.spec.command,
+            "Image": f.image,
+            "Volumes": null,
+            "WorkingDir": f.spec.workdir.clone().unwrap_or_default(),
+            "Entrypoint": null,
+            "OnBuild": null,
+            "Labels": f.spec.labels,
+        },
+        "NetworkSettings": {
+            "Bridge": "",
+            "SandboxID": "",
+            "HairpinMode": false,
+            "Ports": if running { bound_ports(&f.state.ports, false) } else { json!({}) },
+            "SandboxKey": "",
+            "IPAddress": st.ip.clone().unwrap_or_default(),
+            "IPPrefixLen": if st.ip.is_some() { prefix } else { 0 },
+            "Gateway": if st.ip.is_some() { gateway } else { String::new() },
+            "MacAddress": "",
+            "Networks": networks(f),
+        },
+        "Mounts": mounts(f),
+    })
+}
+
+fn proto(p: &PortMapping) -> &'static str {
+    match p.proto {
+        Proto::Tcp => "tcp",
+        Proto::Udp => "udp",
+    }
+}
+
+/// `{"80/tcp": [{"HostIp": …, "HostPort": …}]}`. As configured (`configured`: an
+/// unspecified address or port 0 shows as ""), or as bound while running.
+fn bound_ports(ports: &[PortMapping], configured: bool) -> Value {
+    let mut out = serde_json::Map::new();
+    for p in ports {
+        let key = format!("{}/{}", p.container_port, proto(p));
+        let (ip, port) = if configured {
+            let ip = if p.host_ip.is_unspecified() {
+                String::new()
+            } else {
+                p.host_ip.to_string()
+            };
+            let port = if p.host_port == 0 {
+                String::new()
+            } else {
+                p.host_port.to_string()
+            };
+            (ip, port)
+        } else {
+            (p.host_ip.to_string(), p.host_port.to_string())
+        };
+        let entry = out.entry(key).or_insert_with(|| json!([]));
+        if let Some(list) = entry.as_array_mut() {
+            list.push(json!({"HostIp": ip, "HostPort": port}));
+        }
+    }
+    Value::Object(out)
+}
+
+fn exposed(f: &Facts) -> Value {
+    let ports: serde_json::Map<String, Value> = f
+        .spec
+        .publish
+        .iter()
+        .map(|p| (format!("{}/{}", p.container_port, proto(p)), json!({})))
+        .collect();
+    if ports.is_empty() {
+        Value::Null
+    } else {
+        Value::Object(ports)
+    }
+}
+
+/// Docker's name for the network mode: `bridge` for the default network.
+fn network_mode(f: &Facts) -> String {
+    match &f.spec.network {
+        NetworkMode::Bridge { network } => network.clone(),
+        NetworkMode::Host => "host".to_string(),
+        NetworkMode::None => "none".to_string(),
+    }
+}
+
+fn prefix_len(subnet: &str) -> u32 {
+    subnet
+        .rsplit_once('/')
+        .and_then(|(_, p)| p.parse().ok())
+        .unwrap_or(0)
+}
+
+fn networks(f: &Facts) -> Value {
+    let name = network_mode(f);
+    let mut endpoint = json!({
+        "IPAMConfig": null,
+        "Links": null,
+        "Aliases": null,
+        "MacAddress": "",
+        "NetworkID": "",
+        "EndpointID": "",
+        "Gateway": "",
+        "IPAddress": "",
+        "IPPrefixLen": 0,
+        "IPv6Gateway": "",
+        "GlobalIPv6Address": "",
+        "GlobalIPv6PrefixLen": 0,
+        "DriverOpts": null,
+    });
+    if let Some(n) = f.network {
+        endpoint["NetworkID"] = json!(n.id);
+        if let Some(ip) = &f.state.ip {
+            endpoint["IPAddress"] = json!(ip);
+            endpoint["Gateway"] = json!(n.gateway);
+            endpoint["IPPrefixLen"] = json!(prefix_len(&n.subnet));
+        }
+    }
+    json!({ name: endpoint })
+}
+
+fn host_config(f: &Facts) -> Value {
+    let limits = &f.spec.limits;
+    let nano_cpus = limits
+        .cpu_quota
+        .map(|q| q * 1_000_000_000 / crate::cgroup::CPU_PERIOD)
+        .unwrap_or(0);
+    let binds: Vec<String> = f
+        .mounts
+        .iter()
+        .filter(|m| m.kind != "tmpfs")
+        .map(|m| {
+            let mode = if m.read_only { ":ro" } else { "" };
+            format!("{}:{}{mode}", m.source, m.target)
+        })
+        .collect();
+    let mut security_opt = Vec::new();
+    if f.spec.security.no_new_privileges {
+        security_opt.push("no-new-privileges".to_string());
+    }
+    if !f.spec.security.seccomp {
+        security_opt.push("seccomp=unconfined".to_string());
+    }
+    json!({
+        "Binds": binds,
+        "NetworkMode": network_mode(f),
+        "PortBindings": bound_ports(&f.spec.publish, true),
+        "RestartPolicy": {"Name": "no", "MaximumRetryCount": 0},
+        "AutoRemove": f.spec.auto_remove,
+        "LogConfig": {"Type": "json-file", "Config": {}},
+        "Memory": limits.memory.unwrap_or(0),
+        "NanoCpus": nano_cpus,
+        "PidsLimit": limits.pids,
+        "CapAdd": f.spec.security.cap_add,
+        "CapDrop": f.spec.security.cap_drop,
+        "SecurityOpt": security_opt,
+        "Privileged": false,
+        "ReadonlyRootfs": false,
+        "PublishAllPorts": false,
+        "Init": null,
+    })
+}
+
+fn mounts(f: &Facts) -> Vec<Value> {
+    f.mounts
+        .iter()
+        .map(|m| {
+            let (name, source, driver) = match m.kind.as_str() {
+                "volume" => (
+                    m.source.clone(),
+                    f.volumes.join(&m.source).join("data").display().to_string(),
+                    "local",
+                ),
+                "tmpfs" => (String::new(), String::new(), ""),
+                _ => (String::new(), m.source.clone(), ""),
+            };
+            json!({
+                "Type": m.kind,
+                "Name": name,
+                "Source": source,
+                "Destination": m.target,
+                "Driver": driver,
+                "Mode": if m.read_only { "ro" } else { "" },
+                "RW": !m.read_only,
+                "Propagation": "",
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::network::Network;
+
+    fn port(host_port: u16) -> PortMapping {
+        PortMapping {
+            host_ip: "0.0.0.0".parse().unwrap(),
+            host_port,
+            container_port: 80,
+            proto: Proto::Tcp,
+        }
+    }
+
+    #[test]
+    fn inspect_and_list_shapes() {
+        let mut spec = crate::spec::spec_fixture();
+        spec.name = "web".into();
+        spec.command = vec!["sh".into(), "-c".into(), "echo hi".into()];
+        spec.env = vec![("A".into(), "1".into())];
+        spec.labels.insert("app".into(), "x".into());
+        spec.network = NetworkMode::Bridge {
+            network: "bridge".into(),
+        };
+        spec.publish = vec![port(0)];
+        let state = State {
+            status: Status::Running,
+            pid: Some(42),
+            shim_pid: Some(41),
+            exit_code: None,
+            created: 1000,
+            started: Some(1001),
+            finished: None,
+            cgroup: None,
+            oom: None,
+            ip: Some("10.78.0.2".into()),
+            ports: vec![port(32768)],
+        };
+        let net = Network {
+            name: "bridge".into(),
+            id: "abcdef123456".into(),
+            subnet: "10.78.0.0/24".into(),
+            gateway: "10.78.0.1".into(),
+            bridge: "op0".into(),
+            created: 1,
+        };
+        let mounts = vec![
+            MountInfo {
+                kind: "volume".into(),
+                source: "vol".into(),
+                target: "/v".into(),
+                read_only: false,
+            },
+            MountInfo {
+                kind: "bind".into(),
+                source: "/h".into(),
+                target: "/h".into(),
+                read_only: true,
+            },
+        ];
+        let facts = Facts {
+            spec: &spec,
+            state: &state,
+            image: "alpine",
+            mounts: &mounts,
+            network: Some(&net),
+            dir: Path::new("/d/c"),
+            volumes: Path::new("/d/volumes"),
+            now: 1061,
+        };
+        let i = inspect(&facts);
+        for key in [
+            "Id",
+            "Created",
+            "Path",
+            "Args",
+            "State",
+            "Image",
+            "Name",
+            "RestartCount",
+            "Driver",
+            "Platform",
+            "HostConfig",
+            "Config",
+            "NetworkSettings",
+            "Mounts",
+            "LogPath",
+        ] {
+            assert!(i.get(key).is_some(), "inspect has no {key}: {i}");
+        }
+        assert_eq!(i["Name"], "/web");
+        assert_eq!(i["Path"], "sh");
+        assert_eq!(i["Args"], json!(["-c", "echo hi"]));
+        assert_eq!(i["State"]["Status"], "running");
+        assert_eq!(i["State"]["Running"], true);
+        assert_eq!(i["State"]["Pid"], 42);
+        assert_eq!(i["Config"]["Env"], json!(["A=1"]));
+        assert_eq!(i["Config"]["Labels"], json!({"app": "x"}));
+        assert_eq!(i["Config"]["Image"], "alpine");
+        assert_eq!(
+            i["NetworkSettings"]["Ports"],
+            json!({"80/tcp": [{"HostIp": "0.0.0.0", "HostPort": "32768"}]})
+        );
+        let bridge = &i["NetworkSettings"]["Networks"]["bridge"];
+        assert_eq!(bridge["IPAddress"], "10.78.0.2");
+        assert_eq!(bridge["IPPrefixLen"], 24);
+        assert_eq!(bridge["Gateway"], "10.78.0.1");
+        assert_eq!(bridge["NetworkID"], "abcdef123456");
+        assert_eq!(i["HostConfig"]["NetworkMode"], "bridge");
+        assert_eq!(
+            i["HostConfig"]["PortBindings"],
+            json!({"80/tcp": [{"HostIp": "", "HostPort": ""}]})
+        );
+        assert_eq!(i["Mounts"][0]["Type"], "volume");
+        assert_eq!(i["Mounts"][0]["Name"], "vol");
+        assert_eq!(i["Mounts"][0]["Source"], "/d/volumes/vol/data");
+        assert_eq!(i["Mounts"][1]["RW"], false);
+        assert_eq!(i["LogPath"], "/d/c/log.json");
+
+        let l = list_entry(&facts);
+        assert_eq!(l["Id"], spec.id);
+        assert_eq!(l["Names"], json!(["/web"]));
+        assert_eq!(
+            l["Ports"],
+            json!([{"IP": "0.0.0.0", "PrivatePort": 80, "PublicPort": 32768, "Type": "tcp"}])
+        );
+        assert_eq!(l["State"], "running");
+        assert_eq!(l["Status"], "Up About a minute");
+        assert_eq!(l["Command"], "sh -c echo hi");
+        assert_eq!(l["Labels"], json!({"app": "x"}));
+        assert_eq!(l["HostConfig"]["NetworkMode"], "bridge");
+    }
+
+    #[test]
+    fn a_stopped_container_shows_its_exit() {
+        let spec = crate::spec::spec_fixture();
+        let state = State {
+            status: Status::Exited,
+            pid: None,
+            shim_pid: None,
+            exit_code: Some(3),
+            created: 1000,
+            started: Some(1001),
+            finished: Some(1002),
+            cgroup: None,
+            oom: None,
+            ip: None,
+            ports: vec![],
+        };
+        let facts = Facts {
+            spec: &spec,
+            state: &state,
+            image: "/r",
+            mounts: &[],
+            network: None,
+            dir: Path::new("/d/c"),
+            volumes: Path::new("/d/volumes"),
+            now: 1012,
+        };
+        let i = inspect(&facts);
+        assert_eq!(i["State"]["Status"], "exited");
+        assert_eq!(i["State"]["ExitCode"], 3);
+        assert_eq!(i["State"]["Running"], false);
+        assert_eq!(i["HostConfig"]["NetworkMode"], "host");
+        let l = list_entry(&facts);
+        assert_eq!(l["Status"], "Exited (3) 10 seconds ago");
+        assert_eq!(l["Ports"], json!([]));
+    }
+}

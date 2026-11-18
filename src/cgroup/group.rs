@@ -216,7 +216,16 @@ fn direct(parent: &Path, id: &str, limits: &Limits, budget: Option<u64>) -> Resu
         }
     }
     let path = parent.join(id);
-    std::fs::create_dir(&path).map_err(fail)?;
+    if let Err(e) = std::fs::create_dir(&path) {
+        // Left by an earlier run of the same container (a restart): an empty group can be
+        // removed and made again; one with processes in it fails here.
+        if e.kind() != std::io::ErrorKind::AlreadyExists {
+            return Err(fail(e));
+        }
+        std::fs::remove_dir(&path)
+            .and_then(|()| std::fs::create_dir(&path))
+            .map_err(fail)?;
+    }
     let group = configure(&path, &enabled, limits).and_then(|()| {
         let dir = open_dir(&path).map_err(fail)?;
         Ok(Group {

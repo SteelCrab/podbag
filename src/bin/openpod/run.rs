@@ -12,9 +12,58 @@ pub fn run(args: RunArgs) -> i32 {
     }
 }
 
+/// `openpod create`: the container is made but not started. Prints its ID.
+pub fn create(args: RunArgs) -> i32 {
+    match build(args).and_then(|c| c.create()) {
+        Ok(handle) => {
+            println!("{}", handle.id());
+            0
+        }
+        Err(e) => {
+            eprintln!("openpod: {e}");
+            e.exit_code()
+        }
+    }
+}
+
 fn start_and_wait(args: RunArgs) -> openpod::Result<i32> {
     // With -it, keystrokes go to the container as typed (raw mode); restored on return.
     let raw = args.tty && args.interactive && !args.detach;
+    let detach = args.detach;
+    let c = build(args)?;
+    if detach {
+        let handle = c.start()?;
+        println!("{}", handle.id());
+        return Ok(0);
+    }
+    foreground(raw, |_| c.spawn_inherit())
+}
+
+/// Run `start` with this terminal: raw mode for `-it`, signals forwarded to the helper.
+pub fn foreground(
+    raw: bool,
+    start: impl FnOnce(()) -> openpod::Result<openpod::Running>,
+) -> openpod::Result<i32> {
+    // Hold signals until the helper is running, so none is lost in between. Signals that
+    // another process sends to the CLI are forwarded to the helper, like `docker run`.
+    // Ctrl+C from the terminal is not forwarded: it reaches the container directly.
+    let forwarded = [libc::SIGINT, libc::SIGQUIT, libc::SIGTERM, libc::SIGHUP];
+    let _raw = raw.then(raw_terminal).flatten();
+    openpod::signals::block(&forwarded);
+    match start(()) {
+        Ok(r) => {
+            openpod::signals::forward_to(r.helper_pid(), &forwarded);
+            r.wait()
+        }
+        Err(e) => {
+            openpod::signals::ignore(&forwarded);
+            Err(e)
+        }
+    }
+}
+
+/// The container `run` and `create` describe.
+fn build(args: RunArgs) -> openpod::Result<Container> {
     let mut c = match args.rootfs {
         Some(rootfs) => Container::from_rootfs(rootfs).command(args.args),
         None => {
@@ -94,28 +143,7 @@ fn start_and_wait(args: RunArgs) -> openpod::Result<i32> {
             openpod::spec::SecurityOpt::SeccompUnconfined => c.seccomp(false),
         };
     }
-    if args.detach {
-        let handle = c.start()?;
-        println!("{}", handle.id());
-        return Ok(0);
-    }
-
-    // Hold signals until the helper is running, so none is lost in between. Signals that
-    // another process sends to the CLI are forwarded to the helper, like `docker run`.
-    // Ctrl+C from the terminal is not forwarded: it reaches the container directly.
-    let forwarded = [libc::SIGINT, libc::SIGQUIT, libc::SIGTERM, libc::SIGHUP];
-    let _raw = raw.then(raw_terminal).flatten();
-    openpod::signals::block(&forwarded);
-    match c.spawn_inherit() {
-        Ok(r) => {
-            openpod::signals::forward_to(r.helper_pid(), &forwarded);
-            r.wait()
-        }
-        Err(e) => {
-            openpod::signals::ignore(&forwarded);
-            Err(e)
-        }
-    }
+    Ok(c)
 }
 
 /// Put this terminal in raw mode for `-t`; restored when the value is dropped.

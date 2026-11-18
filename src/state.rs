@@ -287,7 +287,7 @@ pub fn create(dirs: &Dirs, spec: &ContainerSpec) -> Result<()> {
     for other in list_ids(dirs)? {
         if read_config(dirs, &other).is_ok_and(|c| c.name == spec.name) {
             return Err(Error::new(
-                ErrorKind::InvalidInput,
+                ErrorKind::Conflict,
                 format!("cannot create container {}", spec.name),
                 format!(
                     "the name {} is in use by container {}",
@@ -320,10 +320,39 @@ const SHIM_LOCK: &str = "shim.lock";
 /// The shim holds this lock for its whole life. Readers that can take it know the shim is
 /// gone. Unlike a PID check, this cannot be fooled by a reused PID.
 pub fn hold_shim_lock(dirs: &Dirs, id: &str) -> Result<std::fs::File> {
-    let file = open_shim_lock(dirs, id)?;
-    // Released when `file` is closed.
-    file.lock().map_err(|e| lock_error(id, e))?;
-    Ok(file)
+    // Released when the file is closed. Held already: another shim serves the container.
+    try_shim_lock(dirs, id)?.ok_or_else(|| already_running(id))
+}
+
+fn already_running(id: &str) -> Error {
+    Error::new(
+        ErrorKind::Conflict,
+        format!("cannot start container {}", id::short_id(id)),
+        "it is already running",
+        "stop it first, or use `openpod restart`",
+    )
+}
+
+/// Wait up to `limit` for the last run's shim to let go of container `id`: it answers
+/// `stop` and `wait` before it has cleaned up and ended. A container that runs is
+/// refused at once.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn wait_for_previous_shim(dirs: &Dirs, id: &str, limit: std::time::Duration) -> Result<()> {
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        // Taken and dropped at once: free for the new shim.
+        if try_shim_lock(dirs, id)?.is_some() {
+            return Ok(());
+        }
+        if read_state(dirs, id).is_ok_and(|s| s.status == Status::Running) {
+            return Err(already_running(id));
+        }
+        if std::time::Instant::now() >= deadline {
+            // The new shim tries once more and reports the conflict.
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 }
 
 /// The shim lock, if no shim holds it.
@@ -495,7 +524,7 @@ mod tests {
         let dirs = dirs_in(tmp.path());
         create(&dirs, &spec_named('a', "web")).unwrap();
         let e = create(&dirs, &spec_named('b', "web")).unwrap_err();
-        assert_eq!(e.kind, ErrorKind::InvalidInput);
+        assert_eq!(e.kind, ErrorKind::Conflict);
         assert_eq!(e.what, "cannot create container web");
         assert_eq!(
             e.why,

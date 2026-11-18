@@ -13,8 +13,11 @@ mod supervise;
 use crate::helper::StatusChannel;
 use crate::{paths, state};
 
-/// Run the shim for container `id`. Returns the process exit code.
-pub fn shim_main(id: &str) -> i32 {
+/// Run the shim for container `id`. `mode` says whether it serves an attached caller
+/// (`None`: what the container was created with). With `keep_on_failure` a failed start
+/// keeps the container (`start`); otherwise it is removed (`run`). Returns the process
+/// exit code.
+pub fn shim_main(id: &str, mode: Option<crate::helper::ShimMode>, keep_on_failure: bool) -> i32 {
     let mut status = StatusChannel::take();
     #[cfg(target_os = "linux")]
     {
@@ -29,10 +32,14 @@ pub fn shim_main(id: &str) -> i32 {
         Ok(d) => d,
         Err(e) => return status.fail(e),
     };
-    let spec = match state::read_config(&dirs, id).and_then(|s| s.validate().map(|()| s)) {
+    let mut spec = match state::read_config(&dirs, id).and_then(|s| s.validate().map(|()| s)) {
         Ok(s) => s,
         Err(e) => return status.fail(e),
     };
+    // Each start chooses: `run -d` and `start` detach, `run` and `start -a` attach.
+    if let Some(mode) = mode {
+        spec.detach = mode == crate::helper::ShimMode::Detached;
+    }
     #[cfg(target_os = "linux")]
     {
         if spec.detach {
@@ -43,22 +50,21 @@ pub fn shim_main(id: &str) -> i32 {
         // Readers take this lock to learn that the shim is gone (state::reconcile).
         let _lock = match state::hold_shim_lock(&dirs, id) {
             Ok(lock) => lock,
-            Err(e) => {
-                let code = status.fail(e);
-                remove_container(&dirs, &spec);
-                return code;
-            }
+            // Another shim serves it: leave the container alone.
+            Err(e) => return status.fail(e),
         };
         let outcome = supervise::run(&spec, &dirs, &mut status);
-        // A failed start leaves no trace; a finished container stays unless --rm.
-        if !outcome.started || spec.auto_remove {
+        // A failed `run` leaves no trace, a failed `start` keeps the container; a finished
+        // container stays unless --rm. With --rm it goes even when its start failed, like
+        // Docker (whose CLI waits for that removal).
+        if spec.auto_remove || (!outcome.started && !keep_on_failure) {
             remove_container(&dirs, &spec);
         }
         outcome.code
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = spec;
+        let _ = (spec, keep_on_failure);
         let code = status.fail(crate::Error::unsupported_os());
         let _ = state::remove_container_dir(&dirs, id);
         code

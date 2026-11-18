@@ -25,7 +25,13 @@ use std::os::fd::{AsRawFd, OwnedFd};
 pub struct ExecRequest {
     pub command: Vec<String>,
     pub options: ExecOptions,
+    /// fd 4 is a pipe of resize records for the terminal (`pty::apply_resizes`).
+    #[serde(default)]
+    pub resize: bool,
 }
+
+/// The descriptor that carries resize records when [`ExecRequest::resize`] is set.
+pub const RESIZE_FD: i32 = 4;
 
 const FORWARDED: [i32; 6] = [
     libc::SIGINT,
@@ -54,6 +60,8 @@ struct Started {
     /// The terminal's controlling side with `-t`; output is relayed from it.
     master: Option<OwnedFd>,
     relay_stdin: bool,
+    /// Resize records arrive on [`RESIZE_FD`].
+    resize: bool,
 }
 
 fn start(id: &str, json: &str) -> Result<Started> {
@@ -136,7 +144,10 @@ fn start(id: &str, json: &str) -> Result<Started> {
 
     let opts = &req.options;
     let (master, slave) = if opts.tty {
-        let (m, s) = super::pty::open(Some(0))?;
+        let (m, s) = super::pty::open(if opts.size.is_some() { None } else { Some(0) })?;
+        if let Some((rows, cols)) = opts.size {
+            super::pty::set_size(m.as_raw_fd(), rows, cols);
+        }
         (Some(m), Some(s))
     } else {
         (None, None)
@@ -212,6 +223,7 @@ fn start(id: &str, json: &str) -> Result<Started> {
         pid: child,
         master,
         relay_stdin: opts.tty && opts.interactive,
+        resize: req.resize,
     })
 }
 
@@ -275,7 +287,8 @@ fn child_setup(
 fn finish(started: Started) -> i32 {
     crate::signals::forward_all_to(started.pid, &FORWARDED);
     if let Some(master) = &started.master {
-        super::pty::relay(master, started.relay_stdin, started.pid);
+        let resize = started.resize.then_some(RESIZE_FD);
+        super::pty::relay(master, started.relay_stdin, started.pid, resize);
     }
     wait(started.pid).unwrap_or(-1)
 }

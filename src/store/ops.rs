@@ -7,6 +7,14 @@ pub enum StoreOp {
     Pull {
         name: String,
         progress: bool,
+        /// One JSON [`crate::image::PullEvent`] per line on stderr.
+        #[serde(default)]
+        events: bool,
+    },
+    /// Give the image `source` the name `name` too.
+    Tag {
+        source: String,
+        name: String,
     },
     RemoveImage {
         name: String,
@@ -83,7 +91,16 @@ mod linux_ops {
     /// Runs as the store owner: root, or root of the user namespace when rootless.
     pub(super) fn run(op: StoreOp, dirs: &Dirs, rootless: bool) -> Result<Value> {
         match op {
-            StoreOp::Pull { name, progress } => {
+            StoreOp::Tag { source, name } => {
+                to_json(
+                    &Store::open(dirs, !rootless)?.tag(&source, &name, &|| images_in_use(dirs))?,
+                )
+            }
+            StoreOp::Pull {
+                name,
+                progress,
+                events,
+            } => {
                 let mut store = Store::open(dirs, !rootless)?;
                 let config = config::load(dirs)?;
                 store.use_mount_method(rootless, config.image_mount);
@@ -92,6 +109,9 @@ mod linux_ops {
                 let mut show = |p: Progress| {
                     if progress {
                         print_progress(&p);
+                    }
+                    if events {
+                        print_event(&p);
                     }
                 };
                 let (full, record) =
@@ -182,6 +202,38 @@ mod linux_ops {
         })
     }
 
+    /// For the API server, which reads the helper's stderr line by line.
+    fn print_event(p: &Progress) {
+        use crate::image::PullEvent;
+        let ev = match *p {
+            Progress::Resolved {
+                name,
+                digest,
+                layers,
+            } => PullEvent::Resolved {
+                name: name.to_string(),
+                digest: digest.to_string(),
+                layers,
+            },
+            Progress::LayerCached { index, digest } => PullEvent::LayerCached {
+                index,
+                digest: digest.to_string(),
+            },
+            Progress::LayerDone {
+                index,
+                digest,
+                bytes,
+            } => PullEvent::LayerDone {
+                index,
+                digest: digest.to_string(),
+                bytes,
+            },
+        };
+        if let Ok(line) = serde_json::to_string(&ev) {
+            eprintln!("{line}");
+        }
+    }
+
     fn print_progress(p: &Progress) {
         let short = |d: &str| {
             d.strip_prefix("sha256:")
@@ -222,10 +274,22 @@ mod tests {
         let op = StoreOp::Pull {
             name: "alpine".into(),
             progress: false,
+            events: true,
         };
         assert_eq!(
             serde_json::to_string(&op).unwrap(),
-            r#"{"op":"pull","name":"alpine","progress":false}"#
+            r#"{"op":"pull","name":"alpine","progress":false,"events":true}"#
+        );
+        let old: StoreOp =
+            serde_json::from_str(r#"{"op":"pull","name":"alpine","progress":true}"#).unwrap();
+        assert!(matches!(old, StoreOp::Pull { events: false, .. }));
+        let tag = StoreOp::Tag {
+            source: "alpine".into(),
+            name: "mine:1".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&tag).unwrap(),
+            r#"{"op":"tag","source":"alpine","name":"mine:1"}"#
         );
         let back: StoreOp = serde_json::from_str(r#"{"op":"remove_container","id":"x"}"#).unwrap();
         assert_eq!(back, StoreOp::RemoveContainer { id: "x".into() });

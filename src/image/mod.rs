@@ -21,6 +21,26 @@ pub struct Image {
     pub config: ImageConfig,
 }
 
+/// One step of a pull, as [`Image::pull_with_events`] reports it.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum PullEvent {
+    /// The registry named the manifest (`digest`) and its number of layers.
+    Resolved {
+        name: String,
+        digest: String,
+        layers: usize,
+    },
+    /// Layer `index` (from 0) was stored already.
+    LayerCached { index: usize, digest: String },
+    /// Layer `index` was downloaded and unpacked; `bytes` is its size.
+    LayerDone {
+        index: usize,
+        digest: String,
+        bytes: u64,
+    },
+}
+
 impl Image {
     /// Find programs and libraries in a stored image that cannot run: built for another
     /// C library or CPU, or missing a library. Files are read, never run.
@@ -42,6 +62,32 @@ impl Image {
     #[doc(hidden)]
     pub fn pull_with_progress(name: &str) -> Result<Image> {
         pull(name, true)
+    }
+
+    /// Like [`Image::pull`], calling `on` for each step as it happens.
+    pub fn pull_with_events(name: &str, mut on: impl FnMut(PullEvent)) -> Result<Image> {
+        let op = crate::store::ops::StoreOp::Pull {
+            name: name.to_string(),
+            progress: false,
+            events: true,
+        };
+        from_output(store_op_lines(&op, &mut |line| {
+            if let Ok(ev) = serde_json::from_str::<PullEvent>(line) {
+                on(ev);
+            }
+        })?)
+    }
+
+    /// Give a stored image (a name or digest prefix) another name, like `docker tag`.
+    /// What the name pointed to before loses it. Returns the full new name.
+    pub fn tag(source: &str, name: &str) -> Result<String> {
+        from_output(store_op(
+            &crate::store::ops::StoreOp::Tag {
+                source: source.to_string(),
+                name: name.to_string(),
+            },
+            false,
+        )?)
     }
 
     /// A stored image, by name or digest prefix. NotFound if it has not been pulled.
@@ -106,6 +152,7 @@ fn pull(name: &str, progress: bool) -> Result<Image> {
         &crate::store::ops::StoreOp::Pull {
             name: name.to_string(),
             progress,
+            events: false,
         },
         progress,
     )?;
@@ -119,6 +166,22 @@ fn store_op(op: &crate::store::ops::StoreOp, progress: bool) -> Result<serde_jso
 
 #[cfg(not(unix))]
 fn store_op(_op: &crate::store::ops::StoreOp, _progress: bool) -> Result<serde_json::Value> {
+    Err(Error::unsupported_os())
+}
+
+#[cfg(unix)]
+fn store_op_lines(
+    op: &crate::store::ops::StoreOp,
+    on_line: &mut dyn FnMut(&str),
+) -> Result<serde_json::Value> {
+    crate::helper::run_store_op_lines(op, on_line)
+}
+
+#[cfg(not(unix))]
+fn store_op_lines(
+    _op: &crate::store::ops::StoreOp,
+    _on_line: &mut dyn FnMut(&str),
+) -> Result<serde_json::Value> {
     Err(Error::unsupported_os())
 }
 

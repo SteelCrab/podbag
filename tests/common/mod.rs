@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+pub mod api;
 pub mod registry;
 use std::process::{Command, Output};
 

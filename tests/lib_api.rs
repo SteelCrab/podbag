@@ -207,3 +207,122 @@ fn library_runs_as_root() {
     let map = String::from_utf8_lossy(&out.stdout);
     assert!(map.contains("4294967295"), "{map}");
 }
+
+#[test]
+fn conflicts_have_their_own_kind() {
+    if root_mode() {
+        return;
+    }
+    setup();
+    let first = Container::from_rootfs(rootfs())
+        .name("conflict-a")
+        .command(["sleep", "30"])
+        .start()
+        .unwrap();
+    let again = Container::from_rootfs(rootfs())
+        .name("conflict-a")
+        .command(["true"])
+        .create()
+        .unwrap_err();
+    assert_eq!(again.kind, openpod::ErrorKind::Conflict, "{again}");
+    let running = first.remove(false).unwrap_err();
+    assert_eq!(running.kind, openpod::ErrorKind::Conflict, "{running}");
+    first.remove(true).unwrap();
+}
+
+/// Read a child's output until `want` shows up (or 10 s pass).
+fn read_until(out: &mut impl std::io::Read, want: &str) -> String {
+    let mut got = Vec::new();
+    let mut buf = [0u8; 256];
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        match out.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                got.extend_from_slice(&buf[..n]);
+                if String::from_utf8_lossy(&got).contains(want) {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    String::from_utf8_lossy(&got).to_string()
+}
+
+#[test]
+fn resize_reaches_the_container_tty() {
+    if root_mode() {
+        return;
+    }
+    setup();
+    let handle = Container::from_rootfs(rootfs())
+        .tty(true)
+        .interactive(true)
+        .command(["sh", "-c", "sleep 1; stty size"])
+        .create()
+        .unwrap();
+    let (stdin_r, _stdin_w) = std::io::pipe().unwrap();
+    let (mut out_r, out_w) = std::io::pipe().unwrap();
+    let running = handle
+        .start_attached(stdin_r.into(), out_w.into(), std::process::Stdio::null())
+        .unwrap();
+    handle.resize(30, 100).unwrap();
+    let text = read_until(&mut out_r, "30 100");
+    assert!(text.contains("30 100"), "{text:?}");
+    assert_eq!(running.wait().unwrap(), 0);
+    handle.remove(true).unwrap();
+}
+
+#[test]
+fn exec_with_pipes_and_resize() {
+    if root_mode() {
+        return;
+    }
+    setup();
+    let handle = Container::from_rootfs(rootfs())
+        .command(["sleep", "30"])
+        .start()
+        .unwrap();
+    let options = openpod::ExecOptions {
+        tty: true,
+        size: Some((20, 80)),
+        ..Default::default()
+    };
+    let (mut out_r, out_w) = std::io::pipe().unwrap();
+    let running = handle
+        .exec_with(
+            &["stty", "size"],
+            &options,
+            std::process::Stdio::null(),
+            out_w.into(),
+            std::process::Stdio::null(),
+            None,
+        )
+        .unwrap();
+    let text = read_until(&mut out_r, "20 80");
+    assert!(text.contains("20 80"), "{text:?}");
+    assert_eq!(running.wait().unwrap(), 0);
+
+    let (resize_r, mut resize_w) = std::io::pipe().unwrap();
+    let (mut out_r, out_w) = std::io::pipe().unwrap();
+    let running = handle
+        .exec_with(
+            &["sh", "-c", "sleep 1; stty size"],
+            &options,
+            std::process::Stdio::null(),
+            out_w.into(),
+            std::process::Stdio::null(),
+            Some(resize_r.into()),
+        )
+        .unwrap();
+    use std::io::Write;
+    let mut record = Vec::new();
+    record.extend_from_slice(&40u16.to_le_bytes());
+    record.extend_from_slice(&120u16.to_le_bytes());
+    resize_w.write_all(&record).unwrap();
+    let text = read_until(&mut out_r, "40 120");
+    assert!(text.contains("40 120"), "{text:?}");
+    assert_eq!(running.wait().unwrap(), 0);
+    handle.remove(true).unwrap();
+}

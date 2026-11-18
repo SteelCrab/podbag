@@ -618,3 +618,33 @@ fn check_image_needs_a_pulled_image() {
     assert_ne!(out.status.code(), Some(0));
     assert!(stderr(&out).contains("pull"), "{}", stderr(&out));
 }
+
+#[test]
+fn restart_keeps_the_writable_layer() {
+    let reg = FakeRegistry::start(false);
+    reg.push(
+        "w",
+        "v1",
+        &alpine_with(
+            vec![],
+            serde_json::json!({"Env": [PATH], "Cmd": ["sh", "-c", "echo x >> /state; wc -l < /state"]}),
+        ),
+    );
+    let sb = Sandbox::new();
+    ok(&openpod(
+        &sb,
+        &["run", "-d", "--name", "w", &name(&reg, "w")],
+    ));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let info: serde_json::Value =
+            serde_json::from_str(&ok(&openpod(&sb, &["inspect", "w"]))).unwrap();
+        if info["state"]["status"] == "exited" {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "{info}");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(ok(&openpod(&sb, &["start", "-a", "w"])), "2");
+    ok(&openpod(&sb, &["rm", "w"]));
+}

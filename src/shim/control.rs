@@ -16,6 +16,8 @@ pub enum Request {
     Kill { signal: i32 },
     /// Answer when the container ends.
     Wait,
+    /// Set the size of the container's terminal (no terminal: nothing to do).
+    Resize { rows: u16, cols: u16 },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -167,6 +169,14 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&Request::Wait).unwrap(),
             r#"{"op":"wait"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Request::Resize {
+                rows: 30,
+                cols: 100
+            })
+            .unwrap(),
+            r#"{"op":"resize","rows":30,"cols":100}"#
         );
         assert_eq!(
             serde_json::from_str::<Response>(r#"{"exit_code":3}"#).unwrap(),

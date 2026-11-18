@@ -637,7 +637,10 @@ fn serve(
                         }
                     }
                 }
-                Source::Control => accept_requests(listener, id, pid, exit, &mut waiters),
+                Source::Control => {
+                    let master = io.master.as_ref().map(|m| m.as_raw_fd());
+                    accept_requests(listener, id, pid, exit, master, &mut waiters)
+                }
                 Source::Output(i) => {
                     let o = &io.outputs[i];
                     // SAFETY: reading into a valid buffer from a descriptor we own.
@@ -682,6 +685,7 @@ fn accept_requests(
     id: &str,
     pid: u32,
     exit: Option<i32>,
+    master: Option<i32>,
     waiters: &mut Vec<UnixStream>,
 ) {
     while let Ok((stream, _)) = listener.accept() {
@@ -708,6 +712,19 @@ fn accept_requests(
             // Answered when the state says "exited", even if the exit is known already:
             // the caller may read the state and the log as soon as it hears.
             Some(Request::Wait) => waiters.push(stream),
+            Some(Request::Resize { rows, cols }) => {
+                let response = match (exit, master) {
+                    (Some(_), _) => Response::Failed {
+                        error: control::not_running(id),
+                    },
+                    (None, Some(m)) => {
+                        linux::pty::set_size(m, rows, cols);
+                        Response::Ok { ok: true }
+                    }
+                    (None, None) => Response::Ok { ok: true },
+                };
+                control::reply(&stream, &response);
+            }
             None => {}
         }
     }
@@ -744,7 +761,7 @@ mod tests {
         let mut client = UnixStream::connect(&path).unwrap();
         client.write_all(b"{\"op\":\"wait\"}\n").unwrap();
         let mut waiters = Vec::new();
-        accept_requests(&listener, "x", 1, Some(4), &mut waiters);
+        accept_requests(&listener, "x", 1, Some(4), None, &mut waiters);
         assert_eq!(waiters.len(), 1);
         client.set_nonblocking(true).unwrap();
         let mut buf = [0u8; 64];

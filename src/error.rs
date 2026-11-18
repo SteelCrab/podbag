@@ -17,6 +17,9 @@ pub enum ErrorKind {
     MissingRequirement,
     /// A container, image or path does not exist.
     NotFound,
+    /// The request clashes with the current state: a name in use, a container that is
+    /// (not) running, an image, volume or network in use.
+    Conflict,
     /// The command to run does not exist in the container.
     CommandNotFound,
     /// The command exists but cannot be executed.

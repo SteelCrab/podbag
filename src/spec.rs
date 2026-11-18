@@ -56,6 +56,9 @@ pub struct ContainerSpec {
     /// Run in the background (`-d`): the shim leaves the caller's session.
     #[serde(default)]
     pub detach: bool,
+    /// Labels (Docker's `--label`; Compose finds its containers by them).
+    #[serde(default)]
+    pub labels: std::collections::BTreeMap<String, String>,
     /// Resource limits (`--memory`, `--cpus`, `--pids-limit`).
     #[serde(default)]
     pub limits: crate::cgroup::Limits,
@@ -232,6 +235,7 @@ pub(crate) fn spec_fixture() -> ContainerSpec {
         tty: false,
         interactive: false,
         detach: false,
+        labels: Default::default(),
         limits: Default::default(),
         cgroup: Default::default(),
         security: Default::default(),
@@ -281,6 +285,20 @@ mod tests {
 
     fn spec() -> ContainerSpec {
         spec_fixture()
+    }
+
+    #[test]
+    fn labels_default_to_empty_and_round_trip() {
+        let mut s = spec();
+        assert!(s.labels.is_empty());
+        let mut json = serde_json::to_value(&s).unwrap();
+        json.as_object_mut().unwrap().remove("labels");
+        let back: ContainerSpec = serde_json::from_value(json).unwrap();
+        assert!(back.labels.is_empty(), "an old config has no labels");
+        s.labels.insert("com.example.role".into(), "web".into());
+        let back: ContainerSpec =
+            serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.labels["com.example.role"], "web");
     }
 
     #[test]

@@ -16,6 +16,8 @@ use std::process::{Child, Command, Stdio};
 
 /// The file descriptor on which the helper reports its status.
 pub const STATUS_FD: i32 = 3;
+/// Where [`spawn_with_fd`] puts its extra descriptor.
+pub const EXTRA_FD: i32 = 4;
 
 const HELPER_NAME: &str = "openpod";
 
@@ -148,6 +150,50 @@ pub fn spawn_with_args(
     stderr: Stdio,
     scope: Option<&Scope>,
 ) -> Result<HelperChild> {
+    spawn_with_fd(args, stdin, stdout, stderr, scope, None)
+}
+
+/// Helpers get a process group of their own (set by the API service).
+static OWN_GROUP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The soft descriptor limit this process started with, to give helpers (and through
+/// them, containers) after [`raise_descriptor_limit`]; u64::MAX: unchanged.
+static FIRST_NOFILE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+
+/// From now on, helpers start in a process group of their own: the API service's
+/// Ctrl+C or terminal hangup must not reach the containers it started.
+pub fn helpers_in_own_group() {
+    OWN_GROUP.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Raise this process's soft descriptor limit to the hard one (the API service holds
+/// several descriptors per attached client). Helpers still get the old soft limit, so
+/// containers see the same limits as when the CLI starts them.
+pub fn raise_descriptor_limit() {
+    let mut lim = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: getrlimit and setrlimit with a valid rlimit.
+    unsafe {
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) == 0 && lim.rlim_cur < lim.rlim_max {
+            let first = lim.rlim_cur;
+            lim.rlim_cur = lim.rlim_max;
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &lim) == 0 {
+                FIRST_NOFILE.store(first as u64, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+/// [`spawn_with_args`], with `extra` (if any) on fd 4 of the helper.
+pub fn spawn_with_fd(
+    args: &[&str],
+    stdin: Stdio,
+    stdout: Stdio,
+    stderr: Stdio,
+    scope: Option<&Scope>,
+    extra: Option<std::os::fd::OwnedFd>,
+) -> Result<HelperChild> {
     let helper = locate_helper()?;
     let fail = |e: std::io::Error| {
         Error::io(
@@ -159,6 +205,20 @@ pub fn spawn_with_args(
 
     let (read_end, write_end) = cloexec_pipe().map_err(fail)?;
     let write_fd = write_end.as_raw_fd();
+    // Above fd 4, so that placing the status pipe on fd 3 cannot overwrite it.
+    let extra = match extra {
+        Some(fd) => {
+            // SAFETY: F_DUPFD_CLOEXEC on a descriptor we own; the result is new.
+            let high = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 10) };
+            if high < 0 {
+                return Err(fail(std::io::Error::last_os_error()));
+            }
+            // SAFETY: a fresh descriptor that nothing else owns.
+            Some(unsafe { std::os::fd::OwnedFd::from_raw_fd(high) })
+        }
+        None => None,
+    };
+    let extra_fd = extra.as_ref().map(|f| f.as_raw_fd());
 
     let mut cmd = match scope {
         Some(s) => {
@@ -174,10 +234,21 @@ pub fn spawn_with_args(
         }
     };
     cmd.stdin(stdin).stdout(stdout).stderr(stderr);
-    // SAFETY: the closure only calls sigemptyset, sigprocmask, dup2 and fcntl,
-    // which are async-signal-safe.
+    if OWN_GROUP.load(std::sync::atomic::Ordering::Relaxed) {
+        cmd.process_group(0);
+    }
+    let first_nofile = FIRST_NOFILE.load(std::sync::atomic::Ordering::Relaxed);
+    // SAFETY: the closure only calls sigemptyset, sigprocmask, getrlimit, setrlimit, dup2
+    // and fcntl, which are async-signal-safe.
     unsafe {
         cmd.pre_exec(move || {
+            if first_nofile != u64::MAX {
+                let mut lim: libc::rlimit = std::mem::zeroed();
+                if libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) == 0 {
+                    lim.rlim_cur = first_nofile as libc::rlim_t;
+                    libc::setrlimit(libc::RLIMIT_NOFILE, &lim);
+                }
+            }
             // The helper must not inherit signals the caller blocked.
             let mut set: libc::sigset_t = std::mem::zeroed();
             libc::sigemptyset(&mut set);
@@ -190,6 +261,11 @@ pub fn spawn_with_args(
             } else if libc::dup2(write_fd, STATUS_FD) == -1 {
                 return Err(std::io::Error::last_os_error());
             }
+            if let Some(fd) = extra_fd {
+                if libc::dup2(fd, EXTRA_FD) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
             Ok(())
         });
     }
@@ -201,6 +277,7 @@ pub fn spawn_with_args(
         },
     };
     drop(write_end); // the helper holds the only write end now
+    drop(extra);
 
     Ok(HelperChild {
         child,
@@ -209,15 +286,36 @@ pub fn spawn_with_args(
     })
 }
 
-/// Start `<helper> __shim <id>`, in `scope` when given.
+/// How a shim serves its caller.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShimMode {
+    /// It leaves the caller's session; output only to the log.
+    Detached,
+    /// Output also to its fds 1 and 2, and its fd 0 to the container (`-i`).
+    Attached,
+}
+
+/// Start `<helper> __shim <id> --mode …`, in `scope` when given. With `keep_on_failure`
+/// a container whose start fails stays (`start` of a created or exited container);
+/// otherwise the shim removes it (a failed `run` leaves nothing).
 pub fn spawn_shim(
     id: &str,
     stdin: Stdio,
     stdout: Stdio,
     stderr: Stdio,
     scope: Option<&Scope>,
+    mode: ShimMode,
+    keep_on_failure: bool,
 ) -> Result<HelperChild> {
-    spawn_with_args(&["__shim", id], stdin, stdout, stderr, scope)
+    let mode = match mode {
+        ShimMode::Detached => "detached",
+        ShimMode::Attached => "attached",
+    };
+    let mut args = vec!["__shim", id, "--mode", mode];
+    if keep_on_failure {
+        args.push("--keep-on-failure");
+    }
+    spawn_with_args(&args, stdin, stdout, stderr, scope)
 }
 
 fn scope_error(systemd_run: &Path, why: String) -> Error {
@@ -309,14 +407,7 @@ pub fn run_store_op(
     op: &crate::store::ops::StoreOp,
     show_progress: bool,
 ) -> Result<serde_json::Value> {
-    let json = serde_json::to_string(op).map_err(|e| {
-        Error::new(
-            ErrorKind::Internal,
-            "cannot encode a store job",
-            e.to_string(),
-            "report this bug",
-        )
-    })?;
+    let json = encode_store_op(op)?;
     let stderr = if show_progress {
         Stdio::inherit()
     } else {
@@ -330,6 +421,43 @@ pub fn run_store_op(
         None,
     )?
     .wait_done()
+}
+
+/// [`run_store_op`], giving each line the helper writes to stderr to `on_line`.
+pub fn run_store_op_lines(
+    op: &crate::store::ops::StoreOp,
+    on_line: &mut dyn FnMut(&str),
+) -> Result<serde_json::Value> {
+    let json = encode_store_op(op)?;
+    let mut helper = spawn_with_args(
+        &["__store", &json],
+        Stdio::null(),
+        Stdio::null(),
+        Stdio::piped(),
+        None,
+    )?;
+    if let Some(stderr) = helper.child.stderr.take() {
+        // Read to the end, whatever the bytes: a helper blocked on a full pipe would
+        // never report its result.
+        let mut reader = std::io::BufReader::new(stderr);
+        let mut line = Vec::new();
+        while matches!(reader.read_until(b'\n', &mut line), Ok(n) if n > 0) {
+            on_line(String::from_utf8_lossy(&line).trim_end());
+            line.clear();
+        }
+    }
+    helper.wait_done()
+}
+
+fn encode_store_op(op: &crate::store::ops::StoreOp) -> Result<String> {
+    serde_json::to_string(op).map_err(|e| {
+        Error::new(
+            ErrorKind::Internal,
+            "cannot encode a store job",
+            e.to_string(),
+            "report this bug",
+        )
+    })
 }
 
 /// The status descriptor a helper received from its caller.

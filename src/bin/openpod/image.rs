@@ -95,6 +95,13 @@ pub fn system(cmd: SystemCmd) -> i32 {
             }
             Err(e) => report(&e),
         },
+        // Handled in main on Unix; there is no service elsewhere.
+        SystemCmd::Service { .. } => report(&Error::new(
+            ErrorKind::Unsupported,
+            "cannot serve the Docker API on this operating system",
+            "the service needs Unix sockets and Linux containers",
+            "run openpod on Linux",
+        )),
         SystemCmd::Prune { force: false } => report(&Error::new(
             ErrorKind::InvalidInput,
             "refusing to prune without confirmation",

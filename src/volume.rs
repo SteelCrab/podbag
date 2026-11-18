@@ -45,6 +45,12 @@ impl Volume {
         list_in(&crate::paths::dirs()?)
     }
 
+    /// Delete the volumes no container mounts: anonymous ones, or all with `all`. Returns
+    /// their names and the bytes their files took.
+    pub fn prune(all: bool) -> Result<(Vec<String>, u64)> {
+        prune_in(&crate::paths::dirs()?, all)
+    }
+
     /// Delete a volume and its files. A volume that any container (running or not) mounts
     /// is refused, even with `force`; `force` only makes a missing volume no error.
     pub fn remove(name: &str, force: bool) -> Result<()> {
@@ -236,13 +242,50 @@ pub(crate) fn remove_in(dirs: &Dirs, name: &str, force: bool) -> Result<()> {
     let users = users_of(dirs, name)?;
     if !users.is_empty() {
         return Err(Error::new(
-            ErrorKind::InvalidInput,
+            ErrorKind::Conflict,
             format!("cannot remove volume {name}"),
             format!("it is used by container {}", users.join(", ")),
             "remove those containers first (`openpod rm`)",
         ));
     }
     remove_files(dirs, name)
+}
+
+pub(crate) fn prune_in(dirs: &Dirs, all: bool) -> Result<(Vec<String>, u64)> {
+    let mut gone = Vec::new();
+    let mut bytes = 0;
+    for v in list_in(dirs)? {
+        if !all && !v.anonymous {
+            continue;
+        }
+        let size = tree_size(&dirs.volume_dir(&v.name));
+        // Checks the users again under the volume lock: one mounted meanwhile stays.
+        match remove_in(dirs, &v.name, false) {
+            Ok(()) => {
+                gone.push(v.name);
+                bytes += size;
+            }
+            Err(e) if matches!(e.kind, ErrorKind::Conflict | ErrorKind::NotFound) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok((gone, bytes))
+}
+
+/// Bytes of the files under `path`, as far as they can be read.
+fn tree_size(path: &std::path::Path) -> u64 {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return 0;
+    };
+    if !meta.is_dir() {
+        return meta.len();
+    }
+    std::fs::read_dir(path)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| tree_size(&e.path()))
+        .sum()
 }
 
 /// Remove the anonymous volumes of container `own_id` that no other container names
@@ -637,6 +680,44 @@ mod tests {
         assert_eq!(mode(&dirs.data), 0o700);
     }
 
+    fn user_of(dirs: &Dirs, volume: &str) {
+        let mut spec = crate::spec::spec_fixture();
+        spec.name = "web".into();
+        spec.mounts = vec![Mount {
+            source: MountSource::Volume {
+                name: volume.into(),
+                anonymous: false,
+                path: String::new(),
+            },
+            target: "/data".into(),
+            read_only: false,
+            copy_up: false,
+        }];
+        crate::state::create(dirs, &spec).unwrap();
+    }
+
+    #[test]
+    fn prune_takes_unused_anonymous_volumes_or_all_unused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = dirs_in(tmp.path());
+        create_in(&dirs, Some("named"), false).unwrap();
+        let (anon, _) = create_in(&dirs, None, true).unwrap();
+        create_in(&dirs, Some("busy"), false).unwrap();
+        std::fs::write(dirs.volume_dir(&anon.name).join("data/f"), b"12345").unwrap();
+        user_of(&dirs, "busy");
+        let (gone, bytes) = prune_in(&dirs, false).unwrap();
+        assert_eq!(gone, [anon.name.clone()]);
+        assert!(bytes >= 5, "{bytes}");
+        let (gone, _) = prune_in(&dirs, true).unwrap();
+        assert_eq!(gone, ["named"]);
+        let left: Vec<String> = list_in(&dirs)
+            .unwrap()
+            .into_iter()
+            .map(|v| v.name)
+            .collect();
+        assert_eq!(left, ["busy"]);
+    }
+
     #[test]
     fn volume_in_use_is_not_removed() {
         let tmp = tempfile::tempdir().unwrap();
@@ -657,7 +738,7 @@ mod tests {
         crate::state::create(&dirs, &spec).unwrap();
         for force in [false, true] {
             let e = remove_in(&dirs, "db", force).unwrap_err();
-            assert_eq!(e.kind, ErrorKind::InvalidInput);
+            assert_eq!(e.kind, ErrorKind::Conflict);
             assert!(e.why.contains("web"), "{}", e.why);
         }
         assert_eq!(users_of(&dirs, "db").unwrap(), ["web"]);

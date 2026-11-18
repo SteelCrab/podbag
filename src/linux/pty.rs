@@ -114,9 +114,46 @@ pub fn copy_size(from: i32, to: i32) {
     }
 }
 
+/// Set the window size of terminal `fd`.
+pub fn set_size(fd: i32, rows: u16, cols: u16) {
+    let size = libc::winsize {
+        ws_row: rows,
+        ws_col: cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: a winsize value; ioctl fails harmlessly on a non-terminal.
+    unsafe { libc::ioctl(fd, libc::TIOCSWINSZ, &size) };
+}
+
+/// Read resize records (rows, cols: two little-endian u16) from `from` and apply the
+/// last whole one to terminal `to`. `pending` keeps a partial record. False at the end.
+pub fn apply_resizes(from: i32, to: i32, pending: &mut Vec<u8>) -> bool {
+    let mut buf = [0u8; 64];
+    // SAFETY: reading into a valid buffer.
+    let n = unsafe { libc::read(from, buf.as_mut_ptr().cast(), buf.len()) };
+    if n <= 0 {
+        return false;
+    }
+    pending.extend_from_slice(&buf[..n as usize]);
+    let whole = pending.len() / 4 * 4;
+    if whole >= 4 {
+        let r = &pending[whole - 4..whole];
+        set_size(
+            to,
+            u16::from_le_bytes([r[0], r[1]]),
+            u16::from_le_bytes([r[2], r[3]]),
+        );
+        pending.drain(..whole);
+    }
+    true
+}
+
 /// Copy terminal output to stdout (and stdin to the terminal when `stdin`) until the
-/// terminal closes. SIGWINCH resizes it. Used by `exec -t`.
-pub fn relay(master: &OwnedFd, stdin: bool, _child: u32) {
+/// terminal closes. SIGWINCH resizes it from stdin's terminal; `resize` (a pipe of resize
+/// records, see [`apply_resizes`]) resizes it when the caller is not a terminal. Used by
+/// `exec -t`.
+pub fn relay(master: &OwnedFd, stdin: bool, _child: u32, resize: Option<i32>) {
     use std::os::fd::AsRawFd;
     let m = master.as_raw_fd();
     let Ok((sig_r, sig_w)) = rustix::pipe::pipe_with(
@@ -126,6 +163,8 @@ pub fn relay(master: &OwnedFd, stdin: bool, _child: u32) {
     };
     crate::signals::notify_pipe(sig_w.as_raw_fd(), &[libc::SIGWINCH]);
     let mut relay_stdin = stdin;
+    let mut resize = resize;
+    let mut pending = Vec::new();
     let mut buf = vec![0u8; 64 * 1024];
     loop {
         let mut fds = vec![
@@ -140,13 +179,22 @@ pub fn relay(master: &OwnedFd, stdin: bool, _child: u32) {
                 revents: 0,
             },
         ];
-        if relay_stdin {
+        let resize_at = resize.map(|fd| {
+            fds.push(libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            });
+            fds.len() - 1
+        });
+        let stdin_at = relay_stdin.then(|| {
             fds.push(libc::pollfd {
                 fd: 0,
                 events: libc::POLLIN,
                 revents: 0,
             });
-        }
+            fds.len() - 1
+        });
         // SAFETY: a valid pollfd array.
         if unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) } < 0 {
             continue;
@@ -166,7 +214,12 @@ pub fn relay(master: &OwnedFd, stdin: bool, _child: u32) {
             // SAFETY: writing bytes we just read to our stdout.
             unsafe { libc::write(1, buf.as_ptr().cast(), n as usize) };
         }
-        if relay_stdin && fds.get(2).is_some_and(|f| f.revents != 0) {
+        if let (Some(i), Some(fd)) = (resize_at, resize) {
+            if fds[i].revents != 0 && !apply_resizes(fd, m, &mut pending) {
+                resize = None;
+            }
+        }
+        if stdin_at.is_some_and(|i| fds[i].revents != 0) {
             // SAFETY: reading into a valid buffer from our stdin.
             let n = unsafe { libc::read(0, buf.as_mut_ptr().cast(), buf.len()) };
             if n <= 0 {

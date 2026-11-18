@@ -22,7 +22,16 @@ fn setup() {
 fn shim_reports_a_missing_container() {
     setup();
     let id = "0123abcd".repeat(8);
-    let mut h = helper::spawn_shim(&id, Stdio::null(), Stdio::null(), Stdio::null(), None).unwrap();
+    let mut h = helper::spawn_shim(
+        &id,
+        Stdio::null(),
+        Stdio::null(),
+        Stdio::null(),
+        None,
+        helper::ShimMode::Attached,
+        false,
+    )
+    .unwrap();
     let e = h.wait_started().unwrap_err();
     assert_eq!(e.kind, ErrorKind::NotFound);
     assert_eq!(e.what, format!("cannot load container {id}"));
@@ -35,8 +44,16 @@ fn shim_rejects_an_invalid_id_without_deleting_anything() {
     let keep = data.join("keep");
     std::fs::create_dir_all(&keep).unwrap();
     // "containers/.." is the data directory itself.
-    let mut h =
-        helper::spawn_shim("..", Stdio::null(), Stdio::null(), Stdio::null(), None).unwrap();
+    let mut h = helper::spawn_shim(
+        "..",
+        Stdio::null(),
+        Stdio::null(),
+        Stdio::null(),
+        None,
+        helper::ShimMode::Attached,
+        false,
+    )
+    .unwrap();
     assert_eq!(h.wait_started().unwrap_err().kind, ErrorKind::InvalidInput);
     assert!(keep.exists(), "the shim deleted the data directory");
 }
@@ -48,6 +65,7 @@ fn shim_reports_unsupported_and_removes_the_container_directory() {
     setup();
     let dirs = paths::dirs().unwrap();
     let spec = ContainerSpec {
+        labels: Default::default(),
         id: "f".repeat(64),
         rootfs: openpod::spec::Rootfs::Dir { path: "/".into() },
         command: vec!["true".into()],
@@ -70,8 +88,16 @@ fn shim_reports_unsupported_and_removes_the_container_directory() {
         publish: Vec::new(),
     };
     state::write_config(&dirs, &spec).unwrap();
-    let mut h =
-        helper::spawn_shim(&spec.id, Stdio::null(), Stdio::null(), Stdio::null(), None).unwrap();
+    let mut h = helper::spawn_shim(
+        &spec.id,
+        Stdio::null(),
+        Stdio::null(),
+        Stdio::null(),
+        None,
+        helper::ShimMode::Attached,
+        false,
+    )
+    .unwrap();
     let e = h.wait_started().unwrap_err();
     assert_eq!(e.kind, ErrorKind::Unsupported);
     assert_eq!(e.what, "cannot run containers on this operating system");

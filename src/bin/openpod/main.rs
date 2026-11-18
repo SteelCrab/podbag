@@ -6,6 +6,8 @@ mod image;
 mod network;
 #[cfg(unix)]
 mod run;
+#[cfg(unix)]
+mod service;
 mod volume;
 
 use args::{Cli, Cmd};
@@ -20,11 +22,26 @@ fn main() {
 fn dispatch(cmd: Cmd) -> i32 {
     match cmd {
         Cmd::Run(a) => run::run(a),
+        Cmd::Create(a) => run::create(a),
+        Cmd::Start {
+            attach,
+            interactive,
+            containers,
+        } => container::start(&containers, attach, interactive),
+        Cmd::Restart { time, containers } => container::restart(&containers, time),
         Cmd::Pull { image } => image::pull(&image),
         Cmd::Images => image::images(),
         Cmd::CheckImage { image } => image::check_image(&image),
         Cmd::Check { apparmor_profile } => check::run(apparmor_profile),
         Cmd::Rmi { images } => image::rmi(&images),
+        Cmd::System {
+            cmd:
+                args::SystemCmd::Service {
+                    socket,
+                    timeout,
+                    print_units,
+                },
+        } => service::service(socket, timeout, print_units),
         Cmd::System { cmd } => image::system(cmd),
         Cmd::Ps { all, quiet } => container::ps(all, quiet),
         Cmd::Inspect { container: c } => container::inspect(&c),
@@ -43,7 +60,18 @@ fn dispatch(cmd: Cmd) -> i32 {
         Cmd::Kill { signal, containers } => container::kill(&containers, &signal),
         Cmd::Exec(a) => container::exec(a),
         Cmd::ExecHelper { id, request } => exec_helper(&id, &request),
-        Cmd::Shim { id } => openpod::shim::shim_main(&id),
+        Cmd::Shim {
+            id,
+            mode,
+            keep_on_failure,
+        } => {
+            let mode = match mode.as_deref() {
+                Some("attached") => Some(openpod::helper::ShimMode::Attached),
+                Some("detached") => Some(openpod::helper::ShimMode::Detached),
+                _ => None,
+            };
+            openpod::shim::shim_main(&id, mode, keep_on_failure)
+        }
         Cmd::Store { op } => openpod::store::ops::helper_main(&op),
         Cmd::Session => session_helper(),
     }

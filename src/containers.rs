@@ -18,6 +18,10 @@ pub struct ExecOptions {
     pub user: Option<String>,
     pub tty: bool,
     pub interactive: bool,
+    /// The terminal size (rows, columns) with `tty`; None: copied from the caller's
+    /// terminal, if it has one.
+    #[serde(default)]
+    pub size: Option<(u16, u16)>,
 }
 
 /// What `openpod inspect` and `openpod ps` show about a container.
@@ -141,6 +145,19 @@ impl ContainerHandle {
         self.wait_in(&paths::dirs()?)
     }
 
+    /// Like [`ContainerHandle::wait`] for at most `limit`: None if it still runs then.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    pub(crate) fn wait_up_to(&self, limit: Duration) -> Result<Option<i32>> {
+        let dirs = paths::dirs()?;
+        match control::send(&dirs, &self.id, &Request::Wait, Some(limit)) {
+            Ok(Response::Exited { exit_code }) => Ok(Some(exit_code)),
+            Ok(Response::Failed { error }) => Err(error),
+            // The request timed out: it runs on.
+            Err(e) if e.kind == ErrorKind::Runtime => Ok(None),
+            Ok(Response::Ok { .. }) | Err(_) => self.recorded_exit(&dirs).map(Some),
+        }
+    }
+
     fn wait_in(&self, dirs: &Dirs) -> Result<i32> {
         match control::send(dirs, &self.id, &Request::Wait, None) {
             Ok(Response::Exited { exit_code }) => Ok(exit_code),
@@ -186,6 +203,7 @@ impl ContainerHandle {
                 Stdio::null(),
                 Stdio::piped(),
                 Stdio::piped(),
+                None,
             )?;
             crate::container::collect_output(&mut helper)
         }
@@ -213,12 +231,140 @@ impl ContainerHandle {
                 Stdio::inherit(),
                 Stdio::inherit(),
                 Stdio::inherit(),
+                None,
             )?;
             Ok(crate::Running::for_exec(helper))
         }
         #[cfg(not(target_os = "linux"))]
         {
             let _ = (command, options);
+            Err(Error::unsupported_os())
+        }
+    }
+
+    /// Start a created or exited container in the background (`docker start`). An exited
+    /// one keeps its writable layer, log and volumes. A failed start keeps the container.
+    pub fn start(&self) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::process::Stdio;
+            let dirs = paths::dirs()?;
+            self.refuse_running()?;
+            let mut helper = crate::container::start_shim(
+                &dirs,
+                &self.id,
+                Stdio::null(),
+                Stdio::null(),
+                Stdio::null(),
+                crate::helper::ShimMode::Detached,
+            )?;
+            // The detached shim forked and its first process has exited; reap it.
+            let _ = helper.child.wait();
+            Ok(())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err(Error::unsupported_os())
+        }
+    }
+
+    /// Start the container attached to these descriptors (`start -a`, the API's attach):
+    /// output to `stdout` and `stderr` (a terminal's to `stdout`), `stdin` to the container
+    /// when it was created interactive. A failed start keeps the container.
+    #[doc(hidden)]
+    pub fn start_attached(
+        &self,
+        stdin: std::process::Stdio,
+        stdout: std::process::Stdio,
+        stderr: std::process::Stdio,
+    ) -> Result<crate::Running> {
+        #[cfg(target_os = "linux")]
+        {
+            let dirs = paths::dirs()?;
+            self.refuse_running()?;
+            let helper = crate::container::start_shim(
+                &dirs,
+                &self.id,
+                stdin,
+                stdout,
+                stderr,
+                crate::helper::ShimMode::Attached,
+            )?;
+            Ok(crate::Running::for_exec(helper))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (stdin, stdout, stderr);
+            Err(Error::unsupported_os())
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn refuse_running(&self) -> Result<()> {
+        let info = self.info()?;
+        if info.state.status == Status::Running {
+            return Err(Error::new(
+                ErrorKind::Conflict,
+                format!("cannot start container {}", info.name),
+                "it is already running",
+                "stop it first, or use `openpod restart`",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Stop the container if it runs (like [`ContainerHandle::stop`]), then start it.
+    pub fn restart(&self, timeout: Duration) -> Result<()> {
+        if self.info()?.state.status == Status::Running {
+            self.stop(timeout)?;
+        }
+        self.start()
+    }
+
+    /// Set the size of the container's terminal (`docker resize`). Nothing to do without
+    /// a terminal.
+    pub fn resize(&self, rows: u16, cols: u16) -> Result<()> {
+        let dirs = paths::dirs()?;
+        let response = control::send(
+            &dirs,
+            &self.id,
+            &Request::Resize { rows, cols },
+            Some(Duration::from_secs(5)),
+        )
+        .map_err(|e| Error {
+            kind: ErrorKind::Conflict,
+            ..e
+        })?;
+        match response {
+            Response::Failed { error } => Err(Error {
+                kind: ErrorKind::Conflict,
+                ..error
+            }),
+            _ => Ok(()),
+        }
+    }
+
+    /// Run a command in the running container with these descriptors (the API's exec).
+    /// `resize`: the reading end of a pipe of resize records (rows, cols: two
+    /// little-endian u16) for the command's terminal.
+    #[doc(hidden)]
+    pub fn exec_with<S: AsRef<str>>(
+        &self,
+        command: &[S],
+        options: &ExecOptions,
+        stdin: std::process::Stdio,
+        stdout: std::process::Stdio,
+        stderr: std::process::Stdio,
+        resize: Option<std::os::fd::OwnedFd>,
+    ) -> Result<crate::Running> {
+        #[cfg(target_os = "linux")]
+        {
+            let helper = self.spawn_exec(command, options, stdin, stdout, stderr, resize)?;
+            Ok(crate::Running::for_exec(helper))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (command, options, stdin, stdout, stderr, resize);
             Err(Error::unsupported_os())
         }
     }
@@ -231,11 +377,12 @@ impl ContainerHandle {
         stdin: std::process::Stdio,
         stdout: std::process::Stdio,
         stderr: std::process::Stdio,
+        resize: Option<std::os::fd::OwnedFd>,
     ) -> Result<crate::helper::HelperChild> {
         let info = self.info()?;
         if info.state.status != Status::Running {
             return Err(Error::new(
-                ErrorKind::InvalidInput,
+                ErrorKind::Conflict,
                 format!("container {} is not running", info.name),
                 "exec needs a running container",
                 "start a new container, or run `openpod ps -a` to see its state",
@@ -244,6 +391,7 @@ impl ContainerHandle {
         let req = crate::linux::exec::ExecRequest {
             command: command.iter().map(|c| c.as_ref().to_string()).collect(),
             options: options.clone(),
+            resize: resize.is_some(),
         };
         let json = serde_json::to_string(&req).map_err(|e| {
             Error::new(
@@ -274,12 +422,13 @@ impl ContainerHandle {
             }),
             _ => None,
         };
-        let mut helper = crate::helper::spawn_with_args(
+        let mut helper = crate::helper::spawn_with_fd(
             &["__exec", &self.id, &json],
             stdin,
             stdout,
             stderr,
             scope.as_ref(),
+            resize,
         )?;
         helper.wait_started()?;
         Ok(helper)
@@ -292,7 +441,7 @@ impl ContainerHandle {
         if info.state.status == Status::Running {
             if !force {
                 return Err(Error::new(
-                    ErrorKind::InvalidInput,
+                    ErrorKind::Conflict,
                     format!("cannot remove container {}", info.name),
                     "it is running",
                     "stop it first, or use `openpod rm -f`",
@@ -388,6 +537,7 @@ mod tests {
                         error: control::not_running(&id),
                     },
                     Some(Request::Wait) => Response::Exited { exit_code: code },
+                    Some(Request::Resize { .. }) => Response::Ok { ok: true },
                     None => return,
                 };
                 control::reply(&stream, &response);

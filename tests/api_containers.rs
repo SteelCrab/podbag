@@ -1,0 +1,651 @@
+#![cfg(target_os = "linux")]
+//! Containers through the Docker Engine API: the docker CLI against `openpod system service`.
+
+mod common;
+use common::api::*;
+use common::registry::{FakeRegistry, TestImage, alpine_layer};
+use common::*;
+use std::io::{Read, Write};
+use std::process::{Command, Output, Stdio};
+use std::time::Duration;
+
+const PATH: &str = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+struct Setup {
+    _reg: FakeRegistry,
+    sb: Sandbox,
+    service: Service,
+    image: String,
+}
+
+/// A service and an alpine image in the fake registry, not pulled yet.
+fn unpulled() -> Setup {
+    let reg = FakeRegistry::start(false);
+    reg.push(
+        "img",
+        "v1",
+        &TestImage {
+            layers: vec![alpine_layer()],
+            config: serde_json::json!({"Env": [PATH], "Cmd": ["sh"]}),
+        },
+    );
+    let image = format!("{}/img:v1", reg.host);
+    let sb = Sandbox::new();
+    let service = Service::start(&sb, &["--timeout", "0"]);
+    Setup {
+        _reg: reg,
+        sb,
+        service,
+        image,
+    }
+}
+
+fn setup() -> Setup {
+    let s = unpulled();
+    s.ok(&["pull", &s.image]);
+    s
+}
+
+impl Setup {
+    fn cmd(&self, args: &[&str]) -> Command {
+        docker(&self.sb, &self.service, args)
+    }
+
+    fn docker(&self, args: &[&str]) -> Output {
+        docker_out(&self.sb, &self.service, args)
+    }
+
+    fn ok(&self, args: &[&str]) -> String {
+        let out = self.docker(args);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "docker {args:?}: {}",
+            stderr(&out)
+        );
+        stdout(&out)
+    }
+
+    /// The docker CLI killed with SIGKILL after `secs`: it cannot close anything itself.
+    fn killed_after(&self, secs: &str, args: &[&str]) -> Output {
+        docker_killed_after(&self.sb, &self.service, secs, args)
+    }
+}
+
+#[test]
+fn docker_run_rm_prints_output_and_exit_code() {
+    let s = unpulled();
+    let out = s.docker(&[
+        "run",
+        "--rm",
+        &s.image,
+        "sh",
+        "-c",
+        "echo out; echo err >&2; exit 3",
+    ]);
+    assert_eq!(out.status.code(), Some(3), "stderr: {}", stderr(&out));
+    assert_eq!(stdout(&out), "out");
+    let err = stderr(&out);
+    assert!(
+        err.contains("Unable to find image"),
+        "pulled on demand: {err}"
+    );
+    assert!(err.lines().any(|l| l == "err"), "{err}");
+    assert!(
+        wait_for(Duration::from_secs(5), || s.ok(&["ps", "-aq"]).is_empty()),
+        "--rm left the container"
+    );
+}
+
+#[test]
+fn docker_run_d_ps_logs_stop_rm() {
+    let s = setup();
+    let id = s.ok(&[
+        "run",
+        "-d",
+        "--name",
+        "web",
+        &s.image,
+        "sh",
+        "-c",
+        "echo started; trap 'exit 0' TERM; while true; do sleep 0.1; done",
+    ]);
+    assert_eq!(id.len(), 64, "{id}");
+    let ps = s.ok(&["ps", "--format", "{{.Names}} {{.Status}}"]);
+    assert!(ps.lines().any(|l| l.starts_with("web Up")), "{ps}");
+    assert!(wait_for(Duration::from_secs(5), || s
+        .ok(&["logs", "web"])
+        .contains("started")));
+    s.ok(&["stop", "-t", "1", "web"]);
+    let ps = s.ok(&["ps", "-a", "--format", "{{.Names}} {{.Status}}"]);
+    assert!(ps.lines().any(|l| l.starts_with("web Exited (0)")), "{ps}");
+    assert_eq!(s.ok(&["ps", "-q"]), "", "not running any more");
+    s.ok(&["rm", "web"]);
+    assert_eq!(s.ok(&["ps", "-aq"]), "");
+}
+
+#[test]
+fn docker_run_interactive_reads_stdin() {
+    let s = setup();
+    let mut child = s
+        .cmd(&["run", "-i", "--rm", &s.image, "cat"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"hello\n").unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert_eq!(stdout(&out), "hello");
+}
+
+#[test]
+fn docker_run_tty_through_script() {
+    let s = setup();
+    let config = s.sb.tmp.path().join("docker-config");
+    std::fs::create_dir_all(&config).unwrap();
+    let docker = if root_mode() {
+        format!("sudo -n env DOCKER_CONFIG={} docker", config.display())
+    } else {
+        format!("env DOCKER_CONFIG={} docker", config.display())
+    };
+    let line = format!(
+        "{docker} -H unix://{} run -it --rm {} sh -c 'stty size; echo tty-ok'",
+        s.service.socket.display(),
+        s.image
+    );
+    let mut child = Command::new("script")
+        .args(["-qec", &line, "/dev/null"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Held open until the end: script passes an end of input on as Ctrl+D.
+    let stdin = child.stdin.take();
+    let mut text = String::new();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut text)
+        .unwrap();
+    let status = child.wait().unwrap();
+    drop(stdin);
+    assert!(text.contains("tty-ok"), "{text}");
+    assert_eq!(status.code(), Some(0), "{text}");
+}
+
+#[test]
+fn docker_create_start_attach_wait() {
+    let s = setup();
+    s.ok(&[
+        "create",
+        "--name",
+        "c1",
+        &s.image,
+        "sh",
+        "-c",
+        "echo hi-from-c1; exit 5",
+    ]);
+    let ps = s.ok(&["ps", "-a", "--format", "{{.Names}} {{.Status}}"]);
+    assert!(ps.lines().any(|l| l == "c1 Created"), "{ps}");
+    let out = s.docker(&["start", "-a", "c1"]);
+    assert_eq!(stdout(&out), "hi-from-c1", "stderr: {}", stderr(&out));
+    assert_eq!(out.status.code(), Some(5));
+    assert_eq!(s.ok(&["wait", "c1"]), "5");
+    // A second start -a runs it again with the same writable layer.
+    let out = s.docker(&["start", "-a", "c1"]);
+    assert_eq!(stdout(&out), "hi-from-c1");
+    s.ok(&["rm", "c1"]);
+}
+
+#[test]
+fn docker_logs_follow_and_tail() {
+    let s = setup();
+    s.ok(&[
+        "run",
+        "-d",
+        "--name",
+        "lg",
+        &s.image,
+        "sh",
+        "-c",
+        "echo one; echo two >&2; sleep 2; echo three",
+    ]);
+    assert!(wait_for(Duration::from_secs(5), || {
+        let out = s.docker(&["logs", "lg"]);
+        stderr(&out).contains("two")
+    }));
+    let out = s.docker(&["logs", "--tail", "1", "lg"]);
+    assert_eq!(stdout(&out), "", "the last line went to stderr");
+    assert_eq!(stderr(&out).trim(), "two");
+    // Ends when the container ends.
+    let out = s.docker(&["logs", "-f", "lg"]);
+    assert_eq!(stdout(&out), "one\nthree");
+    assert_eq!(stderr(&out).trim(), "two");
+    let stamped = s.ok(&["logs", "-t", "lg"]);
+    assert!(
+        stamped.lines().all(|l| l.contains("T") && l.contains("Z ")),
+        "{stamped}"
+    );
+    s.ok(&["rm", "lg"]);
+}
+
+#[test]
+fn docker_ps_filters_by_label() {
+    let s = setup();
+    for (name, app) in [("a1", "app=x"), ("b1", "app=y")] {
+        s.ok(&[
+            "run", "-d", "--name", name, "--label", app, &s.image, "sleep", "30",
+        ]);
+    }
+    let names = |filter: &str| {
+        let mut v: Vec<String> = s
+            .ok(&["ps", "--filter", filter, "--format", "{{.Names}}"])
+            .lines()
+            .map(String::from)
+            .collect();
+        v.sort();
+        v.join(" ")
+    };
+    assert_eq!(names("label=app=x"), "a1");
+    assert_eq!(names("label=app"), "a1 b1");
+    assert_eq!(names("name=b1"), "b1");
+    let labels = s.ok(&["inspect", "--format", "{{json .Config.Labels}}", "a1"]);
+    assert_eq!(labels, r#"{"app":"x"}"#);
+    s.ok(&["rm", "-f", "a1", "b1"]);
+}
+
+#[test]
+fn binds_and_volumes_through_the_api() {
+    let s = setup();
+    let host = s.sb.tmp.path().join("h");
+    std::fs::create_dir_all(&host).unwrap();
+    s.ok(&[
+        "run",
+        "--rm",
+        "-v",
+        &format!("{}:/h", host.display()),
+        "-v",
+        "vol:/v",
+        &s.image,
+        "sh",
+        "-c",
+        "echo bound > /h/f; echo kept > /v/f",
+    ]);
+    assert_eq!(std::fs::read_to_string(host.join("f")).unwrap(), "bound\n");
+    assert_eq!(
+        s.ok(&["run", "--rm", "-v", "vol:/v:ro", &s.image, "cat", "/v/f"]),
+        "kept"
+    );
+    // The API takes host paths as given: a relative one is refused.
+    let out = s.docker(&[
+        "run",
+        "--rm",
+        "--mount",
+        "type=bind,src=rel,dst=/r",
+        &s.image,
+    ]);
+    assert_ne!(out.status.code(), Some(0));
+}
+
+#[test]
+fn ports_through_the_api() {
+    let s = setup();
+    s.ok(&[
+        "run",
+        "-d",
+        "--name",
+        "srv",
+        "-p",
+        "0:80",
+        &s.image,
+        "sh",
+        "-c",
+        "while true; do echo hi | nc -l -p 80; done",
+    ]);
+    let shown = s.ok(&["port", "srv", "80"]);
+    let port: u16 = shown
+        .lines()
+        .next()
+        .and_then(|l| l.rsplit(':').next())
+        .and_then(|p| p.parse().ok())
+        .unwrap_or_else(|| panic!("no port in {shown:?}"));
+    assert!(port > 0);
+    let answered = wait_for(Duration::from_secs(10), || {
+        let Ok(mut conn) = std::net::TcpStream::connect(("127.0.0.1", port)) else {
+            return false;
+        };
+        let _ = conn.set_read_timeout(Some(Duration::from_secs(2)));
+        let mut text = String::new();
+        let _ = conn.read_to_string(&mut text);
+        text.contains("hi")
+    });
+    assert!(answered, "nothing answered on port {port}");
+    s.ok(&["rm", "-f", "srv"]);
+}
+
+#[test]
+fn a_client_that_leaves_mid_stream_leaves_the_container_running() {
+    let s = setup();
+    s.ok(&[
+        "run",
+        "-d",
+        "--name",
+        "long",
+        &s.image,
+        "sh",
+        "-c",
+        "while true; do echo tick; sleep 0.2; done",
+    ]);
+    let logs = s.killed_after("2", &["logs", "-f", "long"]);
+    assert!(stdout(&logs).contains("tick"), "{}", stderr(&logs));
+    let attach = s.killed_after("2", &["attach", "long"]);
+    assert!(stdout(&attach).contains("tick"), "{}", stderr(&attach));
+    let before = s.ok(&["logs", "long"]).lines().count();
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(
+        s.ok(&["logs", "long"]).lines().count() > before,
+        "still logging"
+    );
+    assert_eq!(s.ok(&["ps", "--format", "{{.Names}}"]), "long");
+    assert_eq!(curl(&s.service.socket, &["/_ping"]).0, "OK");
+    s.ok(&["rm", "-f", "long"]);
+}
+
+#[test]
+fn parallel_runs_through_the_api() {
+    let s = setup();
+    std::thread::scope(|scope| {
+        let runs: Vec<_> = (0..8)
+            .map(|n| {
+                let s = &s;
+                scope.spawn(move || {
+                    let n = n.to_string();
+                    let out = s.docker(&["run", "--rm", &s.image, "echo", &n]);
+                    (n, out)
+                })
+            })
+            .collect();
+        for run in runs {
+            let (n, out) = run.join().unwrap();
+            assert_eq!(out.status.code(), Some(0), "run {n}: {}", stderr(&out));
+            assert_eq!(stdout(&out), n);
+        }
+    });
+    assert_eq!(s.ok(&["ps", "-aq"]), "");
+}
+
+#[test]
+fn odd_container_names_are_refused() {
+    let s = setup();
+    let out = s.docker(&["create", "--name", "../x", &s.image]);
+    assert_ne!(out.status.code(), Some(0));
+    assert!(
+        stderr(&out).contains("Invalid container name"),
+        "{}",
+        stderr(&out)
+    );
+    let body = format!(r#"{{"Image":"{}"}}"#, s.image);
+    let (reply, head) = curl(
+        &s.service.socket,
+        &[
+            "-X",
+            "POST",
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            &body,
+            "/containers/create?name=%2e%2e",
+        ],
+    );
+    assert!(head.contains(" 400 "), "{head}");
+    assert!(reply.contains("Invalid container name"), "{reply}");
+    assert_eq!(s.ok(&["ps", "-aq"]), "");
+}
+
+/// A running container for exec tests.
+fn running(s: &Setup, name: &str) {
+    s.ok(&["run", "-d", "--name", name, &s.image, "sleep", "300"]);
+}
+
+#[test]
+fn docker_exec_runs_and_returns_the_code() {
+    let s = setup();
+    running(&s, "e1");
+    let out = s.docker(&["exec", "e1", "sh", "-c", "echo in; echo err >&2; exit 4"]);
+    assert_eq!(out.status.code(), Some(4), "stderr: {}", stderr(&out));
+    assert_eq!(stdout(&out), "in");
+    assert_eq!(stderr(&out).trim(), "err");
+    let shown = s.ok(&[
+        "exec",
+        "-e",
+        "X=1",
+        "-w",
+        "/tmp",
+        "-u",
+        "nobody",
+        "e1",
+        "sh",
+        "-c",
+        "echo $X $(pwd) $(id -un)",
+    ]);
+    assert_eq!(shown, "1 /tmp nobody");
+    let missing = s.docker(&["exec", "e1", "no-such-command"]);
+    assert_eq!(missing.status.code(), Some(127), "{}", stderr(&missing));
+    assert!(
+        stderr(&missing).contains("no-such-command"),
+        "{}",
+        stderr(&missing)
+    );
+    s.ok(&["rm", "-f", "e1"]);
+}
+
+#[test]
+fn docker_exec_interactive() {
+    let s = setup();
+    running(&s, "e2");
+    let mut child = s
+        .cmd(&["exec", "-i", "e2", "cat"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"x\n").unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    assert_eq!(stdout(&out), "x");
+    s.ok(&["rm", "-f", "e2"]);
+}
+
+#[test]
+fn docker_exec_tty_through_script() {
+    let s = setup();
+    running(&s, "e3");
+    let config = s.sb.tmp.path().join("docker-config");
+    std::fs::create_dir_all(&config).unwrap();
+    let docker = if root_mode() {
+        format!("sudo -n env DOCKER_CONFIG={} docker", config.display())
+    } else {
+        format!("env DOCKER_CONFIG={} docker", config.display())
+    };
+    let line = format!(
+        "{docker} -H unix://{} exec -it e3 sh -c 'stty size; echo tty-ok'",
+        s.service.socket.display()
+    );
+    let mut child = Command::new("script")
+        .args(["-qec", &line, "/dev/null"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdin = child.stdin.take();
+    let mut text = String::new();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut text)
+        .unwrap();
+    let status = child.wait().unwrap();
+    drop(stdin);
+    assert!(text.contains("tty-ok"), "{text}");
+    let size = text.lines().find(|l| {
+        let parts: Vec<&str> = l.trim().split(' ').collect();
+        parts.len() == 2 && parts.iter().all(|p| p.parse::<u16>().is_ok())
+    });
+    assert!(size.is_some(), "stty size printed no size: {text}");
+    assert_eq!(status.code(), Some(0), "{text}");
+    s.ok(&["rm", "-f", "e3"]);
+}
+
+#[test]
+fn docker_exec_on_a_stopped_container_is_a_conflict() {
+    let s = setup();
+    s.ok(&["create", "--name", "e4", &s.image, "true"]);
+    let out = s.docker(&["exec", "e4", "true"]);
+    assert_ne!(out.status.code(), Some(0));
+    assert!(stderr(&out).contains("is not running"), "{}", stderr(&out));
+    s.ok(&["rm", "e4"]);
+}
+
+#[test]
+fn an_exec_client_that_leaves_ends_the_relay() {
+    let s = setup();
+    running(&s, "e5");
+    let out = s.killed_after("2", &["exec", "e5", "sleep", "31"]);
+    assert_ne!(out.status.code(), Some(0));
+    let gone = wait_for(Duration::from_secs(10), || {
+        !s.ok(&["exec", "e5", "ps", "-o", "args"])
+            .contains("sleep 31")
+    });
+    assert!(gone, "the exec's command still runs");
+    assert_eq!(s.ok(&["ps", "--format", "{{.Names}}"]), "e5");
+    s.ok(&["rm", "-f", "e5"]);
+}
+
+#[test]
+fn filters_openpod_lacks_are_refused() {
+    let s = setup();
+    s.ok(&["run", "-d", "--name", "keep", &s.image, "sleep", "30"]);
+    let out = s.docker(&["ps", "-aq", "--filter", "volume=x"]);
+    assert_ne!(out.status.code(), Some(0), "{}", stdout(&out));
+    assert!(stderr(&out).contains("volume"), "{}", stderr(&out));
+    let out = s.docker(&["images", "-q", "--filter", "before=x"]);
+    assert_ne!(out.status.code(), Some(0), "{}", stdout(&out));
+    assert_eq!(s.ok(&["ps", "-q"]).lines().count(), 1);
+    // Events filter by the labels containers were created with.
+    std::thread::scope(|scope| {
+        let watcher = scope.spawn(|| {
+            s.killed_after(
+                "5",
+                &[
+                    "events",
+                    "--filter",
+                    "label=app=x",
+                    "--format",
+                    "{{.Actor.Attributes.name}}",
+                ],
+            )
+        });
+        std::thread::sleep(Duration::from_secs(1));
+        s.ok(&["create", "--name", "lab1", "--label", "app=x", &s.image]);
+        s.ok(&["create", "--name", "nolab", &s.image]);
+        let seen = stdout(&watcher.join().unwrap());
+        assert!(seen.lines().any(|l| l == "lab1"), "{seen}");
+        assert!(!seen.contains("nolab"), "{seen}");
+    });
+    s.ok(&["rm", "-f", "keep", "lab1", "nolab"]);
+}
+
+#[test]
+fn a_failed_run_with_rm_leaves_nothing() {
+    let s = setup();
+    // Docker removes an auto-remove container whose start fails, and the CLI waits for
+    // that removal: without it, this would hang.
+    let out = s.killed_after("30", &["run", "--rm", &s.image, "no-such-command"]);
+    // timeout(1) exits 124 when it had to kill the command.
+    assert!(
+        !matches!(out.status.code(), Some(124 | 137)),
+        "docker run hung: {}",
+        stderr(&out)
+    );
+    assert_ne!(out.status.code(), Some(0));
+    assert!(stderr(&out).contains("no-such-command"), "{}", stderr(&out));
+    assert!(
+        wait_for(Duration::from_secs(5), || s.ok(&["ps", "-aq"]).is_empty()),
+        "the container stayed"
+    );
+}
+
+#[test]
+fn stop_then_start_through_the_api_starts_again() {
+    let s = setup();
+    s.ok(&["run", "-d", "--name", "again", &s.image, "sleep", "300"]);
+    for round in 0..10 {
+        s.ok(&["stop", "-t", "1", "again"]);
+        s.ok(&["start", "again"]);
+        let ps = s.ok(&["ps", "--format", "{{.Names}}"]);
+        assert_eq!(ps, "again", "round {round}: not running after start");
+    }
+    s.ok(&["restart", "-t", "1", "again"]);
+    assert_eq!(s.ok(&["ps", "--format", "{{.Names}}"]), "again");
+    s.ok(&["rm", "-f", "again"]);
+}
+
+#[test]
+fn signals_for_the_service_do_not_reach_its_containers() {
+    if root_mode() {
+        return; // sudo stands between the test and the service; the code is the same
+    }
+    let reg = FakeRegistry::start(false);
+    reg.push(
+        "img",
+        "v1",
+        &TestImage {
+            layers: vec![alpine_layer()],
+            config: serde_json::json!({"Env": [PATH], "Cmd": ["sh"]}),
+        },
+    );
+    let image = format!("{}/img:v1", reg.host);
+    let sb = Sandbox::new();
+    let service = Service::start_in_own_group(&sb, &["--timeout", "0"]);
+    assert_eq!(
+        docker_out(&sb, &service, &["pull", &image]).status.code(),
+        Some(0)
+    );
+    // A shell with handlers: as PID 1 in its namespace it gets the signals it handles.
+    let script = "trap 'exit 3' INT HUP TERM; while true; do sleep 0.1; done";
+    let mut attached = docker(
+        &sb,
+        &service,
+        &["run", "--name", "att", &image, "sh", "-c", script],
+    )
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .spawn()
+    .unwrap();
+    let running = || {
+        let out = sb.openpod().args(["ps"]).output().unwrap();
+        stdout(&out)
+            .lines()
+            .any(|l| l.split_whitespace().last() == Some("att"))
+    };
+    assert!(
+        wait_for(Duration::from_secs(10), running),
+        "att did not start"
+    );
+    // A Ctrl+C in the service's terminal, sent to its process group.
+    // SAFETY: a signal to a process group this test made.
+    unsafe { libc::kill(-(service.pid() as i32), libc::SIGINT) };
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(running(), "the container died with the service's signal");
+    let _ = attached.kill();
+    let _ = attached.wait();
+    let _ = sb.openpod().args(["rm", "-f", "att"]).output();
+}

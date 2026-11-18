@@ -2,6 +2,29 @@
 
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
+/// A signal by name (`TERM`, `SIGTERM`) or number. Names give Linux numbers on every
+/// host: the container always runs on Linux (on macOS, inside a VM).
+pub fn parse(s: &str) -> Option<i32> {
+    if let Ok(n) = s.parse::<i32>() {
+        return (n > 0 && n < 65).then_some(n);
+    }
+    let name = s.to_ascii_uppercase();
+    let name = name.strip_prefix("SIG").unwrap_or(&name);
+    Some(match name {
+        "HUP" => 1,
+        "INT" => 2,
+        "QUIT" => 3,
+        "KILL" => 9,
+        "USR1" => 10,
+        "USR2" => 12,
+        "TERM" => 15,
+        "CONT" => 18,
+        "STOP" => 19,
+        "WINCH" => 28,
+        _ => return None,
+    })
+}
+
 static TARGET: AtomicI32 = AtomicI32::new(0);
 static PIPE: AtomicI32 = AtomicI32::new(-1);
 /// Forward signals the kernel generated too (see `forward`).

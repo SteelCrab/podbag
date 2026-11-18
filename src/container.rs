@@ -47,6 +47,8 @@ pub struct Container {
     network: Option<crate::network::NetworkMode>,
     #[serde(default)]
     publish: Vec<crate::network::PortMapping>,
+    #[serde(default)]
+    labels: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,7 +130,14 @@ impl Container {
             mounts: Vec::new(),
             network: None,
             publish: Vec::new(),
+            labels: std::collections::BTreeMap::new(),
         }
+    }
+
+    /// A label (`key=value` in `docker run --label`).
+    pub fn label(mut self, key: impl Into<String>, value: impl Into<String>) -> Container {
+        self.labels.insert(key.into(), value.into());
+        self
     }
 
     /// How to connect the container: a bridge network (the default `bridge`, or one made
@@ -378,6 +387,22 @@ impl Container {
         }
     }
 
+    /// Create the container without starting it (`docker create`): it is listed as
+    /// Created and starts with [`crate::ContainerHandle::start`].
+    #[cfg(unix)]
+    pub fn create(self) -> Result<crate::ContainerHandle> {
+        #[cfg(target_os = "linux")]
+        {
+            let (cleanup, _) = linux_launch::create(self)?;
+            Ok(crate::ContainerHandle::from_id(cleanup.disarm()))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = self;
+            Err(Error::unsupported_os())
+        }
+    }
+
     /// Start the container with this process's stdin, stdout and stderr, and return
     /// without waiting. Used by the CLI to forward signals.
     #[doc(hidden)]
@@ -402,6 +427,42 @@ impl Container {
             Err(Error::unsupported_os())
         }
     }
+}
+
+/// Docker's rule for container names: a letter or digit, then letters, digits, `_`, `.`
+/// and `-`.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub fn check_name(name: &str) -> Result<()> {
+    let ok = name
+        .as_bytes()
+        .first()
+        .is_some_and(u8::is_ascii_alphanumeric)
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'));
+    if ok {
+        Ok(())
+    } else {
+        Err(Error::new(
+            ErrorKind::InvalidInput,
+            format!("Invalid container name ({name})"),
+            "only [a-zA-Z0-9][a-zA-Z0-9_.-] are allowed",
+            "choose another name",
+        ))
+    }
+}
+
+/// Start the shim of an existing container; a failed start keeps the container.
+#[cfg(target_os = "linux")]
+pub(crate) fn start_shim(
+    dirs: &crate::paths::Dirs,
+    id: &str,
+    stdin: std::process::Stdio,
+    stdout: std::process::Stdio,
+    stderr: std::process::Stdio,
+    mode: crate::helper::ShimMode,
+) -> Result<crate::helper::HelperChild> {
+    linux_launch::start(dirs, id, stdin, stdout, stderr, mode, true)
 }
 
 /// Read a helper's stdout and stderr to the end, then wait for it.
@@ -627,6 +688,7 @@ mod linux_launch {
     }
 
     /// Save the settings and start the shim. Returns after the command started.
+    /// Create the container and start it: a failed start removes it again (`run`).
     pub(super) fn launch(
         c: Container,
         stdin: Stdio,
@@ -634,6 +696,34 @@ mod linux_launch {
         stderr: Stdio,
         detach: bool,
     ) -> Result<(Cleanup, HelperChild)> {
+        let (mut cleanup, auto_remove) = create(c)?;
+        let mode = if detach {
+            helper::ShimMode::Detached
+        } else {
+            helper::ShimMode::Attached
+        };
+        let helper = start(
+            &cleanup.dirs,
+            &cleanup.id,
+            stdin,
+            stdout,
+            stderr,
+            mode,
+            false,
+        )?;
+        // Started: from here the shim owns the container. It removes it at the end when
+        // auto-remove is set; otherwise the container stays.
+        cleanup.armed = auto_remove && !detach;
+        Ok((cleanup, helper))
+    }
+
+    /// Everything up to the container record (Status::Created): checks, volumes, the spec,
+    /// directories. The returned guard removes it all until disarmed. Also returns whether
+    /// the container is removed when it ends.
+    pub(super) fn create(c: Container) -> Result<(Cleanup, bool)> {
+        if let Some(name) = &c.name {
+            super::check_name(name)?;
+        }
         let limits = c.limits()?;
         // SAFETY: geteuid has no preconditions.
         let rootless = unsafe { libc::geteuid() } != 0;
@@ -720,7 +810,8 @@ mod linux_launch {
                     auto_remove,
                     tty,
                     interactive,
-                    detach,
+                    detach: false,
+                    labels: c.labels.clone(),
                     limits: limits.clone(),
                     cgroup: placement.clone(),
                     security: c.security.clone(),
@@ -785,7 +876,8 @@ mod linux_launch {
                     auto_remove,
                     tty,
                     interactive,
-                    detach,
+                    detach: false,
+                    labels: c.labels.clone(),
                     limits: limits.clone(),
                     cgroup: placement.clone(),
                     security: c.security.clone(),
@@ -813,7 +905,22 @@ mod linux_launch {
             }
         }
         drop(volume_lock);
-        let scope = match &placement {
+        Ok((cleanup, auto_remove))
+    }
+
+    /// Start the shim of container `id` (created or exited) and wait until it runs.
+    pub(super) fn start(
+        dirs: &Dirs,
+        id: &str,
+        stdin: Stdio,
+        stdout: Stdio,
+        stderr: Stdio,
+        mode: helper::ShimMode,
+        keep_on_failure: bool,
+    ) -> Result<HelperChild> {
+        let spec = state::read_config(dirs, id)?;
+        state::wait_for_previous_shim(dirs, id, std::time::Duration::from_secs(5))?;
+        let scope = match &spec.cgroup {
             crate::cgroup::Placement::Scope { slice } => Some(helper::Scope {
                 systemd_run: crate::cgroup::systemd_run().ok_or_else(|| {
                     Error::new(
@@ -824,18 +931,22 @@ mod linux_launch {
                     )
                 })?,
                 slice: slice.clone(),
-                unit: Some(format!("openpod-{}", cleanup.id)),
+                unit: Some(format!("openpod-{id}")),
                 delegate: true,
             }),
             _ => None,
         };
-        let mut helper = helper::spawn_shim(&cleanup.id, stdin, stdout, stderr, scope.as_ref())?;
+        let mut helper = helper::spawn_shim(
+            id,
+            stdin,
+            stdout,
+            stderr,
+            scope.as_ref(),
+            mode,
+            keep_on_failure,
+        )?;
         helper.wait_started()?;
-        // Started: from here the shim owns the container. It removes it at the end when
-        // auto-remove is set; otherwise the container stays.
-        let mut cleanup = cleanup;
-        cleanup.armed = auto_remove && !detach;
-        Ok((cleanup, helper))
+        Ok(helper)
     }
 
     /// Wait for the shim. Returns its exit code, or 128 + signal number.

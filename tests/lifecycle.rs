@@ -738,3 +738,158 @@ fn slow_reader_does_not_block_stop() {
     wait_for_status(&sb, "slow", "exited");
     ok(&openpod(&sb, &["rm", "slow"]));
 }
+
+/// A free-looking local port for this test process.
+fn port(offset: u16) -> String {
+    (41000 + (std::process::id() % 2000) as u16 + offset).to_string()
+}
+
+#[test]
+fn create_then_start_runs_the_container() {
+    let sb = Sandbox::new();
+    let rootfs = rootfs();
+    let id = ok(&openpod(
+        &sb,
+        &[
+            "create", "--name", "c", "--rootfs", &rootfs, "sh", "-c", "echo hi",
+        ],
+    ));
+    assert_eq!(id.len(), 64, "{id}");
+    let ps = ok(&openpod(&sb, &["ps", "-a"]));
+    assert!(
+        ps.lines()
+            .any(|l| l.contains("Created") && l.ends_with(" c")),
+        "{ps}"
+    );
+    assert!(
+        !ok(&openpod(&sb, &["ps"])).contains(" c\n"),
+        "created is not running"
+    );
+    let out = openpod(&sb, &["start", "-a", "c"]);
+    assert_eq!(ok(&out), "hi");
+    let info = wait_for_status(&sb, "c", "exited");
+    assert_eq!(info["state"]["exit_code"], 0);
+}
+
+#[test]
+fn an_exited_container_starts_again() {
+    let sb = Sandbox::new();
+    let id = start(
+        &sb,
+        // /mnt exists in the shared rootfs: a new mount point would be made in it.
+        &["--name", "r", "-v", "runs:/mnt"],
+        &["sh", "-c", "echo run >> /mnt/runs; cat /mnt/runs | wc -l"],
+    );
+    wait_for_status(&sb, &id, "exited");
+    let out = openpod(&sb, &["start", "-a", "r"]);
+    assert_eq!(ok(&out), "2");
+    let logs = ok(&openpod(&sb, &["logs", "r"]));
+    assert_eq!(logs, "1\n2", "both runs are in the log");
+    assert_eq!(inspect(&sb, "r")["id"], id.as_str());
+}
+
+#[test]
+fn restart_stops_and_starts() {
+    let sb = Sandbox::new();
+    start(&sb, &["--name", "s"], &["sleep", "60"]);
+    let first = inspect(&sb, "s")["state"]["started"].as_u64().unwrap();
+    std::thread::sleep(Duration::from_millis(1100));
+    ok(&openpod(&sb, &["restart", "-t", "1", "s"]));
+    let info = inspect(&sb, "s");
+    assert_eq!(info["state"]["status"], "running", "{info}");
+    assert!(info["state"]["started"].as_u64().unwrap() > first, "{info}");
+    ok(&openpod(&sb, &["rm", "-f", "s"]));
+}
+
+#[test]
+fn a_failed_start_keeps_the_created_container() {
+    let sb = Sandbox::new();
+    let rootfs = rootfs();
+    let publish = format!("127.0.0.1:{}:80", port(0));
+    for name in ["p1", "p2"] {
+        ok(&openpod(
+            &sb,
+            &[
+                "create", "--name", name, "-p", &publish, "--rootfs", &rootfs, "sleep", "30",
+            ],
+        ));
+    }
+    ok(&openpod(&sb, &["start", "p1"]));
+    let second = openpod(&sb, &["start", "p2"]);
+    assert_ne!(second.status.code(), Some(0), "the port is taken");
+    let ps = ok(&openpod(&sb, &["ps", "-a"]));
+    assert!(
+        ps.lines()
+            .any(|l| l.contains("Created") && l.ends_with(" p2")),
+        "{ps}"
+    );
+    // `run` still leaves nothing behind when its start fails.
+    let before = ps.lines().count();
+    let run = openpod(
+        &sb,
+        &[
+            "run", "-d", "-p", &publish, "--rootfs", &rootfs, "sleep", "30",
+        ],
+    );
+    assert_ne!(run.status.code(), Some(0));
+    assert_eq!(ok(&openpod(&sb, &["ps", "-a"])).lines().count(), before);
+    ok(&openpod(&sb, &["rm", "-f", "p1", "p2"]));
+}
+
+#[test]
+fn start_waits_for_the_last_shim_to_finish() {
+    let sb = Sandbox::new();
+    let run = |args: &[&str]| {
+        let out = sb.openpod().args(args).output().unwrap();
+        assert_eq!(out.status.code(), Some(0), "{args:?}: {}", stderr(&out));
+        stdout(&out)
+    };
+    let id = run(&[
+        "run",
+        "-d",
+        "--name",
+        "ss",
+        "--rootfs",
+        &rootfs(),
+        "sleep",
+        "300",
+    ]);
+    run(&["stop", "-t", "1", "ss"]);
+    // The last run's shim answers `stop` before it lets go of its lock (as root, cgroup
+    // cleanup can take a second). A flock plays that shim here.
+    let lock = sb.data().join("containers").join(&id).join("shim.lock");
+    let marker = sb.tmp.path().join("locked");
+    let script = format!("touch {}; sleep 0.8", marker.display());
+    let mut holder = if root_mode() {
+        let mut c = std::process::Command::new("sudo");
+        c.args(["-n", "flock"]);
+        c
+    } else {
+        std::process::Command::new("flock")
+    }
+    .arg(&lock)
+    .args(["-c", &script])
+    .spawn()
+    .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !marker.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(marker.exists(), "flock did not take the lock");
+    let out = sb.openpod().args(["start", "ss"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let _ = holder.wait();
+    let ps = run(&["ps"]);
+    assert!(
+        ps.lines()
+            .any(|l| l.split_whitespace().last() == Some("ss")),
+        "{ps}"
+    );
+    // A container that really runs is refused at once, without waiting.
+    let begun = std::time::Instant::now();
+    let out = sb.openpod().args(["start", "ss"]).output().unwrap();
+    assert_ne!(out.status.code(), Some(0));
+    assert!(stderr(&out).contains("already running"), "{}", stderr(&out));
+    assert!(begun.elapsed() < std::time::Duration::from_secs(3));
+    run(&["rm", "-f", "ss"]);
+}

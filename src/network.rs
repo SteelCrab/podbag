@@ -185,6 +185,24 @@ impl Network {
         Ok(())
     }
 
+    /// Remove every network no container uses (not the default one). Returns them.
+    pub fn prune() -> Result<Vec<Network>> {
+        let removed = prune_in(&crate::paths::dirs()?)?;
+        #[cfg(target_os = "linux")]
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            for network in &removed {
+                crate::linux::net::remove_bridge(network)?;
+            }
+        }
+        Ok(removed)
+    }
+
+    /// The full ID the Docker API shows (64 hex digits; [`Network::id`] is its start).
+    pub fn docker_id(&self) -> String {
+        docker_id_of(&self.name)
+    }
+
     /// The subnet's address and prefix length.
     pub fn cidr(&self) -> (Ipv4Addr, u8) {
         parse_cidr(&self.subnet).unwrap_or(DEFAULT_SUBNET)
@@ -266,6 +284,43 @@ pub fn parse_cidr(s: &str) -> Result<(Ipv4Addr, u8)> {
 fn overlaps(a: (Ipv4Addr, u8), b: (Ipv4Addr, u8)) -> bool {
     let m = mask(a.1.min(b.1));
     u32::from(a.0) & m == u32::from(b.0) & m
+}
+
+/// The 64-hex ID of a network name (also for `host` and `none`, which have no record).
+pub fn docker_id_of(name: &str) -> String {
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(name.as_bytes());
+    digest.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+pub(crate) fn prune_in(dirs: &Dirs) -> Result<Vec<Network>> {
+    let mut removed = Vec::new();
+    for network in list_in(dirs)? {
+        if network.name == DEFAULT {
+            continue;
+        }
+        // Checks its users again under the network lock.
+        match remove_in(dirs, &network.name) {
+            Ok(n) => removed.push(n),
+            Err(e) if matches!(e.kind, ErrorKind::Conflict | ErrorKind::NotFound) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(removed)
+}
+
+/// The containers in `network`: (ID, name, address), by address.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) fn endpoints(dirs: &Dirs, network: &str) -> Result<Vec<(String, String, Ipv4Addr)>> {
+    let _lock = lock(dirs)?;
+    let record = load(dirs, network)?;
+    let mut out: Vec<(String, String, Ipv4Addr)> = record
+        .containers
+        .into_iter()
+        .map(|(id, m)| (id, m.name, m.ip))
+        .collect();
+    out.sort_by_key(|(_, _, ip)| u32::from(*ip));
+    Ok(out)
 }
 
 fn sha_id(name: &str) -> String {
@@ -437,7 +492,8 @@ pub(crate) fn create_in(
     }
     let _lock = lock(dirs)?;
     if read_record(dirs, name)?.is_some() {
-        return Err(invalid(
+        return Err(Error::new(
+            ErrorKind::Conflict,
             format!("cannot create network {name}"),
             "a network with that name exists",
             "choose another name, or remove it with `openpod network rm`",
@@ -534,7 +590,8 @@ pub(crate) fn remove_in(dirs: &Dirs, name: &str) -> Result<Network> {
         .map(|(_, m)| m.name.clone())
         .collect();
     if !users.is_empty() {
-        return Err(invalid(
+        return Err(Error::new(
+            ErrorKind::Conflict,
             format!("cannot remove network {name}"),
             format!("it is used by container {}", users.join(", ")),
             "remove those containers first (`openpod rm`)",
@@ -653,6 +710,64 @@ mod tests {
     }
 
     #[test]
+    fn prune_removes_networks_no_container_uses() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = dirs_in(tmp.path());
+        create_in(&dirs, "idle", None, &[]).unwrap();
+        create_in(&dirs, "busy", None, &[]).unwrap();
+        let spec = crate::spec::spec_fixture();
+        crate::state::create(&dirs, &spec).unwrap();
+        allocate(&dirs, "busy", &spec.id, &spec.name).unwrap();
+        let gone: Vec<String> = prune_in(&dirs)
+            .unwrap()
+            .into_iter()
+            .map(|n| n.name)
+            .collect();
+        assert_eq!(gone, ["idle"]);
+        let left: Vec<String> = list_in(&dirs)
+            .unwrap()
+            .into_iter()
+            .map(|n| n.name)
+            .collect();
+        assert!(
+            left.contains(&"busy".to_string()) && left.contains(&DEFAULT.to_string()),
+            "{left:?}"
+        );
+    }
+
+    #[test]
+    fn docker_ids_extend_the_short_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = dirs_in(tmp.path());
+        let n = create_in(&dirs, "app", None, &[]).unwrap();
+        assert_eq!(n.docker_id().len(), 64);
+        assert!(n.docker_id().starts_with(&n.id));
+        assert_eq!(docker_id_of("host").len(), 64);
+    }
+
+    #[test]
+    fn a_taken_network_name_is_a_conflict() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = dirs_in(tmp.path());
+        create_in(&dirs, "app", None, &[]).unwrap();
+        let e = create_in(&dirs, "app", None, &[]).unwrap_err();
+        assert_eq!(e.kind, ErrorKind::Conflict);
+    }
+
+    #[test]
+    fn endpoints_name_their_containers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = dirs_in(tmp.path());
+        create_in(&dirs, "app", None, &[]).unwrap();
+        let spec = crate::spec::spec_fixture();
+        let ip = allocate(&dirs, "app", &spec.id, &spec.name).unwrap();
+        assert_eq!(
+            endpoints(&dirs, "app").unwrap(),
+            [(spec.id.clone(), spec.name.clone(), ip)]
+        );
+    }
+
+    #[test]
     fn parses_network_and_publish_args() {
         assert_eq!(parse_network_arg("bridge").unwrap(), NetworkMode::default());
         assert_eq!(parse_network_arg("host").unwrap(), NetworkMode::Host);
@@ -750,7 +865,7 @@ mod tests {
         assert_eq!(own.gateway, "192.168.50.1");
         assert_eq!(
             create_in(&dirs, "app", None, &[]).unwrap_err().kind,
-            ErrorKind::InvalidInput
+            ErrorKind::Conflict
         );
         for reserved in ["bridge", "host", "none"] {
             assert!(create_in(&dirs, reserved, None, &[]).is_err(), "{reserved}");

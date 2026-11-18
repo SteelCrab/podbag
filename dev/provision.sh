@@ -27,12 +27,18 @@ if [ ! -x "$HOME/openpod-fixtures/alpine/bin/busybox" ]; then
   "$repo/dev/fetch-rootfs.sh" "$HOME/openpod-fixtures/alpine"
 fi
 
-# Docker, Podman and Kiri for the comparison in docs/benchmarks.md (dev/bench/run.sh).
-if [ "${1:-}" = "--bench" ]; then
-  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq docker.io podman >/dev/null
-  # Docker runs only while it is measured.
+# The docker CLI for the Docker API tests (tests/api_*.rs). Ubuntu ships it only with the
+# engine (docker.io); the engine stays off, except while dev/bench/run.sh measures it.
+if ! command -v docker >/dev/null; then
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq docker.io >/dev/null
   sudo systemctl disable docker.service docker.socket containerd.service >/dev/null 2>&1 || true
   "$repo/dev/bench/docker-off.sh"
+fi
+
+# Podman and Kiri (and Docker, above) for the comparison in docs/benchmarks.md
+# (dev/bench/run.sh).
+if [ "${1:-}" = "--bench" ]; then
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq podman >/dev/null
   # Kiri 0.2.1, engine only (its .deb does not start the engine; run.sh starts it).
   if ! command -v kiri >/dev/null; then
     case "$(uname -m)" in
