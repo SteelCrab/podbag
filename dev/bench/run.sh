@@ -6,11 +6,12 @@
 #   - disk use of two Python images that share their Python files but not their base.
 # Results go to <results-dir>/<tool>.env as key=value lines (dev/bench/report.sh reads them).
 #
-# usage: dev/bench/run.sh openpod|openpod-root|podman|docker [results-dir]
-# Needs `dev/vm.sh bench-setup` (Docker, Podman) and `dev/vm.sh static` (openpod).
+# usage: dev/bench/run.sh openpod|openpod-root|podman|docker|kiri [results-dir]
+# (OPENPOD_IMAGE_MOUNT=hardlink with openpod-root: root mode without composefs)
+# Needs `dev/vm.sh bench-setup` (Docker, Podman, Kiri) and `dev/vm.sh static` (openpod).
 set -euo pipefail
 
-tool="${1:?usage: dev/bench/run.sh openpod|openpod-root|podman|docker [results-dir]}"
+tool="${1:?usage: dev/bench/run.sh openpod|openpod-root|podman|docker|kiri [results-dir]}"
 out="${2:-$HOME/bench-results}"
 runs="${BENCH_RUNS:-100}"
 count="${BENCH_COUNT:-50}"
@@ -32,11 +33,13 @@ case "$tool" in
     version="$("$static" --version)"
     ;;
   openpod-root)
+    # OPENPOD_IMAGE_MOUNT=hardlink measures root mode without composefs.
     cli=(sudo -n env OPENPOD_DATA_DIR=/var/tmp/openpod-bench-root/data
-      OPENPOD_RUNTIME_DIR=/run/openpod-bench-root "$static")
+      OPENPOD_RUNTIME_DIR=/run/openpod-bench-root
+      ${OPENPOD_IMAGE_MOUNT:+OPENPOD_IMAGE_MOUNT=$OPENPOD_IMAGE_MOUNT} "$static")
     proc_pattern='^(openpod)$'
     store=(/var/tmp/openpod-bench-root/data)
-    version="$("$static" --version) (root)"
+    version="$("$static" --version) (root, ${OPENPOD_IMAGE_MOUNT:-composefs})"
     ;;
   podman)
     cli=(podman)
@@ -51,6 +54,19 @@ case "$tool" in
     proc_pattern='^(dockerd|containerd.*|docker-proxy|runc)$'
     store=(/var/lib/docker /var/lib/containerd)
     version="$(docker --version | cut -d, -f1) (root daemon)"
+    ;;
+  kiri)
+    # Kiri on a Linux host: one root daemon serving the Docker Engine API, driven by the
+    # same docker CLI as Docker's column. Runs only while it is measured.
+    sudo -n systemctl start kiri.service
+    trap 'sudo -n systemctl stop kiri.service' EXIT
+    cli=(sudo -n docker -H unix:///run/kiri/docker.sock)
+    for _ in $(seq 50); do "${cli[@]}" version >/dev/null 2>&1 && break; sleep 0.2; done
+    proc_pattern='^(kiri|kiri-init)$'
+    store=(/var/lib/kiri /var/lib/kiri-daemon)
+    # The kiri binary has no --version: ask the package (kiri-lite or the full kiri).
+    version="Kiri $(dpkg-query -W -f='${Version}' kiri-lite 2>/dev/null ||
+      dpkg-query -W -f='${Version}' kiri 2>/dev/null) (root daemon)"
     ;;
   *) echo "unknown tool $tool" >&2; exit 2 ;;
 esac
@@ -89,17 +105,29 @@ echo "== $tool: $version" >&2
 "${timed_prefix[@]}" "${cli[@]}" pull "$alpine" >/dev/null
 remove_all
 
+# BENCH_PARTS picks what to measure (default: start memory disk). A run of some parts
+# replaces only their lines in an earlier results file.
+parts="${BENCH_PARTS:-start memory disk}"
+want() { [[ " $parts " == *" $1 "* ]]; }
 results="$out/$tool.env"
-{
-  echo "tool=$tool"
-  echo "version=$version"
-  echo "runs=$runs"
-  echo "count=$count"
-  echo "idle_procs=$(tool_procs)"
-  echo "idle_pss_kb=$(tool_pss_kb)"
-} >"$results"
+if want start && want memory && want disk; then
+  {
+    echo "tool=$tool"
+    echo "version=$version"
+    echo "runs=$runs"
+    echo "count=$count"
+    echo "idle_procs=$(tool_procs)"
+    echo "idle_pss_kb=$(tool_pss_kb)"
+  } >"$results"
+else
+  [ -f "$results" ] || { echo "BENCH_PARTS=$parts needs an earlier $results" >&2; exit 2; }
+  if want start; then sed -i '/^start_/d' "$results"; fi
+  if want memory; then sed -i -E '/^(mem|pss|procs)_/d' "$results"; fi
+  if want disk; then sed -i '/^disk_/d' "$results"; fi
+fi
 
 # 1. Start time. The first runs warm caches and are not counted.
+if want start; then
 echo "start time: $runs runs" >&2
 times="$("${timed_prefix[@]}" bash -c '
   for i in $(seq $((3 + $1))); do
@@ -110,9 +138,11 @@ times="$("${timed_prefix[@]}" bash -c '
   done' _ "$runs" "$alpine" "${cli[@]}")"
 echo "start_median_ms=$(pct 50 <<<"$times")" >>"$results"
 echo "start_p90_ms=$(pct 90 <<<"$times")" >>"$results"
+fi
 
 # 2. Memory for $count sleeping containers. The system-wide difference is noisy (other
 # processes, the kernel's caches), so it is measured three times; PSS is exact.
+if want memory; then
 for net in none default; do
   net_args=()
   [ "$net" = default ] || net_args=(--network none)
@@ -137,26 +167,40 @@ for net in none default; do
     echo "procs_${net}=$nprocs"
   } >>"$results"
 done
+fi
 
-# 3. Disk: two images that differ in their Debian base but share Python's files.
+# 3. Disk: two images that differ in their Debian base but share Python's files. Each image
+# is pulled and then used once: Kiri unpacks layers when a container first uses them, the
+# other tools while pulling.
+if want disk; then
 echo "disk: $py1, then $py2" >&2
+use() { "${timed_prefix[@]}" "${cli[@]}" run --rm --network none "$1" true >/dev/null; }
 prune() {
   case "$tool" in
     openpod*) "${timed_prefix[@]}" "${cli[@]}" system prune -f ;;
+    kiri) "${timed_prefix[@]}" "${cli[@]}" system prune -af --volumes ;;
     *) "${timed_prefix[@]}" "${cli[@]}" system prune -af ;;
   esac >/dev/null
   sleep 5
 }
 prune
+# The base holds alpine, pulled and used once, in every store: Kiri deletes the layers of
+# removed images only when it next creates a container, so this also clears what earlier
+# runs left. The rows are what the two Python images add.
+"${timed_prefix[@]}" "${cli[@]}" pull "$alpine" >/dev/null
+use "$alpine"
 base="$(store_kb)"
 "${timed_prefix[@]}" "${cli[@]}" pull "$py1" >/dev/null
+use "$py1"
 one="$(store_kb)"
 "${timed_prefix[@]}" "${cli[@]}" pull "$py2" >/dev/null
+use "$py2"
 two="$(store_kb)"
 {
   echo "disk_first_kb=$((one - base))"
   echo "disk_both_kb=$((two - base))"
 } >>"$results"
 prune
+fi
 
 cat "$results"

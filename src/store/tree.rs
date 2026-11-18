@@ -198,6 +198,9 @@ fn build(
                 )
                 .map_err(fail)?;
                 std::os::unix::fs::chown(&p, Some(e.uid), Some(e.gid)).map_err(fail)?;
+                // mknod applied the umask.
+                std::fs::set_permissions(&p, std::fs::Permissions::from_mode(e.mode))
+                    .map_err(fail)?;
             }
             EntryKind::Hardlink { .. } | EntryKind::Whiteout | EntryKind::Opaque => {}
         }
@@ -435,6 +438,28 @@ mod tests {
 
     fn store(tmp: &std::path::Path) -> ObjectStore {
         ObjectStore::new(tmp.join("objects"), false).unwrap()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "needs root: dev/vm.sh test-root"]
+    fn device_nodes_keep_their_mode_under_a_umask_as_root() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let mut null = e("null", EntryKind::Char { major: 1, minor: 3 });
+        null.mode = 0o666;
+        let tree = merge(&[vec![null]]).unwrap();
+        // SAFETY: umask has no memory arguments.
+        let old = unsafe { libc::umask(0o022) };
+        let built = materialize(&tree, &store(tmp.path()), &tmp.path().join("r"), true);
+        // SAFETY: as above.
+        unsafe { libc::umask(old) };
+        built.unwrap();
+        let mode = std::fs::symlink_metadata(tmp.path().join("r/null"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o7777, 0o666);
     }
 
     #[test]

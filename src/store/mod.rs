@@ -1,12 +1,17 @@
 //! The image store: content objects, layer indexes, image trees and names.
 
+#[cfg(target_os = "linux")]
+pub mod composefs;
+pub mod erofs;
 pub mod layer;
+pub mod method;
 pub mod object;
 pub mod ops;
 pub(crate) mod perm;
 pub mod tree;
 pub mod zstd;
 
+use crate::config::ImageMount;
 use crate::image::manifest::{self, Compression};
 use crate::image::reference::Reference;
 use crate::image::registry::{Registry, digest_mismatch};
@@ -14,6 +19,7 @@ use crate::image::{DiskUsage, ImageConfig, PruneReport};
 use crate::paths::Dirs;
 use crate::{Error, ErrorKind, Result};
 use layer::{EntryKind, LayerIndex};
+pub use method::MountMethod;
 use object::{ObjectStore, io_error};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -65,6 +71,43 @@ pub struct Store {
     root: PathBuf,
     objects: ObjectStore,
     can_mknod: bool,
+    /// How containers get the image files; decides what a pull builds.
+    method: MountMethod,
+    /// Where composefs images are mounted for containers: `<runtime>/images`.
+    mounts: Option<PathBuf>,
+    /// False for a store opened for reading only: it never builds image files.
+    can_build: bool,
+}
+
+/// The two ways an image's tree is kept for containers (design 6.3.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Artifact {
+    /// `rootfs.erofs`: the EROFS metadata composefs mounts.
+    Erofs,
+    /// `rootfs/`: a directory of hard links to the objects.
+    Tree,
+}
+
+impl Artifact {
+    fn name(self) -> &'static str {
+        match self {
+            Artifact::Erofs => "rootfs.erofs",
+            Artifact::Tree => "rootfs",
+        }
+    }
+}
+
+/// Next to an image that EROFS cannot hold: the reason. The image uses its hard-link tree.
+const REFUSED: &str = "rootfs.erofs.refused";
+
+/// Where a container's lower layer comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImageRoot {
+    /// A directory of hard links to the objects.
+    Tree(PathBuf),
+    /// The image's EROFS metadata mounted at `lower`, with the file contents in `objects`
+    /// (overlayfs's data-only layer).
+    Composefs { lower: PathBuf, objects: PathBuf },
 }
 
 impl Store {
@@ -84,7 +127,9 @@ impl Store {
                 .map_err(|e| io_error(d, e))?;
             perm::set_mode(d, 0o700).map_err(|e| io_error(d, e))?;
         }
-        Store::open_at(root, set_owner, can_mknod)
+        let mut store = Store::open_at(root, set_owner, can_mknod)?;
+        store.mounts = Some(dirs.runtime.join("images"));
+        Ok(store)
     }
 
     #[cfg(test)]
@@ -101,6 +146,9 @@ impl Store {
             root,
             objects,
             can_mknod,
+            method: MountMethod::Hardlink,
+            mounts: None,
+            can_build: true,
         })
     }
 
@@ -112,6 +160,9 @@ impl Store {
             root,
             objects,
             can_mknod: false,
+            method: MountMethod::Hardlink,
+            mounts: Some(dirs.runtime.join("images")),
+            can_build: false,
         })
     }
 
@@ -146,6 +197,33 @@ impl Store {
         Ok(out)
     }
 
+    /// Whether composefs works on this kernel: the cached probe result, or a new probe
+    /// (as root on Linux) under the shared lock, which keeps garbage collection away from
+    /// the probe's scratch directory.
+    pub fn composefs_support(&self) -> method::Support {
+        let kernel = method::kernel_release();
+        #[cfg(target_os = "linux")]
+        let probe = |scratch: &Path| {
+            let _shared = self.lock(false).map_err(|e| e.to_string())?;
+            composefs::probe(scratch)
+        };
+        #[cfg(not(target_os = "linux"))]
+        let probe = |_: &Path| Err("composefs needs Linux".to_string());
+        method::support(&self.root, &kernel, probe)
+    }
+
+    /// Choose how containers get image files for this command (design 6.3.3): what pulls
+    /// build and what `image_root` returns. Returns the method.
+    pub fn use_mount_method(&mut self, rootless: bool, setting: ImageMount) -> MountMethod {
+        let method = method::choose(setting, rootless, || self.composefs_support());
+        self.method = method;
+        method
+    }
+
+    pub fn mount_method(&self) -> MountMethod {
+        self.method
+    }
+
     /// Take the shared lock: images cannot be removed while it is held.
     pub fn lock_shared(&self) -> Result<impl Drop> {
         self.lock(false)
@@ -153,6 +231,170 @@ impl Store {
 
     pub fn rootfs_path(&self, digest: &str) -> PathBuf {
         self.image_dir(digest).join("rootfs")
+    }
+
+    pub fn erofs_path(&self, digest: &str) -> PathBuf {
+        self.image_dir(digest).join("rootfs.erofs")
+    }
+
+    pub fn objects_dir(&self) -> PathBuf {
+        self.root.join("objects")
+    }
+
+    /// A directory for a short job under `<store>/tmp`, which garbage collection empties.
+    /// Use it only while holding the shared lock.
+    pub fn scratch_dir(&self, name: &str) -> PathBuf {
+        self.root.join("tmp").join(name)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn mount_point(&self, digest: &str) -> Option<PathBuf> {
+        self.mounts.as_ref().map(|m| m.join(hex_of(digest)))
+    }
+
+    /// What a container of this image is built from: its EROFS metadata when the store uses
+    /// composefs and composefs can hold the image, else its hard-link tree.
+    fn artifact(&self, digest: &str) -> Artifact {
+        if self.method == MountMethod::Composefs && !self.image_dir(digest).join(REFUSED).exists() {
+            Artifact::Erofs
+        } else {
+            Artifact::Tree
+        }
+    }
+
+    /// True when containers of this image get it through composefs.
+    pub fn uses_composefs(&self, digest: &str) -> bool {
+        self.artifact(digest) == Artifact::Erofs
+    }
+
+    /// Write `kind` for `tree` at `dest`, which must not exist.
+    fn write_artifact(
+        &self,
+        kind: Artifact,
+        tree: &tree::Tree,
+        dest: &Path,
+        created: u64,
+    ) -> Result<()> {
+        match kind {
+            Artifact::Tree => {
+                let report = tree::materialize(tree, &self.objects, dest, self.can_mknod)?;
+                if report.skipped_devices > 0 {
+                    eprintln!(
+                        "openpod: skipped {} device files: rootless mode cannot create them",
+                        report.skipped_devices
+                    );
+                }
+                Ok(())
+            }
+            Artifact::Erofs => {
+                let bytes = erofs::build(tree, created)?;
+                std::fs::write(dest, bytes).map_err(|e| io_error(dest, e))
+            }
+        }
+    }
+
+    /// Write `kind` into `dir` under a temporary name, then rename it into place. When
+    /// another process finished first (a directory cannot replace one), theirs stays.
+    fn place(&self, dir: &Path, kind: Artifact, tree: &tree::Tree, created: u64) -> Result<()> {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dest = dir.join(kind.name());
+        let tmp = dir.join(format!(
+            "{}.{}.{}.tmp",
+            kind.name(),
+            std::process::id(),
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let result = self
+            .write_artifact(kind, tree, &tmp, created)
+            .and_then(|()| match std::fs::rename(&tmp, &dest) {
+                Ok(()) => Ok(()),
+                Err(_) if dest.exists() => Ok(()),
+                Err(e) => Err(io_error(&dest, e)),
+            });
+        let _ = remove_path(&tmp);
+        result
+    }
+
+    /// Write `want` into `dir`. An image that EROFS cannot hold (an inode with more than
+    /// 4 KiB of extended attributes, a name longer than 255 bytes) gets a hard-link tree
+    /// instead, with the reason in `rootfs.erofs.refused`: one image must not stop root
+    /// mode from pulling or running it, as it runs rootless.
+    fn build_in(&self, dir: &Path, want: Artifact, tree: &tree::Tree, created: u64) -> Result<()> {
+        match self.place(dir, want, tree, created) {
+            Err(e) if want == Artifact::Erofs && e.kind == ErrorKind::InvalidInput => {
+                eprintln!(
+                    "openpod: warning: this image cannot use composefs ({}); it uses a hard-link tree",
+                    e.why
+                );
+                let refused = dir.join(REFUSED);
+                std::fs::write(&refused, &e.why).map_err(|err| io_error(&refused, err))?;
+                if dir.join(Artifact::Tree.name()).exists() {
+                    return Ok(());
+                }
+                self.place(dir, Artifact::Tree, tree, created)
+            }
+            other => other,
+        }
+    }
+
+    /// Build what a container of this image needs when the image does not have it: it was
+    /// pulled with the other method (another kernel, another setting). Call it under the
+    /// shared lock. Two callers may race; the first finished artifact stays.
+    pub fn ensure_artifact(&self, digest: &str) -> Result<()> {
+        let want = self.artifact(digest);
+        let dir = self.image_dir(digest);
+        if dir.join(want.name()).exists() {
+            return Ok(());
+        }
+        let record = self.read_record(digest)?;
+        if !self.can_build {
+            return Err(Error::new(
+                ErrorKind::NotFound,
+                format!("cannot use image {}", crate::id::short_id(hex_of(digest))),
+                format!("its {} is missing from the store", want.name()),
+                "pull the image again (`openpod pull <image>`)",
+            ));
+        }
+        let mut layers = Vec::new();
+        for id in &record.diff_ids {
+            layers.push(self.read_layer_index(id)?.entries);
+        }
+        let tree = tree::merge(&layers)?;
+        self.build_in(&dir, want, &tree, record.created)
+    }
+
+    /// Mount the image's EROFS metadata for containers, once per image (design 6.3.3).
+    #[cfg(target_os = "linux")]
+    fn mount_composefs(&self, digest: &str) -> Result<ImageRoot> {
+        let lower = self.mount_point(digest).ok_or_else(|| {
+            Error::new(
+                ErrorKind::Internal,
+                "cannot mount the image",
+                "this store has no runtime directory for image mounts",
+                "report this bug",
+            )
+        })?;
+        composefs::mount_shared(&self.erofs_path(digest), &lower)?;
+        Ok(ImageRoot::Composefs {
+            lower,
+            objects: self.objects_dir(),
+        })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn mount_composefs(&self, _digest: &str) -> Result<ImageRoot> {
+        Err(Error::unsupported_os())
+    }
+
+    /// The lower layer for a container of this image, built and mounted as needed. Call
+    /// it under the shared lock.
+    pub fn image_root(&self, digest: &str) -> Result<ImageRoot> {
+        self.ensure_artifact(digest)?;
+        // Asked again: building may have found that composefs cannot hold the image.
+        match self.artifact(digest) {
+            Artifact::Tree => Ok(ImageRoot::Tree(self.rootfs_path(digest))),
+            Artifact::Erofs => self.mount_composefs(digest),
+        }
     }
 
     fn image_dir(&self, digest: &str) -> PathBuf {
@@ -281,7 +523,8 @@ impl Store {
             .join("image.json")
             .exists()
         {
-            return Ok(());
+            // Pulled before, maybe with the other mount method.
+            return self.ensure_artifact(&resolved.manifest_digest);
         }
         for (i, desc) in resolved.layers.iter().enumerate() {
             let diff_id = &resolved.config.diff_ids[i];
@@ -405,24 +648,18 @@ impl Store {
         let _ = remove_tree(&staging);
         std::fs::create_dir(&staging).map_err(|e| io_error(&staging, e))?;
         let result = (|| {
-            let report = tree::materialize(
-                &tree,
-                &self.objects,
-                &staging.join("rootfs"),
-                self.can_mknod,
-            )?;
-            if report.skipped_devices > 0 {
-                eprintln!(
-                    "openpod: skipped {} device files: rootless mode cannot create them",
-                    report.skipped_devices
-                );
-            }
+            let created = now();
+            let want = match self.method {
+                MountMethod::Composefs => Artifact::Erofs,
+                MountMethod::Hardlink => Artifact::Tree,
+            };
+            self.build_in(&staging, want, &tree, created)?;
             let record = ImageRecord {
                 digest: digest.to_string(),
                 config,
                 diff_ids,
                 size,
-                created: now(),
+                created,
             };
             write_json(&staging.join("image.json"), &record)?;
             match std::fs::rename(&staging, &dir) {
@@ -558,6 +795,16 @@ impl Store {
     }
 
     fn delete_image(&self, digest: &str) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        if let Some(point) = self.mount_point(digest) {
+            composefs::unmount_shared(&point).map_err(|e| {
+                Error::io(
+                    format!("cannot unmount {}", point.display()),
+                    &e,
+                    "unmount it by hand (`umount -l`), then try again",
+                )
+            })?;
+        }
         let dir = self.image_dir(digest);
         remove_tree(&dir).map_err(|e| io_error(&dir, e))
     }
@@ -570,6 +817,16 @@ impl Store {
         for dir in images.flatten() {
             if let Ok(record) = read_json::<ImageRecord>(&dir.path().join("image.json")) {
                 used_layers.extend(record.diff_ids.iter().map(|d| hex_of(d).to_string()));
+                // Builds that never finished (the exclusive lock keeps out running ones).
+                for e in std::fs::read_dir(dir.path())
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                {
+                    if e.file_name().to_string_lossy().ends_with(".tmp") {
+                        let _ = remove_path(&e.path());
+                    }
+                }
             } else {
                 let _ = remove_tree(&dir.path()); // an unfinished pull
             }
@@ -593,6 +850,7 @@ impl Store {
             }
         }
         self.objects.sweep(&keep)?;
+        let _ = remove_tree(&self.root.join("tmp"));
         Ok(())
     }
 
@@ -700,6 +958,8 @@ impl Store {
         }
         if !self.image_dir(&digest).exists() {
             self.assemble(&digest, ImageConfig::default(), diff_ids)?;
+        } else {
+            self.ensure_artifact(&digest)?;
         }
         self.set_ref(&r.name(), &digest, last_used)?;
         self.read_record(&digest)
@@ -745,6 +1005,16 @@ pub fn remove_tree(path: &Path) -> std::io::Result<()> {
             make_dirs_writable(path);
             std::fs::remove_dir_all(path)
         }
+        Err(e) => Err(e),
+    }
+}
+
+/// Remove a file, or a directory tree.
+fn remove_path(path: &Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(m) if m.is_dir() => remove_tree(path),
+        Ok(_) => std::fs::remove_file(path),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
     }
 }
@@ -864,6 +1134,49 @@ mod tests {
         Store::open_at(tmp.path().join("store"), false, false).unwrap()
     }
 
+    /// One file with an extended attribute (a PAX `SCHILY.xattr.*` record).
+    fn xattr_layer(path: &str, data: &[u8], name: &str, value: &[u8]) -> Vec<u8> {
+        let mut b = tar::Builder::new(Vec::new());
+        let key = format!("SCHILY.xattr.{name}");
+        b.append_pax_extensions([(key.as_str(), value)]).unwrap();
+        let mut h = tar::Header::new_gnu();
+        h.set_entry_type(tar::EntryType::Regular);
+        h.set_mode(0o644);
+        h.set_uid(0);
+        h.set_gid(0);
+        h.set_size(data.len() as u64);
+        b.append_data(&mut h, path, data).unwrap();
+        b.into_inner().unwrap()
+    }
+
+    #[test]
+    fn an_image_composefs_cannot_hold_gets_a_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut s = open(&tmp);
+        s.method = MountMethod::Composefs;
+        let big = vec![b'v'; 5000];
+        let rec = s
+            .import_for_test("a", vec![xattr_layer("x", b"1", "user.big", &big)], 1)
+            .unwrap();
+        assert!(s.rootfs_path(&rec.digest).join("x").exists());
+        assert!(!s.erofs_path(&rec.digest).exists());
+        assert_eq!(
+            s.image_root(&rec.digest).unwrap(),
+            ImageRoot::Tree(s.rootfs_path(&rec.digest))
+        );
+        // A store whose image has only its tree (pulled with hard links) keeps using it.
+        let tmp = tempfile::tempdir().unwrap();
+        let mut s = open(&tmp);
+        let rec = s
+            .import_for_test("a", vec![xattr_layer("x", b"1", "user.big", &big)], 1)
+            .unwrap();
+        s.method = MountMethod::Composefs;
+        assert_eq!(
+            s.image_root(&rec.digest).unwrap(),
+            ImageRoot::Tree(s.rootfs_path(&rec.digest))
+        );
+    }
+
     #[test]
     fn refs_resolve_by_name_and_digest_prefix() {
         let tmp = tempfile::tempdir().unwrap();
@@ -938,6 +1251,131 @@ mod tests {
         s.remove_image("a", &HashMap::new).unwrap();
         assert_eq!(s.objects.total_size().unwrap().0, 1);
         assert!(s.find("a2").is_ok());
+    }
+
+    #[test]
+    fn composefs_pulls_write_only_the_erofs_image() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut s = open(&tmp);
+        s.method = MountMethod::Composefs;
+        let rec = s
+            .import_for_test("a", vec![file_layer(&[("x", b"1")])], 1)
+            .unwrap();
+        let image = std::fs::read(s.erofs_path(&rec.digest)).unwrap();
+        assert_eq!(&image[1024..1028], &0xE0F5_E1E2u32.to_le_bytes());
+        assert!(!s.rootfs_path(&rec.digest).exists());
+    }
+
+    #[test]
+    fn a_changed_method_builds_the_missing_artifact() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut s = open(&tmp);
+        let rec = s
+            .import_for_test("a", vec![file_layer(&[("x", b"1")])], 1)
+            .unwrap();
+        s.method = MountMethod::Composefs;
+        s.ensure_artifact(&rec.digest).unwrap();
+        assert!(s.erofs_path(&rec.digest).is_file());
+        assert!(s.rootfs_path(&rec.digest).join("x").exists());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut s = open(&tmp);
+        s.method = MountMethod::Composefs;
+        let rec = s
+            .import_for_test("a", vec![file_layer(&[("x", b"1")])], 1)
+            .unwrap();
+        s.method = MountMethod::Hardlink;
+        s.ensure_artifact(&rec.digest).unwrap();
+        assert!(s.rootfs_path(&rec.digest).join("x").exists());
+        // Nothing half-built is left next to them.
+        let leftovers: Vec<_> = std::fs::read_dir(s.image_dir(&rec.digest))
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    #[test]
+    fn pulling_again_builds_a_missing_artifact() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut s = open(&tmp);
+        let layers = vec![file_layer(&[("x", b"1")])];
+        let rec = s.import_for_test("a", layers.clone(), 1).unwrap();
+        s.method = MountMethod::Composefs;
+        s.import_for_test("a", layers, 2).unwrap();
+        assert!(s.erofs_path(&rec.digest).is_file());
+    }
+
+    #[test]
+    fn a_read_only_store_does_not_build() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = Dirs {
+            data: tmp.path().join("data"),
+            runtime: tmp.path().join("run"),
+            config: tmp.path().join("cfg"),
+        };
+        let rec = Store::open_at_dirs_for_test(&dirs)
+            .unwrap()
+            .import_for_test("a", vec![file_layer(&[("x", b"1")])], 1)
+            .unwrap();
+        let mut ro = Store::open_existing(&dirs).unwrap();
+        ro.method = MountMethod::Composefs;
+        let e = ro.ensure_artifact(&rec.digest).unwrap_err();
+        assert!(e.next.contains("openpod pull"), "{e:?}");
+        assert!(!ro.erofs_path(&rec.digest).exists());
+    }
+
+    #[test]
+    fn garbage_collection_removes_unfinished_builds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = open(&tmp);
+        let rec = s
+            .import_for_test("a", vec![file_layer(&[("x", b"1")])], 1)
+            .unwrap();
+        let dir = s.image_dir(&rec.digest);
+        std::fs::write(dir.join("rootfs.erofs.77.tmp"), b"half").unwrap();
+        std::fs::create_dir(dir.join("rootfs.77.tmp")).unwrap();
+        std::fs::create_dir_all(s.root.join("tmp/probe.77")).unwrap();
+        s.collect_garbage().unwrap();
+        assert!(!dir.join("rootfs.erofs.77.tmp").exists());
+        assert!(!dir.join("rootfs.77.tmp").exists());
+        assert!(!s.root.join("tmp/probe.77").exists());
+        assert!(s.rootfs_path(&rec.digest).join("x").exists());
+    }
+
+    #[test]
+    fn a_hardlink_image_root_is_its_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = open(&tmp);
+        let rec = s
+            .import_for_test("a", vec![file_layer(&[("x", b"1")])], 1)
+            .unwrap();
+        assert_eq!(
+            s.image_root(&rec.digest).unwrap(),
+            ImageRoot::Tree(s.rootfs_path(&rec.digest))
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn removing_an_image_removes_its_mount_point() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = Dirs {
+            data: tmp.path().join("data"),
+            runtime: tmp.path().join("run"),
+            config: tmp.path().join("cfg"),
+        };
+        let s = Store::open_at_dirs_for_test(&dirs).unwrap();
+        let rec = s
+            .import_for_test("a", vec![file_layer(&[("x", b"1")])], 1)
+            .unwrap();
+        let point = dirs.runtime.join("images").join(hex_of(&rec.digest));
+        std::fs::create_dir_all(&point).unwrap();
+        std::fs::write(point.with_extension("lock"), b"").unwrap();
+        s.remove_image("a", &HashMap::new).unwrap();
+        assert!(!point.exists());
+        assert!(!point.with_extension("lock").exists());
     }
 
     // Images keep setuid bits and file capabilities. Other users must not reach them.

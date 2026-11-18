@@ -4,7 +4,7 @@ A daemonless, rootless container engine that runs Docker/OCI images from a singl
 
 ## Status
 
-Early development (milestone M7). What works:
+Early development (milestone M2b). What works:
 
 ```sh
 openpod run alpine echo hello            # pulls the image if needed; the container stays
@@ -36,10 +36,29 @@ default.
 
 Not yet: macOS and Windows.
 
+## Image storage
+
+Every distinct file is stored once, whatever image it comes from. A container sees its
+image in one of two ways; the files, owners, modes, extended attributes and hard links it
+sees are the same:
+
+- **composefs** (root, Linux 6.5 or later): each image has a small metadata file (EROFS)
+  that names the stored files. openpod mounts it once per image and every container of
+  the image shares that mount; overlayfs reads file contents from the store. Pulls do not
+  unpack a directory tree.
+- **Hard-link trees** (rootless, or older kernels): each image is unpacked once as a
+  directory of hard links to the stored files.
+
+As root, openpod tries composefs once per kernel and remembers the result; `openpod check`
+shows the method in use and, when composefs is not available, why. Set
+`image_mount = "hardlink"` in `config.toml` (or `OPENPOD_IMAGE_MOUNT=hardlink`) to use
+hard-link trees as root too. When the method changes, an image gets what it needs the first
+time a container uses it. Removing an image unmounts it.
+
 ## Checks
 
 `openpod check` lists what openpod needs on this system, one line each: the kernel,
-cgroup v2 and, without root, `newuidmap`/`newgidmap`, subordinate IDs, `pasta`, the systemd
+cgroup v2, how images are mounted (as root) and, without root, `newuidmap`/`newgidmap`, subordinate IDs, `pasta`, the systemd
 user session, AppArmor, linger and the lowest port a user may publish. Each problem comes
 with the command that fixes it. As root, it warns when Docker's firewall blocks bridge
 networks. `openpod check --apparmor-profile` prints the profile described under "AppArmor".
@@ -55,7 +74,8 @@ which, instead of "no such file": for example, that the program needs
 `/lib/ld-linux-aarch64.so.1` (glibc) and the image has no such file, or that a script's
 first line names an interpreter the image lacks.
 
-Measurements against Docker and Podman are in [docs/benchmarks.md](docs/benchmarks.md).
+Measurements are in [docs/benchmarks.md](docs/benchmarks.md): against Podman, Docker and Kiri on
+one Linux host, and against Docker Desktop, OrbStack, Kiri, Podman and Colima on a Mac.
 
 ## Volumes
 
@@ -124,7 +144,8 @@ modes, so the container sees the gateway as the client address.
 
 ## Requirements
 
-- Linux 5.12 or later, with cgroup v2 at `/sys/fs/cgroup`.
+- Linux 5.12 or later, with cgroup v2 at `/sys/fs/cgroup`. composefs (root only) needs
+  6.5 or later with EROFS; older kernels use hard-link trees.
 - Without root: `newuidmap`/`newgidmap` and entries in `/etc/subuid` and `/etc/subgid`;
   `pasta` (package `passt`) for bridge networks (or use `--network host`/`none`);
   on Ubuntu 24.04 and later an AppArmor profile (see below); for resource limits and the
@@ -138,7 +159,7 @@ openpod needs Linux kernel features. On macOS, all Linux builds and tests run in
 ```sh
 dev/vm.sh up          # create and provision the openpod-dev VM (Ubuntu 26.04)
 dev/vm.sh test        # cargo test inside the VM, rootless
-dev/vm.sh test-root   # cargo test inside the VM, as root
+dev/vm.sh test-root   # cargo test inside the VM, as root (plus library tests that need root)
 dev/vm.sh static      # build the static musl release binary and check its size
 dev/vm.sh shell       # open a shell in the VM
 ```

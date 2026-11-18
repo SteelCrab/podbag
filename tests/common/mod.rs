@@ -38,6 +38,14 @@ impl Drop for Sandbox {
             }
         }
         if root_mode() {
+            // Shared image mounts (composefs) stay until their image is removed; take
+            // down every mount below this sandbox, deepest first, before deleting it.
+            for point in mounts_under(self.tmp.path()).into_iter().rev() {
+                let _ = Command::new("sudo")
+                    .args(["-n", "umount", "-l"])
+                    .arg(&point)
+                    .status();
+            }
             let _ = Command::new("sudo")
                 .args(["-n", "rm", "-rf"])
                 .arg(self.tmp.path())
@@ -130,6 +138,28 @@ impl Sandbox {
             .output()
             .unwrap()
     }
+}
+
+/// Mount points at or below `dir` (sorted, so parents come first), with their types.
+pub fn mounts_with_types(dir: &std::path::Path) -> Vec<(String, String)> {
+    let prefix = dir.to_string_lossy().into_owned();
+    let mut out: Vec<(String, String)> = std::fs::read_to_string("/proc/self/mounts")
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| {
+            let mut f = l.split(' ');
+            let point = f.nth(1)?.to_string();
+            let fstype = f.next()?.to_string();
+            point.starts_with(&prefix).then_some((point, fstype))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// Mount points at or below `dir`, parents first.
+pub fn mounts_under(dir: &std::path::Path) -> Vec<String> {
+    mounts_with_types(dir).into_iter().map(|(p, _)| p).collect()
 }
 
 pub fn stdout(o: &Output) -> String {

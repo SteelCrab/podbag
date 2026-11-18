@@ -13,6 +13,7 @@ pub mod session;
 mod spawn;
 pub mod userns;
 
+pub(crate) use rootfs::overlay_options;
 pub use spawn::{ContainerStdio, UserNs, spawn, wait};
 
 use crate::{Error, ErrorKind};

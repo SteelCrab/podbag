@@ -30,10 +30,9 @@ pub(super) fn enter_rootfs(
             upper,
             work,
             merged,
+            data,
         } => {
-            // Inside a user namespace, overlayfs keeps its metadata in user.* xattrs.
-            let userxattr = if rootless { ",userxattr" } else { "" };
-            let options = format!("lowerdir={lower},upperdir={upper},workdir={work}{userxattr}");
+            let options = overlay_options(lower, data.as_deref(), upper, work, rootless);
             let options = std::ffi::CString::new(options).map_err(|_| {
                 Error::new(
                     ErrorKind::InvalidInput,
@@ -253,6 +252,30 @@ const READ_ONLY: [&str; 5] = [
 
 /// Cover the masked paths under `root` that start with `prefix`. Paths this kernel does
 /// not have are skipped.
+/// overlayfs options for a container's root. `data` is the object store when `lower` is an
+/// image's EROFS metadata (composefs): a data-only layer, which needs metacopy and redirects.
+/// Inside a user namespace, overlayfs keeps its metadata in user.* xattrs.
+pub(crate) fn overlay_options(
+    lower: &str,
+    data: Option<&str>,
+    upper: &str,
+    work: &str,
+    rootless: bool,
+) -> String {
+    let mut options = format!("lowerdir={lower}");
+    if let Some(data) = data {
+        options.push_str(&format!("::{data}"));
+    }
+    options.push_str(&format!(",upperdir={upper},workdir={work}"));
+    if data.is_some() {
+        options.push_str(",metacopy=on,redirect_dir=on");
+    }
+    if rootless {
+        options.push_str(",userxattr");
+    }
+    options
+}
+
 fn mask(rootless: bool, root: &Path, prefix: &str) -> Result<()> {
     for rel in MASKED.iter().filter(|p| p.starts_with(prefix)) {
         let path = root.join(rel);
@@ -364,4 +387,32 @@ fn step<T, E: Into<std::io::Error>>(
             "check that the root filesystem directory holds a complete Linux system",
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overlay_options_for_both_methods() {
+        assert_eq!(
+            overlay_options("/s/img", None, "/c/upper", "/c/work", false),
+            "lowerdir=/s/img,upperdir=/c/upper,workdir=/c/work"
+        );
+        assert_eq!(
+            overlay_options("/s/img", None, "/c/upper", "/c/work", true),
+            "lowerdir=/s/img,upperdir=/c/upper,workdir=/c/work,userxattr"
+        );
+        assert_eq!(
+            overlay_options(
+                "/r/images/ab",
+                Some("/s/objects"),
+                "/c/upper",
+                "/c/work",
+                false
+            ),
+            "lowerdir=/r/images/ab::/s/objects,upperdir=/c/upper,workdir=/c/work,\
+             metacopy=on,redirect_dir=on"
+        );
+    }
 }

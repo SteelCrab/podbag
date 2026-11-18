@@ -29,6 +29,10 @@ pub struct Facts {
     /// Docker runs here: its firewall (iptables FORWARD policy DROP) drops forwarded
     /// traffic that its own rules do not allow.
     pub docker: bool,
+    /// The `image_mount` setting.
+    pub image_mount: crate::config::ImageMount,
+    /// As root: whether the composefs probe passed, and why not. None when rootless.
+    pub composefs: Option<Result<(), String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,6 +101,7 @@ pub fn evaluate(f: &Facts) -> Vec<Item> {
             Some("boot with systemd.unified_cgroup_hierarchy=1 (cgroup v2 only)"),
         )
     });
+    items.push(image_mount(f));
     let na = |name: &str| item(name, NotApplicable, "not needed as root", None);
     if f.root {
         for name in [
@@ -231,6 +236,36 @@ pub fn evaluate(f: &Facts) -> Vec<Item> {
     items
 }
 
+/// How containers get their images: only root mode can use composefs (design 4.5.1).
+fn image_mount(f: &Facts) -> Item {
+    use Level::*;
+    let name = "image mount";
+    match (&f.composefs, f.image_mount) {
+        (None, _) => item(
+            name,
+            NotApplicable,
+            "rootless mode uses hard-link trees",
+            None,
+        ),
+        (Some(_), crate::config::ImageMount::Hardlink) => item(
+            name,
+            Ok,
+            "hard-link trees (image_mount = \"hardlink\")",
+            None,
+        ),
+        (Some(Result::Ok(())), _) => item(name, Ok, "composefs", None),
+        (Some(Err(why)), _) => item(
+            name,
+            Ok,
+            format!(
+                "hard-link trees: composefs is not available: {why}; openpod tries again after a \
+                 day (to try now, delete mount-method.json in the image store)"
+            ),
+            None,
+        ),
+    }
+}
+
 /// 1 when a required item fails, else 0.
 pub fn exit_code(items: &[Item]) -> i32 {
     i32::from(items.iter().any(|i| i.level == Level::Fail))
@@ -292,6 +327,24 @@ pub fn gather() -> Facts {
             .ok(),
         docker: Path::new("/sys/class/net/docker0").exists()
             || Path::new("/run/docker.sock").exists(),
+        image_mount: crate::paths::dirs()
+            .and_then(|d| crate::config::load(&d))
+            .map(|c| c.image_mount)
+            .unwrap_or_default(),
+        composefs: root.then(composefs_support),
+    }
+}
+
+/// The cached composefs probe result for the root store (probing when there is none).
+#[cfg(target_os = "linux")]
+fn composefs_support() -> Result<(), String> {
+    let dirs = crate::paths::dirs().map_err(|e| e.to_string())?;
+    let store = crate::store::Store::open(&dirs, true).map_err(|e| e.to_string())?;
+    let found = store.composefs_support();
+    if found.composefs {
+        Ok(())
+    } else {
+        Err(found.reason)
     }
 }
 
@@ -315,7 +368,36 @@ mod tests {
             linger: Some(true),
             unprivileged_port_start: Some(1024),
             docker: false,
+            image_mount: crate::config::ImageMount::Auto,
+            composefs: None,
         }
+    }
+
+    #[test]
+    fn image_mount_item() {
+        use crate::config::ImageMount;
+        let rootless = evaluate(&good_rootless());
+        assert_eq!(item(&rootless, "image mount").level, Level::NotApplicable);
+        let root = |composefs: Result<(), String>, setting: ImageMount| {
+            let mut f = good_rootless();
+            f.root = true;
+            f.composefs = Some(composefs);
+            f.image_mount = setting;
+            item(&evaluate(&f), "image mount").clone()
+        };
+        let ok = root(Ok(()), ImageMount::Auto);
+        assert_eq!((ok.level, ok.detail.as_str()), (Level::Ok, "composefs"));
+        let old = root(
+            Err("overlayfs refused data-only layers (Linux 6.1)".into()),
+            ImageMount::Auto,
+        );
+        assert_eq!(old.level, Level::Ok);
+        assert!(old.detail.contains("hard-link trees"), "{}", old.detail);
+        assert!(old.detail.contains("Linux 6.1"), "{}", old.detail);
+        assert!(old.detail.contains("mount-method.json"), "{}", old.detail);
+        let set = root(Ok(()), ImageMount::Hardlink);
+        assert_eq!(set.level, Level::Ok);
+        assert_eq!(set.detail, "hard-link trees (image_mount = \"hardlink\")");
     }
 
     fn item<'a>(items: &'a [Item], name: &str) -> &'a Item {

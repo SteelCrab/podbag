@@ -32,7 +32,13 @@ case "${1:-}" in
   shell) limactl shell --workdir "$repo" "$name" ;;
   run) shift; vm_run "$@" ;;
   test) shift; vm_run cargo test "$@" ;;
-  test-root) shift; OPENPOD_TEST_ROOT=1 vm_run cargo test "$@" ;;
+  test-root)
+    shift
+    OPENPOD_TEST_ROOT=1 vm_run cargo test "$@"
+    # The whole suite also runs the library tests that need real root.
+    [ $# -gt 0 ] || vm_run dev/root-lib-tests.sh
+    ;;
+  root-lib) shift; vm_run dev/root-lib-tests.sh "$@" ;;
   static)
     target="$(limactl shell "$name" uname -m)-unknown-linux-musl"
     # ring compiles C code; build it with musl-gcc for the musl target.
@@ -42,7 +48,7 @@ case "${1:-}" in
     ;;
   down) limactl stop "$name" ;;
   *)
-    echo "usage: dev/vm.sh up|bench-setup|shell|run <cmd...>|test [args]|test-root [args]|static|down" >&2
+    echo "usage: dev/vm.sh up|bench-setup|shell|run <cmd...>|test [args]|test-root [args]|root-lib [filter]|static|down" >&2
     exit 2
     ;;
 esac

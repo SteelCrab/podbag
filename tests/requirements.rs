@@ -112,6 +112,20 @@ fn check_passes_on_the_test_system() {
 }
 
 #[test]
+fn check_shows_the_image_mount_method() {
+    let sb = Sandbox::new();
+    let out = sb.openpod().arg("check").output().unwrap();
+    let text = stdout(&out);
+    let line = check_line(&text, "image mount");
+    if root_mode() {
+        assert!(line.starts_with("ok"), "{text}");
+        assert!(line.contains("composefs"), "{text}");
+    } else {
+        assert!(line.starts_with("n/a"), "{text}");
+    }
+}
+
+#[test]
 fn check_reports_a_missing_pasta() {
     if root_mode() {
         return;

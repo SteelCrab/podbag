@@ -15,6 +15,29 @@ pub struct Config {
     pub memory_budget: Budget,
     /// The default network's subnet (design 6.8.2).
     pub default_subnet: String,
+    /// How root mode mounts images (design 6.3.3).
+    pub image_mount: ImageMount,
+}
+
+/// `image_mount`: `auto` uses composefs when openpod runs as root and the kernel passes
+/// the probe, hard-link trees otherwise; `hardlink` always uses hard-link trees.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ImageMount {
+    #[default]
+    Auto,
+    Hardlink,
+}
+
+impl ImageMount {
+    fn parse(value: &str) -> std::result::Result<ImageMount, String> {
+        match value {
+            "auto" => Ok(ImageMount::Auto),
+            "hardlink" => Ok(ImageMount::Hardlink),
+            other => Err(format!(
+                "image_mount is \"{other}\"; it must be \"auto\" or \"hardlink\""
+            )),
+        }
+    }
 }
 
 impl Default for Config {
@@ -23,12 +46,13 @@ impl Default for Config {
             store_limit: DEFAULT_STORE_LIMIT,
             memory_budget: Budget::default(),
             default_subnet: "10.77.0.0/16".to_string(),
+            image_mount: ImageMount::Auto,
         }
     }
 }
 
 /// Read `<config>/config.toml` (missing file = defaults). `OPENPOD_STORE_LIMIT`,
-/// `OPENPOD_MEMORY_BUDGET` and `OPENPOD_DEFAULT_SUBNET` override it.
+/// `OPENPOD_MEMORY_BUDGET`, `OPENPOD_DEFAULT_SUBNET` and `OPENPOD_IMAGE_MOUNT` override it.
 pub fn load(dirs: &Dirs) -> Result<Config> {
     let path = dirs.config.join("config.toml");
     let mut config = match std::fs::read_to_string(&path) {
@@ -45,17 +69,33 @@ pub fn load(dirs: &Dirs) -> Result<Config> {
             ));
         }
     };
-    if let Ok(v) = std::env::var("OPENPOD_STORE_LIMIT") {
+    apply_overrides(&mut config, |k| std::env::var(k).ok())?;
+    Ok(config)
+}
+
+/// The environment variables that override the file.
+fn apply_overrides(config: &mut Config, var: impl Fn(&str) -> Option<String>) -> Result<()> {
+    if let Some(v) = var("OPENPOD_STORE_LIMIT") {
         config.store_limit = parse_size(&v)?;
     }
-    if let Ok(v) = std::env::var("OPENPOD_MEMORY_BUDGET") {
+    if let Some(v) = var("OPENPOD_MEMORY_BUDGET") {
         config.memory_budget = parse_budget(&v)?;
     }
-    if let Ok(v) = std::env::var("OPENPOD_DEFAULT_SUBNET") {
+    if let Some(v) = var("OPENPOD_DEFAULT_SUBNET") {
         crate::network::parse_cidr(&v)?;
         config.default_subnet = v;
     }
-    Ok(config)
+    if let Some(v) = var("OPENPOD_IMAGE_MOUNT") {
+        config.image_mount = ImageMount::parse(&v).map_err(|why| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                "invalid OPENPOD_IMAGE_MOUNT",
+                why,
+                "set it to auto or hardlink, or unset it",
+            )
+        })?;
+    }
+    Ok(())
 }
 
 /// Parse `key = value` lines. `#` starts a comment. Values are quoted strings or integers.
@@ -87,6 +127,7 @@ pub fn parse(text: &str) -> Result<Config> {
                 crate::network::parse_cidr(value).map_err(|e| bad(e.why))?;
                 config.default_subnet = value.to_string();
             }
+            "image_mount" => config.image_mount = ImageMount::parse(value).map_err(bad)?,
             other => return Err(bad(format!("unknown setting {other}"))),
         }
     }
@@ -184,6 +225,30 @@ mod tests {
         let c = parse("default_subnet = \"172.31.0.0/16\"").unwrap();
         assert_eq!(c.default_subnet, "172.31.0.0/16");
         assert!(parse("default_subnet = \"10.0.0.1/16\"").is_err());
+    }
+
+    #[test]
+    fn image_mount_setting() {
+        assert_eq!(parse("").unwrap().image_mount, ImageMount::Auto);
+        let mount = |text: &str| parse(text).unwrap().image_mount;
+        assert_eq!(mount("image_mount = \"hardlink\""), ImageMount::Hardlink);
+        assert_eq!(mount("image_mount = \"auto\""), ImageMount::Auto);
+        let e = parse("image_mount = \"overlay\"").unwrap_err();
+        assert_eq!(e.kind, ErrorKind::InvalidInput);
+        assert!(
+            e.why.contains("auto") && e.why.contains("hardlink"),
+            "{}",
+            e.why
+        );
+        let mut c = parse("image_mount = \"auto\"").unwrap();
+        apply_overrides(&mut c, |k| {
+            (k == "OPENPOD_IMAGE_MOUNT").then(|| "hardlink".to_string())
+        })
+        .unwrap();
+        assert_eq!(c.image_mount, ImageMount::Hardlink);
+        assert!(
+            apply_overrides(&mut c, |k| (k == "OPENPOD_IMAGE_MOUNT").then(|| "x".into())).is_err()
+        );
     }
 
     #[test]

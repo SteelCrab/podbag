@@ -485,8 +485,8 @@ mod linux_launch {
     use crate::helper::{self, HelperChild};
     use crate::paths::Dirs;
     use crate::spec::{ContainerSpec, Rootfs};
-    use crate::store::Store;
     use crate::store::ops::StoreOp;
+    use crate::store::{ImageRoot, Store};
     use crate::volume::{self, Access, Mount, MountRequest, MountSource};
     use crate::{Error, ErrorKind, Result, id, paths, state};
     use std::process::Stdio;
@@ -734,32 +734,44 @@ mod linux_launch {
             Source::Image(ref image) => {
                 let command =
                     command_line(&image.config, c.entrypoint.as_deref(), c.command.as_deref())?;
-                let store = Store::open_existing(&dirs).ok_or_else(|| {
+                let not_pulled = || {
                     Error::new(
                         ErrorKind::NotFound,
                         format!("cannot find image {}", image.name),
                         "it has not been pulled",
                         format!("run `openpod pull {}`", image.name),
                     )
-                })?;
+                };
+                // As root the store may build what this mount method needs (design
+                // 6.3.2); rootless stores always hold the hard-link tree a pull made.
+                let mut store = if rootless {
+                    Store::open_existing(&dirs).ok_or_else(not_pulled)?
+                } else {
+                    Store::open_existing(&dirs).ok_or_else(not_pulled)?;
+                    Store::open(&dirs, true)?
+                };
+                store.use_mount_method(rootless, crate::config::load(&dirs)?.image_mount);
                 let _ = store.touch(&image.name);
                 // Hold the shared lock until the config names the image: prune and rmi
                 // skip images that a container config names.
                 let lock = store.lock_shared()?;
                 let (_, record) = store.find(&image.digest)?;
+                let (lower, data) = match store.image_root(&record.digest)? {
+                    ImageRoot::Tree(tree) => (tree, None),
+                    ImageRoot::Composefs { lower, objects } => (lower, Some(objects)),
+                };
+                let text = |p: &std::path::Path| p.to_string_lossy().into_owned();
                 let dir = dirs.container_dir(&id);
                 let sub = |name: &str| dir.join(name).to_string_lossy().into_owned();
                 let mut env = image.config.env.clone();
                 env.extend(c.env);
                 let spec = ContainerSpec {
                     rootfs: Rootfs::Overlay {
-                        lower: store
-                            .rootfs_path(&record.digest)
-                            .to_string_lossy()
-                            .into_owned(),
+                        lower: text(&lower),
                         upper: sub("upper"),
                         work: sub("work"),
                         merged: sub("merged"),
+                        data: data.as_deref().map(text),
                     },
                     id,
                     command,

@@ -332,6 +332,24 @@ pub enum TarEntry {
     },
     Whiteout(String),
     Opaque(String),
+    Fifo {
+        path: String,
+        mode: u32,
+    },
+    /// A character device.
+    Device {
+        path: String,
+        major: u32,
+        minor: u32,
+        mode: u32,
+    },
+    /// A root-owned file with extended attributes (PAX `SCHILY.xattr.*` records).
+    WithXattrs {
+        path: String,
+        data: Vec<u8>,
+        mode: u32,
+        xattrs: Vec<(String, Vec<u8>)>,
+    },
 }
 
 impl TarEntry {
@@ -404,6 +422,46 @@ pub fn layer(entries: &[TarEntry]) -> Vec<u8> {
                 h.set_mode(0o644);
                 h.set_size(0);
                 b.append_data(&mut h, wh, std::io::empty()).unwrap();
+            }
+            TarEntry::Fifo { path, mode } => {
+                h.set_entry_type(tar::EntryType::Fifo);
+                h.set_mode(*mode);
+                h.set_size(0);
+                b.append_data(&mut h, path, std::io::empty()).unwrap();
+            }
+            TarEntry::Device {
+                path,
+                major,
+                minor,
+                mode,
+            } => {
+                h.set_entry_type(tar::EntryType::Char);
+                h.set_mode(*mode);
+                h.set_size(0);
+                h.set_device_major(*major).unwrap();
+                h.set_device_minor(*minor).unwrap();
+                b.append_data(&mut h, path, std::io::empty()).unwrap();
+            }
+            TarEntry::WithXattrs {
+                path,
+                data,
+                mode,
+                xattrs,
+            } => {
+                let keys: Vec<String> = xattrs
+                    .iter()
+                    .map(|(k, _)| format!("SCHILY.xattr.{k}"))
+                    .collect();
+                b.append_pax_extensions(
+                    keys.iter()
+                        .map(String::as_str)
+                        .zip(xattrs.iter().map(|(_, v)| v.as_slice())),
+                )
+                .unwrap();
+                h.set_entry_type(tar::EntryType::Regular);
+                h.set_mode(*mode);
+                h.set_size(data.len() as u64);
+                b.append_data(&mut h, path, data.as_slice()).unwrap();
             }
             TarEntry::Opaque(dir) => {
                 h.set_entry_type(tar::EntryType::Regular);

@@ -74,7 +74,12 @@ impl ObjectStore {
     }
 
     pub fn path(&self, key: &str) -> PathBuf {
-        self.dir.join(&key[..2]).join(key)
+        self.dir.join(ObjectStore::relative_path(key))
+    }
+
+    /// Where an object lives below the objects directory: `ab/ab…`.
+    pub fn relative_path(key: &str) -> String {
+        format!("{}/{key}", &key[..2])
     }
 
     /// Store `data` with `meta`. Returns the object key and the content size.

@@ -17,6 +17,10 @@ pub enum Rootfs {
         upper: String,
         work: String,
         merged: String,
+        /// The object store as overlayfs's data-only layer, when `lower` is an image's
+        /// EROFS metadata (composefs); None for a hard-link tree.
+        #[serde(default)]
+        data: Option<String>,
     },
 }
 
@@ -152,7 +156,12 @@ impl ContainerSpec {
                 upper,
                 work,
                 merged,
-            } => vec![lower, upper, work, merged],
+                data,
+            } => {
+                let mut paths: Vec<&str> = vec![lower, upper, work, merged];
+                paths.extend(data.as_deref());
+                paths
+            }
         };
         if let Some(p) = paths.iter().find(|p| !p.starts_with('/')) {
             return invalid(
@@ -295,6 +304,7 @@ mod tests {
             upper: "/u".into(),
             work: "/w".into(),
             merged: "/m".into(),
+            data: None,
         };
         let e = s.validate().unwrap_err();
         assert!(e.why.contains("',' or ':'"), "{}", e.why);
@@ -303,7 +313,26 @@ mod tests {
             upper: "/u".into(),
             work: "/w".into(),
             merged: "/m".into(),
+            data: None,
         };
+        assert!(s.validate().is_ok());
+    }
+
+    #[test]
+    fn the_data_layer_path_is_checked_like_the_others() {
+        let mut s = spec();
+        let with_data = |data: &str| Rootfs::Overlay {
+            lower: "/r/images/ab".into(),
+            upper: "/u".into(),
+            work: "/w".into(),
+            merged: "/m".into(),
+            data: Some(data.into()),
+        };
+        s.rootfs = with_data("objects");
+        assert!(s.validate().unwrap_err().why.contains("not absolute"));
+        s.rootfs = with_data("/s/ob:jects");
+        assert!(s.validate().unwrap_err().why.contains("',' or ':'"));
+        s.rootfs = with_data("/s/objects");
         assert!(s.validate().is_ok());
     }
 

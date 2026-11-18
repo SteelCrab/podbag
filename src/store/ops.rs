@@ -84,8 +84,10 @@ mod linux_ops {
     pub(super) fn run(op: StoreOp, dirs: &Dirs, rootless: bool) -> Result<Value> {
         match op {
             StoreOp::Pull { name, progress } => {
-                let store = Store::open(dirs, !rootless)?;
-                let limit = config::load(dirs)?.store_limit;
+                let mut store = Store::open(dirs, !rootless)?;
+                let config = config::load(dirs)?;
+                store.use_mount_method(rootless, config.image_mount);
+                let limit = config.store_limit;
                 let in_use = || images_in_use(dirs);
                 let mut show = |p: Progress| {
                     if progress {
@@ -108,8 +110,10 @@ mod linux_ops {
                 to_json(&Store::open(dirs, !rootless)?.prune(&|| images_in_use(dirs))?)
             }
             StoreOp::CheckImage { name } => {
-                let store =
-                    Store::open_existing(dirs).ok_or_else(|| crate::image::not_pulled(&name))?;
+                Store::open_existing(dirs).ok_or_else(|| crate::image::not_pulled(&name))?;
+                // Opened for writing: it may build what this mount method needs.
+                let mut store = Store::open(dirs, !rootless)?;
+                store.use_mount_method(rootless, config::load(dirs)?.image_mount);
                 let _lock = store.lock_shared()?;
                 let (_, record) = store.find(&name)?;
                 let ld_paths: Vec<String> = record
@@ -120,11 +124,25 @@ mod linux_ops {
                     .flat_map(|(_, v)| v.split(':').map(String::from).collect::<Vec<_>>())
                     .filter(|d| d.starts_with('/'))
                     .collect();
-                to_json(&crate::libc_check::check_tree(
-                    &store.rootfs_path(&record.digest),
-                    crate::elf::Machine::host(),
-                    &ld_paths,
-                ))
+                store.ensure_artifact(&record.digest)?;
+                let check = |root: &std::path::Path| {
+                    crate::libc_check::check_tree(root, crate::elf::Machine::host(), &ld_paths)
+                };
+                let report = if !store.uses_composefs(&record.digest) {
+                    check(&store.rootfs_path(&record.digest))
+                } else {
+                    // Mounted privately for this job: nothing stays on the host.
+                    let scratch = store.scratch_dir(&format!("check.{}", std::process::id()));
+                    let report = crate::store::composefs::with_mounted(
+                        &store.erofs_path(&record.digest),
+                        &store.objects_dir(),
+                        &scratch,
+                        check,
+                    );
+                    let _ = remove_tree(&scratch);
+                    report?
+                };
+                to_json(&report)
             }
             StoreOp::RemoveVolume { name } => {
                 crate::volume::check_name(&name)?;
