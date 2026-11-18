@@ -2,6 +2,7 @@
 //!
 //! Everything here runs inside the shim helper process, never in the library caller.
 
+pub mod archive;
 pub mod exec;
 mod init;
 mod mounts;

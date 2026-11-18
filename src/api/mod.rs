@@ -22,7 +22,7 @@ use crate::paths::Dirs;
 use crate::{Error, ErrorKind, Result};
 use http::{HttpError, write_head};
 use router::{Ctx, Reply};
-use std::io::{BufReader, Write};
+use std::io::{BufReader, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -260,16 +260,43 @@ pub(crate) fn handle_connection(stream: UnixStream, ctx: &Ctx) {
     };
     let mut reader = BufReader::new(stream);
     loop {
-        let req = match http::read_request(&mut reader) {
+        let req = match http::read_request_with(&mut reader, &router::streams_body) {
             Ok(Some(r)) => r,
             Ok(None) | Err(HttpError::Io(_)) => return,
             Err(HttpError::Bad(why)) => {
-                let _ = write_fixed(&mut writer, false, router::message(400, why));
+                let _ = write_fixed(&mut writer, false, router::message(400, why), &[]);
                 return;
             }
         };
         let head_only = req.method == "HEAD";
-        match router::route(&req, ctx) {
+        let mut reply = router::route(&req, ctx);
+        // A body left unread for its handler: the handler reads it (an empty one when the
+        // request gives no length), or it is skipped. What follows it cannot be told from a
+        // new request, so the connection then closes.
+        let streamed = req.framing != http::Framing::None || matches!(reply, Reply::WithBody(_));
+        if streamed {
+            if req
+                .header("expect")
+                .is_some_and(|v| v.eq_ignore_ascii_case("100-continue"))
+            {
+                let _ = writer.write_all(b"HTTP/1.1 100 Continue\r\n\r\n");
+            }
+            let mut body = http::BodyReader::new(&mut reader, req.framing);
+            if let Reply::WithBody(run) = reply {
+                reply = run(&mut body);
+            }
+            // The rest, up to a limit, so that a client still sending reads the reply.
+            let _ = std::io::copy(&mut body.take(DRAIN_LIMIT), &mut std::io::sink());
+        }
+        let mut headers = Vec::new();
+        while let Reply::Headed(more, inner) = reply {
+            headers.extend(more);
+            reply = *inner;
+        }
+        if streamed {
+            headers.push(("Connection", "close".to_string()));
+        }
+        match reply {
             Reply::Hijack { content_type, run } => {
                 let head = router::Upgrade {
                     upgrade: req.wants_upgrade(),
@@ -281,18 +308,42 @@ pub(crate) fn handle_connection(stream: UnixStream, ctx: &Ctx) {
                 run(stream, leftover, head);
                 return;
             }
+            Reply::Chunked { content_type, body } => {
+                let mut extra = vec![
+                    ("Content-Type", content_type.to_string()),
+                    ("Transfer-Encoding", "chunked".to_string()),
+                    ("Connection", "close".to_string()),
+                ];
+                extra.extend(headers.into_iter().filter(|(k, _)| *k != "Connection"));
+                if write_head(&mut writer, 200, &extra).is_ok() && !head_only {
+                    let mut chunks = std::io::BufWriter::with_capacity(
+                        64 * 1024,
+                        http::ChunkedWriter::new(&mut writer),
+                    );
+                    if body(&mut chunks).is_ok() && chunks.flush().is_ok() {
+                        if let Ok(mut inner) = chunks.into_inner() {
+                            let _ = inner.finish();
+                        }
+                    }
+                }
+                return;
+            }
             Reply::Stream { content_type, body } => {
-                let extra = [
+                let mut extra = vec![
                     ("Content-Type", content_type.to_string()),
                     ("Connection", "close".to_string()),
                 ];
+                extra.extend(headers.into_iter().filter(|(k, _)| *k != "Connection"));
                 if write_head(&mut writer, 200, &extra).is_ok() && !head_only {
                     let _ = body(&mut writer);
                 }
                 return;
             }
             reply => {
-                if write_fixed(&mut writer, head_only, reply).is_err() || !req.keep_alive() {
+                if write_fixed(&mut writer, head_only, reply, &headers).is_err()
+                    || !req.keep_alive()
+                    || streamed
+                {
                     return;
                 }
             }
@@ -300,8 +351,16 @@ pub(crate) fn handle_connection(stream: UnixStream, ctx: &Ctx) {
     }
 }
 
-/// A reply with a known length.
-fn write_fixed(w: &mut impl Write, head_only: bool, reply: Reply) -> std::io::Result<()> {
+/// How much of an unread request body is skipped before the reply.
+const DRAIN_LIMIT: u64 = 1024 * 1024;
+
+/// A reply with a known length, with `headers` too.
+fn write_fixed(
+    w: &mut impl Write,
+    head_only: bool,
+    reply: Reply,
+    headers: &[(&'static str, String)],
+) -> std::io::Result<()> {
     let (status, content_type, body) = match reply {
         Reply::Json(s, v) => (
             s,
@@ -310,9 +369,13 @@ fn write_fixed(w: &mut impl Write, head_only: bool, reply: Reply) -> std::io::Re
         ),
         Reply::Text(s, t) => (s, Some("text/plain; charset=utf-8"), t.into_bytes()),
         Reply::Empty(s) => (s, None, Vec::new()),
-        Reply::Stream { .. } | Reply::Hijack { .. } => unreachable!("handled by the caller"),
+        Reply::Stream { .. }
+        | Reply::Chunked { .. }
+        | Reply::Hijack { .. }
+        | Reply::Headed(..)
+        | Reply::WithBody(_) => unreachable!("handled by the caller"),
     };
-    let mut extra = Vec::new();
+    let mut extra: Vec<(&str, String)> = headers.to_vec();
     if let Some(ct) = content_type {
         extra.push(("Content-Type", ct.to_string()));
     }

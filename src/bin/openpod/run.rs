@@ -89,6 +89,7 @@ fn build(args: RunArgs) -> openpod::Result<Container> {
     c = c
         .interactive(args.interactive)
         .remove_on_exit(args.rm)
+        .privileged(args.privileged)
         .tty(args.tty);
     if let Some(policy) = &args.restart {
         c = c.restart(policy.parse()?);

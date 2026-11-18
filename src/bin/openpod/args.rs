@@ -44,6 +44,23 @@ pub enum Cmd {
         #[arg(long)]
         apparmor_profile: bool,
     },
+    /// Load images from an archive (`docker save` format or OCI layout) on stdin or a file
+    Load {
+        /// Read from this file instead of stdin
+        #[arg(short, long)]
+        input: Option<std::path::PathBuf>,
+        /// Print nothing
+        #[arg(short, long)]
+        quiet: bool,
+    },
+    /// Save images to an archive (`docker save` format) on stdout or a file
+    Save {
+        /// Write to this file instead of stdout
+        #[arg(short, long)]
+        output: Option<std::path::PathBuf>,
+        #[arg(required = true)]
+        images: Vec<String>,
+    },
     /// Remove images
     Rmi {
         #[arg(required = true)]
@@ -98,6 +115,8 @@ pub enum Cmd {
     Exec(ExecArgs),
     #[command(name = "__exec", hide = true)]
     ExecHelper { id: String, request: String },
+    #[command(name = "__archive", hide = true)]
+    ArchiveHelper { id: String, request: String },
     /// Manage networks
     Network {
         #[command(subcommand)]
@@ -255,6 +274,10 @@ pub struct RunArgs {
     /// Remove the container when it exits
     #[arg(long)]
     pub rm: bool,
+    /// Every capability, no seccomp filter, unmasked kernel files, a writable /sys and
+    /// cgroup (inside the user namespace when rootless)
+    #[arg(long)]
+    pub privileged: bool,
     /// Start it again after it ends: no, always, unless-stopped, on-failure[:max]
     #[arg(long, value_name = "POLICY")]
     pub restart: Option<String>,

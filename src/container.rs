@@ -282,6 +282,14 @@ impl Container {
         self
     }
 
+    /// `--privileged`: every capability, no seccomp filter, the kernel's files unmasked, a
+    /// writable /sys and cgroup (BuildKit and other container tools need them). Rootless,
+    /// it gives no more than the user has: all of it applies inside the user namespace.
+    pub fn privileged(mut self, yes: bool) -> Container {
+        self.security.privileged = yes;
+        self
+    }
+
     /// Use the default seccomp filter (on unless turned off: `seccomp=unconfined`).
     pub fn seccomp(mut self, yes: bool) -> Container {
         self.security.seccomp = yes;

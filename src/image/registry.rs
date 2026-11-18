@@ -27,6 +27,8 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 pub struct Resolved {
     /// The digest of the platform-specific manifest.
     pub manifest_digest: String,
+    /// The digest of its config: the image ID Docker's classic store and buildx show.
+    pub config_digest: String,
     pub config: ConfigFile,
     pub layers: Vec<Descriptor>,
 }
@@ -99,6 +101,7 @@ impl Registry {
 
         let (_, config_body) = self.document(r, "blobs", &config.digest, None)?;
         verify(r, &config.digest, &config_body)?;
+        let config_digest = config.digest.clone();
         let config = manifest::parse_config(&config_body)?;
         // A tag can point straight at a single-platform manifest: check its platform too.
         let (arch, _) = manifest::host_platform();
@@ -126,6 +129,7 @@ impl Registry {
         }
         Ok(Resolved {
             manifest_digest,
+            config_digest,
             config,
             layers,
         })

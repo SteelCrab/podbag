@@ -14,9 +14,27 @@ use std::io::{Read, Write};
 /// As real root there is nothing to map, so `f` runs directly.
 /// The calling process must be single-threaded (a helper process).
 pub fn run_in_userns<T: Serialize + DeserializeOwned>(f: impl FnOnce() -> Result<T>) -> Result<T> {
+    run_in_namespaces(0, f)
+}
+
+/// [`run_in_userns`], in new namespaces of the `extra` kinds (`CLONE_NEWNS`, …) too. As
+/// real root this process itself moves into them first, so it must not need its old ones
+/// afterwards.
+pub fn run_in_namespaces<T: Serialize + DeserializeOwned>(
+    extra: libc::c_int,
+    f: impl FnOnce() -> Result<T>,
+) -> Result<T> {
     // SAFETY: these calls have no preconditions.
     let (euid, egid) = unsafe { (libc::geteuid(), libc::getegid()) };
     if euid == 0 {
+        // SAFETY: unshare has no memory arguments; this process is single-threaded.
+        if extra != 0 && unsafe { libc::unshare(extra) } != 0 {
+            return Err(Error::io(
+                "cannot create a namespace",
+                &std::io::Error::last_os_error(),
+                "check that the kernel has namespaces",
+            ));
+        }
         return f();
     }
     let pipe = || {
@@ -35,7 +53,7 @@ pub fn run_in_userns<T: Serialize + DeserializeOwned>(f: impl FnOnce() -> Result
     let pid = unsafe {
         libc::syscall(
             libc::SYS_clone3,
-            &super::spawn::clone_args(libc::CLONE_NEWUSER as u64),
+            &super::spawn::clone_args((libc::CLONE_NEWUSER | extra) as u64),
             std::mem::size_of::<super::spawn::CloneArgs>(),
         )
     };

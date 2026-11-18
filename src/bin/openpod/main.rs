@@ -34,6 +34,8 @@ fn dispatch(cmd: Cmd) -> i32 {
         Cmd::CheckImage { image } => image::check_image(&image),
         Cmd::Check { apparmor_profile } => check::run(apparmor_profile),
         Cmd::Rmi { images } => image::rmi(&images),
+        Cmd::Load { input, quiet } => image::load(input.as_deref(), quiet),
+        Cmd::Save { output, images } => image::save(output.as_deref(), &images),
         Cmd::System {
             cmd:
                 args::SystemCmd::Service {
@@ -60,6 +62,7 @@ fn dispatch(cmd: Cmd) -> i32 {
         Cmd::Kill { signal, containers } => container::kill(&containers, &signal),
         Cmd::Exec(a) => container::exec(a),
         Cmd::ExecHelper { id, request } => exec_helper(&id, &request),
+        Cmd::ArchiveHelper { id, request } => archive_helper(&id, &request),
         #[cfg(target_os = "linux")]
         Cmd::Keeper { runtime } => openpod::keeper::keeper_main(&runtime),
         #[cfg(not(target_os = "linux"))]
@@ -95,6 +98,8 @@ fn dispatch(cmd: Cmd) -> i32 {
         Cmd::CheckImage { image } => image::check_image(&image),
         Cmd::Check { apparmor_profile } => check::run(apparmor_profile),
         Cmd::Rmi { images } => image::rmi(&images),
+        Cmd::Load { input, quiet } => image::load(input.as_deref(), quiet),
+        Cmd::Save { output, images } => image::save(output.as_deref(), &images),
         Cmd::System { cmd } => image::system(cmd),
         Cmd::Volume { cmd } => volume::run(cmd),
         Cmd::Network { cmd } => network::run(cmd),
@@ -119,6 +124,16 @@ fn exec_helper(id: &str, request: &str) -> i32 {
 
 #[cfg(all(unix, not(target_os = "linux")))]
 fn exec_helper(_id: &str, _request: &str) -> i32 {
+    unsupported()
+}
+
+#[cfg(target_os = "linux")]
+fn archive_helper(id: &str, request: &str) -> i32 {
+    openpod::linux::archive::archive_main(id, request)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn archive_helper(_id: &str, _request: &str) -> i32 {
     unsupported()
 }
 

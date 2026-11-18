@@ -78,6 +78,55 @@ impl Image {
         })?)
     }
 
+    /// Store the images of an archive read from `input`: `docker save`'s format, an OCI
+    /// image layout, or both (as BuildKit writes them), maybe gzip-compressed. Names it
+    /// holds move to its images.
+    pub fn load(input: &mut dyn std::io::Read) -> Result<crate::store::LoadReport> {
+        #[cfg(unix)]
+        {
+            let out =
+                crate::helper::run_store_op_with_input(&crate::store::ops::StoreOp::Load, input)?;
+            serde_json::from_value(out).map_err(|e| {
+                Error::new(
+                    ErrorKind::Internal,
+                    "the store helper sent an unreadable result",
+                    e.to_string(),
+                    "report this bug",
+                )
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = input;
+            Err(Error::unsupported_os())
+        }
+    }
+
+    /// Write the images `names` (names or ID prefixes) as one archive in `docker save`'s
+    /// format to `out`. Layers are written anew from the stored files, so their digests
+    /// (and the image's ID) differ from the original's.
+    pub fn save(names: &[String], out: &mut dyn std::io::Write) -> Result<()> {
+        #[cfg(unix)]
+        {
+            // Unknown names fail here, before anything is written.
+            for name in names {
+                Image::get(name)?;
+            }
+            crate::helper::run_store_op_with_output(
+                &crate::store::ops::StoreOp::Save {
+                    names: names.to_vec(),
+                },
+                out,
+            )
+            .map(|_| ())
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (names, out);
+            Err(Error::unsupported_os())
+        }
+    }
+
     /// Give a stored image (a name or digest prefix) another name, like `docker tag`.
     /// What the name pointed to before loses it. Returns the full new name.
     pub fn tag(source: &str, name: &str) -> Result<String> {
@@ -145,6 +194,11 @@ pub fn disk_usage() -> Result<DiskUsage> {
 /// Remove every image that no container uses.
 pub fn prune() -> Result<PruneReport> {
     from_output(store_op(&crate::store::ops::StoreOp::Prune, false)?)
+}
+
+/// Remove the images without a name (a newer load or tag took it) that no container uses.
+pub fn prune_dangling() -> Result<PruneReport> {
+    from_output(store_op(&crate::store::ops::StoreOp::PruneDangling, false)?)
 }
 
 fn pull(name: &str, progress: bool) -> Result<Image> {
@@ -217,7 +271,11 @@ pub struct DiskUsage {
 /// What `prune` removed.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
 pub struct PruneReport {
+    /// Names removed.
     pub removed_images: Vec<String>,
+    /// Images that had no name, by ID.
+    #[serde(default)]
+    pub removed_ids: Vec<String>,
     pub freed_bytes: u64,
 }
 

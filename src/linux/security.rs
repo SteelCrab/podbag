@@ -9,7 +9,12 @@ use crate::{Error, ErrorKind, Result};
 /// asked, and install the seccomp filter unless it is off. Runs as root of the container,
 /// which holds CAP_SETPCAP and CAP_SYS_ADMIN (seccomp needs one of that or no_new_privs).
 pub(super) fn apply(sec: &Security) -> Result<()> {
-    let keep = crate::caps::effective(&sec.cap_add, &sec.cap_drop)?;
+    // Privileged: every capability the kernel has, whatever else was asked.
+    let keep = if sec.privileged {
+        u64::MAX
+    } else {
+        crate::caps::effective(&sec.cap_add, &sec.cap_drop)?
+    };
     for cap in 0..64u32 {
         if keep & (1u64 << cap) != 0 {
             continue;
@@ -39,7 +44,7 @@ pub(super) fn apply(sec: &Security) -> Result<()> {
             ));
         }
     }
-    if sec.seccomp {
+    if sec.seccomp && !sec.privileged {
         install_seccomp(keep)?;
     }
     Ok(())

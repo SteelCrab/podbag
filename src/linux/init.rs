@@ -105,7 +105,13 @@ fn setup_and_exec(
     if own_netns {
         loopback_up()?;
     }
-    enter_rootfs(&spec.rootfs, &spec.mounts, own_netns, rootless)?;
+    enter_rootfs(
+        &spec.rootfs,
+        &spec.mounts,
+        own_netns,
+        rootless,
+        spec.security.privileged,
+    )?;
     if let Some(sock) = tty_socket {
         // Open the terminal in the container's own /dev/pts, so the command can find it.
         let (master, slave) = super::pty::open(None)?;

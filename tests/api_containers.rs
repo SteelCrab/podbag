@@ -6,6 +6,7 @@ use common::api::*;
 use common::registry::{FakeRegistry, TestImage, alpine_layer};
 use common::*;
 use std::io::{Read, Write};
+use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 
@@ -855,4 +856,296 @@ fn a_terminal_starts_with_the_size_that_was_asked_for() {
     let logs = s.ok(&["logs", "sized"]);
     assert_eq!(logs.trim(), "30 100", "{logs}");
     s.ok(&["rm", "sized"]);
+}
+
+#[test]
+fn privileged_through_the_api() {
+    let s = setup();
+    let caps = s.ok(&[
+        "run",
+        "--rm",
+        "--privileged",
+        &s.image,
+        "sh",
+        "-c",
+        "grep CapEff /proc/self/status",
+    ]);
+    let last: u32 = std::fs::read_to_string("/proc/sys/kernel/cap_last_cap")
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let all = format!("{:016x}", (1u64 << (last + 1)) - 1);
+    assert!(caps.contains(&all), "{caps}");
+    s.ok(&["create", "--name", "p", "--privileged", &s.image, "true"]);
+    let inspect: serde_json::Value =
+        serde_json::from_str::<serde_json::Value>(&s.ok(&["inspect", "p"])).unwrap()[0].clone();
+    assert_eq!(inspect["HostConfig"]["Privileged"], true);
+    s.ok(&["rm", "p"]);
+}
+
+#[test]
+fn docker_cp_into_a_created_and_a_running_container() {
+    let s = setup();
+    let dir = tempfile::tempdir().unwrap();
+    let note = dir.path().join("note");
+    std::fs::write(&note, "from the host\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(&note, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let note = note.display().to_string();
+    // Before its start (as buildx gives BuildKit its configuration).
+    s.ok(&["create", "--name", "c1", &s.image, "cat", "/etc/note"]);
+    s.ok(&["cp", &note, "c1:/etc/"]);
+    let out = s.ok(&["start", "-a", "c1"]);
+    assert_eq!(out.trim(), "from the host", "{out}");
+    // While it runs.
+    s.ok(&["run", "-d", "--name", "c2", &s.image, "sleep", "300"]);
+    s.ok(&["cp", &note, "c2:/tmp/"]);
+    assert_eq!(
+        s.ok(&["exec", "c2", "cat", "/tmp/note"]).trim(),
+        "from the host"
+    );
+    s.ok(&["rm", "-f", "c1", "c2"]);
+}
+
+#[test]
+fn docker_cp_out_of_a_running_and_an_ended_container() {
+    let s = setup();
+    let dir = tempfile::tempdir().unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+    let out = |name: &str| dir.path().join(name).display().to_string();
+    s.ok(&[
+        "run",
+        "-d",
+        "--name",
+        "r",
+        &s.image,
+        "sh",
+        "-c",
+        "mkdir -p /data/sub && echo one > /data/sub/a && ln -s sub/a /data/link && sleep 300",
+    ]);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while s
+        .docker(&["exec", "r", "test", "-e", "/data/link"])
+        .status
+        .code()
+        != Some(0)
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the files never appeared"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // A directory, its symbolic link kept as one.
+    s.ok(&["cp", "r:/data", &out("data")]);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("data/sub/a")).unwrap(),
+        "one\n"
+    );
+    let link = std::fs::read_link(dir.path().join("data/link")).unwrap();
+    assert_eq!(link.display().to_string(), "sub/a");
+    // The contents of a directory, with a trailing `/.`.
+    s.ok(&["cp", "r:/data/sub/.", &out("contents")]);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("contents/a")).unwrap(),
+        "one\n"
+    );
+    // A container that ended keeps its files.
+    s.ok(&[
+        "run",
+        "--name",
+        "e",
+        &s.image,
+        "sh",
+        "-c",
+        "echo two > /left",
+    ]);
+    s.ok(&["cp", "e:/left", &out("left")]);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("left")).unwrap(),
+        "two\n"
+    );
+    let missing = s.docker(&["cp", "e:/nothing", &out("nothing")]);
+    assert_ne!(missing.status.code(), Some(0));
+    assert!(
+        stderr(&missing).to_lowercase().contains("could not find"),
+        "{}",
+        stderr(&missing)
+    );
+    s.ok(&["rm", "-f", "r", "e"]);
+}
+
+#[test]
+fn a_hostile_archive_stays_in_the_container() {
+    let s = setup();
+    s.ok(&["create", "--name", "h", &s.image, "true"]);
+    let dir = tempfile::tempdir().unwrap();
+    let marker = format!("openpod-escape-{}", std::process::id());
+    // Raw names: tar-rs refuses to write `..` itself.
+    let entry = |name: &str, kind: tar::EntryType, link: &str, data: &[u8]| {
+        let mut h = tar::Header::new_gnu();
+        h.set_size(data.len() as u64);
+        h.set_mode(0o644);
+        h.set_entry_type(kind);
+        h.as_gnu_mut().unwrap().name[..name.len()].copy_from_slice(name.as_bytes());
+        h.as_gnu_mut().unwrap().linkname[..link.len()].copy_from_slice(link.as_bytes());
+        h.set_cksum();
+        (h, data.to_vec())
+    };
+    let tar_file = |name: &str, entries: Vec<(tar::Header, Vec<u8>)>| {
+        let mut b = tar::Builder::new(Vec::new());
+        for (h, data) in entries {
+            b.append(&h, data.as_slice()).unwrap();
+        }
+        let path = dir.path().join(name);
+        std::fs::write(&path, b.into_inner().unwrap()).unwrap();
+        path.display().to_string()
+    };
+    let put = |file: &str, path: &str| {
+        let (body, head) = curl(
+            &s.service.socket,
+            &[
+                "-X",
+                "PUT",
+                "-H",
+                "Content-Type: application/x-tar",
+                "--data-binary",
+                &format!("@{file}"),
+                &format!("/containers/h/archive?path={path}&noOverwriteDirNonDir=true"),
+            ],
+        );
+        (head.lines().next().unwrap_or("").to_string(), body)
+    };
+    // `..` leaving the destination is refused.
+    let up = format!("../../../../../../../tmp/{marker}");
+    let file = tar_file(
+        "up.tar",
+        vec![entry(&up, tar::EntryType::Regular, "", b"x")],
+    );
+    let (status, body) = put(&file, "/tmp");
+    assert!(status.contains(" 400 "), "{status} {body}");
+    assert!(!Path::new("/tmp").join(&marker).exists());
+    // A link to `/` leads to the container's root, not the host's.
+    let file = tar_file(
+        "link.tar",
+        vec![
+            entry("root", tar::EntryType::Symlink, "/", b""),
+            entry(
+                &format!("root/tmp/{marker}"),
+                tar::EntryType::Regular,
+                "",
+                b"x",
+            ),
+        ],
+    );
+    let (status, body) = put(&file, "/");
+    assert!(!Path::new("/tmp").join(&marker).exists(), "{status} {body}");
+    // Not an archive at all.
+    let junk = dir.path().join("junk");
+    std::fs::write(&junk, vec![b'j'; 4096]).unwrap();
+    let (status, body) = put(&junk.display().to_string(), "/tmp");
+    assert!(status.contains(" 400 "), "{status} {body}");
+    s.ok(&["rm", "h"]);
+}
+
+#[test]
+fn docker_cp_of_proc_is_an_empty_directory() {
+    // As with Docker, which reads the container's files from outside: the kernel's
+    // file systems (/proc, /sys) come out as empty directories.
+    let s = setup();
+    s.ok(&["run", "-d", "--name", "p", &s.image, "sleep", "300"]);
+    let dir = tempfile::tempdir().unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+    let out = dir.path().join("proc");
+    s.ok(&["cp", "p:/proc", &out.display().to_string()]);
+    let entries: Vec<_> = std::fs::read_dir(&out).unwrap().collect();
+    assert!(entries.is_empty(), "{} entries", entries.len());
+    s.ok(&["rm", "-f", "p"]);
+}
+
+#[test]
+fn a_copy_that_fails_midway_is_an_error() {
+    // Rootless, a file of the host's root that a bind mount shows is not readable to the
+    // container's root: the copy fails after its details were sent.
+    if root_mode() {
+        return;
+    }
+    let s = setup();
+    s.ok(&[
+        "run",
+        "-d",
+        "--name",
+        "f",
+        "-v",
+        "/etc/shadow:/secret:ro",
+        &s.image,
+        "sleep",
+        "300",
+    ]);
+    let dir = tempfile::tempdir().unwrap();
+    let out = s.docker(&[
+        "cp",
+        "f:/secret",
+        &dir.path().join("secret").display().to_string(),
+    ]);
+    assert_ne!(out.status.code(), Some(0), "the copy reported success");
+    s.ok(&["rm", "-f", "f"]);
+}
+
+#[test]
+fn links_a_running_container_plants_stay_inside_it() {
+    // The container makes links to `/` and to its init's root; copies through them reach
+    // its own files, never the host's (as root the helper runs as the host's root).
+    let s = setup();
+    let marker = format!("openpod-marker-{}", std::process::id());
+    let script = format!(
+        "ln -s / /out && ln -s /proc/1/root /out2 && echo inside > /etc/{marker} && sleep 300"
+    );
+    s.ok(&["run", "-d", "--name", "l", &s.image, "sh", "-c", &script]);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while s
+        .docker(&["exec", "l", "test", "-e", &format!("/etc/{marker}")])
+        .status
+        .code()
+        != Some(0)
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the links never appeared"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let dir = tempfile::tempdir().unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+    for (i, via) in ["/out", "/out2"].iter().enumerate() {
+        let got = dir.path().join(format!("got{i}"));
+        s.ok(&[
+            "cp",
+            &format!("l:{via}/etc/{marker}"),
+            &got.display().to_string(),
+        ]);
+        assert_eq!(std::fs::read_to_string(&got).unwrap(), "inside\n", "{via}");
+    }
+    // In through the links: the container's /tmp, not the host's.
+    let note = dir.path().join(&marker);
+    std::fs::write(&note, "copied in\n").unwrap();
+    std::fs::set_permissions(&note, std::fs::Permissions::from_mode(0o644)).unwrap();
+    for via in ["/out", "/out2"] {
+        s.ok(&["cp", &note.display().to_string(), &format!("l:{via}/tmp/")]);
+        assert!(
+            !Path::new("/tmp").join(&marker).exists(),
+            "{via} reached the host"
+        );
+        assert_eq!(
+            s.ok(&["exec", "l", "cat", &format!("/tmp/{marker}")]),
+            "copied in"
+        );
+        s.ok(&["exec", "l", "rm", &format!("/tmp/{marker}")]);
+    }
+    s.ok(&["rm", "-f", "l"]);
 }

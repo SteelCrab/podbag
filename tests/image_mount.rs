@@ -530,3 +530,44 @@ fn check_image_leaves_no_mounts() {
     assert_eq!(mounts_under(sb.tmp.path()), before);
     assert_eq!(list(&sb.data().join("store/tmp")), Vec::<String>::new());
 }
+
+#[test]
+fn a_container_starts_again_after_its_image_mount_is_gone() {
+    // A reboot empties the runtime directory, image mounts included: a stopped container
+    // mounts its image again when it starts.
+    if !root_mode() {
+        return;
+    }
+    let reg = FakeRegistry::start(false);
+    let image = push(
+        &reg,
+        "again",
+        vec![vec![file("note", b"still here\n", 0o644, 0)]],
+    );
+    let sb = Sandbox::new();
+    ok(&openpod(&sb, &["pull", &image]));
+    ok(&openpod(
+        &sb,
+        &["run", "--name", "c", &image, "cat", "/note"],
+    ));
+    let mounts = erofs_mounts(&sb);
+    if mounts.is_empty() {
+        eprintln!("the store does not use composefs here: skipped");
+        return;
+    }
+    for m in &mounts {
+        let gone = Command::new("sudo")
+            .args(["-n", "umount", m])
+            .status()
+            .unwrap()
+            .success()
+            && Command::new("sudo")
+                .args(["-n", "rmdir", m])
+                .status()
+                .unwrap()
+                .success();
+        assert!(gone, "cannot take the image mount down: {m}");
+    }
+    assert_eq!(ok(&openpod(&sb, &["start", "-a", "c"])), "still here");
+    ok(&openpod(&sb, &["rm", "c"]));
+}

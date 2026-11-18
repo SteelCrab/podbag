@@ -115,6 +115,9 @@ fn start(id: &str, json: &str) -> Result<Started> {
         namespaces.push((open_ns(name)?, flag));
     }
     let root = File::open(format!("/proc/{pid}/root")).map_err(|e| enter_error(&spec.name, e))?;
+    // The group of the container's main process, opened now: /proc names other PIDs once
+    // this process is in the container's namespaces.
+    let main_group = group_of(pid);
     // Joined by the child: the helper's own cgroup lies outside the container's cgroup
     // namespace, where clone3 could not place the child.
     // A container made before it had its own cgroup namespace shares ours: skip it.
@@ -183,7 +186,17 @@ fn start(id: &str, json: &str) -> Result<Started> {
     })?;
 
     use std::os::fd::AsFd;
-    let child = fork_into(cgroup.as_ref().map(|c| c.as_fd())).map_err(|e| {
+    let forked = match fork_into(cgroup.as_ref().map(|c| c.as_fd())) {
+        // The container's processes moved into a group below its own and turned on a
+        // controller for the groups below (BuildKit, docker-in-docker): no process may join
+        // the top any more. Join its main process's group instead, as runc does.
+        Err(e) if e.raw_os_error() == Some(libc::EBUSY) => match &main_group {
+            Some(below) => fork_into(Some(below.as_fd())),
+            None => Err(e),
+        },
+        forked => forked,
+    };
+    let child = forked.map_err(|e| {
         Error::io(
             "cannot start the command in the container",
             &e,
@@ -298,6 +311,18 @@ fn same_namespace(pid: u32, name: &str) -> bool {
     let link = |p: String| std::fs::read_link(p).ok();
     let theirs = link(format!("/proc/{pid}/ns/{name}"));
     theirs.is_some() && theirs == link(format!("/proc/self/ns/{name}"))
+}
+
+/// The cgroup directory process `pid` is in now (cgroup v2), as this process sees it.
+fn group_of(pid: u32) -> Option<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let text = std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?;
+    let path = text.lines().find_map(|l| l.strip_prefix("0::"))?;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY)
+        .open(format!("/sys/fs/cgroup{path}"))
+        .ok()
 }
 
 /// In the forked child: join the container's cgroup namespace.

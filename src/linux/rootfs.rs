@@ -14,6 +14,7 @@ pub(super) fn enter_rootfs(
     mounts: &[crate::volume::Mount],
     own_netns: bool,
     rootless: bool,
+    privileged: bool,
 ) -> Result<()> {
     step(
         rootless,
@@ -23,43 +24,7 @@ pub(super) fn enter_rootfs(
             MountPropagationFlags::REC | MountPropagationFlags::PRIVATE,
         ),
     )?;
-    let rootfs = match spec {
-        Rootfs::Dir { path } => Path::new(path),
-        Rootfs::Overlay {
-            lower,
-            upper,
-            work,
-            merged,
-            data,
-        } => {
-            let options = overlay_options(lower, data.as_deref(), upper, work, rootless);
-            let options = std::ffi::CString::new(options).map_err(|_| {
-                Error::new(
-                    ErrorKind::InvalidInput,
-                    "cannot set up the container root filesystem",
-                    "an overlay path contains a NUL byte",
-                    "use another data directory",
-                )
-            })?;
-            step(
-                rootless,
-                "mount the image overlay",
-                rustix::mount::mount(
-                    "overlay",
-                    merged.as_str(),
-                    "overlay",
-                    MountFlags::empty(),
-                    Some(options.as_c_str()),
-                ),
-            )?;
-            Path::new(merged)
-        }
-    };
-    step(
-        rootless,
-        "bind the root filesystem",
-        rustix::mount::mount_bind_recursive(rootfs, rootfs),
-    )?;
+    let rootfs = mount_root(spec, rootless)?;
 
     let at = |p: &str| rootfs.join(p);
 
@@ -75,8 +40,12 @@ pub(super) fn enter_rootfs(
         MountFlags::NOSUID | MountFlags::NODEV | MountFlags::NOEXEC,
         None,
     )?;
-    mask(rootless, rootfs, "proc/")?;
-    for rel in READ_ONLY {
+    // A privileged container sees the kernel's files as they are.
+    let read_only: &[&str] = if privileged { &[] } else { &READ_ONLY };
+    if !privileged {
+        mask(rootless, rootfs, "proc/")?;
+    }
+    for rel in read_only {
         let path = at(rel);
         if std::fs::symlink_metadata(&path).is_err() {
             continue;
@@ -153,11 +122,16 @@ pub(super) fn enter_rootfs(
     // of its own (owned by its user namespace). Without one, bind the host's.
     let sys = at("sys");
     if own_netns {
+        let writable = if privileged {
+            MountFlags::empty()
+        } else {
+            MountFlags::RDONLY
+        };
         mount_fs(
             "sysfs",
             &sys,
             "sysfs",
-            MountFlags::NOSUID | MountFlags::NODEV | MountFlags::NOEXEC | MountFlags::RDONLY,
+            MountFlags::NOSUID | MountFlags::NODEV | MountFlags::NOEXEC | writable,
             None,
         )?;
     } else {
@@ -197,12 +171,16 @@ pub(super) fn enter_rootfs(
             ),
         )?;
     }
-    mask(rootless, rootfs, "sys/")?;
-    step(
-        rootless,
-        "make /sys read-only",
-        set_read_only_recursive(&sys),
-    )?;
+    // Privileged: /sys and the container's own cgroup stay writable (as far as the kernel
+    // lets its user namespace write).
+    if !privileged {
+        mask(rootless, rootfs, "sys/")?;
+        step(
+            rootless,
+            "make /sys read-only",
+            set_read_only_recursive(&sys),
+        )?;
+    }
     // The container's own mounts come last, as with runc, so they may cover /dev/shm.
     super::mounts::mount_all(rootless, rootfs, mounts)?;
 
@@ -249,6 +227,82 @@ const READ_ONLY: [&str; 5] = [
     "proc/sys",
     "proc/sysrq-trigger",
 ];
+
+/// Mount the container's root filesystem (the image overlay, or bind its directory onto
+/// itself, as pivot_root needs a mount). Returns where it is.
+fn mount_root(spec: &Rootfs, rootless: bool) -> Result<&Path> {
+    let rootfs = match spec {
+        Rootfs::Dir { path } => Path::new(path),
+        Rootfs::Overlay {
+            lower,
+            upper,
+            work,
+            merged,
+            data,
+        } => {
+            let options = overlay_options(lower, data.as_deref(), upper, work, rootless);
+            let options = std::ffi::CString::new(options).map_err(|_| {
+                Error::new(
+                    ErrorKind::InvalidInput,
+                    "cannot set up the container root filesystem",
+                    "an overlay path contains a NUL byte",
+                    "use another data directory",
+                )
+            })?;
+            step(
+                rootless,
+                "mount the image overlay",
+                rustix::mount::mount(
+                    "overlay",
+                    merged.as_str(),
+                    "overlay",
+                    MountFlags::empty(),
+                    Some(options.as_c_str()),
+                ),
+            )?;
+            Path::new(merged)
+        }
+    };
+    step(
+        rootless,
+        "bind the root filesystem",
+        rustix::mount::mount_bind_recursive(rootfs, rootfs),
+    )?;
+    Ok(rootfs)
+}
+
+/// For copying files of a container that does not run: in a mount namespace of this
+/// process's own, mount its root filesystem and its volumes and bind mounts (not its tmpfs
+/// mounts: they would hold nothing afterwards) and make it this process's root.
+pub(super) fn enter_files(spec: &crate::spec::ContainerSpec, rootless: bool) -> Result<()> {
+    step(
+        rootless,
+        "make mounts private",
+        rustix::mount::mount_change(
+            "/",
+            MountPropagationFlags::REC | MountPropagationFlags::PRIVATE,
+        ),
+    )?;
+    let rootfs = mount_root(&spec.rootfs, rootless)?;
+    let lasting: Vec<crate::volume::Mount> = spec
+        .mounts
+        .iter()
+        .filter(|m| !matches!(m.source, crate::volume::MountSource::Tmpfs { .. }))
+        .map(|m| crate::volume::Mount {
+            // A new volume is filled with the image's files at the first start.
+            copy_up: false,
+            ..m.clone()
+        })
+        .collect();
+    super::mounts::mount_all(rootless, rootfs, &lasting)?;
+    step(
+        rootless,
+        "enter the root filesystem",
+        rustix::process::chdir(rootfs),
+    )?;
+    step(rootless, "make it the root", rustix::process::chroot("."))?;
+    step(rootless, "enter the root", rustix::process::chdir("/"))
+}
 
 /// Cover the masked paths under `root` that start with `prefix`. Paths this kernel does
 /// not have are skipped.

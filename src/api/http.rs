@@ -33,8 +33,19 @@ pub struct Request {
     /// Names as sent; look them up with [`Request::header`].
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+    /// How the body comes, when it was left unread for the handler
+    /// ([`read_request_with`]); `None` when `body` holds it.
+    pub framing: Framing,
     /// HTTP/1.0 closes after each request unless asked otherwise.
     pub http10: bool,
+}
+
+/// How a request body is delimited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Framing {
+    None,
+    Length(u64),
+    Chunked,
 }
 
 impl Request {
@@ -90,6 +101,15 @@ impl Query {
             })
             .collect();
         Query(pairs)
+    }
+
+    /// Every value given for `key` (`names=a&names=b`).
+    pub fn all(&self, key: &str) -> Vec<&str> {
+        self.0
+            .iter()
+            .filter(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+            .collect()
     }
 
     pub fn get(&self, key: &str) -> Option<&str> {
@@ -168,6 +188,15 @@ pub fn percent_decode(s: &str) -> Result<String, HttpError> {
 
 /// Read one request. `Ok(None)` when the client closed before sending anything.
 pub fn read_request(reader: &mut impl BufRead) -> Result<Option<Request>, HttpError> {
+    read_request_with(reader, &|_| false)
+}
+
+/// [`read_request`], leaving the body in `reader` when `streamed` says so: the handler
+/// reads it with a [`BodyReader`] as it arrives, without a size limit.
+pub fn read_request_with(
+    reader: &mut impl BufRead,
+    streamed: &dyn Fn(&Request) -> bool,
+) -> Result<Option<Request>, HttpError> {
     // The request line and headers, up to the blank line.
     let mut head = Vec::new();
     loop {
@@ -228,12 +257,24 @@ pub fn read_request(reader: &mut impl BufRead) -> Result<Option<Request>, HttpEr
         query: Query::parse(raw_query),
         headers,
         body: Vec::new(),
+        framing: Framing::None,
         http10: parsed.version == Some(0),
     };
-    if req
+    let chunked = req
         .header("transfer-encoding")
-        .is_some_and(|v| v.to_ascii_lowercase().contains("chunked"))
-    {
+        .is_some_and(|v| v.to_ascii_lowercase().contains("chunked"));
+    if streamed(&req) {
+        req.framing = match req.header("content-length") {
+            _ if chunked => Framing::Chunked,
+            Some(len) => Framing::Length(
+                len.parse()
+                    .map_err(|_| HttpError::Bad(format!("invalid Content-Length {len}")))?,
+            ),
+            None => Framing::None,
+        };
+        return Ok(Some(req));
+    }
+    if chunked {
         req.body = read_chunked(reader)?;
     } else if let Some(len) = req.header("content-length") {
         let len: usize = len
@@ -262,6 +303,132 @@ fn read_line(reader: &mut impl BufRead, limit: usize) -> Result<String, HttpErro
         ));
     }
     Ok(String::from_utf8_lossy(&line).trim_end().to_string())
+}
+
+/// A request body read as it arrives, decoded from its framing. It ends at the body's end;
+/// a body cut short is an error.
+pub struct BodyReader<'a> {
+    inner: &'a mut dyn BufRead,
+    chunked: bool,
+    /// Bytes left in the body (by length) or in the current chunk.
+    left: u64,
+    /// A chunk was read: a CRLF comes before the next size line.
+    started: bool,
+    done: bool,
+}
+
+impl<'a> BodyReader<'a> {
+    pub fn new(inner: &'a mut dyn BufRead, framing: Framing) -> BodyReader<'a> {
+        let (chunked, left) = match framing {
+            Framing::None => (false, 0),
+            Framing::Length(n) => (false, n),
+            Framing::Chunked => (true, 0),
+        };
+        BodyReader {
+            inner,
+            chunked,
+            left,
+            started: false,
+            done: !chunked && left == 0,
+        }
+    }
+
+    /// Move to the next chunk: its size line, after the CRLF that ends the one before.
+    fn next_chunk(&mut self, first: bool) -> std::io::Result<()> {
+        let bad = |why: String| std::io::Error::new(std::io::ErrorKind::InvalidData, why);
+        if !first {
+            let mut crlf = [0u8; 2];
+            self.inner.read_exact(&mut crlf)?;
+            if &crlf != b"\r\n" {
+                return Err(bad("a chunk is not followed by CRLF".into()));
+            }
+        }
+        let line = read_line(&mut self.inner, 1024).map_err(|e| bad(e.to_string()))?;
+        let size_text = line.split(';').next().unwrap_or("").trim();
+        let size = u64::from_str_radix(size_text, 16)
+            .map_err(|_| bad(format!("invalid chunk size {size_text:?}")))?;
+        if size == 0 {
+            while !read_line(&mut self.inner, 8 * 1024)
+                .map_err(|e| bad(e.to_string()))?
+                .is_empty()
+            {}
+            self.done = true;
+        }
+        self.left = size;
+        Ok(())
+    }
+}
+
+impl std::io::Read for BodyReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() || self.done {
+            return Ok(0);
+        }
+        if self.chunked && self.left == 0 {
+            let first = !std::mem::replace(&mut self.started, true);
+            self.next_chunk(first)?;
+            if self.done {
+                return Ok(0);
+            }
+        }
+        let want = buf
+            .len()
+            .min(usize::try_from(self.left).unwrap_or(usize::MAX));
+        let n = self.inner.read(&mut buf[..want])?;
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "the request body ended early",
+            ));
+        }
+        self.left -= n as u64;
+        if !self.chunked && self.left == 0 {
+            self.done = true;
+        }
+        Ok(n)
+    }
+}
+
+/// Writes HTTP/1.1 chunks; [`ChunkedWriter::finish`] sends the last one.
+pub struct ChunkedWriter<W: Write> {
+    inner: W,
+}
+
+impl<W: Write> ChunkedWriter<W> {
+    pub fn new(inner: W) -> ChunkedWriter<W> {
+        ChunkedWriter { inner }
+    }
+
+    /// The last chunk: the body is whole.
+    pub fn finish(&mut self) -> std::io::Result<()> {
+        self.inner.write_all(b"0\r\n\r\n")?;
+        self.inner.flush()
+    }
+}
+
+impl<W: Write> Write for ChunkedWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        write!(self.inner, "{:x}\r\n", buf.len())?;
+        self.inner.write_all(buf)?;
+        self.inner.write_all(b"\r\n")?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+impl std::fmt::Display for HttpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HttpError::Bad(why) => f.write_str(why),
+            HttpError::Io(e) => e.fmt(f),
+        }
+    }
 }
 
 fn read_chunked(reader: &mut impl BufRead) -> Result<Vec<u8>, HttpError> {
@@ -382,6 +549,42 @@ mod tests {
 
     fn parse(raw: &[u8]) -> Result<Option<Request>, HttpError> {
         read_request(&mut BufReader::new(Cursor::new(raw.to_vec())))
+    }
+
+    #[test]
+    fn a_streamed_body_is_left_for_the_handler() {
+        use std::io::Read;
+        let raw = b"PUT /a HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n\
+                    5\r\nhello\r\n6;x=y\r\n world\r\n0\r\nTrailer: t\r\n\r\n\
+                    PUT /b HTTP/1.1\r\nContent-Length: 3\r\n\r\nabcGET /c HTTP/1.1\r\n\r\n";
+        let mut reader = BufReader::new(Cursor::new(raw.to_vec()));
+        let streamed = |r: &Request| r.method == "PUT";
+        let first = read_request_with(&mut reader, &streamed).unwrap().unwrap();
+        assert_eq!(first.framing, Framing::Chunked);
+        assert!(first.body.is_empty());
+        let mut body = String::new();
+        BodyReader::new(&mut reader, first.framing)
+            .read_to_string(&mut body)
+            .unwrap();
+        assert_eq!(body, "hello world");
+        let second = read_request_with(&mut reader, &streamed).unwrap().unwrap();
+        assert_eq!(second.framing, Framing::Length(3));
+        let mut body = Vec::new();
+        BodyReader::new(&mut reader, second.framing)
+            .read_to_end(&mut body)
+            .unwrap();
+        assert_eq!(body, b"abc");
+        let third = read_request_with(&mut reader, &streamed).unwrap().unwrap();
+        assert_eq!((third.path.as_str(), third.framing), ("/c", Framing::None));
+        // A body cut short is an error, not an early end.
+        let cut = b"PUT /d HTTP/1.1\r\nContent-Length: 10\r\n\r\nabc";
+        let mut reader = BufReader::new(Cursor::new(cut.to_vec()));
+        let req = read_request_with(&mut reader, &streamed).unwrap().unwrap();
+        let mut body = Vec::new();
+        let err = BodyReader::new(&mut reader, req.framing)
+            .read_to_end(&mut body)
+            .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
     }
 
     #[test]

@@ -1,4 +1,5 @@
-//! `/containers/…`: create, list, inspect, start, stop, kill, wait, logs, attach, remove.
+//! `/containers/…`: create, list, inspect, start, stop, kill, wait, logs, attach, remove,
+//! and files in and out (`docker cp`).
 
 use super::create::container_from_create;
 use super::docker::{docker_image_name, docker_repo, epoch_of, state_name};
@@ -57,6 +58,91 @@ pub fn route(req: &Request, ctx: &Ctx, rest: &[&str]) -> Option<Reply> {
         ),
         _ => return None,
     })
+}
+
+/// The header that carries a path's details, base64-encoded JSON.
+const STAT_HEADER: &str = "X-Docker-Container-Path-Stat";
+
+fn path_param(req: &Request) -> Result<String, Reply> {
+    match req.query.get("path") {
+        Some(p) if !p.is_empty() => Ok(p.to_string()),
+        _ => Err(message(400, "the path parameter is required")),
+    }
+}
+
+fn stat_header(stat: &crate::archive::PathStat) -> (&'static str, String) {
+    let json = serde_json::to_vec(stat).unwrap_or_default();
+    (STAT_HEADER, base64(&json))
+}
+
+/// Standard base64 with padding.
+fn base64(data: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for group in data.chunks(3) {
+        let b = [
+            group[0],
+            *group.get(1).unwrap_or(&0),
+            *group.get(2).unwrap_or(&0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        for (i, shift) in [18, 12, 6, 0].into_iter().enumerate() {
+            if i <= group.len() {
+                out.push(ALPHABET[(n >> shift & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// `HEAD /containers/{id}/archive?path=`: the path's details, in a header.
+pub fn stat_path(req: &Request, id: &str) -> Reply {
+    let (c, path) = match find(id).and_then(|c| path_param(req).map(|p| (c, p))) {
+        Ok(found) => found,
+        Err(reply) => return reply,
+    };
+    match c.stat_path(&path) {
+        Ok(stat) => Reply::Headed(vec![stat_header(&stat)], Box::new(Reply::Empty(200))),
+        Err(e) => reply_error(&e),
+    }
+}
+
+/// `GET /containers/{id}/archive?path=`: the path as a tar, its details in a header.
+pub fn copy_out(req: &Request, id: &str) -> Reply {
+    let (c, path) = match find(id).and_then(|c| path_param(req).map(|p| (c, p))) {
+        Ok(found) => found,
+        Err(reply) => return reply,
+    };
+    match c.copy_out(&path) {
+        Ok((stat, mut tar)) => Reply::Headed(
+            vec![stat_header(&stat)],
+            Box::new(Reply::Chunked {
+                content_type: "application/x-tar",
+                body: Box::new(move |w| std::io::copy(&mut tar, w).map(|_| ())),
+            }),
+        ),
+        Err(e) => reply_error(&e),
+    }
+}
+
+/// `PUT /containers/{id}/archive?path=`: unpack the tar in the body into the directory.
+pub fn copy_in(req: &Request, id: &str) -> Reply {
+    let (c, path) = match find(id).and_then(|c| path_param(req).map(|p| (c, p))) {
+        Ok(found) => found,
+        Err(reply) => return reply,
+    };
+    let options = crate::archive::PutOptions {
+        no_overwrite_dir_non_dir: req.query.bool_param("noOverwriteDirNonDir"),
+        copy_uid_gid: req.query.bool_param("copyUIDGID"),
+    };
+    Reply::WithBody(Box::new(move |body| {
+        match c.copy_in(&path, body, &options) {
+            Ok(()) => Reply::Empty(200),
+            Err(e) => reply_error(&e),
+        }
+    }))
 }
 
 /// A container by name or ID, or a 404 in Docker's words.

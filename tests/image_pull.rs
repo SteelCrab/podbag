@@ -648,3 +648,47 @@ fn restart_keeps_the_writable_layer() {
     assert_eq!(ok(&openpod(&sb, &["start", "-a", "w"])), "2");
     ok(&openpod(&sb, &["rm", "w"]));
 }
+
+#[test]
+fn save_and_load_through_a_pipe() {
+    let reg = FakeRegistry::start(false);
+    reg.push(
+        "piped",
+        "v1",
+        &alpine_with(
+            vec![TarEntry::file("note", b"through a pipe\n")],
+            serde_json::json!({"Cmd": ["cat", "/note"]}),
+        ),
+    );
+    let image = name(&reg, "piped");
+    let sb = Sandbox::new();
+    ok(&openpod(&sb, &["pull", &image]));
+    let saved = sb
+        .openpod()
+        .args(["save", &image])
+        .stdout(Stdio::piped())
+        .output()
+        .unwrap();
+    assert_eq!(saved.status.code(), Some(0), "{}", stderr(&saved));
+    ok(&openpod(&sb, &["rmi", &image]));
+    let mut load = sb
+        .openpod()
+        .args(["load"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    load.stdin.take().unwrap().write_all(&saved.stdout).unwrap();
+    let loaded = load.wait_with_output().unwrap();
+    assert_eq!(loaded.status.code(), Some(0), "{}", stderr(&loaded));
+    assert!(
+        stdout(&loaded).contains(&format!("Loaded image: {image}")),
+        "{}",
+        stdout(&loaded)
+    );
+    assert_eq!(
+        ok(&openpod(&sb, &["run", "--rm", &image])),
+        "through a pipe"
+    );
+}

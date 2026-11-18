@@ -5,6 +5,8 @@
 #[cfg(unix)]
 #[doc(hidden)]
 pub mod api;
+/// Files in and out of a container as tar archives (`docker cp`).
+pub mod archive;
 #[doc(hidden)]
 pub mod caps;
 #[doc(hidden)]
@@ -67,7 +69,7 @@ pub mod volume;
 pub use container::{Container, Output, Running};
 #[cfg(unix)]
 pub use containers::{
-    ContainerHandle, ContainerInfo, ExecOptions, LogFollower, LogLine, MountInfo, Stream,
+    ContainerHandle, ContainerInfo, CopyOut, ExecOptions, LogFollower, LogLine, MountInfo, Stream,
 };
 pub use error::{Error, ErrorKind, Result};
 pub use image::{DiskUsage, Image, ImageConfig, PruneReport, disk_usage, prune};

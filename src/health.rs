@@ -70,6 +70,19 @@ impl HealthSettings {
         }
     }
 
+    /// Docker's JSON form, as [`HealthSettings::from_docker`] reads it.
+    pub fn to_docker(&self) -> serde_json::Value {
+        let ns = |ms: Option<u64>| ms.map_or(0, |ms| ms.saturating_mul(1_000_000));
+        serde_json::json!({
+            "Test": self.test,
+            "Interval": ns(self.interval_ms),
+            "Timeout": ns(self.timeout_ms),
+            "StartPeriod": ns(self.start_period_ms),
+            "StartInterval": ns(self.start_interval_ms),
+            "Retries": self.retries.unwrap_or(0),
+        })
+    }
+
     /// Docker's JSON form (`Healthcheck` of a create request or of an image's config):
     /// durations in nanoseconds, 0 for "not given". None when there is none.
     pub fn from_docker(v: &serde_json::Value) -> Result<Option<HealthSettings>> {

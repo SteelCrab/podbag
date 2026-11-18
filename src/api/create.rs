@@ -180,6 +180,7 @@ pub fn map_create(
             SecurityOpt::SeccompUnconfined => c.seccomp(false),
         };
     }
+    c = c.privileged(host["Privileged"].as_bool().unwrap_or(false));
     let auto_remove = host["AutoRemove"].as_bool().unwrap_or(false);
     if auto_remove {
         c = c.remove_on_exit(true);
@@ -215,14 +216,6 @@ pub fn map_create(
 /// Settings openpod cannot honor: an error now beats a container that is not what was
 /// asked for.
 fn refuse_unsupported(host: &Value) -> Result<()> {
-    if host["Privileged"].as_bool().unwrap_or(false) {
-        return Err(Error::new(
-            ErrorKind::Unsupported,
-            "cannot create a privileged container",
-            "openpod does not run privileged containers yet",
-            "drop --privileged, or add only the capabilities it needs with --cap-add",
-        ));
-    }
     let refuse = |what: &str, next: &str| {
         Err(Error::new(
             ErrorKind::InvalidInput,
@@ -820,7 +813,6 @@ mod tests {
     #[test]
     fn create_refuses_what_openpod_cannot_do() {
         let cases = [
-            (json!({"Privileged": true}), ErrorKind::Unsupported),
             (
                 json!({"Devices": [{"PathOnHost": "/dev/fuse", "PathInContainer": "/dev/fuse", "CgroupPermissions": "rwm"}]}),
                 ErrorKind::InvalidInput,

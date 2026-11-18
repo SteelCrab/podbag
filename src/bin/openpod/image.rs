@@ -1,4 +1,4 @@
-//! `pull`, `images`, `rmi` and `system`.
+//! `pull`, `images`, `load`, `save`, `rmi` and `system`.
 
 use crate::args::SystemCmd;
 use openpod::image::human_size;
@@ -8,6 +8,60 @@ use openpod::{Error, ErrorKind, Image};
 pub fn report(e: &Error) -> i32 {
     eprintln!("openpod: {e}");
     e.exit_code()
+}
+
+pub fn load(input: Option<&std::path::Path>, quiet: bool) -> i32 {
+    let loaded = match input {
+        Some(path) => match std::fs::File::open(path) {
+            Ok(mut f) => Image::load(&mut f),
+            Err(e) => Err(Error::io(
+                format!("cannot open {}", path.display()),
+                &e,
+                "check the path",
+            )),
+        },
+        None => Image::load(&mut std::io::stdin().lock()),
+    };
+    match loaded {
+        Ok(report) => {
+            if !quiet {
+                for name in &report.names {
+                    println!("Loaded image: {name}");
+                }
+                for id in &report.untagged {
+                    println!("Loaded image ID: {id}");
+                }
+            }
+            0
+        }
+        Err(e) => report(&e),
+    }
+}
+
+pub fn save(output: Option<&std::path::Path>, names: &[String]) -> i32 {
+    use std::io::IsTerminal;
+    let saved = match output {
+        Some(path) => std::fs::File::create(path)
+            .map_err(|e| {
+                Error::io(
+                    format!("cannot create {}", path.display()),
+                    &e,
+                    "check the path",
+                )
+            })
+            .and_then(|mut f| Image::save(names, &mut f)),
+        None if std::io::stdout().is_terminal() => Err(Error::new(
+            ErrorKind::InvalidInput,
+            "cannot save images to a terminal",
+            "the archive is binary",
+            "redirect stdout to a file, or use -o FILE",
+        )),
+        None => Image::save(names, &mut std::io::stdout().lock()),
+    };
+    match saved {
+        Ok(()) => 0,
+        Err(e) => report(&e),
+    }
 }
 
 pub fn pull(name: &str) -> i32 {
@@ -112,7 +166,7 @@ pub fn system(cmd: SystemCmd) -> i32 {
             Ok(r) => {
                 println!(
                     "Deleted {} images, reclaimed {}",
-                    r.removed_images.len(),
+                    r.removed_images.len() + r.removed_ids.len(),
                     human_size(r.freed_bytes)
                 );
                 0

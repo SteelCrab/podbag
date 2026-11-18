@@ -505,6 +505,14 @@ impl HelperChild {
         }
     }
 
+    /// This process's end of a piped stdin (a child helper's only).
+    pub fn take_stdin(&mut self) -> Option<std::process::ChildStdin> {
+        match &mut self.proc {
+            Proc::Child(c) => c.stdin.take(),
+            Proc::Kept { .. } => None,
+        }
+    }
+
     /// This process's end of a piped stdout.
     pub fn take_stdout(&mut self) -> Option<Box<dyn std::io::Read + Send>> {
         match &mut self.proc {
@@ -541,6 +549,22 @@ impl HelperChild {
             StatusMessage::Done { output } => Ok(output),
             StatusMessage::Failed { error } => Err(error),
             StatusMessage::Started { .. } => Err(unexpected_status()),
+        }
+    }
+
+    /// Read a job helper's result while it goes on working (it streams more on stdout).
+    /// On failure it is waited for.
+    pub fn wait_ready(&mut self) -> Result<serde_json::Value> {
+        match self.read_status()? {
+            StatusMessage::Done { output } => Ok(output),
+            StatusMessage::Failed { error } => {
+                let _ = self.wait();
+                Err(error)
+            }
+            StatusMessage::Started { .. } => {
+                let _ = self.wait();
+                Err(unexpected_status())
+            }
         }
     }
 
@@ -613,6 +637,68 @@ pub fn run_store_op(
         None,
     )?
     .wait_done()
+}
+
+/// [`run_store_op`] with `input` on the helper's stdin.
+pub fn run_store_op_with_input(
+    op: &crate::store::ops::StoreOp,
+    input: &mut dyn std::io::Read,
+) -> Result<serde_json::Value> {
+    let json = encode_store_op(op)?;
+    let mut helper = spawn_with_args(
+        &["__store", &json],
+        Stdio::piped(),
+        Stdio::null(),
+        Stdio::null(),
+        None,
+    )?;
+    let copied = match helper.take_stdin() {
+        Some(mut stdin) => std::io::copy(input, &mut stdin),
+        None => Ok(0),
+    };
+    // A helper that ended (done, or failed) closed its end: its result tells.
+    let result = helper.wait_done();
+    match copied {
+        Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => Err(Error::io(
+            "cannot read the input of a store job",
+            &e,
+            "send all of it",
+        )),
+        _ => result,
+    }
+}
+
+/// [`run_store_op`], copying what the helper writes on stdout to `out`.
+pub fn run_store_op_with_output(
+    op: &crate::store::ops::StoreOp,
+    out: &mut dyn std::io::Write,
+) -> Result<serde_json::Value> {
+    let json = encode_store_op(op)?;
+    let mut helper = spawn_with_args(
+        &["__store", &json],
+        Stdio::null(),
+        Stdio::piped(),
+        Stdio::null(),
+        None,
+    )?;
+    let copied = match helper.take_stdout() {
+        // Dropped at the end of this arm, so a helper still writing ends.
+        Some(mut stdout) => std::io::copy(&mut stdout, out),
+        None => Ok(0),
+    };
+    let result = helper.wait_done();
+    match copied {
+        Err(e) => {
+            // The reader is gone; the helper's own error (if any) says less.
+            let _ = result;
+            Err(Error::io(
+                "cannot pass on the output of a store job",
+                &e,
+                "check that the reader is still there",
+            ))
+        }
+        Ok(_) => result,
+    }
 }
 
 /// [`run_store_op`], giving each line the helper writes to stderr to `on_line`.

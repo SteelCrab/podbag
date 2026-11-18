@@ -296,7 +296,7 @@ pub fn mount_shared(image: &Path, target: &Path) -> Result<()> {
     mount_erofs(image, target).map_err(|e| mount_error("mount the image's EROFS metadata", e))
 }
 
-fn is_erofs(path: &Path) -> bool {
+pub(crate) fn is_erofs(path: &Path) -> bool {
     rustix::fs::statfs(path).is_ok_and(|s| s.f_type as u32 == EROFS_MAGIC)
 }
 

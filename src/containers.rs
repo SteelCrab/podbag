@@ -74,6 +74,59 @@ impl From<&crate::volume::Mount> for MountInfo {
     }
 }
 
+/// A tar of a container's files ([`ContainerHandle::copy_out`]), read as it is made. Its
+/// end is an error when the copy failed partway: the tar alone could look complete.
+pub struct CopyOut {
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    helper: crate::helper::HelperChild,
+    tar: Option<Box<dyn std::io::Read + Send>>,
+    /// The helper was waited for.
+    ended: bool,
+}
+
+impl std::io::Read for CopyOut {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let Some(tar) = &mut self.tar else {
+            return Ok(0);
+        };
+        let n = tar.read(buf)?;
+        if n == 0 && !buf.is_empty() {
+            self.tar = None;
+            self.ended = true;
+            let code = self.helper.wait()?;
+            if code != 0 {
+                return Err(std::io::Error::other(format!(
+                    "the copy failed partway (exit code {code}); the reason is in the log of \
+                     the process that ran it"
+                )));
+            }
+        }
+        Ok(n)
+    }
+}
+
+impl Drop for CopyOut {
+    fn drop(&mut self) {
+        // Closing the pipe ends a helper still writing; then it is reaped.
+        self.tar = None;
+        if !self.ended {
+            let _ = self.helper.wait();
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn decode_stat(output: serde_json::Value) -> Result<crate::archive::PathStat> {
+    serde_json::from_value(output).map_err(|e| {
+        Error::new(
+            ErrorKind::Internal,
+            "the archive helper sent unreadable details",
+            e.to_string(),
+            "report this bug",
+        )
+    })
+}
+
 /// A container that exists (running or not).
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ContainerHandle {
@@ -459,6 +512,126 @@ impl ContainerHandle {
         )?;
         helper.wait_started()?;
         Ok(helper)
+    }
+
+    /// The details of `path` in the container (`docker cp` asks before it copies).
+    pub fn stat_path(&self, path: &str) -> Result<crate::archive::PathStat> {
+        #[cfg(target_os = "linux")]
+        {
+            let mut helper = self.archive_helper(
+                crate::linux::archive::ArchiveOp::Stat,
+                path,
+                Default::default(),
+                std::process::Stdio::null(),
+                std::process::Stdio::null(),
+            )?;
+            decode_stat(helper.wait_done()?)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = path;
+            Err(Error::unsupported_os())
+        }
+    }
+
+    /// `path` in the container as a tar whose names start with its last part, after its
+    /// details. Read the tar to its end, or drop it to stop.
+    pub fn copy_out(&self, path: &str) -> Result<(crate::archive::PathStat, CopyOut)> {
+        #[cfg(target_os = "linux")]
+        {
+            let mut helper = self.archive_helper(
+                crate::linux::archive::ArchiveOp::Get,
+                path,
+                Default::default(),
+                std::process::Stdio::null(),
+                std::process::Stdio::piped(),
+            )?;
+            let stat = decode_stat(helper.wait_ready()?)?;
+            let tar = helper.take_stdout();
+            Ok((
+                stat,
+                CopyOut {
+                    helper,
+                    tar,
+                    ended: false,
+                },
+            ))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = path;
+            Err(Error::unsupported_os())
+        }
+    }
+
+    /// Unpack the tar (gzip-compressed or not) read from `tar` into the directory `path`
+    /// of the container, running or not.
+    pub fn copy_in(
+        &self,
+        path: &str,
+        tar: &mut dyn std::io::Read,
+        options: &crate::archive::PutOptions,
+    ) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            let mut helper = self.archive_helper(
+                crate::linux::archive::ArchiveOp::Put,
+                path,
+                options.clone(),
+                std::process::Stdio::piped(),
+                std::process::Stdio::null(),
+            )?;
+            let copied = match helper.take_stdin() {
+                Some(mut stdin) => std::io::copy(tar, &mut stdin),
+                None => Ok(0),
+            };
+            // A helper that ended (done, or failed) closed its end: its result tells.
+            let result = helper.wait_done();
+            match copied {
+                Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => Err(Error::io(
+                    "cannot read the archive to copy",
+                    &e,
+                    "send the whole archive",
+                )),
+                _ => result.map(|_| ()),
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (path, tar, options);
+            Err(Error::unsupported_os())
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn archive_helper(
+        &self,
+        op: crate::linux::archive::ArchiveOp,
+        path: &str,
+        put: crate::archive::PutOptions,
+        stdin: std::process::Stdio,
+        stdout: std::process::Stdio,
+    ) -> Result<crate::helper::HelperChild> {
+        let req = crate::linux::archive::ArchiveRequest {
+            op,
+            path: path.to_string(),
+            put,
+        };
+        let json = serde_json::to_string(&req).map_err(|e| {
+            Error::new(
+                ErrorKind::Internal,
+                "cannot encode an archive request",
+                e.to_string(),
+                "report this bug",
+            )
+        })?;
+        crate::helper::spawn_with_args(
+            &["__archive", &self.id, &json],
+            stdin,
+            stdout,
+            std::process::Stdio::inherit(),
+            None,
+        )
     }
 
     /// A start under way (a restarter's) holds the shim lock before the container has a

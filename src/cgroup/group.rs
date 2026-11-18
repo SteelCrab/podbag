@@ -154,17 +154,41 @@ impl Group {
     }
 }
 
-/// Remove an empty cgroup directory once; a busy or missing one is left as it is.
+/// Remove an empty cgroup directory once, with the groups below it; a busy or missing
+/// one is left as it is.
 pub fn try_remove_dir(path: &Path) {
+    remove_below(path);
     let _ = std::fs::remove_dir(path);
 }
 
-/// Remove an empty cgroup directory. Processes that are still ending keep it busy for a
-/// moment, so retry for up to a second. If it is still busy, the next state check
+/// Remove the (empty) groups below `path`, deepest first: a container may make groups of
+/// its own (BuildKit and docker-in-docker do), and the kernel removes only a group without
+/// children. A loop, not recursion: the container decides how deep they go.
+fn remove_below(path: &Path) {
+    let mut todo = vec![(path.to_path_buf(), false)];
+    while let Some((dir, children_done)) = todo.pop() {
+        if children_done {
+            if dir != path {
+                let _ = std::fs::remove_dir(&dir);
+            }
+            continue;
+        }
+        todo.push((dir.clone(), true));
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                todo.push((entry.path(), false));
+            }
+        }
+    }
+}
+
+/// Remove an empty cgroup directory, with the groups below it. Processes that are still
+/// ending keep it busy for a moment, so retry for up to a second. If it is still busy, the next state check
 /// (`state::reconcile`) tries again. True when the directory is gone.
 pub fn remove_dir(path: &Path) -> bool {
     let deadline = Instant::now() + Duration::from_secs(1);
     loop {
+        remove_below(path);
         match std::fs::remove_dir(path) {
             Err(e) if e.raw_os_error() == Some(libc::EBUSY) && Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(10));
@@ -222,6 +246,7 @@ fn direct(parent: &Path, id: &str, limits: &Limits, budget: Option<u64>) -> Resu
         if e.kind() != std::io::ErrorKind::AlreadyExists {
             return Err(fail(e));
         }
+        remove_below(&path);
         std::fs::remove_dir(&path)
             .and_then(|()| std::fs::create_dir(&path))
             .map_err(fail)?;

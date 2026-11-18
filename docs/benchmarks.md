@@ -122,7 +122,9 @@ Every tool was run 3 times, in turn, after one round that is not counted
 
 **Memory per container (Linux).** A detached openpod container has no process of its own:
 one keeper process (2.2–2.3 MiB, PSS) watches all of them and leaves 10 seconds after the
-last one, so with no containers openpod runs nothing. Spread over 50 containers the keeper
+last one, so with no containers openpod runs nothing. (Since M8c the program is 0.2 MB
+larger and the keeper maps more of it: 2.48 MiB against 2.35 MiB for 50 containers,
+measured side by side in one session; start times did not change.) Spread over 50 containers the keeper
 is 45–48 KiB each; over 300 it is 8 KiB each. Kiri keeps one daemon running (5.9 MiB) and
 one init process that all its containers share; each of the first 50 containers adds about
 96 KiB to the daemon, which also keeps a thread for it. For 50 containers without a network

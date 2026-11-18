@@ -5,7 +5,11 @@ use crate::{Error, ErrorKind, Result};
 use serde::{Deserialize, Serialize};
 
 #[cfg(target_os = "linux")]
+mod devices;
+#[cfg(target_os = "linux")]
 mod group;
+#[cfg(target_os = "linux")]
+pub use devices::restrict as restrict_devices;
 #[cfg(target_os = "linux")]
 pub use group::{
     Group, ROOT, choose_placement, create, enable_controllers, own_cgroup, parent_name, remove_dir,

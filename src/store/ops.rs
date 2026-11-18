@@ -20,6 +20,8 @@ pub enum StoreOp {
         name: String,
     },
     Prune,
+    /// Remove the images without a name that no container uses.
+    PruneDangling,
     RemoveContainer {
         id: String,
     },
@@ -29,6 +31,12 @@ pub enum StoreOp {
     /// Read an image's files for `check-image` (as the owner, who can read them all).
     CheckImage {
         name: String,
+    },
+    /// Store the images of the archive on stdin (`docker load`).
+    Load,
+    /// Write the images `names` as an archive on stdout (`docker save`).
+    Save {
+        names: Vec<String>,
     },
 }
 
@@ -123,11 +131,40 @@ mod linux_ops {
                     config: record.config,
                 })
             }
+            StoreOp::Load => {
+                let mut store = Store::open(dirs, !rootless)?;
+                let config = config::load(dirs)?;
+                store.use_mount_method(rootless, config.image_mount);
+                let mut input = std::io::stdin().lock();
+                to_json(&store.load(&mut input, config.store_limit, &|| images_in_use(dirs))?)
+            }
+            StoreOp::Save { names } => {
+                let store = Store::open_existing(dirs)
+                    .ok_or_else(|| crate::image::not_pulled(&names.join(" ")))?;
+                // Not through std's stdout: a child that ends with _exit never flushes it.
+                // SAFETY: fd 1 is this process's stdout; ManuallyDrop leaves it open.
+                let mut raw = std::mem::ManuallyDrop::new(unsafe {
+                    <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(1)
+                });
+                let mut out = std::io::BufWriter::with_capacity(256 * 1024, &mut *raw);
+                store.save(&names, &mut out)?;
+                std::io::Write::flush(&mut out).map_err(|e| {
+                    crate::Error::io(
+                        "cannot write the image archive",
+                        &e,
+                        "check that the reader is still there",
+                    )
+                })?;
+                Ok(Value::Null)
+            }
             StoreOp::RemoveImage { name } => to_json(
                 &Store::open(dirs, !rootless)?.remove_image(&name, &|| images_in_use(dirs))?,
             ),
             StoreOp::Prune => {
                 to_json(&Store::open(dirs, !rootless)?.prune(&|| images_in_use(dirs))?)
+            }
+            StoreOp::PruneDangling => {
+                to_json(&Store::open(dirs, !rootless)?.prune_dangling(&|| images_in_use(dirs))?)
             }
             StoreOp::CheckImage { name } => {
                 Store::open_existing(dirs).ok_or_else(|| crate::image::not_pulled(&name))?;

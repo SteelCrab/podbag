@@ -20,13 +20,10 @@ pub fn route(req: &Request, ctx: &Ctx, rest: &str) -> Option<Reply> {
         ("GET", "search") => {
             not_supported("searching a registry", "search on the registry's web site")
         }
-        ("GET", "get") | ("POST", "load") => {
-            not_supported("saving and loading images", "pull images from a registry")
-        }
+        ("POST", "load") => load(),
+        ("GET", "get") => save(req.query.all("names")),
         ("GET", r) if r.ends_with("/json") => inspect(ctx, &r[..r.len() - "/json".len()]),
-        ("GET", r) if r.ends_with("/get") => {
-            not_supported("saving images", "pull images from a registry")
-        }
+        ("GET", r) if r.ends_with("/get") => save(vec![&r[..r.len() - "/get".len()]]),
         ("GET", r) if r.ends_with("/history") => {
             not_supported("image history", "use `docker image inspect`")
         }
@@ -37,6 +34,50 @@ pub fn route(req: &Request, ctx: &Ctx, rest: &str) -> Option<Reply> {
         ("DELETE", r) if !r.is_empty() => remove(ctx, r),
         _ => return None,
     })
+}
+
+/// `GET /images/get?names=…` and `GET /images/{name}/get`: the images as one archive.
+fn save(names: Vec<&str>) -> Reply {
+    if names.is_empty() {
+        return super::router::message(400, "no image names given");
+    }
+    let names: Vec<String> = names.into_iter().map(str::to_string).collect();
+    for name in &names {
+        if let Err(e) = crate::Image::get(name) {
+            return super::router::reply_error(&e);
+        }
+    }
+    Reply::Chunked {
+        content_type: "application/x-tar",
+        body: Box::new(move |w| {
+            crate::Image::save(&names, w).map_err(|e| std::io::Error::other(e.to_string()))
+        }),
+    }
+}
+
+/// `POST /images/load`: store the images of the archive in the body, then report their
+/// names as Docker does.
+fn load() -> Reply {
+    Reply::WithBody(Box::new(|body| match crate::Image::load(body) {
+        Ok(report) => {
+            let mut lines = String::new();
+            for name in &report.names {
+                let text = format!("Loaded image: {}\n", super::docker::docker_image_name(name));
+                lines.push_str(&serde_json::json!({ "stream": text }).to_string());
+                lines.push('\n');
+            }
+            for id in &report.untagged {
+                let text = format!("Loaded image ID: {id}\n");
+                lines.push_str(&serde_json::json!({ "stream": text }).to_string());
+                lines.push('\n');
+            }
+            Reply::Stream {
+                content_type: "application/json",
+                body: Box::new(move |w| std::io::Write::write_all(w, lines.as_bytes())),
+            }
+        }
+        Err(e) => super::router::reply_error(&e),
+    }))
 }
 
 /// Turns pull events into Docker's JSON progress messages.
@@ -424,12 +465,18 @@ fn prune(req: &Request) -> Reply {
     let all = filters
         .get("dangling")
         .is_some_and(|v| v.iter().any(|d| d == "false" || d == "0"));
-    if !all || filters.contains_key("label") {
+    // Images have no labels in openpod: a label filter matches none.
+    if filters.contains_key("label") {
         return Reply::Json(200, json!({"ImagesDeleted": null, "SpaceReclaimed": 0}));
     }
-    match crate::image::prune() {
+    let pruned = if all {
+        crate::image::prune()
+    } else {
+        crate::image::prune_dangling()
+    };
+    match pruned {
         Ok(report) => {
-            let deleted: Vec<Value> = report
+            let mut deleted: Vec<Value> = report
                 .removed_images
                 .iter()
                 .map(|n| {
@@ -438,6 +485,10 @@ fn prune(req: &Request) -> Reply {
                     json!({ "Untagged": short })
                 })
                 .collect();
+            deleted.extend(report.removed_ids.iter().map(|id| {
+                super::events::publish("image", "delete", id, &[]);
+                json!({ "Deleted": id })
+            }));
             Reply::Json(
                 200,
                 json!({"ImagesDeleted": deleted, "SpaceReclaimed": report.freed_bytes}),

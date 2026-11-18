@@ -31,6 +31,18 @@ pub enum Reply {
         content_type: &'static str,
         run: Box<dyn FnOnce(UnixStream, Vec<u8>, Upgrade) + Send>,
     },
+    /// A body of unknown length in chunks: it ends with the last (empty) chunk only when
+    /// `body` succeeds, so a client sees an error instead of a cut-off body that looks
+    /// whole. The connection closes afterwards.
+    Chunked {
+        content_type: &'static str,
+        body: Box<dyn FnOnce(&mut dyn std::io::Write) -> std::io::Result<()> + Send>,
+    },
+    /// Another reply with more headers.
+    Headed(Vec<(&'static str, String)>, Box<Reply>),
+    /// The handler reads the request body as it arrives ([`streams_body`] left it unread)
+    /// and then gives the reply. The connection closes afterwards.
+    WithBody(Box<dyn FnOnce(&mut dyn std::io::Read) -> Reply + Send>),
 }
 
 /// The response head of a hijacked connection.
@@ -96,6 +108,17 @@ pub fn strip_version(path: &str) -> &str {
     path
 }
 
+/// Requests whose body the handler reads as it arrives, without a size limit: archives
+/// of files and of images.
+pub fn streams_body(req: &Request) -> bool {
+    let path = strip_version(&req.path);
+    let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
+    matches!(
+        (req.method.as_str(), segments.as_slice()),
+        ("PUT", ["containers", _, "archive"]) | ("POST", ["images", "load"])
+    )
+}
+
 /// Send the request to its handler.
 pub fn route(req: &Request, ctx: &Ctx) -> Reply {
     let path = strip_version(&req.path);
@@ -119,14 +142,12 @@ pub fn route(req: &Request, ctx: &Ctx) -> Reply {
         (_, ["containers", _, "stats"]) => {
             not_supported("stats", "read the container's cgroup files")
         }
-        (
-            _,
-            ["containers", _, "export"]
-            | ["containers", _, "archive"]
-            | ["containers", _, "changes"],
-        ) => not_supported(
-            "copying or diffing container files",
-            "use a bind mount or `docker exec … tar`",
+        ("HEAD", ["containers", id, "archive"]) => super::containers::stat_path(req, id),
+        ("GET", ["containers", id, "archive"]) => super::containers::copy_out(req, id),
+        ("PUT", ["containers", id, "archive"]) => super::containers::copy_in(req, id),
+        (_, ["containers", _, "export"] | ["containers", _, "changes"]) => not_supported(
+            "exporting or diffing container files",
+            "copy them with `docker cp`",
         ),
         (_, ["containers", rest @ ..]) => super::containers::route(req, ctx, rest)
             .unwrap_or_else(|| message(404, "page not found")),

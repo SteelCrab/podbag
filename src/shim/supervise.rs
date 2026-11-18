@@ -368,6 +368,11 @@ pub(super) fn run(
         }
     };
 
+    // After a reboot the image's mount is gone (it lives in the runtime directory).
+    if let Err(e) = crate::store::ensure_image_mount(dirs, &spec.rootfs) {
+        remove_control(dirs, id);
+        return failed(status, e);
+    }
     let budget = match memory_budget(dirs) {
         Ok(b) => b,
         Err(e) => {
@@ -384,6 +389,24 @@ pub(super) fn run(
     };
     // SAFETY: geteuid has no preconditions. (Read before joining a user namespace.)
     let rootless = unsafe { libc::geteuid() } != 0;
+    // As root, the container may open only the usual devices (a privileged one: all).
+    // Rootless, the kernel refuses device nodes to the user namespace already.
+    if let (false, false, Some(g)) = (rootless, spec.security.privileged, &group) {
+        if let Err(e) = crate::cgroup::restrict_devices(g.fd()) {
+            remove_control(dirs, id);
+            if let Some(g) = group {
+                g.remove();
+            }
+            return failed(
+                status,
+                Error::io(
+                    "cannot limit the devices the container may open",
+                    &e,
+                    "check that the kernel has cgroup BPF (CONFIG_CGROUP_BPF)",
+                ),
+            );
+        }
+    }
     let bridged = matches!(spec.network, crate::network::NetworkMode::Bridge { .. });
     let session = if rootless && bridged {
         match super::net::join_session(dirs, spec) {

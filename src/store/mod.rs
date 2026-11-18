@@ -4,10 +4,13 @@
 pub mod composefs;
 pub mod erofs;
 pub mod layer;
+mod load;
 pub mod method;
 pub mod object;
 pub mod ops;
 pub(crate) mod perm;
+#[cfg(unix)]
+mod save;
 pub mod tree;
 pub mod zstd;
 
@@ -19,6 +22,7 @@ use crate::image::{DiskUsage, ImageConfig, PruneReport};
 use crate::paths::Dirs;
 use crate::{Error, ErrorKind, Result};
 use layer::{EntryKind, LayerIndex};
+pub use load::LoadReport;
 pub use method::MountMethod;
 use object::{ObjectStore, io_error};
 use serde::{Deserialize, Serialize};
@@ -33,6 +37,10 @@ use std::path::{Path, PathBuf};
 pub struct ImageRecord {
     /// The manifest digest, `sha256:…`.
     pub digest: String,
+    /// The config's digest, when known: the ID buildx and Docker's classic store show.
+    /// Images stored before it was kept have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_digest: Option<String>,
     pub config: ImageConfig,
     pub diff_ids: Vec<String>,
     /// Bytes of file content in the image.
@@ -420,6 +428,27 @@ impl Store {
             if let Some((name, r)) = matches.first() {
                 return Ok(((*name).clone(), self.read_record(&r.digest)?));
             }
+            // An image without a name (loaded from an archive that gave none), or one asked
+            // for by its config's digest (buildx reports that one): by reading the records.
+            let images = std::fs::read_dir(self.root.join("images"));
+            let records = images.into_iter().flatten().flatten().filter_map(|e| {
+                let hex = e.file_name().to_string_lossy().into_owned();
+                let record = read_json::<ImageRecord>(&e.path().join("image.json")).ok()?;
+                (hex.len() == 64).then_some((hex, record))
+            });
+            for (hex, record) in records {
+                let by_config = record
+                    .config_digest
+                    .as_deref()
+                    .is_some_and(|c| hex_of(c).starts_with(wanted));
+                if hex.starts_with(wanted) || by_config {
+                    let name = refs
+                        .iter()
+                        .find(|(_, r)| r.digest == record.digest)
+                        .map_or_else(|| record.digest.clone(), |(n, _)| n.clone());
+                    return Ok((name, record));
+                }
+            }
         }
         let name = Reference::parse(name_or_digest)
             .map(|r| r.name())
@@ -537,8 +566,14 @@ impl Store {
             }
             let compression = manifest::layer_compression(&desc.media_type)?;
             let blob = registry.open_blob(r, desc)?;
-            let bytes =
-                self.ingest_layer(r, blob, compression, &desc.digest, desc.size, diff_id)?;
+            let bytes = self.ingest_layer(
+                Source::Registry(r),
+                blob,
+                compression,
+                &desc.digest,
+                desc.size,
+                diff_id,
+            )?;
             progress(Progress::LayerDone {
                 index: i,
                 digest: &desc.digest,
@@ -549,13 +584,14 @@ impl Store {
             &resolved.manifest_digest,
             resolved.config.config.clone(),
             resolved.config.diff_ids.clone(),
+            Some(resolved.config_digest.clone()),
         )
     }
 
     /// Read one layer blob: check its digest and diff_id while storing its files.
     fn ingest_layer(
         &self,
-        r: &Reference,
+        source: Source<'_>,
         blob: Box<dyn Read + Send>,
         compression: Compression,
         digest: &str,
@@ -565,7 +601,7 @@ impl Store {
         let read_error = |e: std::io::Error| {
             Error::new(
                 ErrorKind::Runtime,
-                format!("cannot pull {}", r.name()),
+                source.failure(),
                 format!("reading layer {digest}: {e}"),
                 "try again",
             )
@@ -592,25 +628,27 @@ impl Store {
         if compressed.count != size {
             return Err(Error::new(
                 ErrorKind::Runtime,
-                format!("cannot pull {}", r.name()),
+                source.failure(),
                 format!(
-                    "layer {digest}: the registry sent {}{} bytes, the manifest says {size}",
+                    "layer {digest}: {} has {}{} bytes, {} says {size}",
+                    source.sender(),
                     compressed.count,
                     if compressed.count > size {
                         " or more"
                     } else {
                         ""
-                    }
+                    },
+                    source.promise(),
                 ),
                 "try again; if it keeps failing, the registry or a proxy is corrupting data",
             ));
         }
         if compressed.digest() != digest {
-            return Err(digest_mismatch(r, digest));
+            return Err(source.mismatch(digest));
         }
         let (entries, plain_digest) = parsed?;
         if plain_digest != diff_id {
-            return Err(digest_mismatch(r, diff_id));
+            return Err(source.mismatch(diff_id));
         }
         write_json(
             &self.layer_path(diff_id),
@@ -623,7 +661,13 @@ impl Store {
     }
 
     /// Merge stored layers into the image tree and write the image record.
-    fn assemble(&self, digest: &str, config: ImageConfig, diff_ids: Vec<String>) -> Result<()> {
+    fn assemble(
+        &self,
+        digest: &str,
+        config: ImageConfig,
+        diff_ids: Vec<String>,
+        config_digest: Option<String>,
+    ) -> Result<()> {
         let mut layers = Vec::new();
         for id in &diff_ids {
             layers.push(self.read_layer_index(id)?.entries);
@@ -656,6 +700,7 @@ impl Store {
             self.build_in(&staging, want, &tree, created)?;
             let record = ImageRecord {
                 digest: digest.to_string(),
+                config_digest,
                 config,
                 diff_ids,
                 size,
@@ -760,6 +805,55 @@ impl Store {
     }
 
     /// Remove every image that no container uses.
+    /// Remove the images without a name that no container uses (`docker image prune`).
+    pub fn prune_dangling(
+        &self,
+        in_use: &dyn Fn() -> HashMap<String, String>,
+    ) -> Result<PruneReport> {
+        let _lock = self.lock(true)?;
+        let in_use = in_use();
+        let before = self.objects.total_size()?.1;
+        let doomed: Vec<String> = self
+            .unnamed_images()?
+            .into_iter()
+            .filter(|d| !in_use.contains_key(d))
+            .collect();
+        for digest in &doomed {
+            self.delete_image(digest)?;
+        }
+        self.collect_garbage()?;
+        let after = self.objects.total_size()?.1;
+        Ok(PruneReport {
+            removed_images: Vec::new(),
+            removed_ids: doomed,
+            freed_bytes: before.saturating_sub(after),
+        })
+    }
+
+    /// The images no name points to (a load or a tag moved their names away, or they came
+    /// without one), by digest.
+    fn unnamed_images(&self) -> Result<Vec<String>> {
+        let refs = self.read_refs()?;
+        let named: HashSet<&str> = refs.values().map(|r| r.digest.as_str()).collect();
+        let dir = self.root.join("images");
+        let mut unnamed = Vec::new();
+        for entry in std::fs::read_dir(&dir)
+            .map_err(|e| io_error(&dir, e))?
+            .flatten()
+        {
+            let hex = entry.file_name().to_string_lossy().into_owned();
+            let digest = format!("sha256:{hex}");
+            if crate::image::reference::is_digest(&digest)
+                && entry.path().join("image.json").exists()
+                && !named.contains(digest.as_str())
+            {
+                unnamed.push(digest);
+            }
+        }
+        unnamed.sort();
+        Ok(unnamed)
+    }
+
     pub fn prune(&self, in_use: &dyn Fn() -> HashMap<String, String>) -> Result<PruneReport> {
         let _lock = self.lock(true)?;
         let in_use = in_use();
@@ -778,10 +872,20 @@ impl Store {
         for digest in doomed.iter().map(|(_, d)| d).collect::<HashSet<_>>() {
             self.delete_image(digest)?;
         }
+        // And the images that had no name left.
+        let unnamed: Vec<String> = self
+            .unnamed_images()?
+            .into_iter()
+            .filter(|d| !in_use.contains_key(d))
+            .collect();
+        for digest in &unnamed {
+            self.delete_image(digest)?;
+        }
         self.collect_garbage()?;
         let after = self.objects.total_size()?.1;
         Ok(PruneReport {
             removed_images: doomed.into_iter().map(|(n, _)| n).collect(),
+            removed_ids: unnamed,
             freed_bytes: before.saturating_sub(after),
         })
     }
@@ -807,16 +911,20 @@ impl Store {
         let mut removed = Vec::new();
         while self.objects.total_size()?.1 > limit {
             let refs = self.read_refs()?;
-            let mut last_used: HashMap<&str, u64> = HashMap::new();
+            let mut last_used: HashMap<String, u64> = HashMap::new();
             for r in refs.values() {
-                let t = last_used.entry(&r.digest).or_insert(0);
+                let t = last_used.entry(r.digest.clone()).or_insert(0);
                 *t = (*t).max(r.last_used);
+            }
+            // Images without a name go first.
+            for digest in self.unnamed_images()? {
+                last_used.entry(digest).or_insert(0);
             }
             let victim = last_used
                 .into_iter()
-                .filter(|(d, _)| *d != keep && !in_use.contains_key(*d))
-                .min_by_key(|(d, t)| (*t, d.to_string()))
-                .map(|(d, _)| d.to_string());
+                .filter(|(d, _)| d != keep && !in_use.contains_key(d))
+                .min_by_key(|(d, t)| (*t, d.clone()))
+                .map(|(d, _)| d);
             let Some(victim) = victim else { break };
             let names = self.update_refs(|refs| {
                 let names: Vec<String> = refs
@@ -945,7 +1053,6 @@ impl Store {
         write_json(&self.root.join("refs.json"), refs)
     }
 
-    #[cfg(test)]
     fn set_ref(&self, name: &str, digest: &str, last_used: u64) -> Result<()> {
         self.update_refs(|refs| {
             refs.insert(
@@ -989,7 +1096,7 @@ impl Store {
             if !self.layer_path(id).exists() {
                 let size = layer.len() as u64;
                 self.ingest_layer(
-                    &r,
+                    Source::Registry(&r),
                     Box::new(std::io::Cursor::new(layer)),
                     Compression::None,
                     id,
@@ -999,12 +1106,54 @@ impl Store {
             }
         }
         if !self.image_dir(&digest).exists() {
-            self.assemble(&digest, ImageConfig::default(), diff_ids)?;
+            self.assemble(&digest, ImageConfig::default(), diff_ids, None)?;
         } else {
             self.ensure_artifact(&digest)?;
         }
         self.set_ref(&r.name(), &digest, last_used)?;
         self.read_record(&digest)
+    }
+}
+
+/// Where a layer comes from, for error messages.
+#[derive(Clone, Copy)]
+enum Source<'a> {
+    Registry(&'a Reference),
+    Archive,
+}
+
+impl Source<'_> {
+    fn failure(self) -> String {
+        match self {
+            Source::Registry(r) => format!("cannot pull {}", r.name()),
+            Source::Archive => "cannot load the image archive".to_string(),
+        }
+    }
+
+    fn sender(self) -> &'static str {
+        match self {
+            Source::Registry(_) => "the registry's blob",
+            Source::Archive => "the archive's blob",
+        }
+    }
+
+    fn promise(self) -> &'static str {
+        match self {
+            Source::Registry(_) => "the manifest",
+            Source::Archive => "its record",
+        }
+    }
+
+    fn mismatch(self, digest: &str) -> Error {
+        match self {
+            Source::Registry(r) => digest_mismatch(r, digest),
+            Source::Archive => Error::new(
+                ErrorKind::InvalidInput,
+                "cannot load the image archive",
+                format!("sha256 mismatch for {digest}: the archive's content is not what it names"),
+                "the archive is damaged or was changed; save it again",
+            ),
+        }
     }
 }
 
@@ -1014,6 +1163,34 @@ impl Drop for Lock {
     fn drop(&mut self) {
         let _ = self.0.unlock();
     }
+}
+
+/// Mount the image of a container's root filesystem again when its mount is gone: image
+/// mounts live in the runtime directory, which a reboot empties. Only composefs images
+/// have one (root mode); a tree needs nothing.
+#[cfg(target_os = "linux")]
+pub fn ensure_image_mount(dirs: &Dirs, rootfs: &crate::spec::Rootfs) -> Result<()> {
+    let crate::spec::Rootfs::Overlay {
+        lower,
+        data: Some(_),
+        ..
+    } = rootfs
+    else {
+        return Ok(());
+    };
+    let lower = Path::new(lower);
+    if composefs::is_erofs(lower) {
+        return Ok(());
+    }
+    let hex = lower
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    let digest = format!("sha256:{hex}");
+    let store = Store::open_existing(dirs)
+        .ok_or_else(|| crate::image::not_pulled(&crate::id::short_id(hex)))?;
+    let _shared = store.lock(false)?;
+    composefs::mount_shared(&store.erofs_path(&digest), lower)
 }
 
 /// Digests of images used by existing containers, mapped to one container ID each.

@@ -206,6 +206,9 @@ pub struct Security {
     pub no_new_privileges: bool,
     /// The default seccomp filter; `--security-opt seccomp=unconfined` turns it off.
     pub seccomp: bool,
+    /// `--privileged`: every capability, no seccomp filter, no masked or read-only kernel
+    /// files, a writable /sys and cgroup. Rootless, all of it inside the user namespace.
+    pub privileged: bool,
 }
 
 impl Default for Security {
@@ -215,6 +218,7 @@ impl Default for Security {
             cap_drop: Vec::new(),
             no_new_privileges: false,
             seccomp: true,
+            privileged: false,
         }
     }
 }
@@ -477,6 +481,16 @@ mod tests {
         json.as_object_mut().unwrap().remove("restart");
         let spec: ContainerSpec = serde_json::from_value(json).unwrap();
         assert_eq!(spec.restart, crate::restart::RestartPolicy::No);
+    }
+
+    #[test]
+    fn settings_without_privileged_load() {
+        let mut json = serde_json::to_value(spec_fixture()).unwrap();
+        let security = json["security"].as_object_mut().unwrap();
+        security.remove("privileged");
+        let spec: ContainerSpec = serde_json::from_value(json).unwrap();
+        assert!(!spec.security.privileged);
+        assert!(spec.security.seccomp, "{:?}", spec.security);
     }
 
     #[test]

@@ -253,6 +253,41 @@ struct RawRootfs {
     diff_ids: Vec<String>,
 }
 
+/// An image config file for `config` and the layers `diff_ids`, as [`parse_config`]
+/// reads it back: what `docker save` writes for an image of the store.
+#[cfg(unix)]
+pub fn config_json(config: &ImageConfig, diff_ids: &[String], created: u64) -> Vec<u8> {
+    let env: Vec<String> = config.env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    let volumes: serde_json::Map<String, serde_json::Value> = config
+        .volumes
+        .iter()
+        .map(|v| (v.clone(), serde_json::json!({})))
+        .collect();
+    let mut run = serde_json::json!({
+        "Env": env,
+        "Cmd": config.cmd,
+        "WorkingDir": config.workdir.clone().unwrap_or_default(),
+        "User": config.user.clone().unwrap_or_default(),
+    });
+    if !config.entrypoint.is_empty() {
+        run["Entrypoint"] = serde_json::json!(config.entrypoint);
+    }
+    if !volumes.is_empty() {
+        run["Volumes"] = serde_json::Value::Object(volumes);
+    }
+    if let Some(h) = &config.healthcheck {
+        run["Healthcheck"] = h.to_docker();
+    }
+    serde_json::to_vec(&serde_json::json!({
+        "architecture": host_platform().0,
+        "os": "linux",
+        "created": crate::shim::logbook::rfc3339(created, 0),
+        "config": run,
+        "rootfs": {"type": "layers", "diff_ids": diff_ids},
+    }))
+    .unwrap_or_default()
+}
+
 pub fn parse_config(body: &[u8]) -> Result<ConfigFile> {
     let raw: RawConfig = serde_json::from_slice(body).map_err(|e| {
         Error::new(
@@ -323,6 +358,40 @@ mod tests {
             Fetched::Index(m) => m,
             Fetched::Manifest { .. } => panic!("expected an index"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_written_config_reads_back_the_same() {
+        let config = ImageConfig {
+            entrypoint: vec!["/entry".into()],
+            cmd: vec!["run".into(), "it".into()],
+            env: vec![
+                ("PATH".into(), "/bin".into()),
+                ("EMPTY".into(), String::new()),
+            ],
+            workdir: Some("/work".into()),
+            user: Some("1000:1000".into()),
+            volumes: vec!["/data".into()],
+            healthcheck: Some(crate::health::HealthSettings {
+                test: vec!["CMD".into(), "true".into()],
+                interval_ms: Some(5000),
+                timeout_ms: None,
+                retries: Some(3),
+                start_period_ms: Some(1000),
+                start_interval_ms: None,
+            }),
+        };
+        let ids = vec![format!("sha256:{}", "a".repeat(64))];
+        let back = parse_config(&config_json(&config, &ids, 1_700_000_000)).unwrap();
+        assert_eq!(back.config, config);
+        assert_eq!(back.diff_ids, ids);
+        assert_eq!(back.os, "linux");
+        let bare = ImageConfig::default();
+        assert_eq!(
+            parse_config(&config_json(&bare, &[], 0)).unwrap().config,
+            bare
+        );
     }
 
     #[test]

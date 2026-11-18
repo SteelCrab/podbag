@@ -4,7 +4,7 @@ A daemonless, rootless container engine that runs Docker/OCI images from a singl
 
 ## Status
 
-Early development (milestones M0 to M10 and M8a/M8b of the plan). What works:
+Early development (milestones M0 to M10 and M8a to M8c of the plan). What works:
 
 ```sh
 openpod run alpine echo hello            # pulls the image if needed; the container stays
@@ -23,6 +23,8 @@ openpod logs -f web
 openpod exec -it web sh
 openpod stop web && openpod rm web
 openpod pull alpine | openpod images | openpod rmi alpine
+openpod save -o app.tar myapp:1 && openpod load -i app.tar     # image archives
+openpod run --rm --privileged alpine mount -t tmpfs none /mnt   # every capability (rootless: in its user namespace)
 openpod system df | openpod system prune -f
 openpod run --rootfs ./rootfs sh         # a plain directory instead of an image
 openpod check                            # is this system ready? (exit 1 if not)
@@ -132,6 +134,7 @@ cannot send a mount outside it; `/proc` and `/sys` cannot hold mounts.
 | `--cap-add NAME`, `--cap-drop NAME` | change Docker's 14 default capabilities (`ALL` allowed; drops first) |
 | `--security-opt no-new-privileges` | setuid programs cannot gain privileges (off by default, like Docker) |
 | `--security-opt seccomp=unconfined` | turn off the default seccomp filter |
+| `--privileged` | every capability, no seccomp filter, the kernel's files unmasked, a writable `/sys` and cgroup, any device (for BuildKit and other container tools); host devices are not added to `/dev` |
 
 **Memory budget.** All containers run in one parent cgroup. Its `memory.max` is the
 budget: by default 50% of the host's memory (`memory_budget` in `config.toml`, such as
@@ -150,7 +153,14 @@ scope of its own, `openpod-<id>.scope`. `exec` runs commands in the same cgroup.
 **Security defaults.** Docker's 14 capabilities, a seccomp filter that refuses dangerous
 system calls (module loading, kexec, mount, new namespaces, keyrings, BPF, …), hidden
 kernel files (`/proc/kcore`, `/proc/keys`, `/sys/firmware`, …) and read-only kernel
-settings (`/proc/sys`, `/proc/sysrq-trigger`, …). `exec` applies the same.
+settings (`/proc/sys`, `/proc/sysrq-trigger`, …). A container may make device nodes, as
+with Docker, but open only the usual ones (`/dev/null`, `zero`, `full`, `random`,
+`urandom`, `tty`, `ptmx`, terminals, `net/tun`): as root these are runc's rules, in a cgroup
+BPF program; without root the user namespace refuses device nodes anyway. `exec` applies
+the same.
+`--privileged` drops all of these. Without root it still gives nothing the user does not
+have: the capabilities hold inside the container's user namespace, the host's kernel
+settings stay out of reach, and no host device is passed in. As root it is the host's root.
 
 ## Networks
 
@@ -204,17 +214,32 @@ What works: `version`, `info`, `system df`, `events` (live: there is no history,
 `image prune`; `run` (attached, `-d`, `-i`, `-t`, `--rm`), `create`, `start [-a]`, `stop`,
 `restart`, `kill`, `wait`, `rm`, `logs` (`-f`, `--tail`, `-t`, `--since`), `attach`, `ps`
 (with `label`, `name`, `id`, `status` filters), `inspect`, `port`, `exec` (`-i`, `-t`, `-d`,
-`-e`, `-w`, `-u`), `container prune`; `volume` and `network` (create, ls, inspect, rm,
-prune).
+`-e`, `-w`, `-u`), `cp` (both ways, running or not), `container prune`; `save` and `load`;
+`volume` and `network` (create, ls, inspect, rm, prune).
 
-Settings openpod does not have are refused with a reason (devices, `--privileged`,
-`--read-only`, `--pid host`, `--volumes-from`, `--link`, port ranges, other network or
-volume drivers), or accepted with a warning when ignoring them is harmless (`--dns`,
-`--add-host`, ulimits, log drivers, fixed addresses).
-Features it lacks answer 501 with what to do instead: `build` (use buildx, later),
-`commit`, `cp`, `export`, `diff`, `top`, `stats`, `pause`, `rename`, `update`, `push`,
-`search`, `save`/`load`, swarm and plugins. `network connect` and `disconnect` work on
+Settings openpod does not have are refused with a reason (devices, `--read-only`,
+`--pid host`, `--volumes-from`, `--link`, port ranges, other network or volume drivers),
+or accepted with a warning when ignoring them is harmless (`--dns`, `--add-host`,
+ulimits, log drivers, fixed addresses).
+Features it lacks answer 501 with what to do instead: the classic builder (`POST /build`;
+use buildx, below), `commit`, `export`, `diff`, `top`, `stats`, `pause`, `rename`,
+`update`, `push`, `search`, swarm and plugins. `network connect` and `disconnect` work on
 containers that do not run.
+
+`docker cp` works on running and stopped containers. In a running one it goes through
+the container's own mounts; in a stopped one openpod mounts its files (root filesystem,
+volumes, bind mounts) privately for the copy, and no start begins meanwhile. Paths are
+the container's: a symbolic link to `/etc` means the container's `/etc`, never the
+host's. The kernel's file systems (`/proc`, `/sys`) come out empty, as with Docker; a copy
+that fails partway is an error. `docker save` writes Docker's archive format; the store keeps files, not the
+original layer archives, so a saved image's layers (and its ID) get new digests, and it
+carries the image's command, environment, user, working directory, volumes and health
+check, but not its labels or history. `docker load` reads `docker save` archives and OCI
+image layouts (both, as BuildKit writes them), plain or gzip-compressed; every digest in
+the archive is checked, and an archive larger than the store limit is refused. An image
+whose name moves to a newly loaded one is removed unless a container uses it; images
+that came without a name are found by ID (the config's digest too, which buildx prints)
+and removed by `docker image prune`.
 
 Differences from Docker: `docker attach` to a container that another process started
 reads its output from the log and cannot send input; a client that leaves an attached
@@ -227,8 +252,22 @@ anything new when nothing changed), `down` (`-v`), `ps`, `logs`, `exec`, `run`, 
 project's networks and volumes, several networks per service, services that reach each
 other by service and container name, `depends_on` with `condition: service_healthy`,
 restart policies and health checks. Names live in each container's `/etc/hosts` (there is
-no DNS server): when replicas share a name, the first one answers. Building images
-(`build:`) comes with buildx in the next milestone.
+no DNS server): when replicas share a name, the first one answers. `docker compose build`
+builds with a buildx builder (`--builder`, below).
+
+**Building images with buildx.** buildx's `docker-container` driver runs BuildKit in an
+openpod container (privileged, so it can run each step in containers of its own) and
+loads the result through `docker load`:
+
+```sh
+docker buildx create --driver docker-container --name openpod --use
+docker buildx build --load -t myapp .          # then: docker run myapp
+docker compose build --builder openpod
+```
+
+The builder keeps running after the service ends (it is an ordinary container), and its
+cache stays in its volume until `docker buildx rm`. The default `docker` driver (the
+daemon's built-in BuildKit) is not available.
 
 ## Requirements
 
