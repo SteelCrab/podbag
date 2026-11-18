@@ -42,6 +42,10 @@ pub mod libc_check;
 #[cfg(target_os = "linux")]
 #[doc(hidden)]
 pub mod linux;
+/// openpod on macOS: the VM host and the CLI that forwards to it.
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub mod macos;
 #[doc(hidden)]
 pub mod netfiles;
 #[doc(hidden)]
@@ -64,6 +68,9 @@ pub mod spec;
 pub mod state;
 #[doc(hidden)]
 pub mod store;
+/// The macOS VM's shared parts (and, on Linux, the guest's init and agent).
+#[doc(hidden)]
+pub mod vm;
 pub mod volume;
 
 pub use container::{Container, Output, Running};

@@ -117,6 +117,9 @@ pub enum Cmd {
     ExecHelper { id: String, request: String },
     #[command(name = "__archive", hide = true)]
     ArchiveHelper { id: String, request: String },
+    /// The macOS VM's agent (it runs in the VM)
+    #[command(name = "__vm-agent", hide = true)]
+    VmAgent,
     /// Manage networks
     Network {
         #[command(subcommand)]

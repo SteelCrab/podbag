@@ -14,8 +14,145 @@ use args::{Cli, Cmd};
 use clap::Parser;
 
 fn main() {
+    // PID 1 of the macOS VM: openpod is its initramfs's /init, which the kernel starts as
+    // `/init __vm-init`. Anywhere else (a container's entry point, `unshare -pf`), PID 1
+    // is a CLI like any other.
+    #[cfg(target_os = "linux")]
+    if std::process::id() == 1
+        && std::env::args_os()
+            .nth(1)
+            .is_some_and(|a| a == openpod::vm::proto::INIT_ARG)
+    {
+        openpod::vm::guest::vm_init_main();
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(code) = macos_front(std::env::args().skip(1).collect()) {
+        std::process::exit(code);
+    }
     let cli = Cli::parse();
     std::process::exit(dispatch(cli.cmd));
+}
+
+/// On macOS, commands run in openpod's Linux VM; only `vm …`, help and the version stay
+/// here.
+#[cfg(target_os = "macos")]
+fn macos_front(args: Vec<String>) -> Option<i32> {
+    match args.first().map(String::as_str) {
+        Some("__vm-host") => Some(openpod::macos::host::host_main()),
+        Some("vm") => Some(openpod::macos::cli::vm_command(&args[1..])),
+        None | Some("-h" | "--help" | "help" | "-V" | "--version") => None,
+        // Helpers the library starts on this Mac (`__store`, `__shim`, …) run here.
+        Some(helper) if helper.starts_with("__") => None,
+        // Checked here first: help and wrong arguments need no VM.
+        Some(_) => match parse(&args) {
+            Err(e) => e.exit(),
+            Ok(cli) => Some(openpod::macos::cli::forward(mac_command(&cli, args))),
+        },
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn parse(args: &[String]) -> Result<Cli, clap::Error> {
+    Cli::try_parse_from(std::iter::once("openpod".to_string()).chain(args.iter().cloned()))
+}
+
+/// What the Mac's side must know of a command it sends to the VM: whether it reads stdin,
+/// the Mac paths it names, and the Mac's values of `-e NAME`.
+#[cfg(target_os = "macos")]
+fn mac_command(cli: &Cli, argv: Vec<String>) -> openpod::macos::cli::Forward {
+    let mut f = openpod::macos::cli::Forward {
+        argv,
+        stdin: false,
+        paths: Vec::new(),
+    };
+    match &cli.cmd {
+        Cmd::Run(a) | Cmd::Create(a) => {
+            f.stdin = matches!(cli.cmd, Cmd::Run(_)) && a.interactive && !a.detach;
+            for v in &a.volume {
+                if let Ok(openpod::MountRequest::Bind { source, .. }) =
+                    openpod::volume::parse_volume_arg(v)
+                {
+                    f.paths.push(source);
+                }
+            }
+            f.paths.extend(a.rootfs.clone());
+            f.argv = fill_env(&f.argv, a.args.len());
+        }
+        Cmd::Exec(a) => {
+            f.stdin = a.interactive;
+            f.argv = fill_env(&f.argv, a.args.len());
+        }
+        Cmd::Start {
+            attach,
+            interactive,
+            ..
+        } => f.stdin = *attach && *interactive,
+        Cmd::Load { input, .. } => match input {
+            Some(p) => f.paths.push(p.display().to_string()),
+            None => f.stdin = true,
+        },
+        Cmd::Save {
+            output: Some(p), ..
+        } => f.paths.push(p.display().to_string()),
+        Cmd::System {
+            cmd: args::SystemCmd::Service {
+                socket: Some(p), ..
+            },
+        } => f.paths.push(p.display().to_string()),
+        _ => {}
+    }
+    f
+}
+
+/// `-e NAME` (no value) takes NAME's value from the Mac, as a local `run` takes it from
+/// its own environment: the VM's is not the Mac's. Only the options before the
+/// `trailing` arguments (image and command) are rewritten, and only when clap then reads
+/// the same options with the values filled in.
+#[cfg(target_os = "macos")]
+fn fill_env(argv: &[String], trailing: usize) -> Vec<String> {
+    let value = |name: &str| -> Option<String> {
+        (!name.contains('=') && !name.is_empty())
+            .then(|| std::env::var(name).ok().map(|v| format!("{name}={v}")))
+            .flatten()
+    };
+    // `-e`, `--env`, or boolean short flags ending in e (`-ite`): the value comes next.
+    let takes_next = |a: &str| {
+        a == "--env"
+            || a.strip_prefix('-').is_some_and(|f| {
+                !f.starts_with('-')
+                    && f.ends_with('e')
+                    && f[..f.len() - 1].chars().all(|c| "dit".contains(c))
+            })
+    };
+    let end = argv.len().saturating_sub(trailing);
+    let mut out = argv.to_vec();
+    let mut i = 0;
+    while i < end {
+        if takes_next(&argv[i]) && i + 1 < end {
+            if let Some(v) = value(&argv[i + 1]) {
+                out[i + 1] = v;
+            }
+            i += 2;
+            continue;
+        }
+        if let Some(v) = argv[i].strip_prefix("--env=").and_then(value) {
+            out[i] = format!("--env={v}");
+        }
+        i += 1;
+    }
+    let env_of = |cli: &Cli| match &cli.cmd {
+        Cmd::Run(a) | Cmd::Create(a) => Some(a.env.clone()),
+        Cmd::Exec(a) => Some(a.env.clone()),
+        _ => None,
+    };
+    let expected = parse(argv)
+        .ok()
+        .and_then(|c| env_of(&c))
+        .map(|env| env.iter().map(|e| value(e).unwrap_or(e.clone())).collect());
+    match parse(&out) {
+        Ok(c) if env_of(&c).is_some() && env_of(&c) == expected => out,
+        _ => argv.to_vec(),
+    }
 }
 
 #[cfg(unix)]
@@ -63,6 +200,10 @@ fn dispatch(cmd: Cmd) -> i32 {
         Cmd::Exec(a) => container::exec(a),
         Cmd::ExecHelper { id, request } => exec_helper(&id, &request),
         Cmd::ArchiveHelper { id, request } => archive_helper(&id, &request),
+        #[cfg(target_os = "linux")]
+        Cmd::VmAgent => openpod::vm::agent::vm_agent_main(),
+        #[cfg(not(target_os = "linux"))]
+        Cmd::VmAgent => unsupported(),
         #[cfg(target_os = "linux")]
         Cmd::Keeper { runtime } => openpod::keeper::keeper_main(&runtime),
         #[cfg(not(target_os = "linux"))]

@@ -147,6 +147,15 @@ pub fn numbers(arch: Arch) -> Vec<(&'static str, u32)> {
 /// reach, so it gets ENOSYS and the C library falls back to `clone` (as with Docker).
 const CLONE3: u32 = 435;
 
+fn socket_number(arch: Arch) -> u32 {
+    match arch {
+        Arch::X86_64 => 41,
+        Arch::Aarch64 => 198,
+    }
+}
+
+const AF_VSOCK: u32 = 40;
+
 fn clone_number(arch: Arch) -> u32 {
     match arch {
         Arch::X86_64 => 56,
@@ -234,6 +243,15 @@ pub fn deny_filter(arch: Arch, caps: u64) -> Vec<Insn> {
             p.extend([jeq(nr, 0, 1), ret(RET_ERRNO | EPERM)]);
         }
     }
+    // AF_VSOCK leads out of the container, to a VM's agent and its host: denied whatever
+    // the capabilities, as by Docker.
+    p.extend([
+        jeq(socket_number(arch), 0, 4),
+        load(OFFSET_ARG0_LOW),
+        jeq(AF_VSOCK, 0, 1),
+        ret(RET_ERRNO | EPERM),
+        ret(RET_ALLOW),
+    ]);
     // With CAP_SYS_ADMIN, new namespaces are allowed (Docker's rule for clone and clone3).
     if caps & SYS_ADMIN == 0 {
         p.extend([
@@ -291,6 +309,23 @@ mod tests {
                 0x06 => return i.k,
                 other => panic!("unknown instruction {other:#x}"),
             };
+        }
+    }
+
+    #[test]
+    fn vsock_sockets_are_denied_like_docker() {
+        // AF_VSOCK leads out of the container to the VM's agent and its host.
+        for arch in [Arch::X86_64, Arch::Aarch64] {
+            let socket = match arch {
+                Arch::X86_64 => 41,
+                Arch::Aarch64 => 198,
+            };
+            for caps in [crate::caps::DEFAULT, u64::MAX] {
+                let p = deny_filter(arch, caps);
+                assert_eq!(eval(&p, socket, audit(arch), 40), RET_ERRNO | EPERM);
+                assert_eq!(eval(&p, socket, audit(arch), 2), RET_ALLOW);
+                assert_eq!(eval(&p, socket, audit(arch), 1), RET_ALLOW);
+            }
         }
     }
 

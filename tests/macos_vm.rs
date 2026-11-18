@@ -1,0 +1,975 @@
+#![cfg(target_os = "macos")]
+//! openpod on the Mac: commands run in the Linux VM it starts and stops itself. Needs the
+//! guest (`dev/vm.sh run dev/macos/build-guest.sh`) and runs only with
+//! OPENPOD_TEST_MACOS_VM=1 (it boots a VM). Each test has a home of its own, so its own VM.
+
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
+
+fn enabled() -> bool {
+    let on = std::env::var("OPENPOD_TEST_MACOS_VM").as_deref() == Ok("1");
+    if !on {
+        eprintln!("OPENPOD_TEST_MACOS_VM is not 1: skipped");
+    }
+    on
+}
+
+fn repo() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+/// The guest files (OPENPOD_TEST_GUEST: another build's, to compare with).
+fn guest() -> PathBuf {
+    std::env::var_os("OPENPOD_TEST_GUEST").map_or_else(|| repo().join("target/vm"), PathBuf::from)
+}
+
+/// The binary, signed with the virtualization entitlement, once for all tests (codesign
+/// replaces the file: two at once trip over each other).
+fn openpod_bin() -> PathBuf {
+    static SIGNED: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    SIGNED
+        .get_or_init(|| {
+            // OPENPOD_TEST_BIN: another build, to compare with (an older one fails).
+            let bin = std::env::var_os("OPENPOD_TEST_BIN").map_or_else(
+                || PathBuf::from(env!("CARGO_BIN_EXE_openpod")),
+                PathBuf::from,
+            );
+            let signed = Command::new(repo().join("dev/macos/sign.sh"))
+                .arg(&bin)
+                .output()
+                .unwrap();
+            assert!(
+                signed.status.success(),
+                "{}",
+                String::from_utf8_lossy(&signed.stderr)
+            );
+            bin
+        })
+        .clone()
+}
+
+/// A Mac home of its own (`OPENPOD_MAC_HOME`): its own VM, disk and sockets. The VM is
+/// stopped on drop.
+struct Mac {
+    home: tempfile::TempDir,
+    bin: PathBuf,
+    idle: u32,
+}
+
+impl Mac {
+    fn new(idle_secs: u32) -> Mac {
+        // Short socket paths: a Unix socket path is limited to 104 bytes on macOS.
+        let home = tempfile::Builder::new()
+            .prefix("opm")
+            .tempdir_in("/tmp")
+            .unwrap();
+        Mac {
+            home,
+            bin: openpod_bin(),
+            idle: idle_secs,
+        }
+    }
+
+    fn cmd(&self, args: &[&str]) -> Command {
+        let mut c = Command::new(&self.bin);
+        c.args(args)
+            .env("OPENPOD_MAC_HOME", self.home.path())
+            .env("OPENPOD_VM_GUEST", guest())
+            .env("OPENPOD_VM_MEMORY", "1024")
+            .env("OPENPOD_VM_IDLE", self.idle.to_string());
+        c
+    }
+
+    fn run(&self, args: &[&str]) -> Output {
+        self.cmd(args).stdin(Stdio::null()).output().unwrap()
+    }
+
+    fn ok(&self, args: &[&str]) -> String {
+        let out = self.run(args);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "openpod {args:?}: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim_end().to_string()
+    }
+
+    fn sock(&self) -> PathBuf {
+        self.home.path().join("run/vm.sock")
+    }
+}
+
+impl Drop for Mac {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            // The home goes with the test: show why its VM did what it did.
+            for log in ["run/host.log", "console.log"] {
+                let text = std::fs::read_to_string(self.home.path().join(log)).unwrap_or_default();
+                let lines: Vec<&str> = text.lines().collect();
+                let tail = &lines[lines.len().saturating_sub(40)..];
+                eprintln!("--- {log} (last {} lines)\n{}", tail.len(), tail.join("\n"));
+            }
+        }
+        let _ = self.run(&["vm", "stop"]);
+    }
+}
+
+#[test]
+fn commands_run_in_the_vm() {
+    if !enabled() {
+        return;
+    }
+    let mac = Mac::new(60);
+    let started = Instant::now();
+    assert_eq!(mac.ok(&["run", "--rm", "alpine:3.22", "echo", "hi"]), "hi");
+    eprintln!("first run, VM included: {:?}", started.elapsed());
+    // Exit codes and stdin.
+    let failed = mac.run(&["run", "--rm", "alpine:3.22", "sh", "-c", "exit 3"]);
+    assert_eq!(failed.status.code(), Some(3));
+    let mut cat = mac
+        .cmd(&["run", "--rm", "-i", "alpine:3.22", "cat"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    cat.stdin
+        .take()
+        .unwrap()
+        .write_all(b"through stdin\n")
+        .unwrap();
+    let out = cat.wait_with_output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "through stdin\n");
+    // A Mac directory under /Users, mounted by a relative path.
+    let dir = tempfile::tempdir_in(std::env::var("HOME").unwrap()).unwrap();
+    std::fs::write(dir.path().join("note"), "from the mac\n").unwrap();
+    let read = mac
+        .cmd(&[
+            "run",
+            "--rm",
+            "-v",
+            "./:/work",
+            "alpine:3.22",
+            "cat",
+            "/work/note",
+        ])
+        .current_dir(dir.path())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&read.stdout),
+        "from the mac\n",
+        "{}",
+        String::from_utf8_lossy(&read.stderr)
+    );
+    // Detached, listed, entered, removed.
+    mac.ok(&["run", "-d", "--name", "bg", "alpine:3.22", "sleep", "300"]);
+    assert!(mac.ok(&["ps"]).contains("bg"));
+    assert_eq!(mac.ok(&["exec", "bg", "echo", "inside"]), "inside");
+    mac.ok(&["rm", "-f", "bg"]);
+}
+
+#[test]
+fn two_commands_share_one_vm_and_it_stops_when_idle() {
+    if !enabled() {
+        return;
+    }
+    let mac = Mac::new(5);
+    // Both start while no VM runs: one host makes it, both use it.
+    let a = mac
+        .cmd(&["run", "--rm", "alpine:3.22", "true"])
+        .stdin(Stdio::null())
+        .spawn()
+        .unwrap();
+    let b = mac
+        .cmd(&["run", "--rm", "alpine:3.22", "true"])
+        .stdin(Stdio::null())
+        .spawn()
+        .unwrap();
+    assert!(a.wait_with_output().unwrap().status.success());
+    assert!(b.wait_with_output().unwrap().status.success());
+    let hosts = Command::new("pgrep")
+        .args(["-f", &format!("{} __vm-host", mac.bin.display())])
+        .output()
+        .unwrap();
+    // pgrep sees hosts of other tests too; this home's socket tells ours apart.
+    assert!(!String::from_utf8_lossy(&hosts.stdout).trim().is_empty());
+    assert!(mac.sock().exists());
+    // Idle for 5 seconds with nothing running: the VM goes, and the host with it.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while mac.sock().exists() {
+        assert!(Instant::now() < deadline, "the VM never stopped");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert_eq!(mac.ok(&["vm", "status"]), "stopped");
+}
+
+#[test]
+fn an_unsigned_binary_says_how_to_sign_it() {
+    if !enabled() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let copy = dir.path().join("openpod");
+    std::fs::copy(env!("CARGO_BIN_EXE_openpod"), &copy).unwrap();
+    // Strip the signature the linker gave it, then sign without the entitlement.
+    let _ = Command::new("codesign")
+        .args(["--remove-signature"])
+        .arg(&copy)
+        .output();
+    let _ = Command::new("codesign")
+        .args(["--force", "--sign", "-"])
+        .arg(&copy)
+        .output();
+    let home = tempfile::Builder::new()
+        .prefix("opu")
+        .tempdir_in("/tmp")
+        .unwrap();
+    // Two at once: one host fails, the other finds it starting; both say so quickly.
+    let started = Instant::now();
+    let spawn = || {
+        Command::new(&copy)
+            .args(["run", "--rm", "alpine:3.22", "true"])
+            .env("OPENPOD_MAC_HOME", home.path())
+            .env("OPENPOD_VM_GUEST", guest())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
+    let (a, b) = (spawn(), spawn());
+    for out in [a.wait_with_output().unwrap(), b.wait_with_output().unwrap()] {
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_ne!(out.status.code(), Some(0));
+        assert!(err.contains("sign"), "{err}");
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "it took {:?}",
+        started.elapsed()
+    );
+    assert!(!Path::new(&home.path().join("run/vm.sock")).exists());
+    // Arguments are checked here, without a VM.
+    let bad = Command::new(&copy)
+        .args(["ps", "--no-such-option"])
+        .env("OPENPOD_MAC_HOME", home.path())
+        .output()
+        .unwrap();
+    assert_eq!(bad.status.code(), Some(2));
+}
+
+/// Run `openpod args` under a new terminal of `rows`×`cols`; returns the master side.
+fn under_terminal(
+    mac: &Mac,
+    args: &[&str],
+    rows: u16,
+    cols: u16,
+) -> (std::fs::File, std::process::Child) {
+    use std::os::fd::FromRawFd;
+    let (mut master, mut slave) = (0, 0);
+    let mut size = libc::winsize {
+        ws_row: rows,
+        ws_col: cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: openpty fills two descriptors.
+    let r = unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut size,
+        )
+    };
+    assert_eq!(r, 0);
+    // SAFETY: new descriptors from openpty.
+    // Only this process holds the master: when it closes, the terminal hangs up.
+    // SAFETY: FD_CLOEXEC on a descriptor openpty just made.
+    unsafe { libc::fcntl(master, libc::F_SETFD, libc::FD_CLOEXEC) };
+    // SAFETY: new descriptors from openpty.
+    let (master, slave) = unsafe {
+        (
+            std::fs::File::from_raw_fd(master),
+            std::fs::File::from_raw_fd(slave),
+        )
+    };
+    let mut cmd = mac.cmd(args);
+    cmd.stdin(slave.try_clone().unwrap())
+        .stdout(slave.try_clone().unwrap())
+        .stderr(slave);
+    use std::os::unix::process::CommandExt;
+    // SAFETY: setsid and TIOCSCTTY are async-signal-safe.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            libc::ioctl(0, libc::TIOCSCTTY as _, 0);
+            Ok(())
+        });
+    }
+    let child = cmd.spawn().unwrap();
+    (master, child)
+}
+
+/// Read from `master` until `want` shows up (or time runs out); returns what was read.
+fn read_until(master: &mut std::fs::File, want: &str, secs: u64) -> String {
+    use std::io::Read;
+    let fd = std::os::fd::AsRawFd::as_raw_fd(master);
+    // SAFETY: non-blocking reads on our own descriptor.
+    unsafe {
+        libc::fcntl(
+            fd,
+            libc::F_SETFL,
+            libc::fcntl(fd, libc::F_GETFL) | libc::O_NONBLOCK,
+        )
+    };
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    let mut seen = String::new();
+    let mut buf = [0u8; 4096];
+    while Instant::now() < deadline && !seen.contains(want) {
+        match master.read(&mut buf) {
+            Ok(n) if n > 0 => seen.push_str(&String::from_utf8_lossy(&buf[..n])),
+            _ => std::thread::sleep(Duration::from_millis(30)),
+        }
+    }
+    seen
+}
+
+#[test]
+fn a_terminal_reaches_the_container() {
+    if !enabled() {
+        return;
+    }
+    use std::io::Write;
+    let mac = Mac::new(60);
+    mac.ok(&["pull", "alpine:3.22"]);
+    let (mut master, mut child) =
+        under_terminal(&mac, &["run", "--rm", "-it", "alpine:3.22", "sh"], 33, 101);
+    assert!(read_until(&mut master, "#", 60).contains('#'), "no prompt");
+    // The size of the Mac's terminal.
+    master.write_all(b"stty size\r").unwrap();
+    let size = read_until(&mut master, "33 101", 10);
+    assert!(size.contains("33 101"), "{size:?}");
+    // A new size reaches it.
+    let size = libc::winsize {
+        ws_row: 40,
+        ws_col: 120,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: TIOCSWINSZ on the terminal we made; its foreground group gets SIGWINCH.
+    unsafe {
+        libc::ioctl(
+            std::os::fd::AsRawFd::as_raw_fd(&master),
+            libc::TIOCSWINSZ,
+            &size,
+        )
+    };
+    std::thread::sleep(Duration::from_millis(500));
+    master.write_all(b"stty size\r").unwrap();
+    let resized = read_until(&mut master, "40 120", 10);
+    assert!(resized.contains("40 120"), "{resized:?}");
+    // Ctrl+C ends what runs in the foreground, not the shell.
+    master.write_all(b"sleep 100\r").unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    master.write_all(&[3]).unwrap();
+    master.write_all(b"echo still-$((40+2))\r").unwrap();
+    let after = read_until(&mut master, "still-42", 10);
+    assert!(after.contains("still-42"), "{after:?}");
+    master.write_all(b"exit 5\r").unwrap();
+    let status = child.wait().unwrap();
+    assert_eq!(status.code(), Some(5));
+}
+
+#[test]
+fn a_running_container_keeps_the_vm() {
+    if !enabled() {
+        return;
+    }
+    let mac = Mac::new(3);
+    mac.ok(&["run", "-d", "--name", "keep", "alpine:3.22", "sleep", "300"]);
+    // Well past the idle time, the container still runs.
+    std::thread::sleep(Duration::from_secs(10));
+    assert_eq!(mac.ok(&["vm", "status"]), "running");
+    assert!(mac.ok(&["ps"]).contains("keep"));
+    mac.ok(&["rm", "-f", "keep"]);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while mac.sock().exists() {
+        assert!(Instant::now() < deadline, "the VM never stopped");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+#[test]
+fn only_paths_under_users_reach_the_vm() {
+    if !enabled() {
+        return;
+    }
+    let mac = Mac::new(60);
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let out = mac
+        .cmd(&["run", "--rm", "-v", "./:/work", "alpine:3.22", "true"])
+        .current_dir(dir.path())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_ne!(out.status.code(), Some(0));
+    assert!(err.contains("/Users"), "{err}");
+    // Named volumes are the VM's own.
+    mac.ok(&["run", "--rm", "-v", "data:/data", "alpine:3.22", "true"]);
+}
+
+#[test]
+fn containers_cannot_reach_the_agent() {
+    if !enabled() {
+        return;
+    }
+    let mac = Mac::new(60);
+    // vsock from a container, to every address that could lead back into the VM: an
+    // answer would mean root in the VM and the Mac's /Users.
+    let script = r#"import socket
+for cid in (1, 2, 3):
+    try:
+        s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
+        s.settimeout(3)
+        s.connect((cid, 2))
+        s.sendall(b'{"argv":["ps"],"env":[],"cwd":"/","tty":false,"rows":0,"cols":0,"time":[0,0]}\n')
+        data = s.recv(64)
+        print("REACHED" if data else "closed", cid, data)
+    except Exception as e:
+        print("refused", cid, e)
+"#;
+    for extra in [&[][..], &["--privileged"][..]] {
+        let mut args = vec!["run", "--rm"];
+        args.extend(extra);
+        args.extend(["python:3.13-alpine", "python3", "-c", script]);
+        let out = mac.ok(&args);
+        assert!(!out.contains("REACHED"), "{extra:?}: {out}");
+    }
+}
+
+#[test]
+fn a_command_ends_when_its_terminal_goes() {
+    if !enabled() {
+        return;
+    }
+    let mac = Mac::new(60);
+    mac.ok(&["pull", "alpine:3.22"]);
+    // A program that ends on a hangup. (A container's PID 1 without a handler ignores
+    // it, here as with a local terminal and with Docker.)
+    let (master, mut child) = under_terminal(
+        &mac,
+        &[
+            "run",
+            "-it",
+            "--name",
+            "hup",
+            "alpine:3.22",
+            "sh",
+            "-c",
+            "trap 'exit 0' HUP; while :; do sleep 1; done",
+        ],
+        24,
+        80,
+    );
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !mac.ok(&["ps"]).contains("hup") {
+        assert!(Instant::now() < deadline, "it never ran");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    // The terminal closes (a closed window): like a local terminal, the command and its
+    // container get a hangup.
+    drop(master);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while child.try_wait().unwrap().is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "the command outlived its terminal"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    while mac.ok(&["ps"]).contains("hup") {
+        assert!(
+            Instant::now() < deadline,
+            "the container outlived its terminal"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+#[test]
+fn a_reader_that_leaves_ends_the_command() {
+    if !enabled() {
+        return;
+    }
+    use std::io::BufRead;
+    let mac = Mac::new(60);
+    mac.ok(&["pull", "alpine:3.22"]);
+    // A reader that takes one line and leaves: the command ends too.
+    let mut yes = mac
+        .cmd(&["run", "--rm", "alpine:3.22", "yes"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut first = String::new();
+    std::io::BufReader::new(yes.stdout.take().unwrap())
+        .read_line(&mut first)
+        .unwrap();
+    assert_eq!(first, "y\n");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while yes.try_wait().unwrap().is_none() {
+        assert!(
+            Instant::now() < deadline,
+            "it kept running for a reader that left"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[test]
+fn a_slow_reader_gets_everything() {
+    if !enabled() {
+        return;
+    }
+    let mac = Mac::new(60);
+    mac.ok(&["pull", "alpine:3.22"]);
+    // Readers that wait before they read, for outputs around what the buffers between
+    // the VM and the Mac hold: nothing is lost, whatever the size.
+    std::thread::scope(|s| {
+        for step in 0..17usize {
+            let mac = &mac;
+            s.spawn(move || {
+                use std::io::Read;
+                let n = 192_000 + step * 48_000;
+                let script = format!("head -c {n} /dev/zero | base64 -w0");
+                let mut c = mac
+                    .cmd(&["run", "--rm", "alpine:3.22", "sh", "-c", &script])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .spawn()
+                    .unwrap();
+                std::thread::sleep(Duration::from_secs(5));
+                let mut all = Vec::new();
+                c.stdout.take().unwrap().read_to_end(&mut all).unwrap();
+                assert!(c.wait().unwrap().success());
+                assert_eq!(all.len(), n.div_ceil(3) * 4, "{n} bytes in");
+            });
+        }
+    });
+}
+
+#[test]
+fn input_stays_for_who_reads_it() {
+    if !enabled() {
+        return;
+    }
+    let mac = Mac::new(60);
+    mac.ok(&["pull", "alpine:3.22"]);
+    // Without -i the command does not take the caller's input: `cat` gets it.
+    let script = format!(
+        "{{ {} run --rm alpine:3.22 true; cat; }} <<'EOF'\nleft for cat\nEOF",
+        mac.bin.display()
+    );
+    let base = mac.cmd(&[]);
+    let out = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(&script)
+        .envs(base.get_envs().filter_map(|(k, v)| Some((k, v?))))
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "left for cat\n");
+    // With -i it does.
+    let mut cat = mac
+        .cmd(&["run", "--rm", "-i", "alpine:3.22", "cat"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    cat.stdin
+        .take()
+        .unwrap()
+        .write_all(b"for the container\n")
+        .unwrap();
+    let out = cat.wait_with_output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "for the container\n");
+}
+
+#[test]
+fn a_bare_env_name_takes_the_macs_value() {
+    if !enabled() {
+        return;
+    }
+    let mac = Mac::new(60);
+    let token = mac
+        .cmd(&[
+            "run",
+            "--rm",
+            "-e",
+            "OPM_TOKEN",
+            "--env=OPM_OTHER",
+            "--env",
+            "OPM_THIRD",
+            "-e",
+            "OPM_UNSET",
+            "alpine:3.22",
+            "sh",
+            "-c",
+            "echo $OPM_TOKEN/$OPM_OTHER/$OPM_THIRD/${OPM_UNSET-none} -e OPM_TOKEN",
+        ])
+        .env("OPM_TOKEN", "abc")
+        .env("OPM_OTHER", "d=e")
+        .env("OPM_THIRD", "f")
+        .env_remove("OPM_UNSET")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&token.stdout).trim(),
+        "abc/d=e/f/none -e OPM_TOKEN",
+        "{}",
+        String::from_utf8_lossy(&token.stderr)
+    );
+}
+
+#[test]
+fn a_restarting_container_keeps_the_vm() {
+    if !enabled() {
+        return;
+    }
+    let mac = Mac::new(3);
+    // It fails at once and waits longer each time before it starts again.
+    mac.ok(&[
+        "run",
+        "-d",
+        "--name",
+        "again",
+        "--restart",
+        "always",
+        "alpine:3.22",
+        "sh",
+        "-c",
+        "exit 1",
+    ]);
+    std::thread::sleep(Duration::from_secs(15));
+    assert_eq!(mac.ok(&["vm", "status"]), "running");
+    mac.ok(&["rm", "-f", "again"]);
+}
+
+#[test]
+fn a_containers_own_options_are_not_mounts() {
+    if !enabled() {
+        return;
+    }
+    let mac = Mac::new(60);
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
+    // `-v` after the image belongs to the container's command.
+    let ls = mac
+        .cmd(&["run", "--rm", "alpine:3.22", "ls", "-v", "/"])
+        .current_dir(tmp.path())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(
+        ls.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&ls.stderr)
+    );
+}
+
+#[test]
+fn mac_paths_outside_users_are_refused_however_written() {
+    if !enabled() {
+        return;
+    }
+    let mac = Mac::new(60);
+    mac.ok(&["pull", "alpine:3.22"]);
+    let home = tempfile::tempdir_in(std::env::var("HOME").unwrap()).unwrap();
+    let up = "../".repeat(home.path().components().count());
+    let dotted = format!("{up}tmp:/x");
+    let link = home.path().join("elsewhere");
+    std::os::unix::fs::symlink("/tmp", &link).unwrap();
+    let linked = format!("{}:/x", link.display());
+    for args in [
+        &["run", "--rm", "-v", &dotted, "alpine:3.22", "true"][..],
+        &["run", "--rm", "-itv", "/tmp:/x", "alpine:3.22", "true"],
+        &["run", "--rm", "--volume=/tmp:/x", "alpine:3.22", "true"],
+        &["run", "--rm", "-v", &linked, "alpine:3.22", "true"],
+    ] {
+        let out = mac
+            .cmd(args)
+            .current_dir(home.path())
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(125), "{args:?}: {err}");
+        assert!(err.contains("only /Users"), "{args:?}: {err}");
+    }
+    // `-v/tmp:/x` is no mount at all: the argument parser takes it for the image, as for a
+    // local command.
+    let attached = mac
+        .cmd(&["run", "--rm", "-v/tmp:/x", "alpine:3.22", "true"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_ne!(attached.status.code(), Some(0));
+    // A file the VM would write where the Mac cannot see it.
+    let tmp = tempfile::tempdir_in("/tmp").unwrap();
+    for args in [
+        &["save", "-o", "out.tar", "alpine:3.22"][..],
+        &["load", "-i", "/tmp/in.tar"],
+    ] {
+        let out = mac
+            .cmd(args)
+            .current_dir(tmp.path())
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(125), "{args:?}: {err}");
+        assert!(err.contains("only /Users"), "{args:?}: {err}");
+    }
+    // Under /Users, a file round trip works.
+    let saved = mac
+        .cmd(&["save", "-o", "out.tar", "alpine:3.22"])
+        .current_dir(home.path())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(saved.status.code(), Some(0));
+    assert!(home.path().join("out.tar").metadata().unwrap().len() > 1_000_000);
+}
+
+#[test]
+fn a_broken_data_disk_is_an_error_not_a_ram_disk() {
+    if !enabled() {
+        return;
+    }
+    let mac = Mac::new(60);
+    // A disk with no file system on it.
+    let disk = std::fs::File::create(mac.home.path().join("disk.img")).unwrap();
+    disk.set_len(1 << 30).unwrap();
+    let out = mac.run(&["run", "--rm", "alpine:3.22", "true"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(125), "{err}");
+    assert!(err.contains("data disk"), "{err}");
+}
+
+#[test]
+fn a_stopped_host_keeps_what_was_written() {
+    if !enabled() {
+        return;
+    }
+    let mac = Mac::new(60);
+    mac.ok(&[
+        "run",
+        "--rm",
+        "-v",
+        "keep:/d",
+        "alpine:3.22",
+        "sh",
+        "-c",
+        "echo persisted > /d/f",
+    ]);
+    // Logging out ends the host with SIGTERM. It is the one process holding its lock.
+    let lsof = Command::new("lsof")
+        .arg("-t")
+        .arg(mac.home.path().join("run/host.lock"))
+        .output()
+        .unwrap();
+    let pid: i32 = String::from_utf8_lossy(&lsof.stdout)
+        .trim()
+        .parse()
+        .expect("one host");
+    // SAFETY: a signal to the host this test started.
+    unsafe { libc::kill(pid, libc::SIGTERM) };
+    let deadline = Instant::now() + Duration::from_secs(40);
+    while mac.sock().exists() {
+        assert!(Instant::now() < deadline, "the host did not stop");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert_eq!(
+        mac.ok(&["run", "--rm", "-v", "keep:/d", "alpine:3.22", "cat", "/d/f"]),
+        "persisted"
+    );
+    // The VM's files are the user's alone.
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(mac.home.path().join("run"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o700);
+}
+
+#[test]
+fn commands_while_the_vm_stops_all_succeed() {
+    if !enabled() {
+        return;
+    }
+    let mac = Mac::new(60);
+    mac.ok(&["pull", "alpine:3.22"]);
+    // An old error in the host's log is not news.
+    use std::io::Write;
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(mac.home.path().join("run/host.log"))
+        .unwrap()
+        .write_all(b"openpod: an old error\n")
+        .unwrap();
+    // A container's PID 1 ignores SIGTERM: the VM takes its five seconds to stop.
+    mac.ok(&["run", "-d", "alpine:3.22", "sleep", "1000"]);
+    // Commands that come while the VM stops (as when its idle time ends) wait for the
+    // next VM instead of failing.
+    std::thread::scope(|s| {
+        s.spawn(|| mac.ok(&["vm", "stop"]));
+        std::thread::sleep(Duration::from_millis(1500));
+        for i in 0..3 {
+            let out = mac.run(&["run", "--rm", "alpine:3.22", "true"]);
+            assert_eq!(
+                out.status.code(),
+                Some(0),
+                "run {i}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    });
+}
+
+#[test]
+fn mac_settings_stay_on_the_mac() {
+    if !enabled() {
+        return;
+    }
+    let mac = Mac::new(60);
+    // Paths and programs of the Mac mean nothing in the VM.
+    let pulled = mac
+        .cmd(&["pull", "alpine:3.22"])
+        .env("OPENPOD_DATA_DIR", "/tmp/opm-elsewhere")
+        .env("OPENPOD_BIN", "/nonexistent/openpod")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(
+        pulled.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&pulled.stderr)
+    );
+    assert!(mac.ok(&["images"]).contains("alpine"));
+}
+
+#[test]
+fn containers_get_generous_limits() {
+    if !enabled() {
+        return;
+    }
+    let mac = Mac::new(60);
+    // Like Docker Desktop's VM: many open files, and room for Elasticsearch's maps.
+    let out = mac.ok(&[
+        "run",
+        "--rm",
+        "alpine:3.22",
+        "sh",
+        "-c",
+        "ulimit -n; ulimit -Hn; cat /proc/sys/vm/max_map_count",
+    ]);
+    assert_eq!(out, "1048576\n1048576\n262144");
+}
+
+/// Send `argv` to the guest agent as the host's own commands are sent, and wait for the
+/// connection to end.
+fn agent_request(mac: &Mac, argv: &[&str]) {
+    use std::io::{Read, Write};
+    let mut s = std::os::unix::net::UnixStream::connect(mac.sock()).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    let req = openpod::vm::proto::CliRequest {
+        argv: argv.iter().map(|a| a.to_string()).collect(),
+        env: Vec::new(),
+        cwd: "/".into(),
+        tty: false,
+        rows: 0,
+        cols: 0,
+        time: (0, 0),
+    };
+    let line = format!("PORT 2\n{}\n", serde_json::to_string(&req).unwrap());
+    s.write_all(line.as_bytes()).unwrap();
+    let mut sink = Vec::new();
+    let _ = s.read_to_end(&mut sink);
+}
+
+#[test]
+fn the_vm_recovers_from_a_lost_agent() {
+    if !enabled() {
+        return;
+    }
+    let mac = Mac::new(60);
+    mac.ok(&["ps"]);
+    // Without its agent, the VM still stops when told to.
+    agent_request(&mac, &["__vm-agent-exit"]);
+    mac.ok(&["vm", "stop"]);
+    assert!(!mac.sock().exists());
+    // PID 1 starts a lost agent again.
+    mac.ok(&["ps"]);
+    agent_request(&mac, &["__vm-agent-exit"]);
+    std::thread::sleep(Duration::from_millis(200));
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while mac.run(&["ps"]).status.code() != Some(0) {
+        assert!(Instant::now() < deadline, "the agent did not come back");
+        std::thread::sleep(Duration::from_millis(300));
+    }
+}
+
+#[test]
+fn a_signal_is_not_held_up_by_unread_input() {
+    if !enabled() {
+        return;
+    }
+    let mac = Mac::new(60);
+    mac.ok(&["pull", "alpine:3.22"]);
+    // Endless input that the container never reads, then a signal from another process.
+    let mut run = mac
+        .cmd(&[
+            "run",
+            "--rm",
+            "-i",
+            "alpine:3.22",
+            "sh",
+            "-c",
+            "trap 'exit 3' INT; sleep 1000 & wait",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut input = run.stdin.take().unwrap();
+    std::thread::spawn(move || {
+        use std::io::Write;
+        let chunk = vec![b'y'; 64 * 1024];
+        while input.write_all(&chunk).is_ok() {}
+    });
+    std::thread::sleep(Duration::from_secs(5));
+    // SAFETY: a signal to the command this test started.
+    unsafe { libc::kill(run.id() as i32, libc::SIGINT) };
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let status = loop {
+        if let Some(status) = run.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the signal never reached the container"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(status.code(), Some(3));
+}

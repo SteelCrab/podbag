@@ -1,0 +1,507 @@
+//! The Mac's `openpod`: commands run in the VM. It starts the VM host when none runs,
+//! sends the command (see [`crate::vm::proto`]), and passes input, output, the terminal's
+//! size and signals until the command's exit code comes back.
+
+use super::host::{Paths, make_run_dir, paths};
+use crate::vm::proto::{CLI_PORT, CliRequest, Frame};
+use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
+use std::os::unix::net::UnixStream;
+use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
+
+/// A command for the VM, and what the Mac's side must know of it.
+pub struct Forward {
+    /// The arguments after `openpod`.
+    pub argv: Vec<String>,
+    /// It reads stdin (`run -i`, `exec -i`, `start -ai`, `load`): only then is input sent,
+    /// and a terminal put in raw mode.
+    pub stdin: bool,
+    /// Mac paths it names (bind mount sources, files), as given.
+    pub paths: Vec<String>,
+}
+
+/// How long a command waits for a VM: one that stops first, then a new one.
+const WAIT_FOR_VM: Duration = Duration::from_secs(90);
+
+/// The Mac's settings that mean the same in the VM. Paths and programs
+/// (OPENPOD_DATA_DIR, OPENPOD_BIN, …) are the Mac's own.
+const SETTINGS: &[&str] = &[
+    "OPENPOD_KEEPER",
+    "OPENPOD_KEEPER_LINGER_MS",
+    "OPENPOD_IMAGE_MOUNT",
+    "OPENPOD_STORE_LIMIT",
+    "OPENPOD_MEMORY_BUDGET",
+    "OPENPOD_DEFAULT_SUBNET",
+];
+
+/// Input sent ahead of what the command took.
+const INPUT_WINDOW: u64 = 1 << 20;
+
+/// The Mac's clock, for the VM.
+pub fn now() -> (u64, u32) {
+    let d = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    (d.as_secs(), d.subsec_nanos())
+}
+
+/// A connection to the VM host's `vm.sock`. With `start`, a host is started when none
+/// runs, and it waits (until `deadline`) while one starts or stops.
+pub fn connect_host(start: bool, deadline: Instant) -> Result<UnixStream, String> {
+    let p = paths()?;
+    if let Ok(s) = UnixStream::connect(&p.vm_sock) {
+        return Ok(s);
+    }
+    if !start {
+        return Err("the VM is not running".into());
+    }
+    make_run_dir(&p)?;
+    // The host this command started, and where its lines in the log begin.
+    let mut ours: Option<(std::process::Child, u64)> = None;
+    loop {
+        if let Ok(s) = UnixStream::connect(&p.vm_sock) {
+            return Ok(s);
+        }
+        match ours.as_mut().map(|(host, at)| (host.try_wait(), *at)) {
+            Some((Ok(Some(status)), at)) if !status.success() => {
+                return Err(error_since(&p.log, at));
+            }
+            // It found another host (starting, or stopping): that one is waited for.
+            Some((Ok(Some(_)), _)) => ours = None,
+            Some(_) => {}
+            None => {
+                if lock_is_free(&p.lock) {
+                    ours = Some(start_host(&p)?);
+                }
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "the VM did not start in time; see {} and {}",
+                p.log.display(),
+                p.console.display()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(30));
+    }
+}
+
+fn start_host(p: &Paths) -> Result<(std::process::Child, u64), String> {
+    // Appended to: two starting at once must not wipe each other's lines.
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&p.log)
+        .map_err(|e| format!("{}: {e}", p.log.display()))?;
+    let at = log.metadata().map_or(0, |m| m.len());
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("__vm-host")
+        .stdin(std::process::Stdio::null())
+        .stdout(log.try_clone().map_err(|e| e.to_string())?)
+        .stderr(log);
+    // Its own session: a Ctrl+C or hangup meant for this command must not reach it.
+    // SAFETY: setsid is async-signal-safe.
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    let host = cmd
+        .spawn()
+        .map_err(|e| format!("cannot start the VM host: {e}"))?;
+    Ok((host, at))
+}
+
+/// Whether no VM host holds the lock (none runs, starts or stops).
+fn lock_is_free(lock: &Path) -> bool {
+    let Ok(f) = std::fs::File::open(lock) else {
+        return true;
+    };
+    // SAFETY: flock on our own descriptor; released when it closes.
+    unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
+}
+
+/// The last error the VM host wrote after `at` in its log.
+fn error_since(log: &Path, at: u64) -> String {
+    let text = std::fs::read(log).unwrap_or_default();
+    let text = String::from_utf8_lossy(text.get(at as usize..).unwrap_or_default());
+    match text.rfind("openpod: ") {
+        Some(start) => text[start..]
+            .trim()
+            .trim_start_matches("openpod: ")
+            .to_string(),
+        None => format!("the VM host ended; see {}", log.display()),
+    }
+}
+
+/// `openpod vm start|stop|status|logs`.
+pub fn vm_command(args: &[String]) -> i32 {
+    let result = match args.first().map(String::as_str) {
+        Some("start") => {
+            connect_host(true, Instant::now() + WAIT_FOR_VM).map(|_| println!("running"))
+        }
+        Some("status") => {
+            let running = connect_host(false, Instant::now()).is_ok();
+            println!("{}", if running { "running" } else { "stopped" });
+            Ok(())
+        }
+        Some("stop") => stop(),
+        Some("logs") => paths().and_then(|p| {
+            let log = std::fs::read_to_string(&p.console)
+                .map_err(|e| format!("{}: {e}", p.console.display()))?;
+            print!("{log}");
+            Ok(())
+        }),
+        _ => Err("usage: openpod vm start|stop|status|logs".into()),
+    };
+    match result {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("openpod: {e}");
+            1
+        }
+    }
+}
+
+/// The host powers the VM off (outright when the guest does not answer) and ends.
+fn stop() -> Result<(), String> {
+    let p = paths()?;
+    let Ok(mut s) = UnixStream::connect(&p.vm_sock) else {
+        return Ok(());
+    };
+    s.write_all(b"STOP\n")
+        .map_err(|e| format!("cannot reach the VM host: {e}"))?;
+    // It closes the connection once the VM is off, then ends.
+    let _ = s.read_to_end(&mut Vec::new());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !lock_is_free(&p.lock) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Ok(())
+}
+
+/// The path with `..` and links resolved, as far as it exists (the rest is appended).
+fn resolve(path: &Path) -> PathBuf {
+    if let Ok(real) = path.canonicalize() {
+        return real;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(dir), Some(name)) => resolve(dir).join(name),
+        _ => {
+            let mut clean = PathBuf::from("/");
+            for c in path.components() {
+                match c {
+                    Component::ParentDir => {
+                        clean.pop();
+                    }
+                    Component::Normal(n) => clean.push(n),
+                    _ => {}
+                }
+            }
+            clean
+        }
+    }
+}
+
+/// The VM shares only the Mac's /Users, at the same path: any other path would be the
+/// VM's own, silently.
+fn check_paths(paths: &[String], cwd: &Path) -> Result<(), String> {
+    for given in paths {
+        let full = resolve(&cwd.join(given));
+        if !full.starts_with("/Users") {
+            return Err(format!(
+                "cannot use {given} ({}): the VM sees only /Users of this Mac\n  \
+                 fix:   move it under /Users, or use a named volume",
+                full.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Why a connection did not get a command into the VM.
+enum Failed {
+    /// The host was stopping (or went away) before it took the command: the next host
+    /// gets it.
+    NotTaken,
+    Error(String),
+}
+
+/// Run `openpod <argv>` in the VM; returns its exit code.
+pub fn forward(f: Forward) -> i32 {
+    // SAFETY: isatty has no memory arguments.
+    let tty = unsafe { libc::isatty(0) == 1 && libc::isatty(1) == 1 };
+    let here = std::env::current_dir().unwrap_or_else(|_| "/".into());
+    if let Err(e) = check_paths(&f.paths, &here) {
+        eprintln!("openpod: {e}");
+        return 125;
+    }
+    // The VM has the same directory only under /Users.
+    let real = resolve(&here);
+    let cwd = if real.starts_with("/Users") {
+        real.display().to_string()
+    } else {
+        "/".to_string()
+    };
+    let deadline = Instant::now() + WAIT_FOR_VM;
+    loop {
+        let result = connect_host(true, deadline)
+            .map_err(Failed::Error)
+            .and_then(|stream| run_remote(stream, &f, tty, &cwd));
+        match result {
+            Ok(code) => return code,
+            Err(Failed::NotTaken) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(Failed::NotTaken) => {
+                eprintln!("openpod: no VM took the command in time");
+                return 125;
+            }
+            Err(Failed::Error(e)) => {
+                eprintln!("openpod: {e}");
+                return 125;
+            }
+        }
+    }
+}
+
+fn window_size() -> (u16, u16) {
+    // SAFETY: TIOCGWINSZ fills a winsize.
+    unsafe {
+        let mut ws: libc::winsize = std::mem::zeroed();
+        if libc::ioctl(1, libc::TIOCGWINSZ, &mut ws) == 0 && ws.ws_row > 0 {
+            (ws.ws_row, ws.ws_col)
+        } else {
+            (24, 80)
+        }
+    }
+}
+
+/// The terminal in raw mode until dropped: the VM's terminal does the line editing.
+struct Raw(libc::termios);
+
+impl Raw {
+    fn enter() -> Option<Raw> {
+        // SAFETY: termios calls on stdin with structs we own.
+        unsafe {
+            let mut saved: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(0, &mut saved) != 0 {
+                return None;
+            }
+            let mut raw = saved;
+            libc::cfmakeraw(&mut raw);
+            libc::tcsetattr(0, libc::TCSANOW, &raw);
+            Some(Raw(saved))
+        }
+    }
+}
+
+impl Drop for Raw {
+    fn drop(&mut self) {
+        // SAFETY: restores what `enter` read.
+        unsafe { libc::tcsetattr(0, libc::TCSANOW, &self.0) };
+    }
+}
+
+extern "C" fn nothing(_: libc::c_int) {}
+
+/// Signals another process (or the terminal, outside raw mode) sends this command go to
+/// the VM's; a terminal's new size too.
+fn take_signals(tty: bool) -> Vec<i32> {
+    let mut signals = vec![libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT];
+    if tty {
+        signals.push(libc::SIGWINCH);
+        // SAFETY: an empty handler. macOS drops a blocked signal whose action is to ignore
+        // it (SIGWINCH's default) instead of keeping it for sigwait.
+        unsafe { libc::signal(libc::SIGWINCH, nothing as *const () as libc::sighandler_t) };
+    }
+    crate::signals::block(&signals);
+    signals
+}
+
+/// The connection's sending side, shared by the threads that send.
+#[derive(Clone)]
+struct Out(Arc<Mutex<UnixStream>>);
+
+impl Out {
+    fn send(&self, f: Frame) -> std::io::Result<()> {
+        let mut w = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        f.write_to(&mut *w)
+    }
+}
+
+/// Input sent and not yet taken by the command.
+#[derive(Default)]
+struct Window(Mutex<u64>, Condvar);
+
+fn run_remote(mut stream: UnixStream, f: &Forward, tty: bool, cwd: &str) -> Result<i32, Failed> {
+    // A host that is stopping closes without `OK`: the command never reached its VM.
+    stream
+        .write_all(format!("PORT {CLI_PORT}\n").as_bytes())
+        .map_err(|_| Failed::NotTaken)?;
+    let mut ok = [0u8; 3];
+    if stream.read_exact(&mut ok).is_err() || &ok != b"OK\n" {
+        return Err(Failed::NotTaken);
+    }
+    let io = |e: std::io::Error| Failed::Error(format!("the connection to the VM failed: {e}"));
+    let (rows, cols) = if tty { window_size() } else { (24, 80) };
+    let req = CliRequest {
+        argv: f.argv.clone(),
+        env: std::env::vars()
+            .filter(|(k, _)| SETTINGS.contains(&k.as_str()))
+            .collect(),
+        cwd: cwd.to_string(),
+        tty,
+        rows,
+        cols,
+        time: now(),
+    };
+    let mut line = serde_json::to_string(&req).map_err(|e| Failed::Error(e.to_string()))?;
+    line.push('\n');
+    stream.write_all(line.as_bytes()).map_err(io)?;
+    // Blocked before any thread starts, so only the signal thread takes them.
+    let signals = take_signals(tty);
+    let raw = if tty && f.stdin { Raw::enter() } else { None };
+    let out = Out(Arc::new(Mutex::new(stream.try_clone().map_err(io)?)));
+    let window = Arc::new(Window::default());
+    if f.stdin {
+        let (out, window) = (out.clone(), window.clone());
+        std::thread::spawn(move || send_input(&out, &window));
+    } else if !tty {
+        // The command has no input: it sees its end at once.
+        let _ = out.send(Frame::StdinEnd);
+    }
+    {
+        let out = out.clone();
+        std::thread::spawn(move || {
+            loop {
+                let sig = wait_for(&signals);
+                let frame = if sig == libc::SIGWINCH {
+                    let (rows, cols) = window_size();
+                    Frame::Resize { rows, cols }
+                } else {
+                    Frame::Signal(sig)
+                };
+                if out.send(frame).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+    let result = take_output(&mut stream, &window);
+    drop(raw);
+    // Whatever made it end, the VM's command learns it: an early end is a hangup there.
+    let _ = stream.shutdown(std::net::Shutdown::Both);
+    result
+}
+
+/// The Mac's stdin to the VM, at most a window ahead of what the command took.
+fn send_input(out: &Out, window: &Window) {
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut stdin = std::io::stdin().lock();
+    loop {
+        match stdin.read(&mut buf) {
+            Ok(0) | Err(_) => {
+                let _ = out.send(Frame::StdinEnd);
+                return;
+            }
+            Ok(n) => {
+                let mut ahead = window.0.lock().unwrap_or_else(|p| p.into_inner());
+                while *ahead >= INPUT_WINDOW {
+                    ahead = window.1.wait(ahead).unwrap_or_else(|p| p.into_inner());
+                }
+                *ahead += n as u64;
+                drop(ahead);
+                if out.send(Frame::Stdin(buf[..n].to_vec())).is_err() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// The command's output and exit code. A reader that went away (`| head`) ends this
+/// command as it would end a local one: exit code 141, as from SIGPIPE.
+fn take_output(stream: &mut UnixStream, window: &Window) -> Result<i32, Failed> {
+    let mut out = std::io::stdout().lock();
+    let mut err = std::io::stderr();
+    loop {
+        match Frame::read_from(stream) {
+            Ok(Some(Frame::Stdout(d))) => {
+                if out.write_all(&d).and_then(|()| out.flush()).is_err() {
+                    return Ok(128 + libc::SIGPIPE);
+                }
+            }
+            Ok(Some(Frame::Stderr(d))) => {
+                let _ = err.write_all(&d);
+            }
+            Ok(Some(Frame::StdinTaken(n))) => {
+                let mut ahead = window.0.lock().unwrap_or_else(|p| p.into_inner());
+                *ahead = ahead.saturating_sub(u64::from(n));
+                window.1.notify_all();
+            }
+            Ok(Some(Frame::Exit(code))) => return Ok(code),
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => {
+                return Err(Failed::Error(
+                    "the VM ended the command without an exit code".into(),
+                ));
+            }
+        }
+    }
+}
+
+/// The next of `signals` (blocked in every thread).
+fn wait_for(signals: &[i32]) -> i32 {
+    // SAFETY: a sigset on the stack with the signals blocked by `take_signals`.
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        for &s in signals {
+            libc::sigaddset(&mut set, s);
+        }
+        let mut sig = 0;
+        libc::sigwait(&set, &mut sig);
+        sig
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_paths_under_users_are_mounted() {
+        let paths = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let home = std::env::var("HOME").unwrap();
+        let home = Path::new(&home);
+        assert!(check_paths(&paths(&["./src", "x/y", "/Users"]), home).is_ok());
+        assert!(check_paths(&paths(&["./src"]), Path::new("/tmp")).is_err());
+        assert!(check_paths(&paths(&["/opt/x"]), home).is_err());
+        let up = "../".repeat(home.components().count());
+        assert!(check_paths(&paths(&[&format!("{up}tmp")]), home).is_err());
+        assert!(
+            check_paths(
+                &paths(&[&format!("{}/a/../../../../tmp", home.display())]),
+                home
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn links_out_of_users_are_followed() {
+        let dir = tempfile::tempdir_in(std::env::var("HOME").unwrap()).unwrap();
+        let link = dir.path().join("out");
+        std::os::unix::fs::symlink("/tmp", &link).unwrap();
+        let paths = vec![link.join("new-file").display().to_string()];
+        assert!(check_paths(&paths, dir.path()).is_err());
+        let paths = vec![dir.path().join("new/deeper").display().to_string()];
+        assert!(check_paths(&paths, dir.path()).is_ok());
+    }
+}

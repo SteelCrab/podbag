@@ -30,6 +30,7 @@ openpod run --rootfs ./rootfs sh         # a plain directory instead of an image
 openpod check                            # is this system ready? (exit 1 if not)
 openpod check-image myapp:1              # programs that cannot run in the image (exit 1)
 openpod system service &                 # the Docker API, for the docker CLI (see below)
+openpod vm status                        # macOS: the Linux VM openpod starts by itself (see below)
 ```
 
 There is no daemon. While containers run, one small keeper process (`openpod __keeper`,
@@ -268,6 +269,39 @@ docker compose build --builder openpod
 The builder keeps running after the service ends (it is an ordinary container), and its
 cache stays in its volume until `docker buildx rm`. The default `docker` driver (the
 daemon's built-in BuildKit) is not available.
+
+## macOS
+
+On a Mac, openpod runs containers in a small Linux VM of its own (Virtualization.framework,
+Linux 6.18). The first command starts it (about one second); it powers off 60 seconds
+after the last connection ends while no container runs or waits to restart
+(`OPENPOD_VM_IDLE`, seconds), so nothing runs while no container does. A command that comes
+while the VM stops waits for the next one. A running VM answers `openpod run --rm alpine
+true` in about 30 ms.
+
+```sh
+dev/vm.sh run dev/macos/build-guest.sh     # the guest: kernel, initramfs, empty data disk
+cargo build && dev/macos/sign.sh           # VMs need the virtualization entitlement
+target/debug/openpod run --rm -it alpine sh
+target/debug/openpod vm status             # also: vm start, vm stop, vm logs
+```
+
+Commands run in the VM: the Mac's `openpod` passes them on with their output, exit code,
+signals and terminal size, as a local one would run. Only commands that read input
+(`-i`, `load` without `-i FILE`) take the Mac's stdin, and only `-i` on a terminal puts it
+in raw mode; a closed terminal is a hangup for the command, as locally. `-e NAME` takes the
+Mac's value of NAME. The Mac's `/Users` appears in the VM at the same path, so
+`-v ./src:/work` works from a directory under `/Users`; other Mac paths (also through `..`
+or a link, and files for `save -o`, `load -i`, `--rootfs`) are refused, and named volumes
+live in the VM. Of the `OPENPOD_*` settings, the keeper's, the store's and the default
+subnet pass to the VM; paths and programs stay the Mac's. Containers cannot reach the VM's
+agent (vsock is closed to them). Images, containers and volumes stay on a sparse 64 GiB
+disk, `~/.openpod/disk.img`, between VM runs; `openpod vm stop` and a logout power the VM
+off cleanly, and when the disk cannot be mounted, commands say so instead of using memory.
+The VM uses 2 GiB of memory (`OPENPOD_VM_MEMORY`, MiB); containers get 1048576 open files
+and `vm.max_map_count` 262144, like Docker Desktop's. Still to come: the docker CLI and
+Compose on the Mac, published ports on the Mac's localhost, and memory and disk space given
+back while the VM runs.
 
 ## Requirements
 
