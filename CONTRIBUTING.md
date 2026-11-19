@@ -9,6 +9,7 @@ Thank you for helping. Bug reports, fixes and new features are all welcome.
 - [Test](#test)
 - [Pull requests](#pull-requests)
 - [Translations](#translations)
+- [Website](#website)
 - [License](#license)
 
 ## Report a problem
@@ -66,6 +67,25 @@ dev/vm.sh static       # the static release binary, and a check of its size
 - `README.md` is the source. `README.<language>.md` files follow it.
 - When you change `README.md`, say so in the pull request, so that the translations can
   follow.
+- The website's words are in `site/i18n/<language>.json`. Every file needs every key that
+  `en.json` has: the build stops when one is missing.
+- The words in the layers-and-files picture are in `dev/docs/storage.py` (`TEXT`).
+
+## Website
+
+- The site is in `site/`: a page template (`page.html`), one string file per language
+  (`i18n/<language>.json`), the style and the script.
+- Build it, then look at it:
+
+```sh
+python3 dev/docs/site.py _site
+python3 -m http.server -d _site 8000    # then open http://localhost:8000
+```
+
+- A push to `main` deploys it to https://podbag.dev on Cloudflare
+  (`.github/workflows/site.yml`).
+- The pictures come from the scripts in `dev/docs/` and from `dev/bench/charts.py`. Run the
+  script again after you change one.
 
 ## License
 
