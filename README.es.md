@@ -37,6 +37,7 @@ Guarda las imágenes archivo por archivo: un archivo que comparten muchas imáge
 - **Funciona con las herramientas de Docker.** Imágenes Docker y OCI, el CLI `docker`, Compose y buildx.
 - **Con o sin root.** El mismo programa funciona de las dos formas.
 - **Linux, macOS y Windows.** x86_64 y arm64. El soporte de Windows es experimental.
+- **Una TUI y una aplicación de escritorio.** `podbag tui` en la terminal, y una ventana con un icono en la barra de menús, para contenedores, imágenes, volúmenes y redes.
 
 ### Capas y archivos
 
@@ -172,7 +173,7 @@ docker compose up -d
 
 Los documentos de abajo están en inglés.
 
-- [Uso](docs/usage.md): comandos, volúmenes, redes, límites, API de Docker, macOS, Windows.
+- [Uso](docs/usage.md): comandos, volúmenes, redes, límites, API de Docker, TUI y GUI, macOS, Windows.
 - [Arquitectura](docs/architecture.md): en qué se diferencia podbag de Docker.
 - [Compilar desde el código fuente](docs/build.md): Linux, macOS, Windows.
 - [Rendimiento](docs/benchmarks.md) y la [prueba con microservicios Spring](docs/benchmarks-msa.md).

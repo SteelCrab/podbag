@@ -37,6 +37,7 @@
 - **兼容 Docker 工具。** 支持 Docker 和 OCI 镜像、`docker` CLI、Compose 和 buildx。
 - **有无 root 都可以。** 同一个程序两种方式都能用。
 - **Linux、macOS 和 Windows。** 支持 x86_64 和 arm64。Windows 支持处于实验阶段。
+- **有 TUI 和桌面应用。** 在终端里用 `podbag tui`，在桌面上用带菜单栏图标的窗口，管理容器、镜像、卷和网络。
 
 ### 层与文件
 
@@ -172,7 +173,7 @@ docker compose up -d
 
 以下文档为英文。
 
-- [使用](docs/usage.md)：命令、卷、网络、限制、Docker API、macOS、Windows。
+- [使用](docs/usage.md)：命令、卷、网络、限制、Docker API、TUI 和 GUI、macOS、Windows。
 - [架构](docs/architecture.md)：podbag 与 Docker 的区别。
 - [从源码构建](docs/build.md)：Linux、macOS、Windows。
 - [基准测试](docs/benchmarks.md)和 [Spring 微服务基准测试](docs/benchmarks-msa.md)。
