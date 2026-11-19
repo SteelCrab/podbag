@@ -1,0 +1,143 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="490" viewBox="0 0 800 490" lang="vi" xml:lang="vi" role="img" aria-label="Hoạt ảnh. Hai image có hầu hết các tệp giống nhau. Khi lưu theo lớp, một lớp chỉ được lưu một lần khi nó giống hệt; lớp trên của image B khác một tệp, nên spring.jar và jackson.jar được lưu lại: 8 tệp. podbag lưu mỗi tệp một lần: 6 tệp. Đo với 8 dịch vụ Spring trong 2 bản phát hành: 2.970 MiB đĩa khi lưu theo lớp (Docker), 902 MiB với podbag." font-family="ui-sans-serif, -apple-system, 'Segoe UI', 'Apple SD Gothic Neo', 'Malgun Gothic', 'Hiragino Sans', 'Yu Gothic', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK KR', Helvetica, Arial, sans-serif">
+<title>Hai image được lưu theo lớp và theo tệp</title>
+<style>@keyframes k1{0%{opacity:0}1%{opacity:0}2.5%{opacity:1}13.5%{opacity:1}15%{opacity:0}100%{opacity:0}}.k1{animation:k1 20s linear infinite both}@keyframes k2{0%{opacity:0}15%{opacity:0}16.5%{opacity:1}41.5%{opacity:1}43%{opacity:0}100%{opacity:0}}.k2{animation:k2 20s linear infinite both}@keyframes k3{0%{opacity:0}43%{opacity:0}44.5%{opacity:1}66.5%{opacity:1}68%{opacity:0}100%{opacity:0}}.k3{animation:k3 20s linear infinite both}@keyframes k4{0%{opacity:0}68%{opacity:0}69.5%{opacity:1}96%{opacity:1}98%{opacity:0}100%{opacity:0}}.k4{animation:k4 20s linear infinite both}@keyframes k5{0%{opacity:0}4.5%{opacity:0}5.5%{opacity:1}8.5%{opacity:0}100%{opacity:0}}.k5{animation:k5 20s linear infinite both}@keyframes k6{0%{opacity:0}20%{opacity:0}21.5%{opacity:1}96%{opacity:1}98%{opacity:0}100%{opacity:0}}.k6{animation:k6 20s linear infinite both}@keyframes k7{0%{opacity:0;transform:translate(1.4px,-156.0px)}16%{opacity:0;transform:translate(1.4px,-156.0px)}16.75%{opacity:1;transform:translate(1.4px,-156.0px);animation-timing-function:cubic-bezier(.45,0,.25,1)}20%{opacity:1;transform:translate(0px,0px)}96%{opacity:1;transform:translate(0px,0px)}98%{opacity:0;transform:translate(0px,0px)}100%{opacity:0;transform:translate(0px,0px)}}.k7{animation:k7 20s linear infinite both}@keyframes k8{0%{opacity:0;transform:translate(1.4px,-200.0px)}21%{opacity:0;transform:translate(1.4px,-200.0px)}21.75%{opacity:1;transform:translate(1.4px,-200.0px);animation-timing-function:cubic-bezier(.45,0,.25,1)}25%{opacity:1;transform:translate(0px,0px)}96%{opacity:1;transform:translate(0px,0px)}98%{opacity:0;transform:translate(0px,0px)}100%{opacity:0;transform:translate(0px,0px)}}.k8{animation:k8 20s linear infinite both}@keyframes k9{0%{opacity:0}25%{opacity:0}26.5%{opacity:1}31%{opacity:1}32.5%{opacity:0}100%{opacity:0}}.k9{animation:k9 20s linear infinite both}@keyframes k10{0%{opacity:0;transform:translate(345.0px,-200.0px)}27%{opacity:0;transform:translate(345.0px,-200.0px)}27.75%{opacity:1;transform:translate(345.0px,-200.0px);animation-timing-function:cubic-bezier(.45,0,.25,1)}31%{opacity:1;transform:translate(0px,0px)}32.5%{opacity:0;transform:translate(0px,0px)}100%{opacity:0;transform:translate(0px,0px)}}.k10{animation:k10 20s linear infinite both}@keyframes k11{0%{opacity:0}31%{opacity:0}32%{opacity:1}35%{opacity:0}100%{opacity:0}}.k11{animation:k11 20s linear infinite both}@keyframes k12{0%{opacity:0}32.5%{opacity:0}34%{opacity:1}96%{opacity:1}98%{opacity:0}100%{opacity:0}}.k12{animation:k12 20s linear infinite both}@keyframes k13{0%{opacity:0}32.5%{opacity:0}34%{opacity:1}96%{opacity:1}98%{opacity:0}100%{opacity:0}}.k13{animation:k13 20s linear infinite both}@keyframes k14{0%{opacity:0;transform:translate(345.0px,-198.0px)}34.5%{opacity:0;transform:translate(345.0px,-198.0px)}35.25%{opacity:1;transform:translate(345.0px,-198.0px);animation-timing-function:cubic-bezier(.45,0,.25,1)}38.5%{opacity:1;transform:translate(0px,0px)}96%{opacity:1;transform:translate(0px,0px)}98%{opacity:0;transform:translate(0px,0px)}100%{opacity:0;transform:translate(0px,0px)}}.k14{animation:k14 20s linear infinite both}@keyframes k15{0%{opacity:0}38.5%{opacity:0}40%{opacity:1}96%{opacity:1}98%{opacity:0}100%{opacity:0}}.k15{animation:k15 20s linear infinite both}@keyframes k16{0%{opacity:0}39.5%{opacity:0}41%{opacity:1}96%{opacity:1}98%{opacity:0}100%{opacity:0}}.k16{animation:k16 20s linear infinite both}@keyframes k17{0%{opacity:0}41.5%{opacity:0}43%{opacity:1}96%{opacity:1}98%{opacity:0}100%{opacity:0}}.k17{animation:k17 20s linear infinite both}@keyframes k18{0%{opacity:0;transform:translate(-414.2px,-134.0px)}44.5%{opacity:0;transform:translate(-414.2px,-134.0px)}45.25%{opacity:1;transform:translate(-414.2px,-134.0px);animation-timing-function:cubic-bezier(.45,0,.25,1)}48.5%{opacity:1;transform:translate(0px,0px)}96%{opacity:1;transform:translate(0px,0px)}98%{opacity:0;transform:translate(0px,0px)}100%{opacity:0;transform:translate(0px,0px)}}.k18{animation:k18 20s linear infinite both}@keyframes k19{0%{opacity:0;transform:translate(-418.2px,-134.0px)}45.3%{opacity:0;transform:translate(-418.2px,-134.0px)}46.05%{opacity:1;transform:translate(-418.2px,-134.0px);animation-timing-function:cubic-bezier(.45,0,.25,1)}49.3%{opacity:1;transform:translate(0px,0px)}96%{opacity:1;transform:translate(0px,0px)}98%{opacity:0;transform:translate(0px,0px)}100%{opacity:0;transform:translate(0px,0px)}}.k19{animation:k19 20s linear infinite both}@keyframes k20{0%{opacity:0;transform:translate(-531.0px,-174.0px)}46.1%{opacity:0;transform:translate(-531.0px,-174.0px)}46.85%{opacity:1;transform:translate(-531.0px,-174.0px);animation-timing-function:cubic-bezier(.45,0,.25,1)}50.1%{opacity:1;transform:translate(0px,0px)}96%{opacity:1;transform:translate(0px,0px)}98%{opacity:0;transform:translate(0px,0px)}100%{opacity:0;transform:translate(0px,0px)}}.k20{animation:k20 20s linear infinite both}@keyframes k21{0%{opacity:0;transform:translate(-269.8px,-218.0px)}46.9%{opacity:0;transform:translate(-269.8px,-218.0px)}47.65%{opacity:1;transform:translate(-269.8px,-218.0px);animation-timing-function:cubic-bezier(.45,0,.25,1)}50.9%{opacity:1;transform:translate(0px,0px)}96%{opacity:1;transform:translate(0px,0px)}98%{opacity:0;transform:translate(0px,0px)}100%{opacity:0;transform:translate(0px,0px)}}.k21{animation:k21 20s linear infinite both}@keyframes k22{0%{opacity:0;transform:translate(-273.8px,-218.0px)}47.7%{opacity:0;transform:translate(-273.8px,-218.0px)}48.45%{opacity:1;transform:translate(-273.8px,-218.0px);animation-timing-function:cubic-bezier(.45,0,.25,1)}51.7%{opacity:1;transform:translate(0px,0px)}96%{opacity:1;transform:translate(0px,0px)}98%{opacity:0;transform:translate(0px,0px)}100%{opacity:0;transform:translate(0px,0px)}}.k22{animation:k22 20s linear infinite both}@keyframes k23{0%{opacity:0;transform:translate(-70.6px,-134.0px)}53.5%{opacity:0;transform:translate(-70.6px,-134.0px)}54.25%{opacity:1;transform:translate(-70.6px,-134.0px);animation-timing-function:cubic-bezier(.45,0,.25,1)}57.5%{opacity:1;transform:translate(0px,0px)}59.25%{opacity:0;transform:translate(0px,0px)}100%{opacity:0;transform:translate(0px,0px)}}.k23{animation:k23 20s linear infinite both}@keyframes k24{0%{opacity:0}57.5%{opacity:0}58.5%{opacity:1}61.5%{opacity:0}100%{opacity:0}}.k24{animation:k24 20s linear infinite both}@keyframes k25{0%{opacity:0;transform:translate(-74.6px,-134.0px)}54.3%{opacity:0;transform:translate(-74.6px,-134.0px)}55.05%{opacity:1;transform:translate(-74.6px,-134.0px);animation-timing-function:cubic-bezier(.45,0,.25,1)}58.3%{opacity:1;transform:translate(0px,0px)}60.05%{opacity:0;transform:translate(0px,0px)}100%{opacity:0;transform:translate(0px,0px)}}.k25{animation:k25 20s linear infinite both}@keyframes k26{0%{opacity:0}58.3%{opacity:0}59.3%{opacity:1}62.3%{opacity:0}100%{opacity:0}}.k26{animation:k26 20s linear infinite both}@keyframes k27{0%{opacity:0;transform:translate(-187.4px,-174.0px)}55.1%{opacity:0;transform:translate(-187.4px,-174.0px)}55.85%{opacity:1;transform:translate(-187.4px,-174.0px);animation-timing-function:cubic-bezier(.45,0,.25,1)}59.1%{opacity:1;transform:translate(0px,0px)}60.85%{opacity:0;transform:translate(0px,0px)}100%{opacity:0;transform:translate(0px,0px)}}.k27{animation:k27 20s linear infinite both}@keyframes k28{0%{opacity:0}59.1%{opacity:0}60.1%{opacity:1}63.1%{opacity:0}100%{opacity:0}}.k28{animation:k28 20s linear infinite both}@keyframes k29{0%{opacity:0;transform:translate(73.8px,-218.0px)}55.9%{opacity:0;transform:translate(73.8px,-218.0px)}56.65%{opacity:1;transform:translate(73.8px,-218.0px);animation-timing-function:cubic-bezier(.45,0,.25,1)}59.9%{opacity:1;transform:translate(0px,0px)}61.65%{opacity:0;transform:translate(0px,0px)}100%{opacity:0;transform:translate(0px,0px)}}.k29{animation:k29 20s linear infinite both}@keyframes k30{0%{opacity:0}59.9%{opacity:0}60.9%{opacity:1}63.9%{opacity:0}100%{opacity:0}}.k30{animation:k30 20s linear infinite both}@keyframes k31{0%{opacity:0;transform:translate(-28.2px,-218.0px)}56.7%{opacity:0;transform:translate(-28.2px,-218.0px)}57.45%{opacity:1;transform:translate(-28.2px,-218.0px);animation-timing-function:cubic-bezier(.45,0,.25,1)}60.7%{opacity:1;transform:translate(0px,0px)}96%{opacity:1;transform:translate(0px,0px)}98%{opacity:0;transform:translate(0px,0px)}100%{opacity:0;transform:translate(0px,0px)}}.k31{animation:k31 20s linear infinite both}@keyframes k32{0%{opacity:0}62.5%{opacity:0}64%{opacity:1}96%{opacity:1}98%{opacity:0}100%{opacity:0}}.k32{animation:k32 20s linear infinite both}@keyframes k33{0%{transform:scaleX(0)}70%{transform:scaleX(0);animation-timing-function:cubic-bezier(.2,.7,.2,1)}75%{transform:scaleX(1)}96%{transform:scaleX(1);opacity:1}98%{transform:scaleX(1);opacity:0}100%{transform:scaleX(1);opacity:0}}.k33{animation:k33 20s linear infinite both}@keyframes k34{0%{opacity:0}69%{opacity:0}70.5%{opacity:1}96%{opacity:1}98%{opacity:0}100%{opacity:0}}.k34{animation:k34 20s linear infinite both}@keyframes k35{0%{opacity:0}69%{opacity:0}70.5%{opacity:1}96%{opacity:1}98%{opacity:0}100%{opacity:0}}.k35{animation:k35 20s linear infinite both}@media (prefers-reduced-motion: reduce){.m{animation:none!important}}</style>
+<rect width="800" height="490" rx="12" fill="#fcfcfb"/>
+<text x="400.0" y="34.0" font-size="17" fill="#0b0b0b" font-weight="700" text-anchor="middle" class="m k1" opacity="0"><tspan x="400.0" dy="0.0">Hai image có hầu hết các tệp giống nhau</tspan></text>
+<text x="400.0" y="34.0" font-size="17" fill="#0b0b0b" font-weight="700" text-anchor="middle" class="m k2" opacity="0"><tspan x="400.0" dy="0.0">Lớp: chỉ cần một tệp khác, cả lớp được lưu lại lần nữa</tspan></text>
+<text x="400.0" y="34.0" font-size="17" fill="#0b0b0b" font-weight="700" text-anchor="middle" class="m k3" opacity="0"><tspan x="400.0" dy="0.0">Tệp: podbag lưu mỗi tệp một lần</tspan></text>
+<text x="400.0" y="34.0" font-size="17" fill="#0b0b0b" font-weight="700" text-anchor="middle" class="m k4"><tspan x="400.0" dy="0.0">Đo với 8 dịch vụ Spring trong 2 bản phát hành</tspan></text>
+<text x="228.2" y="72.0" font-size="13" fill="#0b0b0b" font-weight="700" text-anchor="middle">image A</text>
+<rect x="71.4" y="82" width="313.6" height="34" rx="7" fill="#e6e4dc" stroke="#c3c2b7"/>
+<rect x="79.4" y="88.0" width="88.0" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<text x="123.4" y="103.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">spring.jar</text>
+<rect x="173.4" y="88.0" width="95.2" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<text x="221.0" y="103.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">jackson.jar</text>
+<rect x="274.6" y="88.0" width="88.0" height="22" rx="5" fill="#ffffff" stroke="#c3c2b7"/>
+<text x="318.6" y="103.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#0b0b0b" text-anchor="middle">orders.jar</text>
+<rect x="71.4" y="122" width="313.6" height="34" rx="7" fill="#e6e4dc" stroke="#c3c2b7"/>
+<rect x="79.4" y="128.0" width="52.0" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<text x="105.4" y="143.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">linux</text>
+<rect x="137.4" y="128.0" width="44.8" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<text x="159.8" y="143.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">java</text>
+<text x="571.8" y="72.0" font-size="13" fill="#0b0b0b" font-weight="700" text-anchor="middle">image B</text>
+<rect x="415.0" y="82" width="313.6" height="34" rx="7" fill="#e6e4dc" stroke="#c3c2b7"/>
+<rect x="423.0" y="88.0" width="88.0" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<text x="467.0" y="103.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">spring.jar</text>
+<rect x="517.0" y="88.0" width="95.2" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<text x="564.6" y="103.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">jackson.jar</text>
+<rect x="618.2" y="88.0" width="102.4" height="22" rx="5" fill="#ffffff" stroke="#c3c2b7"/>
+<text x="669.4" y="103.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#0b0b0b" text-anchor="middle">payments.jar</text>
+<rect x="415.0" y="122" width="313.6" height="34" rx="7" fill="#e6e4dc" stroke="#c3c2b7"/>
+<rect x="423.0" y="128.0" width="52.0" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<text x="449.0" y="143.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">linux</text>
+<rect x="481.0" y="128.0" width="44.8" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<text x="503.4" y="143.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">java</text>
+<rect class="m k5" opacity="0" x="76.4" y="85.0" width="94.0" height="28.0" rx="8" fill="none" stroke="#2a78d6" stroke-width="2.5"/>
+<rect class="m k5" opacity="0" x="170.4" y="85.0" width="101.2" height="28.0" rx="8" fill="none" stroke="#2a78d6" stroke-width="2.5"/>
+<rect class="m k5" opacity="0" x="76.4" y="125.0" width="58.0" height="28.0" rx="8" fill="none" stroke="#2a78d6" stroke-width="2.5"/>
+<rect class="m k5" opacity="0" x="134.4" y="125.0" width="50.8" height="28.0" rx="8" fill="none" stroke="#2a78d6" stroke-width="2.5"/>
+<rect class="m k5" opacity="0" x="420.0" y="85.0" width="94.0" height="28.0" rx="8" fill="none" stroke="#2a78d6" stroke-width="2.5"/>
+<rect class="m k5" opacity="0" x="514.0" y="85.0" width="101.2" height="28.0" rx="8" fill="none" stroke="#2a78d6" stroke-width="2.5"/>
+<rect class="m k5" opacity="0" x="420.0" y="125.0" width="58.0" height="28.0" rx="8" fill="none" stroke="#2a78d6" stroke-width="2.5"/>
+<rect class="m k5" opacity="0" x="478.0" y="125.0" width="50.8" height="28.0" rx="8" fill="none" stroke="#2a78d6" stroke-width="2.5"/>
+<rect x="326.4" y="173" width="13" height="13" rx="3" fill="#2a78d6"/>
+<text x="346.4" y="184.0" font-size="12.5" fill="#52514e" text-anchor="start">có trong cả hai image</text>
+<text x="22" y="212" font-size="16" font-weight="700" fill="#0b0b0b">Lớp<tspan dx="8" font-size="12.5" font-weight="400" fill="#52514e">Docker, Podman, Kiri</tspan></text>
+<rect x="14" y="224" width="380" height="190" rx="10" fill="#f2f1ed" stroke="#c3c2b7"/>
+<text x="414" y="212" font-size="16" font-weight="700" fill="#0b0b0b">Tệp<tspan dx="8" font-size="12.5" font-weight="400" fill="#52514e">podbag</tspan></text>
+<rect x="406" y="224" width="380" height="190" rx="10" fill="#f2f1ed" stroke="#c3c2b7"/>
+<g class="m k6"><rect x="22" y="245" width="44" height="20" rx="10" fill="#fcfcfb" stroke="#c3c2b7"/><text x="44" y="259" font-size="11" font-weight="700" fill="#52514e" text-anchor="middle">A</text></g>
+<g class="m k7">
+<rect x="70.0" y="238" width="313.6" height="34" rx="7" fill="#e6e4dc" stroke="#c3c2b7"/>
+<rect x="78.0" y="244.0" width="88.0" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<text x="122.0" y="259.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">spring.jar</text>
+<rect x="172.0" y="244.0" width="95.2" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<text x="219.6" y="259.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">jackson.jar</text>
+<rect x="273.2" y="244.0" width="88.0" height="22" rx="5" fill="#ffffff" stroke="#c3c2b7"/>
+<text x="317.2" y="259.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#0b0b0b" text-anchor="middle">orders.jar</text>
+</g>
+<g class="m k8">
+<rect x="70.0" y="322" width="313.6" height="34" rx="7" fill="#e6e4dc" stroke="#c3c2b7"/>
+<rect x="78.0" y="328.0" width="52.0" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<text x="104.0" y="343.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">linux</text>
+<rect x="136.0" y="328.0" width="44.8" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<text x="158.4" y="343.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">java</text>
+</g>
+<g class="m k9" opacity="0"><rect x="22" y="329" width="44" height="20" rx="10" fill="#fcfcfb" stroke="#c3c2b7"/><text x="44" y="343" font-size="11" font-weight="700" fill="#52514e" text-anchor="middle">A</text></g>
+<g class="m k10" opacity="0">
+<rect x="70.0" y="322" width="313.6" height="34" rx="7" fill="#e6e4dc" stroke="#c3c2b7"/>
+<rect x="78.0" y="328.0" width="52.0" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<text x="104.0" y="343.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">linux</text>
+<rect x="136.0" y="328.0" width="44.8" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<text x="158.4" y="343.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">java</text>
+</g>
+<rect class="m k11" opacity="0" x="67.0" y="319.0" width="319.6" height="40.0" rx="8" fill="none" stroke="#15803d" stroke-width="2.5"/>
+<g class="m k12"><rect x="22" y="329" width="44" height="20" rx="10" fill="#fcfcfb" stroke="#c3c2b7"/><text x="44" y="343" font-size="11" font-weight="700" fill="#52514e" text-anchor="middle">A+B</text></g>
+<text x="192.8" y="344.0" font-size="12" fill="#15803d" font-weight="700" text-anchor="start" class="m k13">✓ cùng lớp: chỉ lưu một lần</text>
+<g class="m k14">
+<rect x="70.0" y="280" width="313.6" height="34" rx="7" fill="#e6e4dc" stroke="#c3c2b7"/>
+<rect x="78.0" y="286.0" width="88.0" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<text x="122.0" y="301.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">spring.jar</text>
+<rect x="172.0" y="286.0" width="95.2" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<text x="219.6" y="301.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">jackson.jar</text>
+<rect x="273.2" y="286.0" width="102.4" height="22" rx="5" fill="#ffffff" stroke="#c3c2b7"/>
+<text x="324.4" y="301.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#0b0b0b" text-anchor="middle">payments.jar</text>
+</g>
+<g class="m k15"><rect x="22" y="287" width="44" height="20" rx="10" fill="#fcfcfb" stroke="#c3c2b7"/><text x="44" y="301" font-size="11" font-weight="700" fill="#52514e" text-anchor="middle">B</text></g>
+<g class="m k16">
+<rect x="78.0" y="286.0" width="88.0" height="22" rx="5" fill="#c2410c" stroke="#c2410c"/>
+<text x="122.0" y="301.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">spring.jar</text>
+<rect x="172.0" y="286.0" width="95.2" height="22" rx="5" fill="#c2410c" stroke="#c2410c"/>
+<text x="219.6" y="301.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">jackson.jar</text>
+</g>
+<text class="m k17" x="22" y="398" font-size="13"><tspan font-weight="700" fill="#0b0b0b">Lưu 8 tệp</tspan><tspan fill="#c2410c" font-weight="600"> · 2 tệp lưu hai lần</tspan></text>
+<g class="m k18">
+<rect x="493.6" y="262.0" width="52.0" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<text x="519.6" y="277.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">linux</text>
+</g>
+<g class="m k19">
+<rect x="555.6" y="262.0" width="44.8" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<text x="578.0" y="277.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">java</text>
+</g>
+<g class="m k20">
+<rect x="610.4" y="262.0" width="88.0" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<text x="654.4" y="277.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">spring.jar</text>
+</g>
+<g class="m k21">
+<rect x="443.2" y="306.0" width="95.2" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<text x="490.8" y="321.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">jackson.jar</text>
+</g>
+<g class="m k22">
+<rect x="548.4" y="306.0" width="88.0" height="22" rx="5" fill="#ffffff" stroke="#c3c2b7"/>
+<text x="592.4" y="321.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#0b0b0b" text-anchor="middle">orders.jar</text>
+</g>
+<g class="m k23" opacity="0">
+<rect x="493.6" y="262.0" width="52.0" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<text x="519.6" y="277.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">linux</text>
+</g>
+<rect class="m k24" opacity="0" x="490.6" y="259.0" width="58.0" height="28.0" rx="8" fill="none" stroke="#15803d" stroke-width="2.5"/>
+<g class="m k25" opacity="0">
+<rect x="555.6" y="262.0" width="44.8" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<text x="578.0" y="277.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">java</text>
+</g>
+<rect class="m k26" opacity="0" x="552.6" y="259.0" width="50.8" height="28.0" rx="8" fill="none" stroke="#15803d" stroke-width="2.5"/>
+<g class="m k27" opacity="0">
+<rect x="610.4" y="262.0" width="88.0" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<text x="654.4" y="277.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">spring.jar</text>
+</g>
+<rect class="m k28" opacity="0" x="607.4" y="259.0" width="94.0" height="28.0" rx="8" fill="none" stroke="#15803d" stroke-width="2.5"/>
+<g class="m k29" opacity="0">
+<rect x="443.2" y="306.0" width="95.2" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<text x="490.8" y="321.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">jackson.jar</text>
+</g>
+<rect class="m k30" opacity="0" x="440.2" y="303.0" width="101.2" height="28.0" rx="8" fill="none" stroke="#15803d" stroke-width="2.5"/>
+<g class="m k31">
+<rect x="646.4" y="306.0" width="102.4" height="22" rx="5" fill="#ffffff" stroke="#c3c2b7"/>
+<text x="697.6" y="321.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#0b0b0b" text-anchor="middle">payments.jar</text>
+</g>
+<text class="m k32" x="414" y="398" font-size="13"><tspan font-weight="700" fill="#0b0b0b">Lưu 6 tệp</tspan><tspan fill="#15803d" font-weight="600"> · mỗi tệp một lần</tspan></text>
+<text x="22.0" y="444.0" font-size="14" fill="#0b0b0b" font-weight="700" text-anchor="start" class="m k34">Đĩa 2.970 MiB</text>
+<rect class="m k33" x="22" y="452" width="360.0" height="14" rx="4" fill="#2a78d6" style="transform-box:fill-box;transform-origin:0 50%"/>
+<text x="414.0" y="444.0" font-size="14" fill="#0b0b0b" font-weight="700" text-anchor="start" class="m k35">Đĩa 902 MiB</text>
+<rect class="m k33" x="414" y="452" width="109.3" height="14" rx="4" fill="#2a78d6" style="transform-box:fill-box;transform-origin:0 50%"/>
+</svg>

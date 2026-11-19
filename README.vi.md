@@ -9,6 +9,7 @@ Image được lưu theo từng tệp: tệp mà nhiều image dùng chung chỉ
 [![Release](https://img.shields.io/github/v/release/SteelCrab/podbag)](https://github.com/SteelCrab/podbag/releases/latest)
 [![crates.io](https://img.shields.io/crates/v/podbag)](https://crates.io/crates/podbag)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![Website](https://img.shields.io/badge/website-podbag.dev-2a78d6)](https://podbag.dev)
 
 [English](README.md) · [한국어](README.ko.md) · [日本語](README.ja.md) · [简体中文](README.zh-CN.md) · [Filipino](README.fil.md) · [Español](README.es.md) · **Tiếng Việt**
 
@@ -39,9 +40,9 @@ Image được lưu theo từng tệp: tệp mà nhiều image dùng chung chỉ
 
 ### Lớp và tệp
 
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/storage-dark.svg"><img alt="So sánh lớp và tệp: khi lưu theo lớp, cùng các tệp jar được build lại vào lớp mới sẽ bị lưu thêm lần nữa; khi lưu theo tệp, các jar mà hai image dùng chung chỉ được lưu một lần và cả hai image cùng trỏ tới." src="docs/images/storage-light.svg"></picture>
+<picture><source media="(max-width: 600px) and (prefers-color-scheme: dark)" srcset="docs/images/storage-vi-tall-dark.svg"><source media="(max-width: 600px)" srcset="docs/images/storage-vi-tall-light.svg"><source media="(prefers-color-scheme: dark)" srcset="docs/images/storage-vi-dark.svg"><img alt="Hoạt ảnh. Hai image có hầu hết các tệp giống nhau. Khi lưu theo lớp, một lớp chỉ được lưu một lần khi nó giống hệt; lớp trên của image B khác một tệp, nên spring.jar và jackson.jar được lưu lại: 8 tệp. podbag lưu mỗi tệp một lần: 6 tệp. Đo với 8 dịch vụ Spring trong 2 bản phát hành: 2.970 MiB đĩa khi lưu theo lớp (Docker), 902 MiB với podbag." src="docs/images/storage-vi-light.svg"></picture>
 
-- Kho lưu theo lớp (Docker, Podman, Kiri) lưu nguyên từng lớp. Khi image được build lại, cùng các tệp đó đi vào một lớp mới, được lưu lại và cache lại lần nữa.
+- Kho lưu theo lớp (Docker, Podman, Kiri) chỉ lưu một lớp một lần khi cả lớp giống hệt. Chỉ cần một tệp khác, cả lớp được lưu lại, cùng với các tệp giống với lớp khác.
 - podbag lưu mỗi tệp một lần. Một image là danh sách đường dẫn trỏ tới các tệp đó.
 - Với 8 dịch vụ Spring ở 2 bản phát hành: 902 MiB đĩa so với 2.970 MiB của Docker, và 324 MiB page cache so với 982 MiB.
 

@@ -9,6 +9,7 @@
 [![Release](https://img.shields.io/github/v/release/SteelCrab/podbag)](https://github.com/SteelCrab/podbag/releases/latest)
 [![crates.io](https://img.shields.io/crates/v/podbag)](https://crates.io/crates/podbag)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![Website](https://img.shields.io/badge/website-podbag.dev-2a78d6)](https://podbag.dev)
 
 [English](README.md) · **한국어** · [日本語](README.ja.md) · [简体中文](README.zh-CN.md) · [Filipino](README.fil.md) · [Español](README.es.md) · [Tiếng Việt](README.vi.md)
 
@@ -39,9 +40,9 @@
 
 ### 레이어와 파일
 
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/storage-dark.svg"><img alt="레이어와 파일 비교: 레이어 방식에서는 다시 빌드한 같은 jar가 새 레이어에 또 저장됩니다. 파일 방식에서는 두 이미지가 공유하는 jar를 한 번만 저장하고, 두 이미지가 함께 가리킵니다." src="docs/images/storage-light.svg"></picture>
+<picture><source media="(max-width: 600px) and (prefers-color-scheme: dark)" srcset="docs/images/storage-ko-tall-dark.svg"><source media="(max-width: 600px)" srcset="docs/images/storage-ko-tall-light.svg"><source media="(prefers-color-scheme: dark)" srcset="docs/images/storage-ko-dark.svg"><img alt="애니메이션. 두 이미지는 파일 대부분이 같습니다. 레이어 방식은 레이어가 똑같을 때만 한 번 저장합니다. 이미지 B의 위쪽 레이어는 파일 하나가 달라서 spring.jar와 jackson.jar를 다시 저장합니다: 파일 8개. podbag은 파일마다 한 번만 저장합니다: 파일 6개. Spring 서비스 8개, 릴리스 2개로 잰 디스크: 레이어(Docker) 2,970 MiB, podbag 902 MiB." src="docs/images/storage-ko-light.svg"></picture>
 
-- 레이어 방식(Docker, Podman, Kiri)은 레이어를 통째로 저장합니다. 이미지를 다시 빌드하면 같은 파일이 새 레이어에 들어가 다시 저장되고, 메모리에도 다시 올라갑니다.
+- 레이어 방식(Docker, Podman, Kiri)은 레이어 전체가 같을 때만 한 번 저장합니다. 파일 하나만 달라도 레이어 전체를 다시 저장하고, 다른 레이어와 같은 파일도 함께 다시 저장됩니다.
 - podbag은 파일 하나하나를 한 번만 저장합니다. 이미지는 그 파일들을 가리키는 경로 목록입니다.
 - Spring 서비스 8개, 릴리스 2개 기준: 디스크 902 MiB(Docker 2,970 MiB), 페이지 캐시 324 MiB(Docker 982 MiB).
 

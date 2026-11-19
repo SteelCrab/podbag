@@ -9,6 +9,7 @@ Iniimbak nito ang mga image nang file-by-file: ang file na ginagamit ng maraming
 [![Release](https://img.shields.io/github/v/release/SteelCrab/podbag)](https://github.com/SteelCrab/podbag/releases/latest)
 [![crates.io](https://img.shields.io/crates/v/podbag)](https://crates.io/crates/podbag)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![Website](https://img.shields.io/badge/website-podbag.dev-2a78d6)](https://podbag.dev)
 
 [English](README.md) · [한국어](README.ko.md) · [日本語](README.ja.md) · [简体中文](README.zh-CN.md) · **Filipino** · [Español](README.es.md) · [Tiếng Việt](README.vi.md)
 
@@ -39,9 +40,9 @@ Iniimbak nito ang mga image nang file-by-file: ang file na ginagamit ng maraming
 
 ### Mga layer at mga file
 
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/storage-dark.svg"><img alt="Mga layer laban sa mga file: bilang mga layer, iniimbak ulit ang parehong mga jar na binuo muli sa bagong layer; bilang mga file, isang beses lang iniimbak ang mga jar na ginagamit ng dalawang image, at tumuturo rito ang dalawang image." src="docs/images/storage-light.svg"></picture>
+<picture><source media="(max-width: 600px) and (prefers-color-scheme: dark)" srcset="docs/images/storage-fil-tall-dark.svg"><source media="(max-width: 600px)" srcset="docs/images/storage-fil-tall-light.svg"><source media="(prefers-color-scheme: dark)" srcset="docs/images/storage-fil-dark.svg"><img alt="Animation. Halos pareho ang mga file ng dalawang image. Sa mga layer, isang beses lang iniimbak ang layer kapag pareho ito; iba ang isang file sa itaas na layer ng image B, kaya iniimbak ulit ang spring.jar at jackson.jar: 8 file. Iniimbak ng podbag ang bawat file nang isang beses: 6 file. Sinukat sa 8 Spring service sa 2 release: 2,970 MiB sa disk gamit ang mga layer (Docker), 902 MiB gamit ang podbag." src="docs/images/storage-fil-light.svg"></picture>
 
-- Iniimbak nang buo ng mga layer store (Docker, Podman, Kiri) ang bawat layer. Kapag binuo muli ang isang image, napupunta sa bagong layer ang parehong mga file, at iniimbak at kina-cache ulit ang mga ito.
+- Isang beses lang iniimbak ng mga layer store (Docker, Podman, Kiri) ang isang layer kapag pareho ang buong layer. Kapag may isang file na iba, iniimbak ulit ang buong layer, kasama ang mga file na pareho sa ibang layer.
 - Iniimbak ng podbag ang bawat file nang isang beses. Ang image ay listahan ng mga path na tumuturo sa mga file.
 - Para sa 8 Spring service sa 2 release: 902 MiB sa disk laban sa 2,970 MiB ng Docker, at 324 MiB na page cache laban sa 982 MiB.
 

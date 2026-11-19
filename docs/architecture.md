@@ -47,7 +47,7 @@ Mac. The numbers come from [benchmarks.md](benchmarks.md) and
 
 ## Image storage: layers and files
 
-<picture><source media="(prefers-color-scheme: dark)" srcset="images/storage-dark.svg"><img alt="Layers against files: as layers, the same jars rebuilt into a new layer are stored again; as files, the jars that two images share are kept once and both images point to them." src="images/storage-light.svg"></picture>
+<picture><source media="(max-width: 600px) and (prefers-color-scheme: dark)" srcset="images/storage-tall-dark.svg"><source media="(max-width: 600px)" srcset="images/storage-tall-light.svg"><source media="(prefers-color-scheme: dark)" srcset="images/storage-dark.svg"><img alt="Animation. Two images share most of their files. As layers, a layer is kept once only when it is the same; image B&#x27;s top layer differs by one file, so spring.jar and jackson.jar are stored again: 8 files. podbag stores each file once: 6 files. Measured with 8 Spring services in 2 releases: 2,970 MiB on disk with layers (Docker), 902 MiB with podbag." src="images/storage-light.svg"></picture>
 
 ### Layers
 

@@ -9,6 +9,7 @@
 [![Release](https://img.shields.io/github/v/release/SteelCrab/podbag)](https://github.com/SteelCrab/podbag/releases/latest)
 [![crates.io](https://img.shields.io/crates/v/podbag)](https://crates.io/crates/podbag)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![Website](https://img.shields.io/badge/website-podbag.dev-2a78d6)](https://podbag.dev)
 
 [English](README.md) · [한국어](README.ko.md) · [日本語](README.ja.md) · **简体中文** · [Filipino](README.fil.md) · [Español](README.es.md) · [Tiếng Việt](README.vi.md)
 
@@ -39,9 +40,9 @@
 
 ### 层与文件
 
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/storage-dark.svg"><img alt="层与文件对比：按层存储时，重新构建的同样的 jar 会在新层里再保存一次；按文件存储时，两个镜像共用的 jar 只保存一份，两个镜像都指向它。" src="docs/images/storage-light.svg"></picture>
+<picture><source media="(max-width: 600px) and (prefers-color-scheme: dark)" srcset="docs/images/storage-zh-CN-tall-dark.svg"><source media="(max-width: 600px)" srcset="docs/images/storage-zh-CN-tall-light.svg"><source media="(prefers-color-scheme: dark)" srcset="docs/images/storage-zh-CN-dark.svg"><img alt="动画。两个镜像的大部分文件相同。按层存储时，只有完全相同的层才只存一次；镜像 B 的上层有一个文件不同，所以 spring.jar 和 jackson.jar 又存了一次：共 8 个文件。podbag 每个文件只存一次：共 6 个文件。8 个 Spring 服务、2 个版本的实测磁盘用量：按层（Docker）2,970 MiB，podbag 902 MiB。" src="docs/images/storage-zh-CN-light.svg"></picture>
 
-- 按层存储（Docker、Podman、Kiri）会完整保存每一层。镜像重新构建后，同样的文件进入新层，会再保存一次，也会再读入内存一次。
+- 按层存储（Docker、Podman、Kiri）只有在整层完全相同时才只存一份。只要有一个文件不同，整层就要再存一次，和其他层相同的文件也跟着再存一次。
 - podbag 每个文件只保存一份。镜像是指向这些文件的路径列表。
 - 以 8 个 Spring 服务、2 个版本为例：磁盘 902 MiB（Docker 为 2,970 MiB），页缓存 324 MiB（Docker 为 982 MiB）。
 

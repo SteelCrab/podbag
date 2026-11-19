@@ -9,6 +9,7 @@ It stores images file by file: a file that many images share is kept once.
 [![Release](https://img.shields.io/github/v/release/SteelCrab/podbag)](https://github.com/SteelCrab/podbag/releases/latest)
 [![crates.io](https://img.shields.io/crates/v/podbag)](https://crates.io/crates/podbag)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![Website](https://img.shields.io/badge/website-podbag.dev-2a78d6)](https://podbag.dev)
 
 **English** · [한국어](README.ko.md) · [日本語](README.ja.md) · [简体中文](README.zh-CN.md) · [Filipino](README.fil.md) · [Español](README.es.md) · [Tiếng Việt](README.vi.md)
 
@@ -39,9 +40,9 @@ It stores images file by file: a file that many images share is kept once.
 
 ### Layers and files
 
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/storage-dark.svg"><img alt="Layers against files: as layers, the same jars rebuilt into a new layer are stored again; as files, the jars that two images share are kept once and both images point to them." src="docs/images/storage-light.svg"></picture>
+<picture><source media="(max-width: 600px) and (prefers-color-scheme: dark)" srcset="docs/images/storage-tall-dark.svg"><source media="(max-width: 600px)" srcset="docs/images/storage-tall-light.svg"><source media="(prefers-color-scheme: dark)" srcset="docs/images/storage-dark.svg"><img alt="Animation. Two images share most of their files. As layers, a layer is kept once only when it is the same; image B&#x27;s top layer differs by one file, so spring.jar and jackson.jar are stored again: 8 files. podbag stores each file once: 6 files. Measured with 8 Spring services in 2 releases: 2,970 MiB on disk with layers (Docker), 902 MiB with podbag." src="docs/images/storage-light.svg"></picture>
 
-- Layer stores (Docker, Podman, Kiri) keep each layer whole. When an image is built again, the same files go into a new layer, and are stored and cached again.
+- A layer store (Docker, Podman, Kiri) keeps a layer once only when the whole layer is the same. If one file differs, the whole layer is stored again, with the files it shares with other layers.
 - podbag keeps each file once. An image is a list of paths that point to the files.
 - For 8 Spring services in 2 releases: 902 MiB on disk against Docker's 2,970 MiB, and 324 MiB of page cache against 982 MiB.
 

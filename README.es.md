@@ -9,6 +9,7 @@ Guarda las imágenes archivo por archivo: un archivo que comparten muchas imáge
 [![Release](https://img.shields.io/github/v/release/SteelCrab/podbag)](https://github.com/SteelCrab/podbag/releases/latest)
 [![crates.io](https://img.shields.io/crates/v/podbag)](https://crates.io/crates/podbag)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+[![Website](https://img.shields.io/badge/website-podbag.dev-2a78d6)](https://podbag.dev)
 
 [English](README.md) · [한국어](README.ko.md) · [日本語](README.ja.md) · [简体中文](README.zh-CN.md) · [Filipino](README.fil.md) · **Español** · [Tiếng Việt](README.vi.md)
 
@@ -39,9 +40,9 @@ Guarda las imágenes archivo por archivo: un archivo que comparten muchas imáge
 
 ### Capas y archivos
 
-<picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/storage-dark.svg"><img alt="Capas frente a archivos: con capas, los mismos jar reconstruidos en una capa nueva se guardan otra vez; con archivos, los jar que comparten dos imágenes se guardan una vez y ambas imágenes apuntan a ellos." src="docs/images/storage-light.svg"></picture>
+<picture><source media="(max-width: 600px) and (prefers-color-scheme: dark)" srcset="docs/images/storage-es-tall-dark.svg"><source media="(max-width: 600px)" srcset="docs/images/storage-es-tall-light.svg"><source media="(prefers-color-scheme: dark)" srcset="docs/images/storage-es-dark.svg"><img alt="Animación. Dos imágenes comparten la mayoría de sus archivos. Con capas, una capa se guarda una vez solo si es igual; la capa superior de la imagen B tiene un archivo distinto, así que spring.jar y jackson.jar se guardan otra vez: 8 archivos. podbag guarda cada archivo una vez: 6 archivos. Medido con 8 servicios Spring en 2 versiones: 2.970 MiB de disco con capas (Docker), 902 MiB con podbag." src="docs/images/storage-es-light.svg"></picture>
 
-- Los almacenes por capas (Docker, Podman, Kiri) guardan cada capa entera. Si una imagen se vuelve a construir, los mismos archivos entran en una capa nueva y se guardan y se cachean otra vez.
+- Los almacenes por capas (Docker, Podman, Kiri) guardan una capa una sola vez solo si toda la capa es igual. Si un solo archivo es distinto, se guarda otra vez toda la capa, con los archivos que comparte con otras capas.
 - podbag guarda cada archivo una sola vez. Una imagen es una lista de rutas que apuntan a esos archivos.
 - Con 8 servicios Spring en 2 versiones: 902 MiB de disco frente a 2.970 MiB de Docker, y 324 MiB de caché de páginas frente a 982 MiB.
 
