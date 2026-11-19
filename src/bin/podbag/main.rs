@@ -313,9 +313,9 @@ fn dispatch(cmd: Cmd) -> i32 {
         Cmd::Store { op } => podbag::store::ops::helper_main(&op),
         Cmd::Session => session_helper(),
         #[cfg(target_os = "linux")]
-        Cmd::Pause => podbag::cri::pod::pause_main(),
+        Cmd::PodInit => podbag::cri::pod::pause_main(),
         #[cfg(not(target_os = "linux"))]
-        Cmd::Pause => unsupported(),
+        Cmd::PodInit => unsupported(),
         Cmd::Restarter { id } => podbag::restart::restart_main(&id),
         Cmd::Probe { id, start_period } => podbag::health::probe_main(&id, start_period),
         Cmd::InstallSelf { dest } => install_self(&dest),

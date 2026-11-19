@@ -158,7 +158,7 @@ pub enum Cmd {
     Session,
     /// The init that holds a Kubernetes pod's PID namespace
     #[command(name = "__pause", hide = true)]
-    Pause,
+    PodInit,
     /// Start an ended container again when its restart policy says so
     #[command(name = "__restart", hide = true)]
     Restarter { id: String },
