@@ -118,7 +118,7 @@ podbag logs -f web                                # ログを追いかけて表�
 podbag exec -it web sh                            # コンテナの中でシェルを開きます
 podbag stop web && podbag rm web                  # 停止して削除します
 podbag images                                     # イメージの一覧
-podbag login ghcr.io                              # レジストリにログイン（docker login と共有）
+podbag login ghcr.io                              # レジストリにログインします（docker login と共有）
 podbag push ghcr.io/me/app:1                      # イメージをレジストリに送ります
 ```
 
