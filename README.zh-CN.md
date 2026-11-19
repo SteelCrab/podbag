@@ -116,6 +116,7 @@ podbag run -d --name web -p 8080:80 nginx:alpine  # 在后台运行
 podbag ps                                         # 列出容器
 podbag logs -f web                                # 持续查看日志
 podbag exec -it web sh                            # 在容器里打开 shell
+podbag stats --no-stream                          # CPU、内存和网络用量
 podbag stop web && podbag rm web                  # 停止并删除
 podbag images                                     # 列出镜像
 ```

@@ -116,6 +116,7 @@ podbag run -d --name web -p 8080:80 nginx:alpine  # 백그라운드에서 실행
 podbag ps                                         # 컨테이너 목록
 podbag logs -f web                                # 로그를 따라 봅니다
 podbag exec -it web sh                            # 컨테이너 안에서 셸을 엽니다
+podbag stats --no-stream                          # CPU, 메모리, 네트워크 사용량
 podbag stop web && podbag rm web                  # 멈추고 지웁니다
 podbag images                                     # 이미지 목록
 ```
