@@ -3,6 +3,8 @@
 Two comparisons, written by `dev/bench/report.sh`: container engines on one Linux host
 (no VM; the same kernel for all), and the tools Mac users run, each with its own Linux VM.
 Numbers compare only within one table: each table was measured in one session.
+A node of Spring microservices in two releases, layers against files, is in
+[benchmarks-msa.md](benchmarks-msa.md).
 
 ## Linux host, no VM
 
