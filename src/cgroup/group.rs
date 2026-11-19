@@ -1,9 +1,9 @@
 //! Container cgroups on Linux: choose where they go, create them, read why they ended,
 //! and remove them.
 
+use super::resources::Setting;
 use super::{
-    Limits, OomReason, Placement, budget_values, cpu_max, oom_reason, rootless_placement,
-    unavailable,
+    Limits, OomReason, Placement, budget_values, oom_reason, rootless_placement, unavailable,
 };
 use crate::{Error, ErrorKind, Result};
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
@@ -15,6 +15,10 @@ pub const ROOT: &str = "/sys/fs/cgroup";
 
 /// The controllers podbag uses.
 const CONTROLLERS: [&str; 3] = ["cpu", "memory", "pids"];
+
+/// Controllers for `--cpuset-*`, `--blkio-weight` and block I/O statistics: turned on
+/// where they can be.
+const OPTIONAL_CONTROLLERS: [&str; 2] = ["cpuset", "io"];
 
 /// The name of the group (or systemd slice) that holds all containers: `podbag`, or
 /// `PODBAG_CGROUP_PARENT`.
@@ -370,52 +374,89 @@ pub(super) fn enable(dir: &Path) -> std::io::Result<Vec<String>> {
     if !missing.is_empty() {
         std::fs::write(dir.join("cgroup.subtree_control"), missing.join(" "))?;
     }
-    Ok(wanted.into_iter().map(String::from).collect())
+    let mut enabled: Vec<String> = wanted.into_iter().map(String::from).collect();
+    // Each on its own, and a failure is no error: containers run without them.
+    for c in OPTIONAL_CONTROLLERS {
+        let on = has(&on, c)
+            || (has(&available, c)
+                && std::fs::write(dir.join("cgroup.subtree_control"), format!("+{c}")).is_ok());
+        if on {
+            enabled.push(c.to_string());
+        }
+    }
+    Ok(enabled)
 }
 
 /// Write the limits of a new container group. `enabled` lists the controllers on for it.
 pub(super) fn configure(path: &Path, enabled: &[String], limits: &Limits) -> Result<()> {
-    let need = |controller: &str, option: &str| {
-        if enabled.iter().any(|c| c == controller) {
-            Ok(())
-        } else {
-            Err(Error::new(
-                ErrorKind::MissingRequirement,
-                format!("cannot apply {option}"),
-                format!(
-                    "the cgroup {controller} controller is not available in {}",
-                    path.parent().unwrap_or(path).display()
-                ),
-                "enable the controller for podbag's cgroup, or run without the option",
-            ))
-        }
-    };
-    let write = |file: &str, value: &str| {
-        std::fs::write(path.join(file), value).map_err(|e| cgroup_error(path, e))
-    };
     if enabled.iter().any(|c| c == "memory") {
-        write("memory.oom.group", "1")?;
+        std::fs::write(path.join("memory.oom.group"), "1").map_err(|e| cgroup_error(path, e))?;
     }
-    if let Some(bytes) = limits.memory {
-        need("memory", "--memory")?;
-        write("memory.max", &bytes.to_string())?;
-        // Like Docker without --memory-swap: as much swap as memory. No swap support: skip.
-        match std::fs::write(path.join("memory.swap.max"), bytes.to_string()) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+    let settings = super::resources::settings(limits);
+    for s in &settings {
+        if !s.optional && !enabled.iter().any(|c| c == s.controller) {
+            return Err(missing_controller(path, s));
+        }
+    }
+    write_settings(path, &settings).map(drop)
+}
+
+fn missing_controller(path: &Path, s: &Setting) -> Error {
+    Error::new(
+        ErrorKind::MissingRequirement,
+        format!("cannot apply {}", s.option),
+        format!(
+            "the cgroup {} controller is not available in {}",
+            s.controller,
+            path.parent().unwrap_or(path).display()
+        ),
+        "enable the controller for podbag's cgroup, or run without the option",
+    )
+}
+
+/// Write the settings in order. A missing file of an optional one is skipped and named in
+/// the warnings; a missing file of another one means its controller is off.
+fn write_settings(path: &Path, settings: &[Setting]) -> Result<Vec<String>> {
+    let mut warnings = Vec::new();
+    for s in settings {
+        let (file, value) = match &s.instead {
+            Some((file, value)) if path.join(file).exists() => (*file, value.as_str()),
+            _ => (s.file, s.value.as_str()),
+        };
+        match std::fs::write(path.join(file), value) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && s.optional => {
+                warnings.push(format!(
+                    "{} is ignored: this kernel's cgroup has no {}",
+                    s.option, s.file
+                ));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(missing_controller(path, s));
+            }
+            Err(e) if !matches!(e.raw_os_error(), Some(libc::EINVAL | libc::ERANGE)) => {
                 return Err(cgroup_error(path, e));
             }
-            _ => {}
+            Err(e) => {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("cannot apply {}", s.option),
+                    format!(
+                        "the kernel refused {value:?} for {}: {e}",
+                        path.join(file).display()
+                    ),
+                    "check the value",
+                ));
+            }
         }
     }
-    if let Some(quota) = limits.cpu_quota {
-        need("cpu", "--cpus")?;
-        write("cpu.max", &cpu_max(quota))?;
-    }
-    if let Some(pids) = limits.pids {
-        need("pids", "--pids-limit")?;
-        write("pids.max", &pids.to_string())?;
-    }
-    Ok(())
+    Ok(warnings)
+}
+
+/// Change the limits of a running container's group at `path` from `old` to `new`.
+/// Returns warnings about what this kernel cannot apply.
+pub fn apply_live(path: &Path, old: &Limits, new: &Limits) -> Result<Vec<String>> {
+    write_settings(path, &super::resources::changes(old, new))
 }
 
 pub(super) fn open_dir(path: &Path) -> std::io::Result<OwnedFd> {

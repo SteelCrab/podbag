@@ -85,7 +85,7 @@ fn docker_events_reports_a_container_lifecycle() {
 fn unknown_endpoints_get_404_and_unsupported_get_501() {
     let sb = Sandbox::new();
     let service = Service::start(&sb, &["--timeout", "0"]);
-    let out = docker_out(&sb, &service, &["top", "abc"]);
+    let out = docker_out(&sb, &service, &["plugin", "ls"]);
     assert_ne!(out.status.code(), Some(0));
     assert!(
         stderr(&out).contains("not supported by podbag"),

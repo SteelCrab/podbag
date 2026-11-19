@@ -113,6 +113,41 @@ pub enum Cmd {
     },
     /// Run a command in a running container
     Exec(ExecArgs),
+    /// Show the resource use of containers (default: the running ones)
+    Stats {
+        /// Print one table and end
+        #[arg(long)]
+        no_stream: bool,
+        /// Show all containers (default: only running ones)
+        #[arg(short, long)]
+        all: bool,
+        containers: Vec<String>,
+    },
+    /// Show the processes of a running container (ps options are passed to the host's ps)
+    Top {
+        container: String,
+        /// ps options, like -o pid,comm
+        #[arg(
+            trailing_var_arg = true,
+            allow_hyphen_values = true,
+            value_name = "PS OPTIONS"
+        )]
+        ps_args: Vec<String>,
+    },
+    /// Freeze every process of containers
+    Pause {
+        #[arg(required = true)]
+        containers: Vec<String>,
+    },
+    /// Let the processes of paused containers run again
+    Unpause {
+        #[arg(required = true)]
+        containers: Vec<String>,
+    },
+    /// Rename a container
+    Rename { container: String, new_name: String },
+    /// Change the resource limits and restart policy of containers
+    Update(UpdateArgs),
     #[command(name = "__exec", hide = true)]
     ExecHelper { id: String, request: String },
     #[command(name = "__archive", hide = true)]
@@ -252,6 +287,48 @@ pub enum SystemCmd {
         #[arg(long)]
         print_units: bool,
     },
+}
+
+#[derive(Args)]
+pub struct UpdateArgs {
+    /// Block I/O weight, 10 to 1000
+    #[arg(long)]
+    pub blkio_weight: Option<u16>,
+    /// The CPU period in microseconds (with --cpu-quota)
+    #[arg(long)]
+    pub cpu_period: Option<i64>,
+    /// CPU time in microseconds per period (-1: no limit)
+    #[arg(long, allow_hyphen_values = true)]
+    pub cpu_quota: Option<i64>,
+    /// CPU shares, a relative weight (default 1024)
+    #[arg(short = 'c', long)]
+    pub cpu_shares: Option<i64>,
+    /// Number of CPUs (like 0.5)
+    #[arg(long)]
+    pub cpus: Option<f64>,
+    /// CPUs the container may use (0-3, 0,1)
+    #[arg(long)]
+    pub cpuset_cpus: Option<String>,
+    /// Memory nodes the container may use (0-3, 0,1)
+    #[arg(long)]
+    pub cpuset_mems: Option<String>,
+    /// Memory limit (like 512m or 2g)
+    #[arg(short = 'm', long)]
+    pub memory: Option<String>,
+    /// Memory the kernel tries to leave the container (like 256m)
+    #[arg(long)]
+    pub memory_reservation: Option<String>,
+    /// Memory plus swap (-1: swap without limit)
+    #[arg(long, allow_hyphen_values = true)]
+    pub memory_swap: Option<String>,
+    /// Process limit (0 or less: no limit)
+    #[arg(long, allow_hyphen_values = true)]
+    pub pids_limit: Option<i64>,
+    /// Restart policy: no, always, unless-stopped, on-failure[:max]
+    #[arg(long, value_name = "POLICY")]
+    pub restart: Option<String>,
+    #[arg(required = true)]
+    pub containers: Vec<String>,
 }
 
 #[derive(Args)]

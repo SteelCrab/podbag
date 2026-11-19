@@ -83,14 +83,24 @@ pub fn status_text(state: &State, now: u64) -> String {
     match state.status {
         Status::Created => "Created".to_string(),
         Status::Running => format!(
-            "Up {}",
-            human_duration(now.saturating_sub(state.started.unwrap_or(now)))
+            "Up {}{}",
+            human_duration(now.saturating_sub(state.started.unwrap_or(now))),
+            if state.paused { " (Paused)" } else { "" }
         ),
         Status::Exited => format!(
             "Exited ({}) {} ago",
             state.exit_code.unwrap_or(-1),
             human_duration(now.saturating_sub(state.finished.unwrap_or(now)))
         ),
+    }
+}
+
+/// Docker's state name of a container: `paused` while it is paused.
+pub fn state_label(state: &State) -> &'static str {
+    if state.status == Status::Running && state.paused {
+        "paused"
+    } else {
+        state_name(state.status)
     }
 }
 
@@ -126,6 +136,7 @@ mod tests {
             oom: None,
             ip: None,
             ports: vec![],
+            paused: false,
         }
     }
 
@@ -154,6 +165,10 @@ mod tests {
             status_text(&state(Status::Created, None, None, None), now),
             "Created"
         );
+        let mut paused = state(Status::Running, Some(now - 600), None, None);
+        paused.paused = true;
+        assert_eq!(status_text(&paused, now), "Up 10 minutes (Paused)");
+        assert_eq!(state_label(&paused), "paused");
         let up = |secs| status_text(&state(Status::Running, Some(now - secs), None, None), now);
         assert_eq!(up(0), "Up Less than a second");
         assert_eq!(up(1), "Up 1 second");

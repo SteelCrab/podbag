@@ -334,7 +334,11 @@ fn status(c: &ContainerInfo, now: u64) -> String {
         Status::Running => format!(
             "Up {}{}",
             human_duration(now.saturating_sub(c.state.started.unwrap_or(now))),
-            c.health.as_ref().map_or("", |h| h.status.ps_suffix())
+            if c.state.paused {
+                " (Paused)"
+            } else {
+                c.health.as_ref().map_or("", |h| h.status.ps_suffix())
+            }
         ),
         Status::Exited => {
             let code = c.state.exit_code.map_or("?".to_string(), |c| c.to_string());

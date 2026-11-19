@@ -3,6 +3,8 @@ mod check;
 #[cfg(unix)]
 mod container;
 mod image;
+#[cfg(unix)]
+mod manage;
 mod network;
 #[cfg(unix)]
 mod run;
@@ -284,6 +286,19 @@ fn dispatch(cmd: Cmd) -> i32 {
         Cmd::Stop { time, containers } => container::stop(&containers, time),
         Cmd::Kill { signal, containers } => container::kill(&containers, &signal),
         Cmd::Exec(a) => container::exec(a),
+        Cmd::Stats {
+            no_stream,
+            all,
+            containers,
+        } => manage::stats(&containers, all, no_stream),
+        Cmd::Top { container, ps_args } => manage::top(&container, &ps_args),
+        Cmd::Pause { containers } => manage::pause(&containers),
+        Cmd::Unpause { containers } => manage::unpause(&containers),
+        Cmd::Rename {
+            container,
+            new_name,
+        } => manage::rename(&container, &new_name),
+        Cmd::Update(a) => manage::update(&a),
         Cmd::ExecHelper { id, request } => exec_helper(&id, &request),
         Cmd::ArchiveHelper { id, request } => archive_helper(&id, &request),
         #[cfg(target_os = "linux")]

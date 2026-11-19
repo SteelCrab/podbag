@@ -2,7 +2,7 @@
 //! and files in and out (`docker cp`).
 
 use super::create::container_from_create;
-use super::docker::{docker_image_name, docker_repo, epoch_of, state_name};
+use super::docker::{docker_image_name, docker_repo, epoch_of, state_label};
 use super::http::{Request, client_gone, peer_closed};
 use super::router::{
     Ctx, Reply, check_filters, label_matches, labels_match, message, not_supported, reply_error,
@@ -26,6 +26,9 @@ const POLL: Duration = Duration::from_millis(100);
 
 /// Routes under `/containers/`; `rest` is the path after it, split at `/`.
 pub fn route(req: &Request, ctx: &Ctx, rest: &[&str]) -> Option<Reply> {
+    if let Some(reply) = super::manage::route(req, rest) {
+        return Some(reply);
+    }
     Some(match (req.method.as_str(), rest) {
         ("POST", ["create"]) => create(req, ctx),
         ("GET", ["json"]) => list(req, ctx),
@@ -41,17 +44,6 @@ pub fn route(req: &Request, ctx: &Ctx, rest: &[&str]) -> Option<Reply> {
         ("POST", [id, "attach"]) => attach(req, ctx, id),
         ("POST", [id, "resize"]) => resize(req, id),
         ("POST", [id, "exec"]) => super::exec::create(req, ctx, id),
-        ("POST", [_, "rename"]) => not_supported(
-            "renaming containers",
-            "remove it and create it again with the new name",
-        ),
-        (_, [_, "pause" | "unpause"]) => {
-            not_supported("pausing containers", "stop it and start it again")
-        }
-        ("POST", [_, "update"]) => not_supported(
-            "changing a running container's settings",
-            "create it again with the new settings",
-        ),
         (_, [_, "attach", "ws"]) => not_supported(
             "attaching over a websocket",
             "use POST /containers/{id}/attach",
@@ -213,7 +205,12 @@ fn create(req: &Request, ctx: &Ctx) -> Reply {
 }
 
 /// The container's Docker shape (`shapes::list_entry` or `shapes::inspect`).
-fn shape(ctx: &Ctx, info: &ContainerInfo, spec: &ContainerSpec, f: fn(&Facts) -> Value) -> Value {
+pub(super) fn shape(
+    ctx: &Ctx,
+    info: &ContainerInfo,
+    spec: &ContainerSpec,
+    f: fn(&Facts) -> Value,
+) -> Value {
     let alone = |name| shapes::Attached {
         name,
         network: None,
@@ -290,7 +287,7 @@ fn matches(
         "label" => values.iter().all(|w| label_matches(w, &spec.labels)),
         "name" => values.iter().any(|v| name_matches(v, &spec.name)),
         "id" => values.iter().any(|v| info.id.starts_with(v.as_str())),
-        "status" => values.iter().any(|v| v == state_name(info.state.status)),
+        "status" => values.iter().any(|v| v == state_label(&info.state)),
         "health" => {
             let health = info.health.as_ref().map_or("none", |h| h.status.name());
             values.iter().any(|v| v == health)
@@ -373,6 +370,9 @@ fn inspect(ctx: &Ctx, name: &str) -> Reply {
 /// `POST /containers/{id}/start`: attached to the clients that wait for it, if any.
 fn start(ctx: &Ctx, name: &str) -> Reply {
     let handle = found!(find(name));
+    if handle.info().is_ok_and(|i| i.state.paused) {
+        return message(409, "cannot start a paused container, try unpause instead");
+    }
     if status(&handle) == Some(Status::Running) {
         return Reply::Empty(304);
     }

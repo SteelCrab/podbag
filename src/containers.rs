@@ -9,6 +9,12 @@ use crate::{Error, ErrorKind, Result};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+pub(crate) mod pause;
+mod rename;
+pub mod stats;
+pub mod top;
+pub mod update;
+
 /// Settings for [`ContainerHandle::exec`]. Unset values come from the container.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct ExecOptions {
@@ -215,7 +221,11 @@ impl ContainerHandle {
             Some(Duration::from_secs(10)),
         )? {
             Response::Failed { error } => Err(error),
-            _ => Ok(()),
+            _ => {
+                // A paused container handles the signal once it runs again.
+                pause::thaw_after_signal(dirs, &self.id);
+                Ok(())
+            }
         }
     }
 
@@ -382,6 +392,14 @@ impl ContainerHandle {
     #[cfg(target_os = "linux")]
     fn refuse_running(&self) -> Result<()> {
         let info = self.info()?;
+        if info.state.paused {
+            return Err(Error::new(
+                ErrorKind::Conflict,
+                format!("cannot start container {}", info.name),
+                "it is paused",
+                "run `podbag unpause` instead",
+            ));
+        }
         if info.state.status == Status::Running {
             return Err(Error::new(
                 ErrorKind::Conflict,
@@ -467,6 +485,9 @@ impl ContainerHandle {
                 "exec needs a running container",
                 "start a new container, or run `podbag ps -a` to see its state",
             ));
+        }
+        if info.state.paused {
+            return Err(pause::exec_refused(&self.id));
         }
         let req = crate::linux::exec::ExecRequest {
             command: command.iter().map(|c| c.as_ref().to_string()).collect(),
@@ -939,6 +960,7 @@ mod tests {
             oom: None,
             ip: None,
             ports: Vec::new(),
+            paused: false,
         };
         state::write_state(&dirs, &id, &running).unwrap();
         let _shim_alive = state::hold_shim_lock(&dirs, &id).unwrap();
