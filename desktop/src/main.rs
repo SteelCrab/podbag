@@ -47,6 +47,7 @@ struct AppState {
     settings_file: Mutex<Option<PathBuf>>,
     /// The events stream, while the window is open.
     watching: AtomicBool,
+    watch_generation: AtomicU64,
     watch: Mutex<Option<Closer>>,
     /// The open log stream and its generation.
     logs: Mutex<Option<Closer>>,
@@ -75,6 +76,7 @@ impl AppState {
             settings: Mutex::new(Settings::default()),
             settings_file: Mutex::new(None),
             watching: AtomicBool::new(false),
+            watch_generation: AtomicU64::new(0),
             watch: Mutex::new(None),
             logs: Mutex::new(None),
             log_generation: AtomicU64::new(0),
@@ -89,11 +91,16 @@ impl AppState {
         strings::resolve(&lock(&self.settings).language, sys_locale::get_locale())
     }
 
-    fn stop_streams(&self) {
+    fn stop_watch(&self) {
         self.watching.store(false, Ordering::SeqCst);
+        self.watch_generation.fetch_add(1, Ordering::SeqCst);
         if let Some(c) = lock(&self.watch).take() {
             c.close();
         }
+    }
+
+    fn stop_streams(&self) {
+        self.stop_watch();
         self.log_generation.fetch_add(1, Ordering::SeqCst);
         if let Some(c) = lock(&self.logs).take() {
             c.close();
@@ -211,22 +218,25 @@ fn logs_stop(state: State<'_, AppState>) {
 #[tauri::command(async)]
 fn watch(app: AppHandle, state: State<'_, AppState>, on: bool) {
     if !on {
-        state.watching.store(false, Ordering::SeqCst);
-        if let Some(c) = lock(&state.watch).take() {
-            c.close();
-        }
+        state.stop_watch();
         return;
     }
     if state.watching.swap(true, Ordering::SeqCst) {
         return;
     }
+    // A thread of an earlier watch that still sleeps sees another generation and ends.
+    let generation = state.watch_generation.fetch_add(1, Ordering::SeqCst) + 1;
     std::thread::spawn(move || {
         let state = app.state::<AppState>();
-        while state.watching.load(Ordering::SeqCst) {
+        let current = || {
+            state.watching.load(Ordering::SeqCst)
+                && state.watch_generation.load(Ordering::SeqCst) == generation
+        };
+        while current() {
             if let Ok(events) = state.client.events() {
                 *lock(&state.watch) = Some(events.closer());
                 // Stopped meanwhile: the stream is closed at once.
-                if !state.watching.load(Ordering::SeqCst) {
+                if !current() {
                     events.closer().close();
                 }
                 let _ = app.emit("live", true);
