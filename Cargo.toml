@@ -43,6 +43,8 @@ httparse = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+# `podbag tui` (on Windows, the TUI runs in the WSL distribution).
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { version = "1", features = ["fs", "mount", "pipe", "process", "system", "thread"] }

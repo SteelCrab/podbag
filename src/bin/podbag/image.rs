@@ -150,7 +150,7 @@ pub fn system(cmd: SystemCmd) -> i32 {
             Err(e) => report(&e),
         },
         // Handled in main on Unix; there is no service elsewhere.
-        SystemCmd::Service { .. } => report(&Error::new(
+        SystemCmd::Service { .. } | SystemCmd::DialStdio => report(&Error::new(
             ErrorKind::Unsupported,
             "cannot serve the Docker API on this operating system",
             "the service needs Unix sockets and Linux containers",

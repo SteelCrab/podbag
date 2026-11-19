@@ -113,6 +113,15 @@ pub enum Cmd {
     },
     /// Run a command in a running container
     Exec(ExecArgs),
+    /// Manage containers, images, volumes and networks in the terminal
+    ///
+    /// A client of the Docker API on podbag's socket (or DOCKER_HOST, when it is a Unix
+    /// socket). Press ? for the keys.
+    Tui {
+        /// Draw one screen as text, without a terminal, and exit
+        #[arg(long, hide = true)]
+        once: bool,
+    },
     #[command(name = "__exec", hide = true)]
     ExecHelper { id: String, request: String },
     #[command(name = "__archive", hide = true)]
@@ -252,6 +261,11 @@ pub enum SystemCmd {
         #[arg(long)]
         print_units: bool,
     },
+    /// Connect stdin and stdout to the Docker API socket
+    ///
+    /// For programs that cannot reach the socket themselves, such as the desktop app on
+    /// Windows. It starts the service when none runs.
+    DialStdio,
 }
 
 #[derive(Args)]
