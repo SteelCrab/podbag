@@ -183,7 +183,7 @@ pub fn serve(opts: ServeOptions) -> Result<()> {
                 }
             }
         }
-        if opts.timeout.is_some_and(|t| activity.idle_for() >= t) {
+        if opts.timeout.is_some_and(|t| activity.idle_for() >= t) && !crate::swarm::busy() {
             break;
         }
     }

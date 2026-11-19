@@ -104,8 +104,8 @@ pub fn info(ctx: &Ctx) -> Reply {
             "SecurityOptions": security,
             "Runtimes": {"podbag": {"path": "podbag"}},
             "DefaultRuntime": "podbag",
-            "Swarm": {"LocalNodeState": "inactive", "NodeID": "", "NodeAddr": "", "ControlAvailable": false},
-            "Plugins": {"Volume": ["local"], "Network": ["bridge", "host", "null"], "Log": ["json-file"]},
+            "Swarm": crate::swarm::http::info(ctx),
+            "Plugins": {"Volume": ["local"], "Network": ["bridge", "host", "null", "overlay"], "Log": ["json-file"]},
             "Warnings": [],
         }),
     )

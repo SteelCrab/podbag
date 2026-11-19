@@ -68,6 +68,9 @@ pub mod spec;
 pub mod state;
 #[doc(hidden)]
 pub mod store;
+#[cfg(unix)]
+#[doc(hidden)]
+pub mod swarm;
 /// The macOS VM's shared parts (and, on Linux, the guest's init and agent).
 #[doc(hidden)]
 pub mod vm;

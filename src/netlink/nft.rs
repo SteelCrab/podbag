@@ -7,9 +7,9 @@ use super::{Message, NLA_F_NESTED, NLM_F_ACK, NLM_F_CREATE, NLM_F_REQUEST};
 const NFNL_SUBSYS_NFTABLES: u16 = 10;
 const NFNL_MSG_BATCH_BEGIN: u16 = 0x10;
 const NFNL_MSG_BATCH_END: u16 = 0x11;
-const NFT_MSG_NEWTABLE: u16 = 0;
+pub(super) const NFT_MSG_NEWTABLE: u16 = 0;
 const NFT_MSG_NEWCHAIN: u16 = 3;
-const NFT_MSG_DELCHAIN: u16 = 5;
+pub(super) const NFT_MSG_DELCHAIN: u16 = 5;
 const NFT_MSG_NEWRULE: u16 = 6;
 const NFT_MSG_GETRULE: u16 = 7;
 /// `NLM_F_ROOT | NLM_F_MATCH`: a listing.
@@ -23,7 +23,7 @@ const RULE_USERDATA: u16 = 7;
 /// are there with this mark, so **change the number whenever the rules in
 /// `masquerade_batch` change**: hosts that have the rules of an earlier version then get
 /// the new ones at the next start.
-const RULES_VERSION: &str = "podbag rules 1";
+const RULES_VERSION: &str = "podbag rules 2";
 /// How many rules `masquerade_batch` puts into the NAT chain and into the forward chain.
 const NAT_RULES: usize = 1;
 const FORWARD_RULES: usize = 2;
@@ -42,7 +42,7 @@ fn network_of(subnet: [u8; 4], prefix: u8) -> ([u8; 4], [u8; 4]) {
 }
 
 /// The mark as rule user data: one comment entry (type 0, length, text, NUL).
-fn rules_mark(subnet: [u8; 4], prefix: u8) -> Vec<u8> {
+pub(super) fn rules_mark(subnet: [u8; 4], prefix: u8) -> Vec<u8> {
     let ([a, b, c, d], _) = network_of(subnet, prefix);
     let text = format!("{RULES_VERSION} {a}.{b}.{c}.{d}/{}", prefix.min(32));
     let mut mark = vec![0, (text.len() + 1) as u8];
@@ -50,31 +50,34 @@ fn rules_mark(subnet: [u8; 4], prefix: u8) -> Vec<u8> {
     mark.push(0);
     mark
 }
-const NFT_MSG_DELRULE: u16 = 8;
+pub(super) const NFT_MSG_DELRULE: u16 = 8;
 const NLM_F_APPEND: u16 = 0x800;
 const NFPROTO_IPV4: u8 = 2;
 const NF_INET_FORWARD: u32 = 2;
-const NF_INET_POST_ROUTING: u32 = 4;
+pub(super) const NF_INET_POST_ROUTING: u32 = 4;
 /// `filter`.
 const FILTER_PRIORITY: u32 = 0;
 const NFT_META_IIFNAME: u32 = 6;
 const NFT_CT_STATE: u32 = 0;
+pub(super) const NFT_CT_STATUS: u32 = 2;
+/// `ct status dnat` (IPS_DST_NAT): a DNAT rule changed the connection's destination.
+pub(super) const CT_STATUS_DNAT: u32 = 0x20;
 /// `ct state established,related` bits (NF_CT_STATE_BIT of each).
 const CT_ESTABLISHED_RELATED: u32 = 2 | 4;
 const NF_DROP: u32 = 0;
 /// The verdict register.
-const NFT_REG_VERDICT: u32 = 0;
+pub(super) const NFT_REG_VERDICT: u32 = 0;
 
 /// The address pasta maps to the host's loopback (`--map-host-loopback`). Containers must
 /// not reach it; the forward chain drops it.
 pub const HOST_LOOPBACK: [u8; 4] = [169, 254, 1, 3];
 /// `srcnat`.
-const NAT_PRIORITY: u32 = 100;
-const NFT_REG_1: u32 = 1;
-const NFT_PAYLOAD_NETWORK_HEADER: u32 = 1;
-const NFT_META_OIFNAME: u32 = 7;
-const NFT_CMP_EQ: u32 = 0;
-const NFT_CMP_NEQ: u32 = 1;
+pub(super) const NAT_PRIORITY: u32 = 100;
+pub(super) const NFT_REG_1: u32 = 1;
+pub(super) const NFT_PAYLOAD_NETWORK_HEADER: u32 = 1;
+pub(super) const NFT_META_OIFNAME: u32 = 7;
+pub(super) const NFT_CMP_EQ: u32 = 0;
+pub(super) const NFT_CMP_NEQ: u32 = 1;
 const IFNAMSIZ: usize = 16;
 
 /// The table podbag owns; no other table is touched.
@@ -86,7 +89,7 @@ fn nfgenmsg(family: u8, res_id: u16) -> [u8; 4] {
     [family, 0, id[0], id[1]]
 }
 
-fn message(ty: u16, flags: u16) -> Message {
+pub(super) fn message(ty: u16, flags: u16) -> Message {
     Message::new(
         (NFNL_SUBSYS_NFTABLES << 8) | ty,
         NLM_F_REQUEST | NLM_F_ACK | flags,
@@ -96,7 +99,7 @@ fn message(ty: u16, flags: u16) -> Message {
 
 /// Wrap messages in BATCH_BEGIN/END. Returns the bytes and the sequence number of the last
 /// message that asks for an acknowledgement.
-fn batch(first_seq: u32, msgs: Vec<Message>) -> (Vec<u8>, u32) {
+pub(super) fn batch(first_seq: u32, msgs: Vec<Message>) -> (Vec<u8>, u32) {
     let control = |ty| Message::new(ty, NLM_F_REQUEST, &nfgenmsg(0, NFNL_SUBSYS_NFTABLES));
     let mut seq = first_seq;
     let mut bytes = control(NFNL_MSG_BATCH_BEGIN).finish(seq);
@@ -121,7 +124,7 @@ fn forward_chain_name(bridge: &str) -> String {
     format!("fwd-{bridge}")
 }
 
-fn base_chain(name: &str, hook: u32, priority: u32, kind: &str) -> Message {
+pub(super) fn base_chain(name: &str, hook: u32, priority: u32, kind: &str) -> Message {
     let mut chain = message(NFT_MSG_NEWCHAIN, NLM_F_CREATE);
     chain.attr_str(1, TABLE);
     chain.attr_str(3, name);
@@ -133,14 +136,14 @@ fn base_chain(name: &str, hook: u32, priority: u32, kind: &str) -> Message {
     chain
 }
 
-fn flush(chain: &str) -> Message {
+pub(super) fn flush(chain: &str) -> Message {
     let mut m = message(NFT_MSG_DELRULE, 0);
     m.attr_str(1, TABLE);
     m.attr_str(2, chain);
     m
 }
 
-fn rule(chain: &str, mark: &[u8], exprs: impl FnOnce(&mut Message)) -> Message {
+pub(super) fn rule(chain: &str, mark: &[u8], exprs: impl FnOnce(&mut Message)) -> Message {
     let mut m = message(NFT_MSG_NEWRULE, NLM_F_CREATE | NLM_F_APPEND);
     m.attr_str(1, TABLE);
     m.attr_str(2, chain);
@@ -157,7 +160,7 @@ fn ifname_bytes(name: &str) -> [u8; IFNAMSIZ] {
 }
 
 /// `meta <key>` then `cmp <op> <ifname>`.
-fn match_ifname(m: &mut Message, key: u32, op: u32, name: &str) {
+pub(super) fn match_ifname(m: &mut Message, key: u32, op: u32, name: &str) {
     let ifname = ifname_bytes(name);
     expr(
         m,
@@ -193,8 +196,40 @@ fn drop_verdict(m: &mut Message) {
     );
 }
 
+/// `ct status & <bit>` compared with zero: `op` NEQ for "set", EQ for "not set".
+pub(super) fn match_ct_status(m: &mut Message, bit: u32, op: u32) {
+    expr(
+        m,
+        "ct",
+        Some(&|m: &mut Message| {
+            be(m, 1, NFT_REG_1);
+            be(m, 2, NFT_CT_STATUS);
+        }),
+    );
+    expr(
+        m,
+        "bitwise",
+        Some(&|m: &mut Message| {
+            be(m, 1, NFT_REG_1);
+            be(m, 2, NFT_REG_1);
+            be(m, 3, 4);
+            value(m, 4, &bit.to_ne_bytes());
+            value(m, 5, &[0; 4]);
+        }),
+    );
+    expr(
+        m,
+        "cmp",
+        Some(&|m: &mut Message| {
+            be(m, 1, NFT_REG_1);
+            be(m, 2, op);
+            value(m, 3, &[0; 4]);
+        }),
+    );
+}
+
 /// One expression: `name` with the attributes `data` adds (none for `masq`).
-fn expr(m: &mut Message, name: &str, data: Option<&dyn Fn(&mut Message)>) {
+pub(super) fn expr(m: &mut Message, name: &str, data: Option<&dyn Fn(&mut Message)>) {
     m.nested(1 | NLA_F_NESTED, |m| {
         m.attr_str(1, name);
         if let Some(data) = data {
@@ -203,12 +238,12 @@ fn expr(m: &mut Message, name: &str, data: Option<&dyn Fn(&mut Message)>) {
     });
 }
 
-fn be(m: &mut Message, ty: u16, v: u32) {
+pub(super) fn be(m: &mut Message, ty: u16, v: u32) {
     m.attr(ty, &v.to_be_bytes());
 }
 
 /// A data attribute: `ty` { NFTA_DATA_VALUE bytes }.
-fn value(m: &mut Message, ty: u16, bytes: &[u8]) {
+pub(super) fn value(m: &mut Message, ty: u16, bytes: &[u8]) {
     m.nested(ty | NLA_F_NESTED, |m| {
         m.attr(1, bytes);
     });
@@ -264,7 +299,8 @@ pub fn masquerade_batch(
     });
 
     // Isolation: no new connection reaches the bridge from anywhere but itself (other
-    // networks, other hosts routing through this one); answers to its own may.
+    // networks, other hosts routing through this one); answers to its own may, and so
+    // may connections that a swarm service's DNAT rule sends to its tasks.
     let forward = forward_chain_name(bridge);
     let inbound = rule(&forward, &mark, |m| {
         match_ifname(m, NFT_META_OIFNAME, NFT_CMP_EQ, bridge);
@@ -297,6 +333,7 @@ pub fn masquerade_batch(
                 value(m, 3, &[0; 4]);
             }),
         );
+        match_ct_status(m, CT_STATUS_DNAT, NFT_CMP_EQ);
         drop_verdict(m);
     });
     let host_loopback = rule(&forward, &mark, |m| {
@@ -455,8 +492,8 @@ mod tests {
             .position(|w| w == text)
             .unwrap();
         let number = at + text.len() - 1;
-        assert_eq!(other[0][number], b'1');
-        other[0][number] = b'2';
+        assert_eq!(other[0][number], b'2');
+        other[0][number] = b'3';
         assert!(!in_place(&other, NAT_RULES));
         let mark_attr = (4 + rules_mark([10, 77, 1, 0], 24).len() + 3) & !3;
         let unmarked = vec![nat[0][..nat[0].len() - mark_attr].to_vec()];
@@ -470,15 +507,15 @@ mod tests {
         // The mark names the network, whatever the prefix.
         assert_eq!(
             &rules_mark([10, 77, 1, 9], 24)[2..],
-            b"podbag rules 1 10.77.1.0/24\0"
+            b"podbag rules 2 10.77.1.0/24\0"
         );
         assert_eq!(
             &rules_mark([10, 77, 1, 9], 0)[2..],
-            b"podbag rules 1 0.0.0.0/0\0"
+            b"podbag rules 2 0.0.0.0/0\0"
         );
         assert_eq!(
             &rules_mark([10, 77, 1, 9], 32)[2..],
-            b"podbag rules 1 10.77.1.9/32\0"
+            b"podbag rules 2 10.77.1.9/32\0"
         );
     }
 
@@ -622,13 +659,22 @@ mod tests {
             b"ct\0",
             b"bitwise\0",
             b"cmp\0",
+            b"ct\0",
+            b"bitwise\0",
+            b"cmp\0",
             b"immediate\0",
         ];
         assert_eq!(
             names(7),
             inbound,
-            "new connections into the bridge from elsewhere"
+            "new connections into the bridge from elsewhere, unless a service sends them"
         );
+        let exprs = attrs(&get(&m[7].2, 4 | NLA_F_NESTED));
+        let data = |i: usize| attrs(&get(&attrs(&exprs[i].1), 2 | NLA_F_NESTED));
+        let value = |a: &[(u16, Vec<u8>)], ty: u16| get(&attrs(&get(a, ty | NLA_F_NESTED)), 1);
+        assert_eq!(get(&data(7), 2), 2u32.to_be_bytes(), "ct status");
+        assert_eq!(value(&data(8), 4), 0x20u32.to_ne_bytes(), "the dnat bit");
+        assert_eq!(value(&data(9), 3), [0; 4], "not set");
         let host_loopback: Vec<&[u8]> =
             vec![b"meta\0", b"cmp\0", b"payload\0", b"cmp\0", b"immediate\0"];
         assert_eq!(
