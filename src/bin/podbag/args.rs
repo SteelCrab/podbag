@@ -34,6 +34,35 @@ pub enum Cmd {
     },
     /// Download an image from a registry
     Pull { image: String },
+    /// Upload an image to a registry
+    Push { image: String },
+    /// Give an image another name, like REGISTRY/NAME:TAG for a push
+    Tag { source: String, target: String },
+    /// Log in to a registry (Docker Hub when none is given)
+    Login {
+        /// The registry, like ghcr.io or localhost:5000
+        server: Option<String>,
+        #[arg(short, long)]
+        username: Option<String>,
+        /// The password (shows in the process list: prefer --password-stdin)
+        #[arg(short, long)]
+        password: Option<String>,
+        /// Read the password from stdin
+        #[arg(long)]
+        password_stdin: bool,
+    },
+    /// Log out from a registry (Docker Hub when none is given)
+    Logout { server: Option<String> },
+    /// Search Docker Hub (or REGISTRY/TERM) for images
+    Search {
+        term: String,
+        /// The most results to show
+        #[arg(long, default_value_t = 25)]
+        limit: u32,
+        /// Show whole descriptions
+        #[arg(long)]
+        no_trunc: bool,
+    },
     /// List stored images
     Images,
     /// Find programs in an image that cannot run (wrong C library or CPU)

@@ -351,8 +351,12 @@ fn registry_job(
 fn registry_job(
     _op: &crate::store::ops::StoreOp,
     _login: Option<&auth::AuthConfig>,
-    _report: Report,
+    report: Report,
 ) -> Result<serde_json::Value> {
+    // No store helper here: nothing reports.
+    if let Report::Events(on) = report {
+        let _ = on;
+    }
     Err(Error::unsupported_os())
 }
 

@@ -497,10 +497,33 @@ pub fn lookup(registry: &str) -> Option<AuthConfig> {
     Credentials::from_env()?.get(&registry).ok().flatten()
 }
 
+static FRONT_END: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+
+/// Read [`AUTH_ENV`] and remove it from the environment, so that no process this one
+/// starts (a container's helper, the keeper, a container) inherits the login.
+///
+/// # Safety
+///
+/// No other thread may read or write the environment meanwhile: call it first thing in
+/// `main`.
+pub unsafe fn take_front_end_logins() {
+    FRONT_END.get_or_init(|| {
+        let value = std::env::var(AUTH_ENV).ok();
+        if value.is_some() {
+            // SAFETY: the caller promises that no other thread uses the environment.
+            unsafe { std::env::remove_var(AUTH_ENV) };
+        }
+        value
+    });
+}
+
 /// The front end's credentials for a registry: None when the variable is not set (then the
 /// config is read), Some(None) when it is set without this registry.
 fn from_env_var(registry: &str) -> Option<Option<AuthConfig>> {
-    let value = std::env::var(AUTH_ENV).ok().filter(|v| !v.is_empty())?;
+    let value = FRONT_END
+        .get_or_init(|| std::env::var(AUTH_ENV).ok())
+        .clone()
+        .filter(|v| !v.is_empty())?;
     Some(
         decode_map(&value)
             .and_then(|map| {
