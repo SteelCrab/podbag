@@ -6,14 +6,21 @@
 //! hides what the image had there (`.wh..wh..opq`), and a directory with a `redirect`
 //! attribute was renamed from an image directory. File contents and metadata come from the
 //! merged view: with composefs, an upper file may hold only metadata (metacopy).
+//!
+//! The container may change its files while they are read, and swap a file or a folder
+//! for a link: no path is resolved from the host. Each tree is opened once, and every path
+//! below it is opened with `openat2` inside that tree (`RESOLVE_IN_ROOT`), refusing links
+//! on the way (`RESOLVE_NO_SYMLINKS`). Files are opened without following a link, and
+//! their type and size come from the opened file.
 
 pub use super::Change;
+use rustix::fs::{AtFlags, FileType, Mode, OFlags, ResolveFlags, Stat};
 use std::collections::HashMap;
 use std::ffi::{CString, OsStr};
 use std::io::{Read, Write};
+use std::os::fd::{AsFd, AsRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{FileTypeExt, MetadataExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Where overlayfs keeps its attributes: `trusted.` as root, `user.` in a user namespace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,6 +46,141 @@ impl XattrSpace {
     }
 }
 
+/// A file tree that paths cannot leave: every path is resolved inside it.
+struct Root(OwnedFd);
+
+impl Root {
+    /// Open the tree at `path`, a path the caller trusts (not one inside a container).
+    fn open(path: &Path) -> std::io::Result<Root> {
+        let fd = rustix::fs::open(
+            path,
+            OFlags::PATH | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
+        Ok(Root(fd))
+    }
+
+    /// Open `rel` inside the tree, through no link. A link as the last part is opened
+    /// itself with `O_PATH | O_NOFOLLOW`; other flags refuse it.
+    fn at(&self, rel: &str, flags: OFlags) -> std::io::Result<OwnedFd> {
+        let path = if rel.is_empty() { "." } else { rel };
+        let resolve =
+            ResolveFlags::IN_ROOT | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS;
+        let flags = flags | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let mut tries = 0;
+        loop {
+            match rustix::fs::openat2(&self.0, path, flags, Mode::empty(), resolve) {
+                // A rename elsewhere in the tree: the kernel asks to try again.
+                Err(rustix::io::Errno::AGAIN) if tries < 8 => tries += 1,
+                other => return other.map_err(Into::into),
+            }
+        }
+    }
+
+    /// The details of `rel` itself (a link is not followed). None when it is gone, or
+    /// cannot be reached without a link.
+    fn stat(&self, rel: &str) -> Option<Stat> {
+        let fd = self.at(rel, OFlags::PATH).ok()?;
+        rustix::fs::fstat(&fd).ok()
+    }
+
+    /// The entries of the directory `rel`, sorted by name, with their details. A directory
+    /// gone meanwhile, or one that became a link, is empty.
+    fn children(&self, rel: &str) -> std::io::Result<Vec<(String, Stat)>> {
+        let dir = match self.at(rel, OFlags::RDONLY | OFlags::DIRECTORY) {
+            Ok(fd) => fd,
+            Err(e) if gone(&e) => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        };
+        let mut out = Vec::new();
+        for entry in rustix::fs::Dir::read_from(&dir)? {
+            let entry = entry?;
+            let name = entry.file_name().to_bytes();
+            if name == b"." || name == b".." {
+                continue;
+            }
+            // One name, relative to the directory itself: nothing to resolve.
+            match rustix::fs::statat(&dir, entry.file_name(), AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(st) => out.push((OsStr::from_bytes(name).to_string_lossy().into_owned(), st)),
+                Err(rustix::io::Errno::NOENT) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(out)
+    }
+
+    /// The target of the link `rel`.
+    fn read_link(&self, rel: &str) -> std::io::Result<PathBuf> {
+        let fd = self.at(rel, OFlags::PATH)?;
+        let target = rustix::fs::readlinkat(&fd, "", Vec::new())?;
+        Ok(PathBuf::from(OsStr::from_bytes(target.as_bytes())))
+    }
+
+    /// The regular file `rel`, opened for reading, with its details. None when it is gone
+    /// or is no longer a regular file.
+    fn open_file(&self, rel: &str) -> std::io::Result<Option<(std::fs::File, Stat)>> {
+        let fd = match self.at(rel, OFlags::PATH) {
+            Ok(fd) => fd,
+            Err(e) if gone(&e) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let st = rustix::fs::fstat(&fd)?;
+        if FileType::from_raw_mode(st.st_mode) != FileType::RegularFile {
+            return Ok(None);
+        }
+        // The same inode, opened for reading: no path is looked up again.
+        let file = std::fs::File::open(proc_path(&fd))?;
+        let st = rustix::fs::fstat(&file)?;
+        Ok(Some((file, st)))
+    }
+
+    /// The value of the extended attribute `name` of `rel` (not of a link's target).
+    fn xattr(&self, rel: &str, name: &str) -> Option<Vec<u8>> {
+        let fd = self.at(rel, OFlags::PATH).ok()?;
+        let st = rustix::fs::fstat(&fd).ok()?;
+        if FileType::from_raw_mode(st.st_mode) == FileType::Symlink {
+            return None;
+        }
+        get_xattr_at(&proc_path(&fd), name)
+    }
+
+    /// The extended attributes a layer keeps: file capabilities and `user.*`, but not the
+    /// overlay's own. A link has none.
+    fn kept_xattrs(&self, rel: &str, st: &Stat) -> Vec<(String, Vec<u8>)> {
+        if FileType::from_raw_mode(st.st_mode) == FileType::Symlink {
+            return Vec::new();
+        }
+        let Ok(fd) = self.at(rel, OFlags::PATH) else {
+            return Vec::new();
+        };
+        let path = proc_path(&fd);
+        let mut out = Vec::new();
+        for name in list_xattrs_at(&path) {
+            let keep = name == "security.capability"
+                || (name.starts_with("user.") && !name.starts_with("user.overlay."));
+            if keep && let Some(v) = get_xattr_at(&path, &name) {
+                out.push((name, v));
+            }
+        }
+        out.sort();
+        out
+    }
+}
+
+/// `/proc/self/fd/<n>`: the file of a descriptor, for calls that take a path.
+fn proc_path(fd: &impl AsFd) -> PathBuf {
+    PathBuf::from(format!("/proc/self/fd/{}", fd.as_fd().as_raw_fd()))
+}
+
+/// Gone, or reachable only through a link: left out.
+fn gone(e: &std::io::Error) -> bool {
+    matches!(
+        e.raw_os_error(),
+        Some(libc::ENOENT | libc::ELOOP | libc::ENOTDIR | libc::EXDEV)
+    )
+}
+
 /// Write the changes in `upper` as a layer tar to `out`, reading what files hold from
 /// `merged`.
 pub fn write_layer(
@@ -47,52 +189,55 @@ pub fn write_layer(
     space: XattrSpace,
     out: &mut dyn Write,
 ) -> std::io::Result<()> {
+    let (upper, merged) = (Root::open(upper)?, Root::open(merged)?);
     let mut w = Writer {
         tar: tar::Builder::new(out),
         links: HashMap::new(),
     };
-    w.upper_dir(upper, merged, "", space)?;
+    w.upper_dir(&upper, &merged, "", space)?;
     w.tar.finish()
 }
 
 /// All of a container's files under `root` as a tar (`export`). The directories in `skip`
 /// (relative paths: the mounts of a running container) are written empty.
 pub fn write_tree(root: &Path, skip: &[String], out: &mut dyn Write) -> std::io::Result<()> {
+    let root = Root::open(root)?;
     let mut w = Writer {
         tar: tar::Builder::new(out),
         links: HashMap::new(),
     };
-    w.tree(root, "", skip)?;
+    w.tree(&root, "", skip)?;
     w.tar.finish()
 }
 
 /// The changes in `upper`: added when `lower` (the image) lacks the path.
 pub fn changes(upper: &Path, lower: &Path) -> std::io::Result<Vec<Change>> {
+    let (upper, lower) = (Root::open(upper)?, Root::open(lower)?);
     let mut out = Vec::new();
-    list_changes(upper, lower, "", &mut out)?;
+    list_changes(&upper, &lower, "", &mut out)?;
     out.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(out)
 }
 
 fn list_changes(
-    upper: &Path,
-    lower: &Path,
+    upper: &Root,
+    lower: &Root,
     rel: &str,
     out: &mut Vec<Change>,
 ) -> std::io::Result<()> {
-    for (name, meta) in children(&upper.join(rel))? {
+    for (name, st) in upper.children(rel)? {
         let child = join(rel, &name);
         let path = format!("/{child}");
-        if is_whiteout(&meta) {
+        if is_whiteout(&st) {
             out.push(Change { path, kind: 2 });
             continue;
         }
-        let in_image = std::fs::symlink_metadata(lower.join(&child)).is_ok();
+        let in_image = lower.stat(&child).is_some();
         out.push(Change {
             path,
             kind: if in_image { 0 } else { 1 },
         });
-        if meta.is_dir() {
+        if FileType::from_raw_mode(st.st_mode) == FileType::Directory {
             list_changes(upper, lower, &child, out)?;
         }
     }
@@ -100,8 +245,8 @@ fn list_changes(
 }
 
 /// A deleted path in an overlay upper directory.
-pub fn is_whiteout(meta: &std::fs::Metadata) -> bool {
-    meta.file_type().is_char_device() && meta.rdev() == 0
+fn is_whiteout(st: &Stat) -> bool {
+    FileType::from_raw_mode(st.st_mode) == FileType::CharacterDevice && st.st_rdev == 0
 }
 
 struct Writer<'a> {
@@ -114,29 +259,30 @@ impl Writer<'_> {
     /// The entries below `rel` in the upper directory.
     fn upper_dir(
         &mut self,
-        upper: &Path,
-        merged: &Path,
+        upper: &Root,
+        merged: &Root,
         rel: &str,
         space: XattrSpace,
     ) -> std::io::Result<()> {
-        for (name, meta) in children(&upper.join(rel))? {
+        for (name, st) in upper.children(rel)? {
             let child = join(rel, &name);
-            if is_whiteout(&meta) {
+            if is_whiteout(&st) {
                 self.marker(&join(rel, &format!(".wh.{name}")))?;
                 continue;
             }
-            if !meta.is_dir() {
-                self.entry(&merged.join(&child), &child, Some(&meta))?;
+            if FileType::from_raw_mode(st.st_mode) != FileType::Directory {
+                self.entry(merged, &child, Some(&st))?;
                 continue;
             }
-            let at = upper.join(&child);
-            let opaque = get_xattr(&at, &space.name("opaque")).is_some_and(|v| v == b"y");
-            let renamed = get_xattr(&at, &space.name("redirect")).is_some();
-            self.entry(&merged.join(&child), &child, None)?;
+            let opaque = upper
+                .xattr(&child, &space.name("opaque"))
+                .is_some_and(|v| v == b"y");
+            let renamed = upper.xattr(&child, &space.name("redirect")).is_some();
+            self.entry(merged, &child, None)?;
             if renamed {
                 // A renamed image directory: all of it, in place of what was there.
                 self.marker(&format!("{child}/.wh..wh..opq"))?;
-                self.merged_dir(merged, &child)?;
+                self.tree(merged, &child, &[])?;
             } else {
                 if opaque {
                     self.marker(&format!("{child}/.wh..wh..opq"))?;
@@ -147,17 +293,13 @@ impl Writer<'_> {
         Ok(())
     }
 
-    /// Everything below `rel` in the merged view.
-    fn merged_dir(&mut self, merged: &Path, rel: &str) -> std::io::Result<()> {
-        self.tree(merged, rel, &[])
-    }
-
     /// Everything below `rel` in `root`; the directories in `skip` are written empty.
-    fn tree(&mut self, root: &Path, rel: &str, skip: &[String]) -> std::io::Result<()> {
-        for (name, meta) in children(&root.join(rel))? {
+    fn tree(&mut self, root: &Root, rel: &str, skip: &[String]) -> std::io::Result<()> {
+        for (name, st) in root.children(rel)? {
             let child = join(rel, &name);
-            self.entry(&root.join(&child), &child, None)?;
-            if meta.is_dir() && !skip.contains(&child) {
+            self.entry(root, &child, None)?;
+            if FileType::from_raw_mode(st.st_mode) == FileType::Directory && !skip.contains(&child)
+            {
                 self.tree(root, &child, skip)?;
             }
         }
@@ -175,27 +317,33 @@ impl Writer<'_> {
         self.tar.append_data(&mut h, name, std::io::empty())
     }
 
-    /// One entry from `src` (in the merged view). `upper` is its upper-directory metadata,
-    /// whose inode tells hard links apart. A path gone meanwhile is left out.
-    fn entry(
-        &mut self,
-        src: &Path,
-        name: &str,
-        upper: Option<&std::fs::Metadata>,
-    ) -> std::io::Result<()> {
-        let meta = match std::fs::symlink_metadata(src) {
-            Ok(m) => m,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(e) => return Err(e),
+    /// One entry from `rel` in `root` (the merged view). `upper` is its upper-directory
+    /// details, whose inode tells hard links apart. A path gone meanwhile, or one that
+    /// became a link on the way, is left out.
+    fn entry(&mut self, root: &Root, rel: &str, upper: Option<&Stat>) -> std::io::Result<()> {
+        let Some(st) = root.stat(rel) else {
+            return Ok(());
         };
-        let kind = meta.file_type();
-        if kind.is_socket() {
+        let kind = FileType::from_raw_mode(st.st_mode);
+        // A regular file is opened first: its details come from the open file.
+        let (file, st) = if kind == FileType::RegularFile {
+            match root.open_file(rel)? {
+                Some((file, st)) => (Some(file), st),
+                None => return Ok(()),
+            }
+        } else {
+            (None, st)
+        };
+        if kind == FileType::Socket {
             return Ok(());
         }
         let mut h = tar::Header::new_gnu();
-        h.set_metadata_in_mode(&meta, tar::HeaderMode::Complete);
+        h.set_mode(st.st_mode & 0o7777);
+        h.set_uid(u64::from(st.st_uid));
+        h.set_gid(u64::from(st.st_gid));
+        h.set_mtime(st.st_mtime.max(0) as u64);
         h.set_size(0);
-        let xattrs = kept_xattrs(src);
+        let xattrs = root.kept_xattrs(rel, &st);
         if !xattrs.is_empty() {
             let pax: Vec<(String, Vec<u8>)> = xattrs
                 .into_iter()
@@ -204,49 +352,55 @@ impl Writer<'_> {
             self.tar
                 .append_pax_extensions(pax.iter().map(|(k, v)| (k.as_str(), v.as_slice())))?;
         }
-        if kind.is_dir() {
-            h.set_entry_type(tar::EntryType::Directory);
-            return self
-                .tar
-                .append_data(&mut h, format!("{name}/"), std::io::empty());
-        }
-        if kind.is_symlink() {
-            h.set_entry_type(tar::EntryType::Symlink);
-            let target = std::fs::read_link(src)?;
-            return self.tar.append_link(&mut h, name, target);
-        }
-        if kind.is_file() {
-            let id = upper.map_or((meta.dev(), meta.ino()), |u| (u.dev(), u.ino()));
-            let nlink = upper.map_or(meta.nlink(), |u| u.nlink());
-            if nlink > 1 {
-                if let Some(first) = self.links.get(&id) {
-                    h.set_entry_type(tar::EntryType::Link);
-                    let first = first.clone();
-                    return self.tar.append_link(&mut h, name, first);
-                }
-                self.links.insert(id, name.to_string());
+        match kind {
+            FileType::Directory => {
+                h.set_entry_type(tar::EntryType::Directory);
+                self.tar
+                    .append_data(&mut h, format!("{rel}/"), std::io::empty())
             }
-            h.set_entry_type(tar::EntryType::Regular);
-            h.set_size(meta.len());
-            let file = std::fs::File::open(src)?;
-            return self
-                .tar
-                .append_data(&mut h, name, Exact(file.take(meta.len()), meta.len()));
+            FileType::Symlink => {
+                h.set_entry_type(tar::EntryType::Symlink);
+                let target = match root.read_link(rel) {
+                    Ok(t) => t,
+                    Err(e) if gone(&e) => return Ok(()),
+                    Err(e) => return Err(e),
+                };
+                self.tar.append_link(&mut h, rel, target)
+            }
+            FileType::RegularFile => {
+                let id = upper.map_or((st.st_dev, st.st_ino), |u| (u.st_dev, u.st_ino));
+                let nlink = upper.map_or(st.st_nlink, |u| u.st_nlink);
+                if nlink > 1 {
+                    if let Some(first) = self.links.get(&id) {
+                        h.set_entry_type(tar::EntryType::Link);
+                        let first = first.clone();
+                        return self.tar.append_link(&mut h, rel, first);
+                    }
+                    self.links.insert(id, rel.to_string());
+                }
+                let size = st.st_size.max(0) as u64;
+                h.set_entry_type(tar::EntryType::Regular);
+                h.set_size(size);
+                let file = file.expect("a regular file was opened");
+                self.tar
+                    .append_data(&mut h, rel, Exact(file.take(size), size))
+            }
+            // A FIFO or a device: the header says all.
+            _ => {
+                if kind == FileType::Fifo {
+                    h.set_entry_type(tar::EntryType::Fifo);
+                } else {
+                    h.set_entry_type(if kind == FileType::CharacterDevice {
+                        tar::EntryType::Char
+                    } else {
+                        tar::EntryType::Block
+                    });
+                    h.set_device_major(libc::major(st.st_rdev))?;
+                    h.set_device_minor(libc::minor(st.st_rdev))?;
+                }
+                self.tar.append_data(&mut h, rel, std::io::empty())
+            }
         }
-        // A FIFO or a device: the header says all.
-        if kind.is_fifo() {
-            h.set_entry_type(tar::EntryType::Fifo);
-        } else {
-            h.set_entry_type(if kind.is_char_device() {
-                tar::EntryType::Char
-            } else {
-                tar::EntryType::Block
-            });
-            let rdev = meta.rdev();
-            h.set_device_major(libc::major(rdev))?;
-            h.set_device_minor(libc::minor(rdev))?;
-        }
-        self.tar.append_data(&mut h, name, std::io::empty())
     }
 }
 
@@ -269,27 +423,6 @@ impl<R: Read> Read for Exact<R> {
     }
 }
 
-/// The entries of a directory, sorted by name. A directory gone meanwhile is empty.
-fn children(dir: &Path) -> std::io::Result<Vec<(String, std::fs::Metadata)>> {
-    let list = match std::fs::read_dir(dir) {
-        Ok(l) => l,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e),
-    };
-    let mut out = Vec::new();
-    for entry in list {
-        let entry = entry?;
-        let meta = match entry.metadata() {
-            Ok(m) => m,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(e),
-        };
-        out.push((entry.file_name().to_string_lossy().into_owned(), meta));
-    }
-    out.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(out)
-}
-
 fn join(rel: &str, name: &str) -> String {
     if rel.is_empty() {
         name.to_string()
@@ -298,33 +431,19 @@ fn join(rel: &str, name: &str) -> String {
     }
 }
 
-/// The extended attributes a layer keeps: file capabilities and `user.*`, but not the
-/// overlay's own.
-fn kept_xattrs(path: &Path) -> Vec<(String, Vec<u8>)> {
-    let mut out = Vec::new();
-    for name in list_xattrs(path) {
-        let keep = name == "security.capability"
-            || (name.starts_with("user.") && !name.starts_with("user.overlay."));
-        if keep && let Some(v) = get_xattr(path, &name) {
-            out.push((name, v));
-        }
-    }
-    out.sort();
-    out
-}
-
 fn c_path(path: &Path) -> Option<CString> {
     CString::new(path.as_os_str().as_bytes()).ok()
 }
 
-fn list_xattrs(path: &Path) -> Vec<String> {
+/// The attribute names of the file at `path` (a `/proc/self/fd/<n>` path).
+fn list_xattrs_at(path: &Path) -> Vec<String> {
     let Some(p) = c_path(path) else {
         return Vec::new();
     };
     let mut buf = vec![0u8; 4096];
     loop {
         // SAFETY: p is a valid C string; buf is writable for its length.
-        let n = unsafe { libc::llistxattr(p.as_ptr(), buf.as_mut_ptr().cast(), buf.len()) };
+        let n = unsafe { libc::listxattr(p.as_ptr(), buf.as_mut_ptr().cast(), buf.len()) };
         if n >= 0 {
             buf.truncate(n as usize);
             break;
@@ -343,14 +462,15 @@ fn list_xattrs(path: &Path) -> Vec<String> {
         .collect()
 }
 
-pub(crate) fn get_xattr(path: &Path, name: &str) -> Option<Vec<u8>> {
+/// One attribute of the file at `path` (a `/proc/self/fd/<n>` path).
+fn get_xattr_at(path: &Path, name: &str) -> Option<Vec<u8>> {
     let p = c_path(path)?;
     let n = CString::new(name).ok()?;
     let mut buf = vec![0u8; 256];
     loop {
         // SAFETY: valid C strings; buf is writable for its length.
         let got =
-            unsafe { libc::lgetxattr(p.as_ptr(), n.as_ptr(), buf.as_mut_ptr().cast(), buf.len()) };
+            unsafe { libc::getxattr(p.as_ptr(), n.as_ptr(), buf.as_mut_ptr().cast(), buf.len()) };
         if got >= 0 {
             buf.truncate(got as usize);
             return Some(buf);
@@ -520,6 +640,77 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// What a container leaves when it swaps directories and files for links while the
+    /// walk runs: the upper directory lists `d/secret`, `r/secret` and `f` as files, and
+    /// the merged view has links there that lead out of the container's root.
+    #[test]
+    fn links_never_lead_out_of_the_container() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret"), "HOST SECRET").unwrap();
+        std::fs::write(outside.join("host-only-name"), "").unwrap();
+        let (up, merged) = (tmp.path().join("up"), tmp.path().join("merged"));
+        for d in ["d", "r"] {
+            std::fs::create_dir_all(up.join(d)).unwrap();
+            std::fs::write(up.join(d).join("secret"), "upper").unwrap();
+        }
+        std::fs::write(up.join("f"), "upper").unwrap();
+        std::fs::create_dir_all(&merged).unwrap();
+        std::os::unix::fs::symlink(&outside, merged.join("d")).unwrap();
+        std::os::unix::fs::symlink("../outside", merged.join("r")).unwrap();
+        std::os::unix::fs::symlink(outside.join("secret"), merged.join("f")).unwrap();
+        let leaks = |tar: &[u8]| {
+            let text = String::from_utf8_lossy(tar);
+            text.contains("HOST SECRET") || text.contains("host-only-name")
+        };
+
+        let mut out = Vec::new();
+        write_layer(&up, &merged, XattrSpace::User, &mut out).unwrap();
+        assert!(!leaks(&out), "write_layer read a file outside the root");
+        let mut out = Vec::new();
+        write_tree(&merged, &[], &mut out).unwrap();
+        assert!(!leaks(&out), "write_tree read a file outside the root");
+        // Paths that became links after the walk listed them.
+        let root = Root::open(&merged).unwrap();
+        let mut out = Vec::new();
+        {
+            let mut w = Writer {
+                tar: tar::Builder::new(&mut out as &mut dyn Write),
+                links: HashMap::new(),
+            };
+            w.tree(&root, "d", &[]).unwrap();
+            w.tree(&root, "r", &[]).unwrap();
+            for rel in ["d/secret", "r/secret", "f", "d/host-only-name"] {
+                w.entry(&root, rel, None).unwrap();
+            }
+            w.tar.finish().unwrap();
+        }
+        assert!(!leaks(&out), "a walk below a link read outside the root");
+        // The upper directory itself, with a link where a directory was.
+        std::fs::remove_dir_all(up.join("r")).unwrap();
+        std::os::unix::fs::symlink(&outside, up.join("r")).unwrap();
+        std::fs::create_dir_all(up.join("x")).unwrap();
+        let mut out = Vec::new();
+        write_layer(&up, &up, XattrSpace::User, &mut out).unwrap();
+        assert!(
+            !leaks(&out),
+            "write_layer listed a directory outside the upper one"
+        );
+        // The image (here the merged view) has links at d and r: what is below them in
+        // the upper directory is new, whatever the host has there.
+        std::fs::remove_file(up.join("r")).unwrap();
+        std::fs::create_dir_all(up.join("r")).unwrap();
+        std::fs::write(up.join("r/secret"), "upper").unwrap();
+        let got: Vec<(String, u8)> = changes(&up, &merged)
+            .unwrap()
+            .into_iter()
+            .map(|c| (c.path, c.kind))
+            .collect();
+        assert!(got.contains(&("/d/secret".to_string(), 1)), "{got:?}");
+        assert!(got.contains(&("/r/secret".to_string(), 1)), "{got:?}");
     }
 
     #[test]

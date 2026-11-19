@@ -188,6 +188,8 @@ podbag build -t myapp - < Dockerfile               # only a Dockerfile, no conte
 - `podbag commit CONTAINER [NAME]`: the container's image plus its changes, as a new image.
   - `-c` sets the config with a Dockerfile instruction: `-c 'CMD ["app"]'`.
   - It works on running containers too, without stopping them.
+  - It does not pause a running container (Docker pauses by default), so a file that is
+    being written at that moment can be cut.
 - `podbag export [-o FILE] CONTAINER`: all its files as a tar, without its volumes.
 - `podbag diff CONTAINER`: the paths it changed: `A` added, `C` changed, `D` deleted.
 
