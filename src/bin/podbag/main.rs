@@ -29,8 +29,93 @@ fn main() {
     if let Some(code) = macos_front(std::env::args().skip(1).collect()) {
         std::process::exit(code);
     }
+    #[cfg(windows)]
+    if let Some(code) = windows_front(std::env::args().skip(1).collect()) {
+        std::process::exit(code);
+    }
     let cli = Cli::parse();
     std::process::exit(dispatch(cli.cmd));
+}
+
+/// On Windows, commands run in podbag's WSL2 distribution; only `vm …`, help and the
+/// version stay here.
+#[cfg(windows)]
+fn windows_front(args: Vec<String>) -> Option<i32> {
+    match args.first().map(String::as_str) {
+        Some("vm") => Some(podbag::windows::vm_command(&args[1..])),
+        None | Some("-h" | "--help" | "help" | "-V" | "--version") => None,
+        // Checked here first: help and wrong arguments need no WSL.
+        Some(_) => match parse(&args) {
+            Err(e) => e.exit(),
+            Ok(cli) => Some(match wsl_argv(&cli, args) {
+                Ok(argv) => podbag::windows::forward(&argv),
+                Err(e) => {
+                    eprintln!("podbag: {e}");
+                    125
+                }
+            }),
+        },
+    }
+}
+
+/// The arguments with the Windows paths they name (`-v`, `--rootfs`, `load -i`,
+/// `save -o`) as WSL sees them. Only as many values as clap read are changed, the first
+/// ones in the arguments: those come before the image and the command it runs.
+#[cfg(any(windows, test))]
+fn wsl_argv(cli: &Cli, mut argv: Vec<String>) -> Result<Vec<String>, String> {
+    use podbag::wsl::{wsl_path, wsl_volume};
+    match &cli.cmd {
+        Cmd::Run(a) | Cmd::Create(a) => {
+            rewrite(&mut argv, Some('v'), "--volume", a.volume.len(), wsl_volume)?;
+            let rootfs = usize::from(a.rootfs.is_some());
+            rewrite(&mut argv, None, "--rootfs", rootfs, wsl_path)?;
+        }
+        Cmd::Load { input: Some(_), .. } => rewrite(&mut argv, Some('i'), "--input", 1, wsl_path)?,
+        Cmd::Save {
+            output: Some(_), ..
+        } => rewrite(&mut argv, Some('o'), "--output", 1, wsl_path)?,
+        _ => {}
+    }
+    Ok(argv)
+}
+
+/// Change the values of the first `count` uses of an option: `--long=VALUE`,
+/// `--long VALUE`, `-s VALUE`, or flags without values ending in it (`-itv VALUE`).
+#[cfg(any(windows, test))]
+fn rewrite(
+    argv: &mut [String],
+    short: Option<char>,
+    long: &str,
+    mut count: usize,
+    change: fn(&str) -> Result<String, String>,
+) -> Result<(), String> {
+    let takes_next = |a: &str| {
+        a == long
+            || short.is_some_and(|s| {
+                a.strip_prefix('-').is_some_and(|f| {
+                    !f.starts_with('-')
+                        && f.ends_with(s)
+                        && f[..f.len() - 1].chars().all(|c| "ditq".contains(c))
+                })
+            })
+    };
+    let mut i = 1;
+    while count > 0 && i < argv.len() {
+        let a = argv[i].clone();
+        if a == "--" {
+            break;
+        }
+        if let Some(v) = a.strip_prefix(long).and_then(|r| r.strip_prefix('=')) {
+            argv[i] = format!("{long}={}", change(v)?);
+            count -= 1;
+        } else if takes_next(&a) && i + 1 < argv.len() {
+            argv[i + 1] = change(&argv[i + 1])?;
+            count -= 1;
+            i += 1;
+        }
+        i += 1;
+    }
+    Ok(())
 }
 
 /// On macOS, commands run in podbag's Linux VM; only `vm …`, help and the version stay
@@ -52,7 +137,7 @@ fn macos_front(args: Vec<String>) -> Option<i32> {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows, test))]
 fn parse(args: &[String]) -> Result<Cli, clap::Error> {
     Cli::try_parse_from(std::iter::once("podbag".to_string()).chain(args.iter().cloned()))
 }
@@ -228,6 +313,18 @@ fn dispatch(cmd: Cmd) -> i32 {
         Cmd::Session => session_helper(),
         Cmd::Restarter { id } => podbag::restart::restart_main(&id),
         Cmd::Probe { id, start_period } => podbag::health::probe_main(&id, start_period),
+        Cmd::InstallSelf { dest } => install_self(&dest),
+    }
+}
+
+#[cfg(unix)]
+fn install_self(dest: &std::path::Path) -> i32 {
+    match podbag::wsl::install_self(dest, &mut std::io::stdin().lock()) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("podbag: cannot install {}: {e}", dest.display());
+            1
+        }
     }
 }
 
@@ -287,4 +384,91 @@ fn session_helper() -> i32 {
 #[cfg(all(unix, not(target_os = "linux")))]
 fn session_helper() -> i32 {
     unsupported()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn via_wsl(args: &[&str]) -> Result<Vec<String>, String> {
+        let argv: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        let cli = parse(&argv).expect("valid arguments");
+        wsl_argv(&cli, argv)
+    }
+
+    #[test]
+    fn windows_paths_in_volumes_become_wsl_paths_but_not_in_the_command() {
+        let out = via_wsl(&[
+            "run",
+            "--rm",
+            "-v",
+            r"C:\Users\me\app:/app:ro",
+            "-itv",
+            r".\data:/data",
+            "alpine",
+            "ls",
+            "-v",
+            r"C:\x",
+        ])
+        .unwrap();
+        assert_eq!(
+            out,
+            [
+                "run",
+                "--rm",
+                "-v",
+                "/mnt/c/Users/me/app:/app:ro",
+                "-itv",
+                "./data:/data",
+                "alpine",
+                "ls",
+                "-v",
+                r"C:\x",
+            ]
+        );
+    }
+
+    #[test]
+    fn long_forms_rootfs_and_named_volumes() {
+        let out = via_wsl(&[
+            "run",
+            r"--volume=D:\cache:/cache",
+            "-v",
+            "data:/data",
+            "--rootfs",
+            r"E:\root",
+            "true",
+        ])
+        .unwrap();
+        assert_eq!(
+            out,
+            [
+                "run",
+                "--volume=/mnt/d/cache:/cache",
+                "-v",
+                "data:/data",
+                "--rootfs",
+                "/mnt/e/root",
+                "true",
+            ]
+        );
+    }
+
+    #[test]
+    fn load_and_save_files() {
+        assert_eq!(
+            via_wsl(&["load", "-qi", r"C:\images\a.tar"]).unwrap(),
+            ["load", "-qi", "/mnt/c/images/a.tar"]
+        );
+        assert_eq!(
+            via_wsl(&["save", "--output", r"out\a.tar", "alpine"]).unwrap(),
+            ["save", "--output", "out/a.tar", "alpine"]
+        );
+        assert_eq!(via_wsl(&["ps", "-a"]).unwrap(), ["ps", "-a"]);
+    }
+
+    #[test]
+    fn network_paths_are_refused() {
+        assert!(via_wsl(&["run", "-v", r"\\server\share:/data", "alpine"]).is_err());
+    }
 }

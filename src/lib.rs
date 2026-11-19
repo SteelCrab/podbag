@@ -72,6 +72,13 @@ pub mod store;
 #[doc(hidden)]
 pub mod vm;
 pub mod volume;
+/// podbag on Windows: the CLI that runs commands in podbag's WSL2 distribution.
+#[cfg(windows)]
+#[doc(hidden)]
+pub mod windows;
+/// The WSL2 distribution's files, and Windows paths as WSL sees them.
+#[doc(hidden)]
+pub mod wsl;
 
 pub use container::{Container, Output, Running};
 #[cfg(unix)]

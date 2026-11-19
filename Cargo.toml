@@ -2,7 +2,12 @@
 name = "podbag"
 version = "0.1.0"
 edition = "2024"
-description = "Daemonless, rootless container engine in a single static binary"
+description = "A container engine with no daemon, in one static binary, that stores images file by file"
+license = "Apache-2.0"
+repository = "https://github.com/SteelCrab/podbag"
+readme = "README.md"
+keywords = ["container", "docker", "oci", "rootless", "wsl"]
+categories = ["command-line-utilities", "virtualization"]
 
 [lib]
 path = "src/lib.rs"
@@ -18,6 +23,9 @@ cli = ["dep:clap"]
 # macOS: the binary carries the VM's guest files from target/vm (or PODBAG_GUEST_DIR),
 # built first with `dev/vm.sh run dev/macos/build-guest.sh`.
 embed-guest = []
+# Windows: podbag.exe carries the static Linux podbag (PODBAG_LINUX_BIN, same CPU) that it
+# installs in its WSL2 distribution.
+embed-linux = []
 
 [dependencies]
 clap = { version = "4", features = ["derive"], optional = true }

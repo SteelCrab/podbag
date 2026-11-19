@@ -1,12 +1,24 @@
 //! With the `embed-guest` feature on a macOS target, the binary carries the VM's guest
-//! files: this script names their directory and an id for
-//! them, which `src/macos/embedded.rs` uses.
+//! files: this script names their directory and an id for them, which
+//! `src/macos/embedded.rs` uses. With `embed-linux` on a Windows target, podbag.exe
+//! carries the static Linux podbag for its WSL distribution (`PODBAG_LINUX_BIN`).
 
 use std::path::PathBuf;
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=PODBAG_GUEST_DIR");
+    println!("cargo:rerun-if-env-changed=PODBAG_LINUX_BIN");
+    let windows = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
+    if windows && std::env::var_os("CARGO_FEATURE_EMBED_LINUX").is_some() {
+        let bin = std::env::var("PODBAG_LINUX_BIN").unwrap_or_else(|_| {
+            panic!("embed-linux: set PODBAG_LINUX_BIN to a static Linux podbag for this CPU")
+        });
+        let bin = std::fs::canonicalize(&bin)
+            .unwrap_or_else(|e| panic!("embed-linux: cannot read {bin}: {e}"));
+        println!("cargo:rerun-if-changed={}", bin.display());
+        println!("cargo:rustc-env=PODBAG_LINUX_BIN={}", bin.display());
+    }
     let embed = std::env::var_os("CARGO_FEATURE_EMBED_GUEST").is_some();
     let macos = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos");
     if !embed || !macos {

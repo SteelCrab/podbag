@@ -161,6 +161,10 @@ pub enum Cmd {
         #[arg(long)]
         start_period: bool,
     },
+    /// Replace the engine at DEST with one read from stdin (podbag.exe updates its WSL
+    /// distribution this way)
+    #[command(name = "__install-self", hide = true)]
+    InstallSelf { dest: std::path::PathBuf },
 }
 
 #[derive(Subcommand)]
@@ -399,6 +403,7 @@ pub fn parse_env(arg: &str, lookup: impl Fn(&str) -> Option<String>) -> Option<(
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn parse_signal_accepts_names_and_numbers() {
         assert_eq!(parse_signal("TERM"), Some(15));
