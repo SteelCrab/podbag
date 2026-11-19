@@ -107,6 +107,14 @@ impl LogWriter {
                 self.emit(stream, &line)?;
             }
         }
+        // The kubelet's format has parts of lines: what came without its newline goes out
+        // now, so that a reader of the log (attach) sees a prompt at once.
+        if self.cri.is_some() {
+            let rest = std::mem::take(&mut self.partial[stream as usize]);
+            if !rest.is_empty() {
+                self.emit_cri(stream, &rest, false)?;
+            }
+        }
         Ok(())
     }
 
@@ -475,27 +483,33 @@ mod tests {
         std::fs::read_to_string(path)
             .unwrap_or_default()
             .lines()
-            .map(|l| l.splitn(2, ' ').nth(1).unwrap().to_string())
+            .map(|l| l.split_once(' ').unwrap().1.to_string())
             .collect()
     }
 
     #[test]
-    fn cri_writer_splits_long_lines_and_ends_the_last() {
+    /// Output without its newline is written at once, as a part (`P`): a prompt reaches
+    /// the reader (attach) before the line ends.
+    fn cri_writer_writes_parts_at_once_and_splits_long_lines() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("web/0.log");
         let mut w = LogWriter::open_cri(&path).unwrap();
         w.write(Stream::Stdout, b"a\nb").unwrap();
+        assert_eq!(cri_texts(&path), ["stdout F a", "stdout P b"]);
+        w.write(Stream::Stdout, b"c\n").unwrap();
         w.write(Stream::Stderr, b"oops\n").unwrap();
         w.write(Stream::Stdout, &vec![b'x'; MAX_LINE + 2]).unwrap();
         w.flush_partial().unwrap();
-        let x = "x".repeat(MAX_LINE - 1);
+        let x = "x".repeat(MAX_LINE);
         assert_eq!(
             cri_texts(&path),
             [
                 "stdout F a".to_string(),
+                "stdout P b".into(),
+                "stdout F c".into(),
                 "stderr F oops".into(),
-                format!("stdout P b{x}"),
-                "stdout F xxx".into(),
+                format!("stdout P {x}"),
+                "stdout P xx".into(),
             ]
         );
         assert!(!tmp.path().join("web/log.json").exists());

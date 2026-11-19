@@ -35,6 +35,10 @@ pub enum Request {
         container: String,
         log: Option<String>,
         io: Io,
+        /// The container's input pipe, when it takes input; closed after the first attach
+        /// with `stdin_once`.
+        stdin: Option<super::runtime::Stdin>,
+        stdin_once: bool,
     },
     PortForward {
         sandbox: String,
@@ -176,8 +180,15 @@ impl Streaming {
             Request::Exec { container, cmd, io } => {
                 exec(&writer, &streams, &container, &cmd, io);
             }
-            Request::Attach { container, log, io } => {
-                attach(&writer, &streams, &container, log.as_deref(), io);
+            Request::Attach {
+                container,
+                log,
+                io,
+                stdin,
+                stdin_once,
+            } => {
+                let input = stdin.map(|s| (s, stdin_once));
+                attach(&writer, &streams, &container, log.as_deref(), io, input);
             }
             Request::PortForward { sandbox, netns } => {
                 port_forward(&writer, &streams, &sandbox, netns.as_deref());
@@ -432,15 +443,15 @@ fn resizer(data: Receiver<Option<Vec<u8>>>, to: OwnedFd) -> std::thread::JoinHan
     })
 }
 
-/// Attach: the container's output from now on (read from its log), and its terminal size.
-/// Its stdin is not connected: podbag keeps no stdin open for a container in the
-/// background.
+/// Attach: the container's output from now on (read from its log), its input (through its
+/// input pipe, for a container without a terminal), and its terminal size.
 fn attach(
     writer: &Arc<Writer>,
     streams: &Receiver<spdy::Stream>,
     container: &str,
     log: Option<&str>,
     io: Io,
+    input: Option<(super::runtime::Stdin, bool)>,
 ) {
     let Some(mut got) = wait_for_streams(streams, &expected(io)) else {
         return;
@@ -461,9 +472,23 @@ fn attach(
             }
         });
     }
-    // Input goes nowhere; it is read so that the client is not held back.
     if let Some(stdin) = got.remove("stdin") {
-        std::thread::spawn(move || while let Ok(Some(_)) = stdin.data.recv() {});
+        std::thread::spawn(move || {
+            while let Ok(Some(chunk)) = stdin.data.recv() {
+                let Some((pipe, _)) = &input else {
+                    // No pipe (a terminal): the input is dropped.
+                    continue;
+                };
+                let mut held = pipe.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(file) = held.as_mut() {
+                    let _ = file.write_all(&chunk);
+                }
+            }
+            // The client's input ended: with stdin_once, the container's ends too.
+            if let Some((pipe, true)) = &input {
+                pipe.lock().unwrap_or_else(|e| e.into_inner()).take();
+            }
+        });
     }
     let out = got.get("stdout").map(|s| s.id);
     let err = got.get("stderr").map(|s| s.id).or(out);

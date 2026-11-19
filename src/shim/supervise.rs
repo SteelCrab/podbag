@@ -123,10 +123,15 @@ impl Io {
         };
         let (out_r, out_w) = pipe()?;
         let (err_r, err_w) = pipe()?;
-        let null: OwnedFd = File::open("/dev/null")
-            .map_err(|e| Error::io("cannot open /dev/null", &e, "check the system"))?
-            .into();
-        let stdin = if spec.interactive {
+        // The input: a named pipe (whoever writes to it holds it open), the caller's stdin,
+        // or nothing.
+        let null: OwnedFd = match &spec.stdin_fifo {
+            Some(path) => open_fifo(path)?,
+            None => File::open("/dev/null")
+                .map_err(|e| Error::io("cannot open /dev/null", &e, "check the system"))?
+                .into(),
+        };
+        let stdin = if spec.interactive && spec.stdin_fifo.is_none() {
             0
         } else {
             null.as_raw_fd()
@@ -629,6 +634,32 @@ pub(super) fn run(
     }
 }
 
+/// Open a named pipe for reading without waiting for a writer, then make reads wait.
+fn open_fifo(path: &str) -> Result<OwnedFd> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|e| {
+            Error::io(
+                format!("cannot open the input pipe {path}"),
+                &e,
+                "report this bug",
+            )
+        })?;
+    // SAFETY: fcntl on a descriptor we own; the flags are plain integers.
+    unsafe {
+        let flags = libc::fcntl(file.as_raw_fd(), libc::F_GETFL);
+        libc::fcntl(
+            file.as_raw_fd(),
+            libc::F_SETFL,
+            flags.max(0) & !libc::O_NONBLOCK,
+        );
+    }
+    Ok(file.into())
+}
+
 /// The device nodes a container was given, bound from the host's.
 fn device_mounts(devices: &[crate::spec::Device]) -> Vec<crate::volume::Mount> {
     devices
@@ -637,6 +668,7 @@ fn device_mounts(devices: &[crate::spec::Device]) -> Vec<crate::volume::Mount> {
             source: crate::volume::MountSource::Bind {
                 path: d.host.clone(),
                 propagation: Default::default(),
+                shallow_ro: false,
             },
             target: d.container.clone(),
             read_only: false,

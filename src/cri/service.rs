@@ -81,7 +81,13 @@ impl Cri {
         };
         let url = self
             .streaming
-            .url(Request::Attach { container, log, io })
+            .url(Request::Attach {
+                stdin: self.runtime.stdin_of(&container),
+                stdin_once: config.stdin_once,
+                container,
+                log,
+                io,
+            })
             .map_err(|e| status_of(&e))?;
         Ok(pb::AttachResponse { url })
     }
@@ -511,10 +517,16 @@ fn remove_image(r: pb::RemoveImageRequest) -> Result<pb::RemoveImageResponse, St
     let Some(found) = images::find(&all, &wanted) else {
         return Ok(pb::RemoveImageResponse {});
     };
-    // By ID or digest, every name goes; by name, that name.
+    // By name, that name; by ID or digest, every stored name of the image (names with a
+    // digest are not among its tags).
     let names = match images::full_tag(&wanted) {
         Some(tag) => vec![tag],
-        None => found.repo_tags.clone(),
+        None => Image::list()
+            .map_err(|e| status_of(&e))?
+            .into_iter()
+            .filter(|i| i.digest == found.id)
+            .map(|i| i.name)
+            .collect(),
     };
     for name in &names {
         match Image::remove(name) {

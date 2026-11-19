@@ -212,7 +212,7 @@ pub fn container_spec(
         .or_else(|| image.config.workdir.clone());
 
     let security = security(&sc, linux.resources.as_ref())?;
-    let user = user(&sc, image.config.user.as_deref());
+    let user = user(&sc, image.config.user.as_deref())?;
 
     let ns_opts = sc.namespace_options.clone().unwrap_or_default();
     let pid = match pb::NamespaceMode::try_from(ns_opts.pid).unwrap_or(pb::NamespaceMode::Container)
@@ -259,6 +259,7 @@ pub fn container_spec(
         source: MountSource::Bind {
             path,
             propagation: Propagation::Private,
+            shallow_ro: false,
         },
         target: target.to_string(),
         read_only,
@@ -300,6 +301,7 @@ pub fn container_spec(
             source: MountSource::Bind {
                 path: m.host_path.clone(),
                 propagation,
+                shallow_ro: m.readonly && !m.recursive_read_only,
             },
             target: m.container_path.clone(),
             read_only: m.readonly,
@@ -362,27 +364,31 @@ pub fn container_spec(
         namespaces,
         devices,
         cri_log: log_file(&pod.log_directory, &config.log_path),
+        stdin_fifo: None,
     })
 }
 
 /// The user to run as: the kubelet's user (a name or a uid), else the image's; with the
 /// kubelet's group, else the one the user part gives.
-pub fn user(sc: &pb::LinuxContainerSecurityContext, image_user: Option<&str>) -> Option<String> {
-    let image_user = image_user.filter(|u| !u.is_empty());
-    let user_part = if !sc.run_as_username.is_empty() {
+pub fn user(
+    sc: &pb::LinuxContainerSecurityContext,
+    image_user: Option<&str>,
+) -> Result<Option<String>> {
+    let given = if !sc.run_as_username.is_empty() {
         Some(sc.run_as_username.clone())
-    } else if let Some(uid) = &sc.run_as_user {
-        Some(uid.value.to_string())
     } else {
-        image_user.map(|u| u.to_string())
+        sc.run_as_user.as_ref().map(|uid| uid.value.to_string())
     };
-    match (user_part, &sc.run_as_group) {
-        (Some(u), Some(g)) => {
-            let u = u.split(':').next().unwrap_or(&u).to_string();
-            Some(format!("{u}:{}", g.value))
-        }
-        (None, Some(g)) => Some(format!("0:{}", g.value)),
-        (u, None) => u,
+    match (given, &sc.run_as_group) {
+        (Some(u), Some(g)) => Ok(Some(format!("{u}:{}", g.value))),
+        (None, Some(_)) => Err(Error::new(
+            ErrorKind::InvalidInput,
+            "cannot set the container's group",
+            "a group is given without a user",
+            "give runAsUser too",
+        )),
+        (Some(u), None) => Ok(Some(u)),
+        (None, None) => Ok(image_user.filter(|u| !u.is_empty()).map(str::to_string)),
     }
 }
 
@@ -598,22 +604,22 @@ mod tests {
                 run_as_group: group.map(|value| pb::Int64Value { value }),
                 ..Default::default()
             };
+        let u = |s, image| user(&s, image).unwrap();
+        assert_eq!(u(sc(None, "", None), Some("nginx")), Some("nginx".into()));
+        assert_eq!(u(sc(None, "", None), None), None);
         assert_eq!(
-            user(&sc(None, "", None), Some("nginx")),
-            Some("nginx".into())
-        );
-        assert_eq!(user(&sc(None, "", None), None), None);
-        assert_eq!(
-            user(&sc(Some(1000), "", None), Some("nginx")),
+            u(sc(Some(1000), "", None), Some("nginx")),
             Some("1000".into())
         );
-        assert_eq!(user(&sc(None, "app", Some(5)), None), Some("app:5".into()));
-        assert_eq!(user(&sc(Some(7), "", Some(8)), None), Some("7:8".into()));
-        assert_eq!(
-            user(&sc(None, "", Some(8)), Some("web:web")),
-            Some("web:8".into())
-        );
-        assert_eq!(user(&sc(None, "", Some(8)), None), Some("0:8".into()));
+        assert_eq!(u(sc(None, "app", Some(5)), None), Some("app:5".into()));
+        assert_eq!(u(sc(Some(7), "", Some(8)), None), Some("7:8".into()));
+        // A group needs the kubelet's user, as with containerd.
+        for image in [Some("web:web"), None] {
+            assert_eq!(
+                user(&sc(None, "", Some(8)), image).unwrap_err().kind,
+                ErrorKind::InvalidInput
+            );
+        }
     }
 
     #[test]

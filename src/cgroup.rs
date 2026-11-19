@@ -114,10 +114,11 @@ impl Limits {
     pub fn controllers(&self) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         for name in self.files.keys() {
-            if let Some((controller, _)) = name.split_once('.') {
-                if controller != "cgroup" && !out.iter().any(|c| c == controller) {
-                    out.push(controller.to_string());
-                }
+            if let Some((controller, _)) = name.split_once('.')
+                && controller != "cgroup"
+                && !out.iter().any(|c| c == controller)
+            {
+                out.push(controller.to_string());
             }
         }
         out

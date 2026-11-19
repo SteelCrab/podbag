@@ -445,6 +445,9 @@ pub enum MountSource {
         /// Whether mounts made later below it pass between the host and the container.
         #[serde(default, skip_serializing_if = "Propagation::is_private")]
         propagation: Propagation,
+        /// With `read_only`: only this mount is read-only, not the mounts below it.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        shallow_ro: bool,
     },
     Volume {
         name: String,

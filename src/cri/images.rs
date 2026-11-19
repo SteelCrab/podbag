@@ -28,7 +28,8 @@ pub fn group(names: &[Image]) -> Vec<pb::Image> {
             }
         };
         let cri = &mut out[i];
-        if !cri.repo_tags.contains(&image.name) {
+        // A name with a digest is no tag: it is listed among the digests only.
+        if !image.name.contains('@') && !cri.repo_tags.contains(&image.name) {
             cri.repo_tags.push(image.name.clone());
         }
         let repo_digest = format!("{}@{}", repository(&image.name), image.digest);
@@ -144,6 +145,13 @@ mod tests {
                 format!("localhost:5000/app@{B}")
             ]
         );
+    }
+
+    #[test]
+    fn a_name_with_a_digest_is_no_tag() {
+        let images = group(&[image(&format!("gcr.io/x/app@{A}"), A, None)]);
+        assert!(images[0].repo_tags.is_empty());
+        assert_eq!(images[0].repo_digests, [format!("gcr.io/x/app@{A}")]);
     }
 
     #[test]

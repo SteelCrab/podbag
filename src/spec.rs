@@ -103,6 +103,9 @@ pub struct ContainerSpec {
     /// Write the output to this file in the Kubernetes log format, not to `log.json`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cri_log: Option<String>,
+    /// A named pipe the container reads its input from (Kubernetes attach writes to it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stdin_fifo: Option<String>,
 }
 
 /// One namespace of a container.
@@ -410,10 +413,10 @@ impl ContainerSpec {
             Namespace::Join { .. } => {}
         }
         for n in [&ns.net, &ns.ipc, &ns.uts, &ns.pid] {
-            if let Namespace::Join { path } = n {
-                if !path.starts_with('/') {
-                    return invalid("a namespace path is not absolute");
-                }
+            if let Namespace::Join { path } = n
+                && !path.starts_with('/')
+            {
+                return invalid("a namespace path is not absolute");
             }
         }
         Ok(())
@@ -499,6 +502,7 @@ pub(crate) fn spec_fixture() -> ContainerSpec {
         namespaces: Default::default(),
         devices: Vec::new(),
         cri_log: None,
+        stdin_fifo: None,
     }
 }
 

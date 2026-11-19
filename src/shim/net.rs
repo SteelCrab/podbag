@@ -59,6 +59,7 @@ pub(super) fn files(
             source: MountSource::Bind {
                 path: path.to_string_lossy().into_owned(),
                 propagation: Default::default(),
+                shallow_ro: false,
             },
             target,
             read_only: false,

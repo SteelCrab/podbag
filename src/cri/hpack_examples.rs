@@ -1,7 +1,13 @@
 //! The examples of RFC 7541 appendix C (C.3 to C.6), extracted from the RFC text.
 
 /// (section, headers, encoded block in hex). Examples in one section share a decoder.
-pub const EXAMPLES: &[(&str, &[(&str, &str)], &str)] = &[
+pub type Example = (
+    &'static str,
+    &'static [(&'static str, &'static str)],
+    &'static str,
+);
+
+pub const EXAMPLES: &[Example] = &[
     (
         "C.3.1",
         &[

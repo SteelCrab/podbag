@@ -31,7 +31,13 @@ pub struct Runtime {
     /// One lock per pod or container, for the calls that change it.
     locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     pub events: super::events::Events,
+    /// The write side of the input pipes of running containers that take input: held open
+    /// from their start, so they see their input end only when it is meant to end.
+    stdin: Mutex<HashMap<String, Stdin>>,
 }
+
+/// A container's input pipe, while its writer is held.
+pub type Stdin = Arc<Mutex<Option<std::fs::File>>>;
 
 fn err(e: Error) -> Status {
     status_of(&e)
@@ -49,6 +55,7 @@ impl Runtime {
             dirs,
             locks: Mutex::new(HashMap::new()),
             events: super::events::Events::default(),
+            stdin: Mutex::new(HashMap::new()),
         })
     }
 
@@ -460,10 +467,37 @@ impl Runtime {
         };
         let id = crate::id::new_id().map_err(err)?;
         let driver = self.options.cgroup_driver;
+        // Without a log file from the kubelet (crictl may give none), one of its own: attach
+        // reads the output from it.
+        let log =
+            mapping::log_file(&pod_config.log_directory, &config.log_path).unwrap_or_else(|| {
+                let own = self.dirs.container_dir(&id).join("console.log");
+                own.display().to_string()
+            });
+        // Input without a terminal comes through a named pipe (attach writes to it).
+        let fifo = (config.stdin && !config.tty).then(|| {
+            self.dirs
+                .container_dir(&id)
+                .join("stdin")
+                .display()
+                .to_string()
+        });
         let made = crate::container::create_on_image(&self.dirs, &image, &id, |rootfs, digest| {
-            mapping::container_spec(
+            let mut spec = mapping::container_spec(
                 &id, &name, &config, &view, &image, rootfs, digest, driver, &found,
+            )?;
+            spec.stdin_fifo = fifo.clone();
+            spec.cri_log = Some(log.clone());
+            Ok(spec)
+        })
+        .and_then(|()| match &fifo {
+            Some(path) => rustix::fs::mkfifoat(
+                rustix::fs::CWD,
+                path.as_str(),
+                rustix::fs::Mode::from_raw_mode(0o600),
             )
+            .map_err(|e| Error::io("cannot make the container's input pipe", &e.into(), "")),
+            None => Ok(()),
         });
         if let Err(e) = made {
             let _ = state::remove_container_dir(&self.dirs, &id);
@@ -510,6 +544,18 @@ impl Runtime {
                 format!("container {id} is not in the created state"),
             ));
         }
+        let fifo = self.dirs.container_dir(&id).join("stdin");
+        if fifo.exists() {
+            let writer = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&fifo)
+                .map_err(|e| err(Error::io("cannot open the container's input pipe", &e, "")))?;
+            self.stdin
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(id.clone(), Arc::new(Mutex::new(Some(writer))));
+        }
         if let Err(e) = ContainerHandle::from_id(id.clone()).start() {
             record.start_error = Some((now_ns(), e.to_string()));
             let _ = self.records.save_container(&record, None);
@@ -523,7 +569,10 @@ impl Runtime {
     }
 
     pub fn stop_container(&self, given: &str, timeout: i64) -> Answer<()> {
-        let id = self.container_id(given)?;
+        // Stopping what is gone already succeeds.
+        let Ok(id) = self.container_id(given) else {
+            return Ok(());
+        };
         self.stop_container_now(&id, Duration::from_secs(timeout.max(0) as u64))
     }
 
@@ -582,6 +631,10 @@ impl Runtime {
             Err(e) if e.kind == ErrorKind::NotFound => {}
             Err(e) => return Err(err(e)),
         }
+        self.stdin
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&id);
         self.records.remove_container(&id).map_err(err)?;
         self.events
             .send(&id, pb::ContainerEventType::ContainerDeletedEvent);
@@ -1003,12 +1056,20 @@ impl Runtime {
         Ok((id, s.net))
     }
 
-    /// Where a container's log is.
+    /// The input pipe of a running container that takes input.
+    pub fn stdin_of(&self, id: &str) -> Option<Stdin> {
+        self.stdin
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(id)
+            .cloned()
+    }
+
+    /// Where a container's log is: the kubelet's file, or one of its own.
     pub fn log_path(&self, id: &str) -> Option<String> {
-        self.records
-            .container(id)
-            .ok()
-            .and_then(|(r, _)| r.log_path)
+        let own = self.dirs.container_dir(id).join("console.log");
+        let (record, _) = self.records.container(id).ok()?;
+        Some(record.log_path.unwrap_or_else(|| own.display().to_string()))
     }
 
     /// The pod of a container.

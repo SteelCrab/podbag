@@ -688,6 +688,7 @@ mod linux_launch {
                     source: MountSource::Bind {
                         path: bind_source(&source)?,
                         propagation: Default::default(),
+                        shallow_ro: false,
                     },
                     target,
                     read_only: access(a),
@@ -947,6 +948,7 @@ mod linux_launch {
                     namespaces: Default::default(),
                     devices: Vec::new(),
                     cri_log: None,
+                    stdin_fifo: None,
                 };
                 spec.validate()?;
                 state::create(&dirs, &spec)?;
@@ -987,6 +989,7 @@ mod linux_launch {
                         namespaces: Default::default(),
                         devices: Vec::new(),
                         cri_log: None,
+                        stdin_fifo: None,
                     })
                 })?;
             }
