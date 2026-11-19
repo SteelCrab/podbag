@@ -501,10 +501,10 @@ fn attach(
                 } else {
                     out
                 };
-                if let Some(id) = to {
-                    if writer.data(id, &text).is_err() {
-                        return;
-                    }
+                if let Some(id) = to
+                    && writer.data(id, &text).is_err()
+                {
+                    return;
                 }
             }
         }

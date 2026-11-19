@@ -435,8 +435,8 @@ pub fn security(
             .map(|v| v.clamp(-1000, 1000) as i32),
         read_only_rootfs: sc.readonly_rootfs,
         // The kubelet sends the default lists itself, and none for an unmasked /proc.
-        masked_paths: Some(sc.masked_paths.clone()).filter(|_| !sc.privileged),
-        readonly_paths: Some(sc.readonly_paths.clone()).filter(|_| !sc.privileged),
+        masked_paths: (!sc.privileged).then(|| sc.masked_paths.clone()),
+        readonly_paths: (!sc.privileged).then(|| sc.readonly_paths.clone()),
     })
 }
 

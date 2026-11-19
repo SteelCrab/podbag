@@ -83,16 +83,16 @@ impl Runtime {
         }
         // One sandbox per pod and attempt.
         for other in self.records.sandbox_ids() {
-            if let Ok((_, c)) = self.records.sandbox(&other) {
-                if c.metadata.as_ref() == Some(&meta) {
-                    return Err(Status::new(
-                        Code::AlreadyExists,
-                        format!(
-                            "pod sandbox {}_{}_{}_{} exists already: {other}",
-                            meta.name, meta.namespace, meta.uid, meta.attempt
-                        ),
-                    ));
-                }
+            if let Ok((_, c)) = self.records.sandbox(&other)
+                && c.metadata.as_ref() == Some(&meta)
+            {
+                return Err(Status::new(
+                    Code::AlreadyExists,
+                    format!(
+                        "pod sandbox {}_{}_{}_{} exists already: {other}",
+                        meta.name, meta.namespace, meta.uid, meta.attempt
+                    ),
+                ));
             }
         }
         let id = crate::id::new_id().map_err(err)?;
@@ -437,10 +437,10 @@ impl Runtime {
         let mut found = Found::default();
         if ns.pid == pb::NamespaceMode::Target as i32 {
             let target = self.container_id(&ns.target_id)?;
-            if let Ok(st) = state::reconcile(&self.dirs, &target) {
-                if let (RunStatus::Running, Some(pid)) = (st.status, st.pid) {
-                    found.target_pid_ns = Some(format!("/proc/{pid}/ns/pid"));
-                }
+            if let Ok(st) = state::reconcile(&self.dirs, &target)
+                && let (RunStatus::Running, Some(pid)) = (st.status, st.pid)
+            {
+                found.target_pid_ns = Some(format!("/proc/{pid}/ns/pid"));
             }
         }
         let linux = pod_config.linux.clone().unwrap_or_default();
@@ -588,12 +588,12 @@ impl Runtime {
                 .container(id)
                 .map(|(_, c)| stop_signal(c.stop_signal))
                 .unwrap_or(libc::SIGTERM);
-            if handle.kill(signal).is_ok() {
-                if let Ok(Some(_)) = handle.wait_up_to(timeout) {
-                    self.events
-                        .send(id, pb::ContainerEventType::ContainerStoppedEvent);
-                    return Ok(());
-                }
+            if handle.kill(signal).is_ok()
+                && let Ok(Some(_)) = handle.wait_up_to(timeout)
+            {
+                self.events
+                    .send(id, pb::ContainerEventType::ContainerStoppedEvent);
+                return Ok(());
             }
         }
         let _ = handle.kill(libc::SIGKILL);
@@ -897,7 +897,7 @@ impl Runtime {
                 }
             }
         } else {
-            rx.recv().unwrap_or_else(|_| Ok(-1))
+            rx.recv().unwrap_or(Ok(-1))
         };
         let code = code.map_err(err)?;
         Ok(pb::ExecSyncResponse {
