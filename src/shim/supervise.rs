@@ -598,6 +598,10 @@ pub(super) fn run(
     }
     let _ = log.flush_partial();
     let oom = group.as_ref().and_then(|g| g.oom_reason());
+    // Without a PID namespace of its own, its other processes outlive it: they go too.
+    if let (Some(g), false) = (&group, spec.namespaces.pid == crate::spec::Namespace::Own) {
+        cgroup::kill_all(g.path());
+    }
     finish(
         dirs,
         spec,

@@ -1280,6 +1280,10 @@ fn finisher(kept: Kept, relaunch: crate::restart::Relaunch) -> ! {
             let rootless = unsafe { libc::geteuid() } != 0;
             let session =
                 rootless && matches!(spec.network, crate::network::NetworkMode::Bridge { .. });
+            // Without a PID namespace of its own, its other processes outlive it.
+            if let (Some(g), false) = (&group, spec.namespaces.pid == crate::spec::Namespace::Own) {
+                crate::cgroup::kill_all(g);
+            }
             crate::shim::finish(&dirs, &spec, st, code, oom, session, listener, &waiters);
             if let Some(g) = group.filter(|g| g.starts_with(crate::cgroup::ROOT)) {
                 if crate::cgroup::remove_dir(&g) {

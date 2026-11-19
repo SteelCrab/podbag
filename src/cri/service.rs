@@ -511,6 +511,10 @@ fn pull_image(r: pb::PullImageRequest) -> Result<pb::PullImageResponse, Status> 
 }
 
 fn remove_image(r: pb::RemoveImageRequest) -> Result<pb::RemoveImageResponse, Status> {
+    // One removal at a time: two at once of the same image would race in the store, and
+    // the second must find it gone (which succeeds).
+    static REMOVING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _one = REMOVING.lock().unwrap_or_else(|e| e.into_inner());
     let wanted = spec_image(r.image);
     let all = stored()?;
     // Removing an image that is gone already succeeds.

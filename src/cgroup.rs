@@ -12,8 +12,8 @@ mod group;
 pub use devices::{Rule as DeviceRule, device_rules, restrict as restrict_devices};
 #[cfg(target_os = "linux")]
 pub use group::{
-    Group, ROOT, choose_placement, create, enable_controllers, own_cgroup, parent_name, remove_dir,
-    slice_budget, systemd_run, try_remove_dir, user_manager, write_files,
+    Group, ROOT, choose_placement, create, enable_controllers, kill_all, own_cgroup, parent_name,
+    remove_dir, slice_budget, systemd_run, try_remove_dir, user_manager, write_files,
 };
 
 /// Where a container's cgroup goes. The library decides; the shim creates it.

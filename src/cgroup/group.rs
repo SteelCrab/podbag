@@ -154,6 +154,21 @@ impl Group {
     }
 }
 
+/// End every process left in the group at `path` (and below it). A container without a
+/// PID namespace of its own (a Kubernetes pod's, or the host's) leaves its other processes
+/// behind when its main process ends; the kernel ends them only with a namespace's init.
+pub fn kill_all(path: &Path) {
+    if std::fs::write(path.join("cgroup.kill"), "1").is_ok() {
+        return;
+    }
+    // Before Linux 5.14: one by one.
+    let procs = std::fs::read_to_string(path.join("cgroup.procs")).unwrap_or_default();
+    for pid in procs.lines().filter_map(|l| l.trim().parse::<i32>().ok()) {
+        // SAFETY: kill has no memory arguments.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+}
+
 /// Remove an empty cgroup directory once, with the groups below it; a busy or missing
 /// one is left as it is.
 pub fn try_remove_dir(path: &Path) {

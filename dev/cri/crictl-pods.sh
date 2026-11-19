@@ -125,8 +125,15 @@ cat >"$dir/user.json" <<'EOF'
    "namespace_options": {"pid": 0}}}}
 EOF
 pod=$(c runp "$dir/hostpod.json")
+# Container events, streamed while the container is made and started.
+timeout -s KILL 6 crictl --config /dev/null -r "unix://$sock" events >"$dir/events.json" 2>&1 &
+events=$!
+sleep 1
 ctr=$(c create "$pod" "$dir/user.json" "$dir/hostpod.json")
 say start "$ctr"
+wait $events 2>/dev/null || true
+check "created event" "$(cat "$dir/events.json")" 'CONTAINER_CREATED_EVENT'
+check "started event" "$(cat "$dir/events.json")" 'CONTAINER_STARTED_EVENT'
 check "user and groups" "$(c exec -s "$ctr" id)" 'uid=1000 gid=1000 groups=1000,2000'
 check "read-only root" "$(c exec -s "$ctr" touch /x 2>&1 || true)" 'Read-only file system'
 check "host network" "$(c exec -s "$ctr" cat /proc/net/dev)" "$(ip -o link | awk -F': ' 'NR==2 {print $2}')"

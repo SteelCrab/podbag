@@ -464,6 +464,26 @@ pub fn container_name(pod: &pb::PodSandboxMetadata, c: &pb::ContainerMetadata) -
     )
 }
 
+/// The kernel settings of a pod, sorted: the kubelet's, and in a network of the pod's own
+/// what containerd sets by default: any user may bind low ports and ping (non-root DNS
+/// servers such as CoreDNS bind port 53).
+pub fn pod_sysctls(
+    given: &std::collections::HashMap<String, String>,
+    own_net: bool,
+) -> Vec<(String, String)> {
+    let mut out: BTreeMap<String, String> =
+        given.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    if own_net {
+        for (k, v) in [
+            ("net.ipv4.ip_unprivileged_port_start", "0"),
+            ("net.ipv4.ping_group_range", "0 2147483647"),
+        ] {
+            out.entry(k.to_string()).or_insert_with(|| v.to_string());
+        }
+    }
+    out.into_iter().collect()
+}
+
 /// The text of a pod's /etc/resolv.conf: the kubelet's DNS settings, or the host's file.
 pub fn resolv_conf(dns: Option<&pb::DnsConfig>, host: &str) -> String {
     let Some(dns) =
@@ -672,6 +692,38 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(security(&privileged, None).unwrap().masked_paths, None);
+    }
+
+    #[test]
+    fn pods_with_their_own_network_may_use_low_ports_and_ping() {
+        let none = std::collections::HashMap::new();
+        assert_eq!(
+            pod_sysctls(&none, true),
+            [
+                (
+                    "net.ipv4.ip_unprivileged_port_start".to_string(),
+                    "0".to_string()
+                ),
+                ("net.ipv4.ping_group_range".into(), "0 2147483647".into()),
+            ]
+        );
+        assert!(pod_sysctls(&none, false).is_empty());
+        let given: std::collections::HashMap<String, String> = [
+            (
+                "net.ipv4.ip_unprivileged_port_start".to_string(),
+                "1024".to_string(),
+            ),
+            ("kernel.shm_rmid_forced".into(), "1".into()),
+        ]
+        .into();
+        assert_eq!(
+            pod_sysctls(&given, true),
+            [
+                ("kernel.shm_rmid_forced".to_string(), "1".to_string()),
+                ("net.ipv4.ip_unprivileged_port_start".into(), "1024".into()),
+                ("net.ipv4.ping_group_range".into(), "0 2147483647".into()),
+            ]
+        );
     }
 
     #[test]

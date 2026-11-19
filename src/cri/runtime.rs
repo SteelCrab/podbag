@@ -118,12 +118,7 @@ impl Runtime {
         } else {
             config.hostname.clone()
         };
-        let mut sysctls: Vec<(String, String)> = linux
-            .sysctls
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        sysctls.sort();
+        let sysctls = mapping::pod_sysctls(&linux.sysctls, wanted.net);
         let ns_dir = self.ns_root.join(&id);
         let held = pod::hold(&ns_dir, wanted, &hostname, &sysctls).map_err(err)?;
         let mut sandbox = records::Sandbox {
