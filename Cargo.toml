@@ -8,6 +8,7 @@ repository = "https://github.com/SteelCrab/podbag"
 readme = "README.md"
 keywords = ["container", "docker", "oci", "rootless", "wsl"]
 categories = ["command-line-utilities", "virtualization"]
+include = ["/src/**", "/build.rs", "/README.md", "/LICENSE"]
 
 [lib]
 path = "src/lib.rs"
