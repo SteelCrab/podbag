@@ -292,6 +292,15 @@ pub fn container_spec(
                 "use another kind of volume",
             ));
         }
+        let private = m.propagation == pb::MountPropagation::PropagationPrivate as i32;
+        if m.recursive_read_only && !(m.readonly && private) {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                format!("cannot mount {} recursively read-only", m.container_path),
+                "a recursive read-only mount must be read-only, without propagation",
+                "set readOnly, and leave mountPropagation out",
+            ));
+        }
         let propagation = match pb::MountPropagation::try_from(m.propagation) {
             Ok(pb::MountPropagation::PropagationHostToContainer) => Propagation::HostToContainer,
             Ok(pb::MountPropagation::PropagationBidirectional) => Propagation::Bidirectional,
@@ -891,6 +900,64 @@ mod tests {
             }
         );
         assert_eq!(spec.labels["io.kubernetes.container.name"], "nginx");
+    }
+
+    #[test]
+    fn recursive_read_only_mounts_need_read_only_and_no_propagation() {
+        let id = "f".repeat(64);
+        let with = |m: pb::Mount| {
+            let config = pb::ContainerConfig {
+                command: vec!["sh".into()],
+                mounts: vec![m],
+                ..Default::default()
+            };
+            container_spec(
+                &id,
+                "n",
+                &config,
+                &pod(),
+                &image(),
+                rootfs(),
+                "sha256:ab".into(),
+                CgroupDriver::Cgroupfs,
+                &Found::default(),
+            )
+        };
+        let mount =
+            |readonly: bool, recursive: bool, propagation: pb::MountPropagation| pb::Mount {
+                container_path: "/data".into(),
+                host_path: "/srv".into(),
+                readonly,
+                recursive_read_only: recursive,
+                propagation: propagation as i32,
+                ..Default::default()
+            };
+        let private = pb::MountPropagation::PropagationPrivate;
+        let spec = with(mount(true, true, private)).unwrap();
+        let last = spec.mounts.last().unwrap();
+        assert!(last.read_only);
+        assert!(matches!(
+            last.source,
+            MountSource::Bind {
+                shallow_ro: false,
+                ..
+            }
+        ));
+        let spec = with(mount(true, false, private)).unwrap();
+        let last = spec.mounts.last().unwrap();
+        assert!(matches!(
+            last.source,
+            MountSource::Bind {
+                shallow_ro: true,
+                ..
+            }
+        ));
+        for bad in [
+            mount(false, true, private),
+            mount(true, true, pb::MountPropagation::PropagationHostToContainer),
+        ] {
+            assert_eq!(with(bad).unwrap_err().kind, ErrorKind::InvalidInput);
+        }
     }
 
     #[test]

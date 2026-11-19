@@ -146,7 +146,11 @@ impl Cri {
             info,
             runtime_handlers: vec![pb::RuntimeHandler {
                 name: String::new(),
-                features: Some(pb::RuntimeHandlerFeatures::default()),
+                features: Some(pb::RuntimeHandlerFeatures {
+                    // Read-only mounts are recursive unless asked otherwise (mount_setattr).
+                    recursive_read_only_mounts: true,
+                    ..Default::default()
+                }),
             }],
             features: Some(pb::RuntimeFeatures::default()),
         }
