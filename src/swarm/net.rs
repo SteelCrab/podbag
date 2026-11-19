@@ -305,12 +305,11 @@ pub fn remove(dirs: &Dirs, service: &ServiceRecord) {
         let _ = crate::network::release(dirs, network, &vip_key(&service.id));
         crate::network::refresh_hosts(dirs, network);
         #[cfg(target_os = "linux")]
-        if let (Ok(n), Ok(ip)) = (Network::get(network), ip.parse::<std::net::Ipv4Addr>()) {
-            if let Ok(mut s) = crate::netlink::Socket::route() {
-                if let Ok(Some(index)) = s.link_index(&n.bridge) {
-                    let _ = s.request(crate::netlink::route::del_address(index, ip.octets(), 32));
-                }
-            }
+        if let (Ok(n), Ok(ip)) = (Network::get(network), ip.parse::<std::net::Ipv4Addr>())
+            && let Ok(mut s) = crate::netlink::Socket::route()
+            && let Ok(Some(index)) = s.link_index(&n.bridge)
+        {
+            let _ = s.request(crate::netlink::route::del_address(index, ip.octets(), 32));
         }
         #[cfg(not(target_os = "linux"))]
         let _ = ip;
