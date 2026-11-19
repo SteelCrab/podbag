@@ -151,6 +151,7 @@ docker compose up -d
 - 在一台 Linux 虚拟机上测得的中位数：4 个 CPU，3.8 GiB，arm64。
 - 版本：podbag 0.1.0，Podman 5.7.0，Docker 29.1.3，Kiri 0.2.1。
 - 所有数据和测量方法：[docs/benchmarks.md](docs/benchmarks.md)、[docs/benchmarks-msa.md](docs/benchmarks-msa.md)（英文）。
+- 作为 k3s 节点的运行时运行 30 个 pod：podbag 只有 2 个进程，共 3.5 MiB；containerd 有 63 个（276 MiB），CRI-O 有 32 个（85 MiB）。[docs/benchmarks-k8s.md](docs/benchmarks-k8s.md)（英文）。
 
 ## 与其他工具比较
 

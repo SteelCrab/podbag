@@ -151,6 +151,7 @@ docker compose up -d
 - Medianas en una VM Linux: 4 CPU, 3,8 GiB, arm64.
 - Versiones: podbag 0.1.0, Podman 5.7.0, Docker 29.1.3, Kiri 0.2.1.
 - Todos los números y cómo se midieron: [docs/benchmarks.md](docs/benchmarks.md) y [docs/benchmarks-msa.md](docs/benchmarks-msa.md) (en inglés).
+- Como runtime de un nodo de Kubernetes con k3s, con 30 pods: 2 procesos en 3,5 MiB, frente a los 63 de containerd (276 MiB) y los 32 de CRI-O (85 MiB): [docs/benchmarks-k8s.md](docs/benchmarks-k8s.md) (en inglés).
 
 ## Comparación con otras herramientas
 

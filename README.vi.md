@@ -151,6 +151,7 @@ docker compose up -d
 - Giá trị trung vị trên một máy ảo Linux: 4 CPU, 3.8 GiB, arm64.
 - Phiên bản: podbag 0.1.0, Podman 5.7.0, Docker 29.1.3, Kiri 0.2.1.
 - Tất cả số liệu và cách đo: [docs/benchmarks.md](docs/benchmarks.md) và [docs/benchmarks-msa.md](docs/benchmarks-msa.md) (tiếng Anh).
+- Làm runtime cho một node Kubernetes trên k3s, với 30 pod: podbag có 2 tiến trình, 3,5 MiB; containerd có 63 (276 MiB) và CRI-O có 32 (85 MiB): [docs/benchmarks-k8s.md](docs/benchmarks-k8s.md) (tiếng Anh).
 
 ## So sánh với các công cụ khác
 

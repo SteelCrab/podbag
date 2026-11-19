@@ -151,6 +151,7 @@ docker compose up -d
 - Linux VM 1台で測った中央値です: 4 CPU、3.8 GiB、arm64。
 - バージョン: podbag 0.1.0、Podman 5.7.0、Docker 29.1.3、Kiri 0.2.1。
 - すべての数値と測り方: [docs/benchmarks.md](docs/benchmarks.md)、[docs/benchmarks-msa.md](docs/benchmarks-msa.md)（英語）。
+- k3s のノードのランタイムとして pod を 30 個動かすと、podbag はプロセス 2 個で 3.5 MiB です。containerd は 63 個（276 MiB）、CRI-O は 32 個（85 MiB）です。[docs/benchmarks-k8s.md](docs/benchmarks-k8s.md)（英語）。
 
 ## 他のツールとの比較
 
