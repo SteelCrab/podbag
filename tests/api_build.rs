@@ -32,6 +32,14 @@ fn have_docker() -> bool {
     ok
 }
 
+impl Drop for Setup {
+    fn drop(&mut self) {
+        // The images go through podbag: rootless, their files belong to other user IDs,
+        // which the sandbox's own removal cannot delete.
+        let _ = self.sb.podbag().args(["system", "prune", "-f"]).output();
+    }
+}
+
 impl Setup {
     fn new() -> Setup {
         let reg = FakeRegistry::start(false);
