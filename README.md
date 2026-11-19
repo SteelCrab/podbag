@@ -118,6 +118,7 @@ podbag run -d --name web -p 8080:80 nginx:alpine  # run in the background
 podbag ps                                         # list containers
 podbag logs -f web                                # follow the logs
 podbag exec -it web sh                            # open a shell in the container
+podbag stats --no-stream                          # CPU, memory and network use
 podbag stop web && podbag rm web                  # stop and remove
 podbag images                                     # list images
 ```
