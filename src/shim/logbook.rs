@@ -31,22 +31,24 @@ pub struct LogLine {
 
 /// Appends output to `log.json`, a line at a time. When the file passes the limit it
 /// becomes `log.json.1` (replacing the older one) and a new file starts.
+///
+/// For a Kubernetes container it writes the kubelet's format to the kubelet's file instead
+/// (see [`cri_line`]). The kubelet rotates that file itself: it renames it and asks for a
+/// new one, so the writer opens the path again once it names another file.
 pub struct LogWriter {
     dir: PathBuf,
     file: File,
     size: u64,
     limit: u64,
     partial: [Vec<u8>; 2],
+    /// The kubelet's file, and the inode the writer has open.
+    cri: Option<(PathBuf, u64)>,
 }
 
 impl LogWriter {
     pub fn open(dir: &Path, limit: u64) -> Result<LogWriter> {
         let path = dir.join(CURRENT);
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .map_err(|e| log_error(&path, e))?;
+        let file = append(&path)?;
         let size = file.metadata().map(|m| m.len()).unwrap_or(0);
         Ok(LogWriter {
             dir: dir.to_path_buf(),
@@ -54,7 +56,37 @@ impl LogWriter {
             size,
             limit,
             partial: [Vec::new(), Vec::new()],
+            cri: None,
         })
+    }
+
+    /// A writer of the kubelet's log format to `path` (its folder is made when missing).
+    pub fn open_cri(path: &Path) -> Result<LogWriter> {
+        use std::os::unix::fs::MetadataExt;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| log_error(path, e))?;
+        }
+        let file = append(path)?;
+        let ino = file.metadata().map(|m| m.ino()).unwrap_or(0);
+        Ok(LogWriter {
+            dir: path.parent().unwrap_or(Path::new("/")).to_path_buf(),
+            file,
+            size: 0,
+            limit: u64::MAX,
+            partial: [Vec::new(), Vec::new()],
+            cri: Some((path.to_path_buf(), ino)),
+        })
+    }
+
+    /// The writer for a container's output: the kubelet's file when it has one.
+    pub fn for_container(
+        dirs: &crate::paths::Dirs,
+        spec: &crate::spec::ContainerSpec,
+    ) -> Result<LogWriter> {
+        match &spec.cri_log {
+            Some(path) => LogWriter::open_cri(Path::new(path)),
+            None => LogWriter::open(&dirs.container_dir(&spec.id), LOG_FILE_LIMIT),
+        }
     }
 
     /// Add output. Complete lines are written now; a trailing partial line waits.
@@ -88,13 +120,48 @@ impl LogWriter {
         for stream in [Stream::Stdout, Stream::Stderr] {
             let line = std::mem::take(&mut self.partial[stream as usize]);
             if !line.is_empty() {
-                self.emit(stream, &line)?;
+                self.emit_last(stream, &line)?;
             }
         }
         Ok(())
     }
 
     fn emit(&mut self, stream: Stream, line: &[u8]) -> Result<()> {
+        if self.cri.is_some() {
+            // A line that reached the length limit without its end goes on in the next.
+            let full = line.last() == Some(&b'\n');
+            return self.emit_cri(stream, line, full);
+        }
+        self.emit_json(stream, line)
+    }
+
+    /// The last output of a stream, without its newline: a complete line for the kubelet
+    /// (containerd's way).
+    fn emit_last(&mut self, stream: Stream, line: &[u8]) -> Result<()> {
+        if self.cri.is_some() {
+            return self.emit_cri(stream, line, true);
+        }
+        self.emit_json(stream, line)
+    }
+
+    fn emit_cri(&mut self, stream: Stream, line: &[u8], full: bool) -> Result<()> {
+        use std::os::unix::fs::MetadataExt;
+        let Some((path, ino)) = self.cri.clone() else {
+            return Ok(());
+        };
+        // Rotated by the kubelet: the path names a new file, or none yet.
+        let now_at = std::fs::metadata(&path).map(|m| m.ino()).ok();
+        if now_at != Some(ino) {
+            self.file = append(&path)?;
+            let ino = self.file.metadata().map(|m| m.ino()).unwrap_or(0);
+            self.cri = Some((path.clone(), ino));
+        }
+        let (secs, nanos) = now();
+        let text = cri_line(&rfc3339(secs, nanos), stream, full, line);
+        self.file.write_all(&text).map_err(|e| log_error(&path, e))
+    }
+
+    fn emit_json(&mut self, stream: Stream, line: &[u8]) -> Result<()> {
         let (secs, nanos) = now();
         let entry = LogLine {
             log: String::from_utf8_lossy(line).into_owned(),
@@ -125,6 +192,30 @@ impl LogWriter {
         self.size = 0;
         Ok(())
     }
+}
+
+fn append(path: &Path) -> Result<File> {
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|e| log_error(path, e))
+}
+
+/// One line of the kubelet's log format: `<time> <stream> <F|P> <text>`, where `F` ends a
+/// line and `P` is a part of a longer one. The text goes without its newline.
+pub fn cri_line(time: &str, stream: Stream, full: bool, text: &[u8]) -> Vec<u8> {
+    let text = text.strip_suffix(b"\n").unwrap_or(text);
+    let stream = match stream {
+        Stream::Stdout => "stdout",
+        Stream::Stderr => "stderr",
+    };
+    let tag = if full { "F" } else { "P" };
+    let mut out = Vec::with_capacity(time.len() + text.len() + 12);
+    out.extend_from_slice(format!("{time} {stream} {tag} ").as_bytes());
+    out.extend_from_slice(text);
+    out.push(b'\n');
+    out
 }
 
 /// Every stored log line, oldest first.
@@ -361,6 +452,71 @@ mod tests {
         }
         let want: Vec<String> = (0..30).map(|i| format!("line {i:02}\n")).collect();
         assert_eq!(seen, want);
+    }
+
+    #[test]
+    fn cri_lines_have_time_stream_and_tag() {
+        let t = "2024-11-17T13:26:40.123456789Z";
+        assert_eq!(
+            cri_line(t, Stream::Stdout, true, b"hello\n"),
+            b"2024-11-17T13:26:40.123456789Z stdout F hello\n"
+        );
+        assert_eq!(
+            cri_line(t, Stream::Stderr, false, b"part"),
+            b"2024-11-17T13:26:40.123456789Z stderr P part\n"
+        );
+        assert_eq!(
+            cri_line(t, Stream::Stdout, true, b"\n"),
+            format!("{t} stdout F \n").as_bytes()
+        );
+    }
+
+    fn cri_texts(path: &Path) -> Vec<String> {
+        std::fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .map(|l| l.splitn(2, ' ').nth(1).unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn cri_writer_splits_long_lines_and_ends_the_last() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("web/0.log");
+        let mut w = LogWriter::open_cri(&path).unwrap();
+        w.write(Stream::Stdout, b"a\nb").unwrap();
+        w.write(Stream::Stderr, b"oops\n").unwrap();
+        w.write(Stream::Stdout, &vec![b'x'; MAX_LINE + 2]).unwrap();
+        w.flush_partial().unwrap();
+        let x = "x".repeat(MAX_LINE - 1);
+        assert_eq!(
+            cri_texts(&path),
+            [
+                "stdout F a".to_string(),
+                "stderr F oops".into(),
+                format!("stdout P b{x}"),
+                "stdout F xxx".into(),
+            ]
+        );
+        assert!(!tmp.path().join("web/log.json").exists());
+    }
+
+    #[test]
+    fn cri_writer_follows_the_kubelets_rotation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("0.log");
+        let mut w = LogWriter::open_cri(&path).unwrap();
+        w.write(Stream::Stdout, b"one\n").unwrap();
+        let rotated = tmp.path().join("0.log.20241117");
+        std::fs::rename(&path, &rotated).unwrap();
+        w.write(Stream::Stdout, b"two\n").unwrap();
+        // The kubelet asked for a new file, which exists before the next line.
+        std::fs::rename(&path, tmp.path().join("0.log.2")).unwrap();
+        std::fs::write(&path, b"").unwrap();
+        w.write(Stream::Stdout, b"three\n").unwrap();
+        assert_eq!(cri_texts(&rotated), ["stdout F one"]);
+        assert_eq!(cri_texts(&tmp.path().join("0.log.2")), ["stdout F two"]);
+        assert_eq!(cri_texts(&path), ["stdout F three"]);
     }
 
     #[test]

@@ -39,7 +39,7 @@ pub fn serve(options: Options) -> Result<()> {
         .map_err(|e| Error::io(format!("set the mode of {}", socket.display()), &e, ""))?;
     eprintln!("podbag cri: serving the CRI on {}", socket.display());
 
-    let handler: Arc<dyn Handler> = Arc::new(grpc::Server(Arc::new(Cri::new(options))));
+    let handler: Arc<dyn Handler> = Arc::new(grpc::Server(Arc::new(Cri::new(options)?)));
     for conn in listener.incoming() {
         match conn {
             Ok(conn) => {

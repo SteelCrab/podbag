@@ -211,7 +211,55 @@ pub fn create(
         Placement::None => Ok(None),
         Placement::Direct { parent } => direct(Path::new(parent), id, limits, budget).map(Some),
         Placement::Scope { slice } => scoped(slice, limits, budget).map(Some),
+        Placement::Exact { path } => exact(Path::new(path), limits).map(Some),
     }
+}
+
+/// The group at `path`, with its missing parents; controllers are turned on from the root
+/// down. The parents are left as they are (a kubelet's pod group has its own limits).
+fn exact(path: &Path, limits: &Limits) -> Result<Group> {
+    let fail = |e: std::io::Error| cgroup_error(path, e);
+    let root = Path::new(ROOT);
+    let rel = path.strip_prefix(root).map_err(|_| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            "cannot set up the container's cgroup",
+            format!("{} is not below {ROOT}", path.display()),
+            "report this bug",
+        )
+    })?;
+    let more = limits.controllers();
+    let mut dir = root.to_path_buf();
+    let mut enabled = enable_with(&dir, &more).map_err(fail)?;
+    for part in rel.parent().into_iter().flat_map(Path::components) {
+        dir.push(part);
+        match std::fs::create_dir(&dir) {
+            Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(fail(e)),
+            _ => {}
+        }
+        enabled = enable_with(&dir, &more).map_err(fail)?;
+    }
+    if let Err(e) = std::fs::create_dir(path) {
+        if e.kind() != std::io::ErrorKind::AlreadyExists {
+            return Err(fail(e));
+        }
+        remove_below(path);
+        std::fs::remove_dir(path)
+            .and_then(|()| std::fs::create_dir(path))
+            .map_err(fail)?;
+    }
+    let group = configure(path, &enabled, limits).and_then(|()| {
+        let dir = open_dir(path).map_err(fail)?;
+        Ok(Group {
+            path: path.to_path_buf(),
+            dir,
+            owned: true,
+        })
+    });
+    if group.is_err() {
+        let _ = std::fs::remove_dir(path);
+    }
+    group
 }
 
 fn warn_budget(e: impl std::fmt::Display) {
@@ -355,11 +403,17 @@ pub fn enable_controllers(dir: &Path) -> std::io::Result<Vec<String>> {
 }
 
 pub(super) fn enable(dir: &Path) -> std::io::Result<Vec<String>> {
+    enable_with(dir, &[])
+}
+
+/// As `enable`, with further controllers when available.
+fn enable_with(dir: &Path, more: &[String]) -> std::io::Result<Vec<String>> {
     let available = std::fs::read_to_string(dir.join("cgroup.controllers"))?;
     let on = std::fs::read_to_string(dir.join("cgroup.subtree_control"))?;
     let has = |list: &str, c: &str| list.split_whitespace().any(|x| x == c);
     let wanted: Vec<&str> = CONTROLLERS
         .into_iter()
+        .chain(more.iter().map(String::as_str))
         .filter(|c| has(&available, c))
         .collect();
     let missing: Vec<String> = wanted
@@ -414,6 +468,34 @@ pub(super) fn configure(path: &Path, enabled: &[String], limits: &Limits) -> Res
     if let Some(pids) = limits.pids {
         need("pids", "--pids-limit")?;
         write("pids.max", &pids.to_string())?;
+    }
+    write_files(path, &limits.files)
+}
+
+/// Write further cgroup files (a running container's new limits, too). Swap files are
+/// skipped on a kernel without swap accounting.
+pub fn write_files(path: &Path, files: &std::collections::BTreeMap<String, String>) -> Result<()> {
+    for (name, value) in files {
+        if name.contains('/') || name.starts_with("cgroup.") {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "cannot set up the container's cgroup",
+                format!("{name} is not a limit file"),
+                "report this bug",
+            ));
+        }
+        match std::fs::write(path.join(name), value) {
+            Err(e)
+                if e.kind() == std::io::ErrorKind::NotFound && name.starts_with("memory.swap.") => {
+            }
+            Err(e) => {
+                return Err(cgroup_error(
+                    path,
+                    std::io::Error::new(e.kind(), format!("{name} = {value}: {e}")),
+                ));
+            }
+            Ok(()) => {}
+        }
     }
     Ok(())
 }

@@ -94,6 +94,54 @@ pub struct ContainerSpec {
     /// Bridge networks beyond the one in `network`, in order: `eth1`, `eth2`, …
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_networks: Vec<Attachment>,
+    /// Namespaces the container shares with others (a Kubernetes pod's) instead of its own.
+    #[serde(default, skip_serializing_if = "Namespaces::is_own")]
+    pub namespaces: Namespaces,
+    /// Device nodes of the host the container may use.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub devices: Vec<Device>,
+    /// Write the output to this file in the Kubernetes log format, not to `log.json`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cri_log: Option<String>,
+}
+
+/// One namespace of a container.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Namespace {
+    /// A new one of its own.
+    #[default]
+    Own,
+    /// The one of the process that starts it (the host's).
+    Host,
+    /// The one held at this path (a bind mount of a namespace file).
+    Join { path: String },
+}
+
+/// The namespaces a container shares. The network is shared through `network` (the host's)
+/// or `net` (a pod's: `Join`, with the network mode `None`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Namespaces {
+    pub net: Namespace,
+    pub ipc: Namespace,
+    pub uts: Namespace,
+    pub pid: Namespace,
+}
+
+impl Namespaces {
+    pub fn is_own(&self) -> bool {
+        *self == Namespaces::default()
+    }
+}
+
+/// A device node of the host, at `container` in the container.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Device {
+    pub host: String,
+    pub container: String,
+    /// What the container may do with it: `r`, `w` and `m` (make the node).
+    pub access: String,
 }
 
 /// A further network of a container (`--network` given again; an entry of Docker's
@@ -209,6 +257,24 @@ pub struct Security {
     /// `--privileged`: every capability, no seccomp filter, no masked or read-only kernel
     /// files, a writable /sys and cgroup. Rootless, all of it inside the user namespace.
     pub privileged: bool,
+    /// Supplementary groups beyond the user's own.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<u32>,
+    /// The user's own group is a supplementary group too.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub own_group_too: bool,
+    /// The processes' `oom_score_adj`; None: 0.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oom_score_adj: Option<i32>,
+    /// The root filesystem is read-only (its mounts are as they say).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub read_only_rootfs: bool,
+    /// Kernel files to hide, instead of Docker's list (absolute paths).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub masked_paths: Option<Vec<String>>,
+    /// Kernel files to make read-only, instead of Docker's list (absolute paths).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readonly_paths: Option<Vec<String>>,
 }
 
 impl Default for Security {
@@ -219,6 +285,12 @@ impl Default for Security {
             no_new_privileges: false,
             seccomp: true,
             privileged: false,
+            groups: Vec::new(),
+            own_group_too: false,
+            oom_score_adj: None,
+            read_only_rootfs: false,
+            masked_paths: None,
+            readonly_paths: None,
         }
     }
 }
@@ -313,7 +385,44 @@ impl ContainerSpec {
                 );
             }
         }
-        check_networks(&self.network, &self.aliases, &self.extra_networks)
+        check_networks(&self.network, &self.aliases, &self.extra_networks)?;
+        self.check_namespaces()
+    }
+
+    /// A pod's network is joined with the network mode `None`; the host's is the mode
+    /// `Host`. Joined namespaces are absolute paths.
+    fn check_namespaces(&self) -> Result<()> {
+        let invalid = |why: &str| {
+            Err(Error::new(
+                ErrorKind::InvalidInput,
+                "invalid namespace settings",
+                why,
+                "report this bug",
+            ))
+        };
+        let ns = &self.namespaces;
+        match &ns.net {
+            Namespace::Own => {}
+            Namespace::Host => return invalid("the host's network is the network mode host"),
+            Namespace::Join { .. } if self.network != crate::network::NetworkMode::None => {
+                return invalid("a joined network namespace needs the network mode none");
+            }
+            Namespace::Join { .. } => {}
+        }
+        for n in [&ns.net, &ns.ipc, &ns.uts, &ns.pid] {
+            if let Namespace::Join { path } = n {
+                if !path.starts_with('/') {
+                    return invalid("a namespace path is not absolute");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether the container gets a network namespace of its own (and sets up its
+    /// loopback interface).
+    pub fn own_netns(&self) -> bool {
+        self.network != crate::network::NetworkMode::Host && self.namespaces.net == Namespace::Own
     }
 
     /// The bridge networks the container joins, its primary one first; none with the
@@ -387,6 +496,9 @@ pub(crate) fn spec_fixture() -> ContainerSpec {
         health: None,
         console_size: None,
         extra_networks: Vec::new(),
+        namespaces: Default::default(),
+        devices: Vec::new(),
+        cri_log: None,
     }
 }
 
@@ -473,6 +585,41 @@ mod tests {
             }),
             invalid
         );
+    }
+
+    #[test]
+    fn namespaces_are_checked_and_old_settings_have_their_own() {
+        use crate::network::NetworkMode;
+        let json = serde_json::to_value(spec_fixture()).unwrap();
+        assert!(json.get("namespaces").is_none(), "{json}");
+        let spec: ContainerSpec = serde_json::from_value(json).unwrap();
+        assert!(spec.namespaces.is_own());
+        assert!(!spec.own_netns(), "the fixture uses the host's network");
+
+        let mut s = spec_fixture();
+        s.network = NetworkMode::None;
+        assert!(s.own_netns());
+        s.namespaces.net = Namespace::Join {
+            path: "/run/x/net".into(),
+        };
+        s.namespaces.uts = Namespace::Host;
+        s.validate().unwrap();
+        assert!(!s.own_netns());
+        let back: ContainerSpec =
+            serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.namespaces, s.namespaces);
+
+        let mut bad = s.clone();
+        bad.network = NetworkMode::default();
+        assert_eq!(bad.validate().unwrap_err().kind, ErrorKind::InvalidInput);
+        let mut bad = s.clone();
+        bad.namespaces.net = Namespace::Host;
+        assert_eq!(bad.validate().unwrap_err().kind, ErrorKind::InvalidInput);
+        let mut bad = s.clone();
+        bad.namespaces.ipc = Namespace::Join {
+            path: "relative".into(),
+        };
+        assert_eq!(bad.validate().unwrap_err().kind, ErrorKind::InvalidInput);
     }
 
     #[test]

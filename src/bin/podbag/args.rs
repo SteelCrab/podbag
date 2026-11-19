@@ -156,6 +156,9 @@ pub enum Cmd {
     Store { op: String },
     #[command(name = "__session", hide = true)]
     Session,
+    /// The init that holds a Kubernetes pod's PID namespace
+    #[command(name = "__pause", hide = true)]
+    Pause,
     /// Start an ended container again when its restart policy says so
     #[command(name = "__restart", hide = true)]
     Restarter { id: String },

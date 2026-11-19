@@ -7,7 +7,7 @@
 //! cannot stop the loop from serving stop, kill and signals.
 
 use super::control::{self, Request, Response};
-use super::logbook::{LOG_FILE_LIMIT, LogWriter, Stream};
+use super::logbook::{LogWriter, Stream};
 use crate::helper::{StatusChannel, StatusMessage};
 use crate::paths::Dirs;
 use crate::spec::ContainerSpec;
@@ -346,7 +346,7 @@ pub(super) fn run(
         Ok(io) => io,
         Err(e) => return failed(status, e),
     };
-    let mut log = match LogWriter::open(&dirs.container_dir(id), LOG_FILE_LIMIT) {
+    let mut log = match LogWriter::for_container(dirs, spec) {
         Ok(l) => l,
         Err(e) => return failed(status, e),
     };
@@ -392,19 +392,22 @@ pub(super) fn run(
     // As root, the container may open only the usual devices (a privileged one: all).
     // Rootless, the kernel refuses device nodes to the user namespace already.
     if let (false, false, Some(g)) = (rootless, spec.security.privileged, &group) {
-        if let Err(e) = crate::cgroup::restrict_devices(g.fd()) {
-            remove_control(dirs, id);
-            if let Some(g) = group {
-                g.remove();
-            }
-            return failed(
-                status,
+        let rules = crate::cgroup::device_rules(&spec.devices);
+        let restricted = rules.and_then(|rules| {
+            crate::cgroup::restrict_devices(g.fd(), &rules).map_err(|e| {
                 Error::io(
                     "cannot limit the devices the container may open",
                     &e,
                     "check that the kernel has cgroup BPF (CONFIG_CGROUP_BPF)",
-                ),
-            );
+                )
+            })
+        });
+        if let Err(e) = restricted {
+            remove_control(dirs, id);
+            if let Some(g) = group {
+                g.remove();
+            }
+            return failed(status, e);
         }
     }
     let bridged = matches!(spec.network, crate::network::NetworkMode::Bridge { .. });
@@ -455,6 +458,7 @@ pub(super) fn run(
         Ok(mut files) => {
             files.append(&mut run_spec.mounts);
             run_spec.mounts = files;
+            run_spec.mounts.extend(device_mounts(&spec.devices));
         }
         Err(e) => {
             undo(group);
@@ -623,6 +627,22 @@ pub(super) fn run(
         started: true,
         handed_over: false,
     }
+}
+
+/// The device nodes a container was given, bound from the host's.
+fn device_mounts(devices: &[crate::spec::Device]) -> Vec<crate::volume::Mount> {
+    devices
+        .iter()
+        .map(|d| crate::volume::Mount {
+            source: crate::volume::MountSource::Bind {
+                path: d.host.clone(),
+                propagation: Default::default(),
+            },
+            target: d.container.clone(),
+            read_only: false,
+            copy_up: false,
+        })
+        .collect()
 }
 
 /// What follows a container's end, for the shim and for the keeper's finisher: the state,

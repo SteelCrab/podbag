@@ -12,12 +12,7 @@ use super::pb;
 use crate::image::{self, Image};
 use crate::{Error, ErrorKind};
 
-/// How the kubelet places cgroups; podbag follows it for pods.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CgroupDriver {
-    Cgroupfs,
-    Systemd,
-}
+pub use super::mapping::CgroupDriver;
 
 /// How `podbag cri serve` was started.
 #[derive(Debug, Clone)]
@@ -31,11 +26,15 @@ pub struct Options {
 /// The CRI runtime and image services.
 pub struct Cri {
     options: Options,
+    runtime: super::runtime::Runtime,
 }
 
 impl Cri {
-    pub fn new(options: Options) -> Cri {
-        Cri { options }
+    pub fn new(options: Options) -> crate::Result<Cri> {
+        Ok(Cri {
+            runtime: super::runtime::Runtime::new(options.clone())?,
+            options,
+        })
     }
 
     fn version(&self) -> pb::VersionResponse {
@@ -139,6 +138,98 @@ impl Service for Cri {
                     Ok(pb::UpdateRuntimeConfigResponse {})
                 })
             }
+            "RuntimeService/RunPodSandbox" => call(request, |r: pb::RunPodSandboxRequest| {
+                let config = r.config.unwrap_or_default();
+                let pod_sandbox_id = self.runtime.run_pod_sandbox(config)?;
+                Ok(pb::RunPodSandboxResponse { pod_sandbox_id })
+            }),
+            "RuntimeService/StopPodSandbox" => call(request, |r: pb::StopPodSandboxRequest| {
+                self.runtime.stop_pod_sandbox(&r.pod_sandbox_id)?;
+                Ok(pb::StopPodSandboxResponse {})
+            }),
+            "RuntimeService/RemovePodSandbox" => call(request, |r: pb::RemovePodSandboxRequest| {
+                self.runtime.remove_pod_sandbox(&r.pod_sandbox_id)?;
+                Ok(pb::RemovePodSandboxResponse {})
+            }),
+            "RuntimeService/PodSandboxStatus" => call(request, |r: pb::PodSandboxStatusRequest| {
+                self.runtime
+                    .pod_sandbox_status(&r.pod_sandbox_id, r.verbose)
+            }),
+            "RuntimeService/ListPodSandbox" => call(request, |r: pb::ListPodSandboxRequest| {
+                Ok(pb::ListPodSandboxResponse {
+                    items: self.runtime.list_pod_sandbox(r.filter)?,
+                })
+            }),
+            "RuntimeService/CreateContainer" => call(request, |r: pb::CreateContainerRequest| {
+                let config = r.config.unwrap_or_default();
+                let container_id = self.runtime.create_container(&r.pod_sandbox_id, config)?;
+                Ok(pb::CreateContainerResponse { container_id })
+            }),
+            "RuntimeService/StartContainer" => call(request, |r: pb::StartContainerRequest| {
+                self.runtime.start_container(&r.container_id)?;
+                Ok(pb::StartContainerResponse {})
+            }),
+            "RuntimeService/StopContainer" => call(request, |r: pb::StopContainerRequest| {
+                self.runtime.stop_container(&r.container_id, r.timeout)?;
+                Ok(pb::StopContainerResponse {})
+            }),
+            "RuntimeService/RemoveContainer" => call(request, |r: pb::RemoveContainerRequest| {
+                self.runtime.remove_container(&r.container_id)?;
+                Ok(pb::RemoveContainerResponse {})
+            }),
+            "RuntimeService/ListContainers" => call(request, |r: pb::ListContainersRequest| {
+                Ok(pb::ListContainersResponse {
+                    containers: self.runtime.list_containers(r.filter)?,
+                })
+            }),
+            "RuntimeService/ContainerStatus" => call(request, |r: pb::ContainerStatusRequest| {
+                self.runtime.container_status(&r.container_id, r.verbose)
+            }),
+            "RuntimeService/UpdateContainerResources" => {
+                call(request, |r: pb::UpdateContainerResourcesRequest| {
+                    self.runtime
+                        .update_container_resources(&r.container_id, r.linux)?;
+                    Ok(pb::UpdateContainerResourcesResponse {})
+                })
+            }
+            "RuntimeService/UpdatePodSandboxResources" => {
+                call(request, |_: pb::UpdatePodSandboxResourcesRequest| {
+                    Ok(pb::UpdatePodSandboxResourcesResponse {})
+                })
+            }
+            "RuntimeService/ReopenContainerLog" => {
+                call(request, |r: pb::ReopenContainerLogRequest| {
+                    self.runtime.reopen_container_log(&r.container_id)?;
+                    Ok(pb::ReopenContainerLogResponse {})
+                })
+            }
+            "RuntimeService/ExecSync" => call(request, |r: pb::ExecSyncRequest| {
+                self.runtime.exec_sync(&r.container_id, r.cmd, r.timeout)
+            }),
+            "RuntimeService/ContainerStats" => call(request, |r: pb::ContainerStatsRequest| {
+                Ok(pb::ContainerStatsResponse {
+                    stats: Some(self.runtime.container_stats(&r.container_id)?),
+                })
+            }),
+            "RuntimeService/ListContainerStats" => {
+                call(request, |r: pb::ListContainerStatsRequest| {
+                    Ok(pb::ListContainerStatsResponse {
+                        stats: self.runtime.list_container_stats(r.filter)?,
+                    })
+                })
+            }
+            "RuntimeService/PodSandboxStats" => call(request, |r: pb::PodSandboxStatsRequest| {
+                Ok(pb::PodSandboxStatsResponse {
+                    stats: Some(self.runtime.pod_sandbox_stats(&r.pod_sandbox_id)?),
+                })
+            }),
+            "RuntimeService/ListPodSandboxStats" => {
+                call(request, |r: pb::ListPodSandboxStatsRequest| {
+                    Ok(pb::ListPodSandboxStatsResponse {
+                        stats: self.runtime.list_pod_sandbox_stats(r.filter)?,
+                    })
+                })
+            }
             "ImageService/ListImages" => call(request, list_images),
             "ImageService/ImageStatus" => call(request, image_status),
             "ImageService/PullImage" => call(request, pull_image),
@@ -149,6 +240,122 @@ impl Service for Cri {
             _ => return None,
         })
     }
+
+    fn stream(
+        &self,
+        path: &str,
+        request: &[u8],
+        out: &mut super::grpc::Stream<'_>,
+    ) -> Option<Result<(), Status>> {
+        let method = path.strip_prefix("/runtime.v1.")?;
+        // The lists come whole, in one message (none for an empty list).
+        let mut send_one = |bytes: Vec<u8>, empty: bool| {
+            if empty { Ok(()) } else { out.send(&bytes) }
+        };
+        Some(match method {
+            "RuntimeService/GetContainerEvents" => self.container_events(request, out),
+            "RuntimeService/StreamPodSandboxes" => {
+                decode(request).and_then(|r: pb::StreamPodSandboxesRequest| {
+                    let items = self.runtime.list_pod_sandbox(r.filter)?;
+                    let empty = items.is_empty();
+                    send_one(
+                        pb::StreamPodSandboxesResponse {
+                            pod_sandboxes: items,
+                        }
+                        .encode_to_vec(),
+                        empty,
+                    )
+                })
+            }
+            "RuntimeService/StreamContainers" => {
+                decode(request).and_then(|r: pb::StreamContainersRequest| {
+                    let items = self.runtime.list_containers(r.filter)?;
+                    let empty = items.is_empty();
+                    send_one(
+                        pb::StreamContainersResponse { containers: items }.encode_to_vec(),
+                        empty,
+                    )
+                })
+            }
+            "RuntimeService/StreamContainerStats" => {
+                decode(request).and_then(|r: pb::StreamContainerStatsRequest| {
+                    let items = self.runtime.list_container_stats(r.filter)?;
+                    let empty = items.is_empty();
+                    send_one(
+                        pb::StreamContainerStatsResponse {
+                            container_stats: items,
+                        }
+                        .encode_to_vec(),
+                        empty,
+                    )
+                })
+            }
+            "RuntimeService/StreamPodSandboxStats" => {
+                decode(request).and_then(|r: pb::StreamPodSandboxStatsRequest| {
+                    let items = self.runtime.list_pod_sandbox_stats(r.filter)?;
+                    let empty = items.is_empty();
+                    send_one(
+                        pb::StreamPodSandboxStatsResponse {
+                            pod_sandbox_stats: items,
+                        }
+                        .encode_to_vec(),
+                        empty,
+                    )
+                })
+            }
+            "ImageService/StreamImages" => {
+                decode(request).and_then(|r: pb::StreamImagesRequest| {
+                    let items = list_images(pb::ListImagesRequest { filter: r.filter })?.images;
+                    let empty = items.is_empty();
+                    send_one(
+                        pb::StreamImagesResponse { images: items }.encode_to_vec(),
+                        empty,
+                    )
+                })
+            }
+            _ => return None,
+        })
+    }
+}
+
+impl Cri {
+    /// Container events until the caller goes away.
+    fn container_events(
+        &self,
+        request: &[u8],
+        out: &mut super::grpc::Stream<'_>,
+    ) -> Result<(), Status> {
+        let _: pb::GetEventsRequest = decode(request)?;
+        let listener = self.runtime.events.listen();
+        // The headers go out now: the kubelet waits for them before it lists the pods.
+        out.start()?;
+        loop {
+            if out.cancelled() {
+                return Ok(());
+            }
+            let Some((id, kind, at)) = listener.next(std::time::Duration::from_secs(1)) else {
+                continue;
+            };
+            let status = self.runtime.status_of(&id).ok();
+            let sandbox = status
+                .as_ref()
+                .and_then(|_| self.runtime.sandbox_of(&id))
+                .and_then(|s| self.runtime.pod_sandbox_status(&s, false).ok())
+                .and_then(|r| r.status);
+            let event = pb::ContainerEventResponse {
+                container_id: id,
+                container_event_type: kind as i32,
+                created_at: at,
+                pod_sandbox_status: sandbox,
+                containers_statuses: status.into_iter().collect(),
+            };
+            out.send(&event.encode_to_vec())?;
+        }
+    }
+}
+
+fn decode<Q: Message + Default>(bytes: &[u8]) -> Result<Q, Status> {
+    Q::decode(bytes).map_err(|e| Status::new(Code::InvalidArgument, format!("bad request: {e}")))
 }
 
 /// Decodes the request, runs `f`, encodes the answer.
@@ -159,6 +366,24 @@ fn call<Q: Message + Default, A: Message>(
     let request = Q::decode(bytes)
         .map_err(|e| Status::new(Code::InvalidArgument, format!("bad request: {e}")))?;
     f(request).map(|answer| answer.encode_to_vec())
+}
+
+/// The stored image the kubelet means: an ID, a name or a name with a digest.
+pub fn find_image(wanted: &str) -> Result<Image, Status> {
+    let all = Image::list().map_err(|e| status_of(&e))?;
+    let grouped = images::group(&all);
+    let found = images::find(&grouped, wanted).ok_or_else(|| {
+        Status::new(
+            Code::NotFound,
+            format!("image {wanted:?} not found: pull it first"),
+        )
+    })?;
+    // The name asked for when it is one of the image's; any of its names otherwise.
+    let tag = images::full_tag(wanted).filter(|t| found.repo_tags.contains(t));
+    all.into_iter()
+        .filter(|i| i.digest == found.id)
+        .find(|i| tag.as_ref().is_none_or(|t| &i.name == t))
+        .ok_or_else(|| Status::new(Code::NotFound, format!("image {wanted:?} not found")))
 }
 
 /// A podbag error as a gRPC status.

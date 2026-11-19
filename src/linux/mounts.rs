@@ -37,10 +37,14 @@ pub(super) fn mount_all(rootless: bool, root: &Path, mounts: &[Mount]) -> Result
 
 fn mount_one(root: BorrowedFd<'_>, m: &Mount) -> std::io::Result<()> {
     match &m.source {
-        MountSource::Bind { path } => {
+        MountSource::Bind { path, propagation } => {
             let is_file = !std::fs::metadata(path)?.is_dir();
             let target = open_target(root, &m.target, is_file)?;
-            bind(Path::new(path), target.as_fd(), m.read_only)
+            if propagation.is_private() {
+                bind(Path::new(path), target.as_fd(), m.read_only)
+            } else {
+                bind_propagated(Path::new(path), target.as_fd(), m.read_only)
+            }
         }
         MountSource::Volume { path, .. } => {
             let target = open_target(root, &m.target, false)?;
@@ -190,6 +194,26 @@ fn bind(source: &Path, target: BorrowedFd<'_>, read_only: bool) -> std::io::Resu
         set_read_only(tree.as_fd())?;
     }
     attach(tree.as_fd(), target)
+}
+
+/// A bind mount that keeps receiving the host's mounts below `source`: made with
+/// mount(2), so the new mount is a slave of the host's mount (the root is a slave, see
+/// `enter_rootfs`), not a private copy as with `open_tree`. The target descriptor names the
+/// place; it was resolved inside the root.
+fn bind_propagated(source: &Path, target: BorrowedFd<'_>, read_only: bool) -> std::io::Result<()> {
+    let at = format!("/proc/self/fd/{}", target.as_raw_fd());
+    // Where the descriptor is, before the mount covers it: reopened below for the new mount.
+    let place = std::fs::read_link(&at)?;
+    rustix::mount::mount_bind_recursive(source, at.as_str())?;
+    if read_only {
+        let mounted = rustix::fs::open(
+            &place,
+            OFlags::PATH | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )?;
+        set_read_only(mounted.as_fd())?;
+    }
+    Ok(())
 }
 
 /// A new tmpfs with `options` (file system options and mount flags), attached to the target.

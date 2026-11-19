@@ -77,6 +77,17 @@ impl Stream<'_> {
         self.response.data(&frame(message)).map_err(gone)
     }
 
+    /// Sends the response headers now, before the first message.
+    pub fn start(&mut self) -> Result<(), Status> {
+        if !self.started {
+            self.response
+                .headers(&OK_HEADERS, false)
+                .map_err(|_| Status::new(Code::Cancelled, "the caller went away"))?;
+            self.started = true;
+        }
+        Ok(())
+    }
+
     pub fn cancelled(&self) -> bool {
         self.response.cancelled()
     }

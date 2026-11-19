@@ -58,6 +58,7 @@ pub(super) fn files(
         mounts.push(Mount {
             source: MountSource::Bind {
                 path: path.to_string_lossy().into_owned(),
+                propagation: Default::default(),
             },
             target,
             read_only: false,

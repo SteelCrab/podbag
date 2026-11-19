@@ -14,16 +14,29 @@ pub(super) fn enter_rootfs(
     mounts: &[crate::volume::Mount],
     own_netns: bool,
     rootless: bool,
-    privileged: bool,
+    security: &crate::spec::Security,
 ) -> Result<()> {
+    let privileged = security.privileged;
+    // Mounts of the host reach the container only through a mount that asks for them:
+    // then the copies of the host's mounts stay slaves (they receive, never send), as with
+    // runc's rslave. New mounts made here are private either way.
+    let receive = mounts.iter().any(|m| {
+        matches!(&m.source, crate::volume::MountSource::Bind { propagation, .. } if !propagation.is_private())
+    });
     step(
         rootless,
         "make mounts private",
         rustix::mount::mount_change(
             "/",
-            MountPropagationFlags::REC | MountPropagationFlags::PRIVATE,
+            MountPropagationFlags::REC
+                | if receive {
+                    MountPropagationFlags::DOWNSTREAM
+                } else {
+                    MountPropagationFlags::PRIVATE
+                },
         ),
     )?;
+    let (masked, read_only) = kernel_paths(security);
     let rootfs = mount_root(spec, rootless)?;
 
     let at = |p: &str| rootfs.join(p);
@@ -40,12 +53,8 @@ pub(super) fn enter_rootfs(
         MountFlags::NOSUID | MountFlags::NODEV | MountFlags::NOEXEC,
         None,
     )?;
-    // A privileged container sees the kernel's files as they are.
-    let read_only: &[&str] = if privileged { &[] } else { &READ_ONLY };
-    if !privileged {
-        mask(rootless, rootfs, "proc/")?;
-    }
-    for rel in read_only {
+    mask(rootless, rootfs, &masked, "proc/")?;
+    for rel in read_only.iter().filter(|p| p.starts_with("proc/")) {
         let path = at(rel);
         if std::fs::symlink_metadata(&path).is_err() {
             continue;
@@ -173,8 +182,8 @@ pub(super) fn enter_rootfs(
     }
     // Privileged: /sys and the container's own cgroup stay writable (as far as the kernel
     // lets its user namespace write).
+    mask(rootless, rootfs, &masked, "sys/")?;
     if !privileged {
-        mask(rootless, rootfs, "sys/")?;
         step(
             rootless,
             "make /sys read-only",
@@ -183,6 +192,27 @@ pub(super) fn enter_rootfs(
     }
     // The container's own mounts come last, as with runc, so they may cover /dev/shm.
     super::mounts::mount_all(rootless, rootfs, mounts)?;
+    // Other kernel paths a caller listed.
+    mask(rootless, rootfs, &masked, "")?;
+    for rel in read_only
+        .iter()
+        .filter(|p| !p.starts_with("proc/") && !p.starts_with("sys/"))
+    {
+        let path = at(rel);
+        if std::fs::symlink_metadata(&path).is_err() {
+            continue;
+        }
+        step(
+            rootless,
+            &format!("bind {rel}"),
+            rustix::mount::mount_bind(&path, &path),
+        )?;
+        step(
+            rootless,
+            &format!("make {rel} read-only"),
+            set_read_only_recursive(&path),
+        )?;
+    }
 
     step(
         rootless,
@@ -200,6 +230,38 @@ pub(super) fn enter_rootfs(
         rustix::mount::unmount(".", UnmountFlags::DETACH),
     )?;
     step(rootless, "enter the new root", rustix::process::chdir("/"))
+}
+
+/// The kernel paths to hide and to make read-only, relative to the root: the caller's
+/// lists, or Docker's; none for a privileged container (it sees the kernel's files as
+/// they are).
+fn kernel_paths(security: &crate::spec::Security) -> (Vec<String>, Vec<String>) {
+    if security.privileged {
+        return (Vec::new(), Vec::new());
+    }
+    let relative = |list: &Option<Vec<String>>, default: &[&str]| -> Vec<String> {
+        match list {
+            Some(paths) => paths
+                .iter()
+                .map(|p| p.trim_start_matches('/').to_string())
+                .filter(|p| !p.is_empty() && !p.split('/').any(|c| c == ".."))
+                .collect(),
+            None => default.iter().map(|p| p.to_string()).collect(),
+        }
+    };
+    (
+        relative(&security.masked_paths, &MASKED),
+        relative(&security.readonly_paths, &READ_ONLY),
+    )
+}
+
+/// After `pivot_root`: make the root mount read-only (not the mounts on it).
+pub(super) fn make_root_read_only(rootless: bool) -> Result<()> {
+    step(
+        rootless,
+        "make the root filesystem read-only",
+        rustix::mount::mount_remount("/", MountFlags::BIND | MountFlags::RDONLY, ""),
+    )
 }
 
 /// Kernel files and directories a container must not read (Docker's list). Files are
@@ -330,8 +392,13 @@ pub(crate) fn overlay_options(
     options
 }
 
-fn mask(rootless: bool, root: &Path, prefix: &str) -> Result<()> {
-    for rel in MASKED.iter().filter(|p| p.starts_with(prefix)) {
+/// `prefix` "" takes the paths outside /proc and /sys.
+fn mask(rootless: bool, root: &Path, masked: &[String], prefix: &str) -> Result<()> {
+    let wanted = |p: &&String| match prefix {
+        "" => !p.starts_with("proc/") && !p.starts_with("sys/"),
+        _ => p.starts_with(prefix),
+    };
+    for rel in masked.iter().filter(wanted) {
         let path = root.join(rel);
         let Ok(meta) = std::fs::symlink_metadata(&path) else {
             continue;
@@ -446,6 +513,28 @@ fn step<T, E: Into<std::io::Error>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kernel_paths_come_from_the_settings_or_dockers_lists() {
+        use crate::spec::Security;
+        let (masked, read_only) = kernel_paths(&Security::default());
+        assert_eq!(masked.len(), MASKED.len());
+        assert!(read_only.contains(&"proc/sys".to_string()));
+        let privileged = Security {
+            privileged: true,
+            ..Default::default()
+        };
+        assert_eq!(kernel_paths(&privileged), (vec![], vec![]));
+        let own = Security {
+            masked_paths: Some(vec!["/proc/kcore".into(), "/x/../etc".into(), "/".into()]),
+            readonly_paths: Some(vec![]),
+            ..Default::default()
+        };
+        assert_eq!(
+            kernel_paths(&own),
+            (vec!["proc/kcore".to_string()], Vec::<String>::new())
+        );
+    }
 
     #[test]
     fn overlay_options_for_both_methods() {

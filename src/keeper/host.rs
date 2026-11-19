@@ -806,10 +806,13 @@ impl Keeper {
             .iter()
             .position(|(pid, _, _)| *pid == h.pid)
             .map(|at| self.early.swap_remove(at).1);
-        let log = LogWriter::open(&dirs.container_dir(&h.id), LOG_FILE_LIMIT).ok();
+        let spec = crate::state::read_config(&dirs, &h.id).ok();
+        let log = match &spec {
+            Some(spec) => LogWriter::for_container(&dirs, spec).ok(),
+            None => LogWriter::open(&dirs.container_dir(&h.id), LOG_FILE_LIMIT).ok(),
+        };
         let pid = h.pid;
-        let health = crate::state::read_config(&dirs, &h.id)
-            .ok()
+        let health = spec
             .and_then(|spec| spec.health)
             .filter(|_| exit.is_none())
             .map(|config| crate::health::Schedule::new(&config, now));
