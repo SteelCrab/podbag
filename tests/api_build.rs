@@ -179,6 +179,19 @@ fn docker_build_uses_the_classic_builder() {
         again,
         s.ok(&["image", "inspect", "-f", "{{.Id}}", "built:1"])
     );
+    // `builder prune` forgets the cache: the next build runs its steps again.
+    s.ok(&["builder", "prune", "-f"]);
+    let rebuilt = s.ok(&[
+        "build",
+        "--network",
+        "none",
+        "--build-arg",
+        "WHO=docker",
+        "-t",
+        "built:1",
+        &ctx,
+    ]);
+    assert!(!rebuilt.contains("Using cache"), "{rebuilt}");
     // A failing step fails the build with its code.
     std::fs::write(
         dir.join("Dockerfile"),
