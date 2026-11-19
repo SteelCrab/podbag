@@ -150,6 +150,23 @@ fn another_registry_gets_written_layers_once_and_they_pull_back() {
         .count();
     assert_eq!(mounted, 2, "{events:?}");
 
+    // A third registry gets the same written layers: written again, with the same digests.
+    let third = FakeRegistry::start(false);
+    let elsewhere = format!("{}/copy:1", third.host);
+    s.tag(&base, &elsewhere, &HashMap::new).unwrap();
+    let events = push(&s, &elsewhere, &mut Registry::new());
+    let pushed = events
+        .iter()
+        .filter(|e| matches!(e, PushEvent::LayerPushed { .. }))
+        .count();
+    assert_eq!(pushed, 2, "{events:?}");
+    let layers = |reg: &FakeRegistry| -> Vec<serde_json::Value> {
+        let (_, body) = reg.manifest("copy", "1").unwrap();
+        let m: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        m["layers"].as_array().unwrap().clone()
+    };
+    assert_eq!(layers(&third), layers(&target));
+
     // A fresh store pulls it back with the same files and settings.
     let fresh = store(&tmp, "fresh");
     pull(&fresh, &name, &mut login());

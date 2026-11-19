@@ -197,17 +197,14 @@ impl Store {
             return Ok(hold(&mut known.blobs[blob], &here));
         }
         if !path.exists() {
-            // Known from an earlier push: written again, the same.
+            // Known from an earlier push: written again. The same files give the same
+            // blob; if not, the new one replaces what was known.
             let again = self.write_blob(&index, created, scratch, &path)?;
             if again.digest != digest {
                 known.blobs[blob] = again;
-                let digest = known.blobs[blob].digest.clone();
-                registry.upload_blob(r, &digest, Blob::File(&path))?;
-                let bytes = known.blobs[blob].size;
-                progress(PushEvent::LayerPushed { id, bytes });
-                return Ok(hold(&mut known.blobs[blob], &here));
             }
         }
+        let digest = known.blobs[blob].digest.clone();
         registry.upload_blob(r, &digest, Blob::File(&path))?;
         let _ = std::fs::remove_file(&path);
         progress(PushEvent::LayerPushed {

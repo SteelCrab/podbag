@@ -75,17 +75,17 @@ impl AuthConfig {
 
     /// `auth` taken apart into user name and password, when those are not given.
     pub fn normalized(mut self) -> AuthConfig {
-        if self.username.is_empty() && self.password.is_empty() && !self.auth.is_empty() {
-            if let Some((u, p)) = crate::base64::decode(&self.auth)
-                .and_then(|b| String::from_utf8(b).ok())
-                .and_then(|s| {
-                    s.split_once(':')
-                        .map(|(u, p)| (u.to_string(), p.to_string()))
-                })
-            {
-                self.username = u;
-                self.password = p;
-            }
+        let pair = (self.username.is_empty() && self.password.is_empty())
+            .then(|| crate::base64::decode(&self.auth))
+            .flatten()
+            .and_then(|b| String::from_utf8(b).ok())
+            .and_then(|s| {
+                s.split_once(':')
+                    .map(|(u, p)| (u.to_string(), p.to_string()))
+            });
+        if let Some((u, p)) = pair {
+            self.username = u;
+            self.password = p;
         }
         self.auth.clear();
         self
@@ -277,11 +277,11 @@ impl Credentials {
             .get("credHelpers")
             .and_then(|h| h.as_object())
             .is_some_and(|h| h.keys().any(|k| registry_of(k) == registry));
-        if let Some(helper) = Credentials::helper_for(&config, &registry) {
-            if own_helper || entry.is_some() {
-                let key = entry.map_or_else(|| key_of(&registry), |(k, _)| k.clone());
-                return self.helper_get(&helper, &key);
-            }
+        if let Some(helper) = Credentials::helper_for(&config, &registry)
+            && (own_helper || entry.is_some())
+        {
+            let key = entry.map_or_else(|| key_of(&registry), |(k, _)| k.clone());
+            return self.helper_get(&helper, &key);
         }
         let Some((_, value)) = entry else {
             return Ok(None);

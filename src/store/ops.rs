@@ -170,10 +170,8 @@ mod linux_ops {
                     if progress {
                         print_push_progress(&ev);
                     }
-                    if events {
-                        if let Ok(line) = serde_json::to_string(&ev) {
-                            eprintln!("{line}");
-                        }
+                    if events && let Ok(line) = serde_json::to_string(&ev) {
+                        eprintln!("{line}");
                     }
                 };
                 to_json(&store.push(&name, &mut Registry::with_auth(auth), &mut show)?)
