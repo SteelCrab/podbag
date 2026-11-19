@@ -22,8 +22,9 @@ pub struct Forward {
     pub paths: Vec<String>,
 }
 
-/// How long a command waits for a VM: one that stops first, then a new one.
-const WAIT_FOR_VM: Duration = Duration::from_secs(90);
+/// How long a command waits for a VM: one that stops first (30 s at most), then a new
+/// one (the host's boot time, 120 s at most).
+const WAIT_FOR_VM: Duration = Duration::from_secs(180);
 
 /// The Mac's settings that mean the same in the VM. Paths and programs
 /// (OPENPOD_DATA_DIR, OPENPOD_BIN, …) are the Mac's own.
@@ -142,14 +143,19 @@ fn error_since(log: &Path, at: u64) -> String {
 /// `openpod vm start|stop|status|logs`.
 pub fn vm_command(args: &[String]) -> i32 {
     let result = match args.first().map(String::as_str) {
-        Some("start") => {
-            connect_host(true, Instant::now() + WAIT_FOR_VM).map(|_| println!("running"))
-        }
-        Some("status") => {
-            let running = connect_host(false, Instant::now()).is_ok();
-            println!("{}", if running { "running" } else { "stopped" });
-            Ok(())
-        }
+        // A round trip to the VM's agent: the VM is up, and works.
+        Some("start") => match forward(Forward {
+            argv: vec!["__vm-check".into()],
+            stdin: false,
+            paths: Vec::new(),
+        }) {
+            0 => {
+                println!("running");
+                Ok(())
+            }
+            _ => return 1,
+        },
+        Some("status") => paths().map(|p| println!("{}", status(&p))),
         Some("stop") => stop(),
         Some("logs") => paths().and_then(|p| {
             let log = std::fs::read_to_string(&p.console)
@@ -168,21 +174,70 @@ pub fn vm_command(args: &[String]) -> i32 {
     }
 }
 
-/// The host powers the VM off (outright when the guest does not answer) and ends.
+/// `running` or `stopped`, from the host's state file and its lock: without connecting,
+/// since a connection keeps the VM up.
+fn status(p: &Paths) -> &'static str {
+    let up = std::fs::read_to_string(&p.state).is_ok_and(|s| s.trim() == "running");
+    if up && !lock_is_free(&p.lock) {
+        "running"
+    } else {
+        "stopped"
+    }
+}
+
+/// The process a pid file names: never 0, 1 or a negative number, which `kill` takes
+/// for a process group, init, or every process of the user.
+fn pid_from(text: &str) -> Option<libc::pid_t> {
+    text.trim()
+        .parse()
+        .ok()
+        .filter(|pid: &libc::pid_t| *pid > 1)
+}
+
+/// The host (or its standby) powers the VM off and ends: SIGTERM, which wakes no VM.
 fn stop() -> Result<(), String> {
     let p = paths()?;
-    let Ok(mut s) = UnixStream::connect(&p.vm_sock) else {
+    if lock_is_free(&p.lock) {
         return Ok(());
+    }
+    let named = |p: &Paths| {
+        std::fs::read_to_string(&p.pid)
+            .ok()
+            .and_then(|s| pid_from(&s))
     };
-    s.write_all(b"STOP\n")
-        .map_err(|e| format!("cannot reach the VM host: {e}"))?;
-    // It closes the connection once the VM is off, then ends.
-    let _ = s.read_to_end(&mut Vec::new());
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !lock_is_free(&p.lock) && Instant::now() < deadline {
+    if named(&p).is_none() {
+        // A host without a pid file: asked on its socket.
+        if let Ok(mut s) = UnixStream::connect(&p.vm_sock) {
+            let _ = s.write_all(b"STOP\n");
+            let _ = s.read_to_end(&mut Vec::new());
+        }
+        return Ok(());
+    }
+    // The host, and the standby it may start meanwhile, end; a host that a command starts
+    // meanwhile (it never begins as a standby) is left alone. Powering off takes 30
+    // seconds at most.
+    let deadline = Instant::now() + Duration::from_secs(40);
+    let mut signalled: Vec<libc::pid_t> = Vec::new();
+    loop {
+        if lock_is_free(&p.lock) {
+            return Ok(());
+        }
+        let standby = std::fs::read_to_string(&p.state).is_ok_and(|s| s.trim() == "standby");
+        match named(&p) {
+            Some(pid) if signalled.contains(&pid) => {}
+            Some(pid) if signalled.is_empty() || standby => {
+                // SAFETY: a signal to the VM host or its standby: it holds the lock, so the
+                // pid file is its own.
+                unsafe { libc::kill(pid, libc::SIGTERM) };
+                signalled.push(pid);
+            }
+            _ => return Ok(()),
+        }
+        if Instant::now() >= deadline {
+            return Err("the VM host did not stop within 40 seconds".into());
+        }
         std::thread::sleep(Duration::from_millis(50));
     }
-    Ok(())
 }
 
 /// The path with `..` and links resolved, as far as it exists (the rest is appended).
@@ -340,12 +395,27 @@ impl Out {
 struct Window(Mutex<u64>, Condvar);
 
 fn run_remote(mut stream: UnixStream, f: &Forward, tty: bool, cwd: &str) -> Result<i32, Failed> {
-    // A host that is stopping closes without `OK`: the command never reached its VM.
+    // A host that is stopping closes without `OK`: the command never reached its VM. One
+    // whose VM cannot start says why (`ERR …`).
     stream
         .write_all(format!("PORT {CLI_PORT}\n").as_bytes())
         .map_err(|_| Failed::NotTaken)?;
-    let mut ok = [0u8; 3];
-    if stream.read_exact(&mut ok).is_err() || &ok != b"OK\n" {
+    let mut answer = Vec::new();
+    let mut byte = [0u8; 1];
+    while answer.len() < 4096 {
+        match stream.read(&mut byte) {
+            Ok(1) if byte[0] == b'\n' => break,
+            Ok(1) => answer.push(byte[0]),
+            _ => return Err(Failed::NotTaken),
+        }
+    }
+    let answer = String::from_utf8_lossy(&answer);
+    if let Some(why) = answer.strip_prefix("ERR ") {
+        return Err(Failed::Error(
+            why.trim_start_matches("openpod: ").replace('\t', "\n"),
+        ));
+    }
+    if answer != "OK" {
         return Err(Failed::NotTaken);
     }
     let io = |e: std::io::Error| Failed::Error(format!("the connection to the VM failed: {e}"));
@@ -503,5 +573,19 @@ mod tests {
         assert!(check_paths(&paths, dir.path()).is_err());
         let paths = vec![dir.path().join("new/deeper").display().to_string()];
         assert!(check_paths(&paths, dir.path()).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod pid_tests {
+    use super::*;
+
+    #[test]
+    fn a_pid_file_names_one_process() {
+        assert_eq!(pid_from("123\n"), Some(123));
+        // kill(0) and kill(-1) would reach the process group or every process.
+        for bad in ["0", "-1", "1", "", "x", "-42"] {
+            assert_eq!(pid_from(bad), None, "{bad:?}");
+        }
     }
 }

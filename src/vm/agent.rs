@@ -28,12 +28,20 @@ pub fn vm_agent_main() -> i32 {
 }
 
 fn run() -> Result<()> {
+    // PID 1 blocks the signals it waits for, and a child inherits that mask: the commands
+    // run here must get theirs as a local command does (Ctrl+C ends `logs -f`), and the
+    // agent itself must end on SIGTERM when the VM powers off.
+    crate::signals::unblock_all();
     let api = listen(API_PORT)?;
     let cli = listen(CLI_PORT)?;
     let dirs = crate::paths::dirs()?;
-    let ctx = Arc::new(crate::api::router::Ctx::new(dirs));
+    let mut ctx = crate::api::router::Ctx::new(dirs);
+    // The Mac's paths: the VM sees only its /Users, at the same place.
+    ctx.binds_under = Some("/Users".into());
+    let ctx = Arc::new(ctx);
     crate::helper::helpers_in_own_group();
     crate::helper::raise_descriptor_limit();
+    eprintln!("openpod: VM agent listens");
     std::thread::spawn(move || {
         accept_each(&api, |stream| {
             let ctx = ctx.clone();

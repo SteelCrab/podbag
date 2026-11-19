@@ -299,9 +299,24 @@ agent (vsock is closed to them). Images, containers and volumes stay on a sparse
 disk, `~/.openpod/disk.img`, between VM runs; `openpod vm stop` and a logout power the VM
 off cleanly, and when the disk cannot be mounted, commands say so instead of using memory.
 The VM uses 2 GiB of memory (`OPENPOD_VM_MEMORY`, MiB); containers get 1048576 open files
-and `vm.max_map_count` 262144, like Docker Desktop's. Still to come: the docker CLI and
-Compose on the Mac, published ports on the Mac's localhost, and memory and disk space given
-back while the VM runs.
+and `vm.max_map_count` 262144, like Docker Desktop's.
+
+The docker CLI, Compose and buildx use openpod through its Docker API socket:
+
+```sh
+export DOCKER_HOST=unix://$HOME/.openpod/run/docker.sock
+docker run --rm alpine echo hi
+docker compose up -d
+docker buildx create --use --driver docker-container
+docker buildx build --load -t app .
+```
+
+The socket stays while the VM is off: a standby of about 8 MiB waits on it, and the first
+request starts the VM. It appears with the first openpod command (`openpod vm start`) and
+goes with `openpod vm stop`. Bind mounts must come from under `/Users` (`mounts denied`
+otherwise); named volumes live in the VM. Each docker request after a pause brings the
+VM's clock to the Mac's. Still to come: published ports on the Mac's localhost, and memory
+and disk space given back while the VM runs.
 
 ## Requirements
 

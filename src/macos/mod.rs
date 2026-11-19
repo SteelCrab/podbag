@@ -3,4 +3,5 @@
 
 pub mod cli;
 pub mod host;
+pub mod standby;
 pub mod vm;

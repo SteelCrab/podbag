@@ -28,6 +28,9 @@ pub struct VmSpec {
     pub cmdline: String,
     /// Shared with the guest as virtiofs tag `users` (the Mac's /Users).
     pub share: PathBuf,
+    /// The network device's address: the same for every VM of a home, so the Mac's DHCP
+    /// server gives it its address again.
+    pub mac: [u8; 6],
 }
 
 /// A started VM.
@@ -99,6 +102,12 @@ fn configuration(spec: &VmSpec) -> Result<Retained<VZVirtualMachineConfiguration
 
         let net = VZVirtioNetworkDeviceConfiguration::new();
         net.setAttachment(Some(&VZNATNetworkDeviceAttachment::new()));
+        let mac = spec.mac.map(|b| format!("{b:02x}")).join(":");
+        if let Some(mac) =
+            VZMACAddress::initWithString(VZMACAddress::alloc(), &NSString::from_str(&mac))
+        {
+            net.setMACAddress(&mac);
+        }
         config.setNetworkDevices(&NSArray::from_retained_slice(&[Retained::into_super(net)]));
 
         let log = std::fs::OpenOptions::new()

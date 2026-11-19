@@ -39,6 +39,7 @@ fn main() {
 fn macos_front(args: Vec<String>) -> Option<i32> {
     match args.first().map(String::as_str) {
         Some("__vm-host") => Some(openpod::macos::host::host_main()),
+        Some("__vm-standby") => Some(openpod::macos::standby::standby_main()),
         Some("vm") => Some(openpod::macos::cli::vm_command(&args[1..])),
         None | Some("-h" | "--help" | "help" | "-V" | "--version") => None,
         // Helpers the library starts on this Mac (`__store`, `__shim`, …) run here.

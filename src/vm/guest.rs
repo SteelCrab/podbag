@@ -22,7 +22,10 @@ pub fn vm_init_main() -> ! {
         let e = leave_rootfs();
         eprintln!("openpod: cannot leave the initramfs root: {e}");
     }
+    let started = std::time::Instant::now();
+    eprintln!("openpod: VM init");
     let problems = setup();
+    eprintln!("openpod: VM set up in {} ms", started.elapsed().as_millis());
     if !problems.is_empty() {
         let why: Vec<String> = problems.iter().map(|e| e.to_string()).collect();
         for w in &why {
@@ -35,8 +38,8 @@ pub fn vm_init_main() -> ! {
     }
     raise_limits();
     let signals = [libc::SIGCHLD, libc::SIGTERM, libc::SIGINT, libc::SIGPWR];
-    // Before the agent starts: its end must not go unnoticed. Children start with an
-    // empty signal mask.
+    // Before the agent starts: its end must not go unnoticed. The agent inherits the
+    // mask and clears it.
     crate::signals::block(&signals);
     reap_until_poweroff(&signals, start_agent())
 }

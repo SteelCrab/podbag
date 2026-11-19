@@ -27,7 +27,7 @@ const POLL: Duration = Duration::from_millis(100);
 /// Routes under `/containers/`; `rest` is the path after it, split at `/`.
 pub fn route(req: &Request, ctx: &Ctx, rest: &[&str]) -> Option<Reply> {
     Some(match (req.method.as_str(), rest) {
-        ("POST", ["create"]) => create(req),
+        ("POST", ["create"]) => create(req, ctx),
         ("GET", ["json"]) => list(req, ctx),
         ("POST", ["prune"]) => prune(req),
         ("GET", [id, "json"]) => inspect(ctx, id),
@@ -176,7 +176,7 @@ macro_rules! ok_or_reply {
 }
 
 /// `POST /containers/create?name=…`.
-fn create(req: &Request) -> Reply {
+fn create(req: &Request, ctx: &Ctx) -> Reply {
     let name = req.query.get("name").filter(|n| !n.is_empty());
     if let Some(n) = name {
         ok_or_reply!(crate::container::check_name(n.trim_start_matches('/')));
@@ -193,6 +193,20 @@ fn create(req: &Request) -> Reply {
         Ok(b) => b,
         Err(e) => return message(400, format!("{e:?}")),
     };
+    if let Some(root) = &ctx.binds_under {
+        for source in ok_or_reply!(super::create::bind_sources(&body)) {
+            if !super::create::lies_under(std::path::Path::new(&source), root) {
+                return message(
+                    400,
+                    format!(
+                        "mounts denied: {source} is not under {}, the only Mac directory \
+                         the VM sees; move it there, or use a named volume",
+                        root.display()
+                    ),
+                );
+            }
+        }
+    }
     let (c, warnings) = ok_or_reply!(container_from_create(&body, name));
     let handle = ok_or_reply!(c.create());
     Reply::Json(201, json!({"Id": handle.id(), "Warnings": warnings}))

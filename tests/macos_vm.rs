@@ -49,24 +49,120 @@ fn openpod_bin() -> PathBuf {
         .clone()
 }
 
+/// The images the tests use, by the names they use, and where they come from: Google's
+/// Docker Hub mirror. Docker Hub allows 100 anonymous pulls an hour, which one run of
+/// these tests would use up if each test pulled.
+const IMAGES: &[(&str, Option<(&str, &str)>)] = &[
+    (
+        "mirror.gcr.io/library/alpine:3.22",
+        Some(("alpine", "3.22")),
+    ),
+    (
+        "mirror.gcr.io/library/python:3.13-alpine",
+        Some(("python", "3.13-alpine")),
+    ),
+    // BuildKit for buildx, by its mirror name (the builder is told to use it).
+    ("mirror.gcr.io/moby/buildkit:buildx-stable-1", None),
+];
+
+/// A data disk with [`IMAGES`], made once per run (in `target/macos-test-seed`) and
+/// cloned into each test's home: APFS clones share blocks, so this costs no space.
+fn seed_disk() -> PathBuf {
+    static SEED: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    SEED.get_or_init(|| {
+        let seed = Mac::named(60, "seed");
+        for (from, name) in IMAGES {
+            seed.ok(&["pull", from]);
+            let Some((repo, tag)) = name else {
+                continue;
+            };
+            // `docker tag`, through the Docker API.
+            let tagged = Command::new("curl")
+                .args(["-s", "-f", "-X", "POST", "--unix-socket"])
+                .arg(seed.docker_sock())
+                .arg(format!(
+                    "http://localhost/images/{from}/tag?repo={repo}&tag={tag}"
+                ))
+                .output()
+                .unwrap();
+            assert!(tagged.status.success(), "tag {from}: {tagged:?}");
+        }
+        seed.ok(&["vm", "stop"]);
+        let dir = repo().join("target/macos-test-seed");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let disk = dir.join("disk.img");
+        std::fs::rename(seed.home.path().join("disk.img"), &disk).unwrap();
+        disk
+    })
+    .clone()
+}
+
 /// A Mac home of its own (`OPENPOD_MAC_HOME`): its own VM, disk and sockets. The VM is
 /// stopped on drop.
 struct Mac {
-    home: tempfile::TempDir,
+    home: Home,
     bin: PathBuf,
     idle: u32,
 }
 
+/// A home directory, removed on drop.
+struct Home(PathBuf);
+
+impl Home {
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Home {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 impl Mac {
+    /// A home whose disk already has the test images (a clone of the seed).
     fn new(idle_secs: u32) -> Mac {
-        // Short socket paths: a Unix socket path is limited to 104 bytes on macOS.
-        let home = tempfile::Builder::new()
-            .prefix("opm")
-            .tempdir_in("/tmp")
+        let mac = Mac::bare(idle_secs);
+        let cloned = Command::new("cp")
+            .arg("-c")
+            .arg(seed_disk())
+            .arg(mac.home.path().join("disk.img"))
+            .status()
             .unwrap();
+        assert!(cloned.success());
+        mac
+    }
+
+    /// A home with a new, empty disk.
+    fn bare(idle_secs: u32) -> Mac {
+        Mac::named(idle_secs, std::thread::current().name().unwrap_or("main"))
+    }
+
+    /// A home with a new, empty disk, at a path that is the same in every run (from
+    /// `name`): its VM keeps its MAC address, so the Mac's DHCP server gives it the
+    /// address it had instead of one more of its 253 (leased for an hour). Short: a Unix
+    /// socket path is limited to 104 bytes on macOS.
+    fn named(idle_secs: u32, name: &str) -> Mac {
+        let mut hash: u32 = 0x811c_9dc5;
+        for b in name.bytes() {
+            hash = (hash ^ u32::from(b)).wrapping_mul(0x0100_0193);
+        }
+        let path = PathBuf::from(format!("/tmp/opm-{hash:08x}"));
+        let bin = openpod_bin();
+        if path.exists() {
+            // Left by a run that was cut short: its VM would have the same address.
+            let _ = Command::new(&bin)
+                .args(["vm", "stop"])
+                .env("OPENPOD_MAC_HOME", &path)
+                .output();
+            let _ = std::fs::remove_dir_all(&path);
+        }
+        std::fs::create_dir_all(&path).unwrap();
         Mac {
-            home,
-            bin: openpod_bin(),
+            home: Home(path),
+            bin,
             idle: idle_secs,
         }
     }
@@ -99,6 +195,29 @@ impl Mac {
 
     fn sock(&self) -> PathBuf {
         self.home.path().join("run/vm.sock")
+    }
+
+    fn docker_sock(&self) -> PathBuf {
+        self.home.path().join("run/docker.sock")
+    }
+
+    /// Wait (30 s at most) until `vm status` says the VM is off.
+    fn wait_until_stopped(&self) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while self.ok(&["vm", "status"]) != "stopped" {
+            assert!(Instant::now() < deadline, "the VM never stopped");
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+
+    /// The process that holds this home's lock (the VM host, or its standby).
+    fn host_pid(&self) -> Option<i32> {
+        let lsof = Command::new("lsof")
+            .arg("-t")
+            .arg(self.home.path().join("run/host.lock"))
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&lsof.stdout).trim().parse().ok()
     }
 }
 
@@ -199,13 +318,8 @@ fn two_commands_share_one_vm_and_it_stops_when_idle() {
     // pgrep sees hosts of other tests too; this home's socket tells ours apart.
     assert!(!String::from_utf8_lossy(&hosts.stdout).trim().is_empty());
     assert!(mac.sock().exists());
-    // Idle for 5 seconds with nothing running: the VM goes, and the host with it.
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while mac.sock().exists() {
-        assert!(Instant::now() < deadline, "the VM never stopped");
-        std::thread::sleep(Duration::from_millis(200));
-    }
-    assert_eq!(mac.ok(&["vm", "status"]), "stopped");
+    // Idle for 5 seconds with nothing running: the VM goes.
+    mac.wait_until_stopped();
 }
 
 #[test]
@@ -348,7 +462,6 @@ fn a_terminal_reaches_the_container() {
     }
     use std::io::Write;
     let mac = Mac::new(60);
-    mac.ok(&["pull", "alpine:3.22"]);
     let (mut master, mut child) =
         under_terminal(&mac, &["run", "--rm", "-it", "alpine:3.22", "sh"], 33, 101);
     assert!(read_until(&mut master, "#", 60).contains('#'), "no prompt");
@@ -383,7 +496,15 @@ fn a_terminal_reaches_the_container() {
     let after = read_until(&mut master, "still-42", 10);
     assert!(after.contains("still-42"), "{after:?}");
     master.write_all(b"exit 5\r").unwrap();
-    let status = child.wait().unwrap();
+    // Read on while it ends: a terminal's last process waits for its output to be read.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "it did not end");
+        let _ = read_until(&mut master, "\0", 1);
+    };
     assert_eq!(status.code(), Some(5));
 }
 
@@ -399,11 +520,7 @@ fn a_running_container_keeps_the_vm() {
     assert_eq!(mac.ok(&["vm", "status"]), "running");
     assert!(mac.ok(&["ps"]).contains("keep"));
     mac.ok(&["rm", "-f", "keep"]);
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while mac.sock().exists() {
-        assert!(Instant::now() < deadline, "the VM never stopped");
-        std::thread::sleep(Duration::from_millis(200));
-    }
+    mac.wait_until_stopped();
 }
 
 #[test]
@@ -461,7 +578,6 @@ fn a_command_ends_when_its_terminal_goes() {
         return;
     }
     let mac = Mac::new(60);
-    mac.ok(&["pull", "alpine:3.22"]);
     // A program that ends on a hangup. (A container's PID 1 without a handler ignores
     // it, here as with a local terminal and with Docker.)
     let (master, mut child) = under_terminal(
@@ -511,7 +627,6 @@ fn a_reader_that_leaves_ends_the_command() {
     }
     use std::io::BufRead;
     let mac = Mac::new(60);
-    mac.ok(&["pull", "alpine:3.22"]);
     // A reader that takes one line and leaves: the command ends too.
     let mut yes = mac
         .cmd(&["run", "--rm", "alpine:3.22", "yes"])
@@ -540,7 +655,6 @@ fn a_slow_reader_gets_everything() {
         return;
     }
     let mac = Mac::new(60);
-    mac.ok(&["pull", "alpine:3.22"]);
     // Readers that wait before they read, for outputs around what the buffers between
     // the VM and the Mac hold: nothing is lost, whatever the size.
     std::thread::scope(|s| {
@@ -572,7 +686,6 @@ fn input_stays_for_who_reads_it() {
         return;
     }
     let mac = Mac::new(60);
-    mac.ok(&["pull", "alpine:3.22"]);
     // Without -i the command does not take the caller's input: `cat` gets it.
     let script = format!(
         "{{ {} run --rm alpine:3.22 true; cat; }} <<'EOF'\nleft for cat\nEOF",
@@ -692,7 +805,6 @@ fn mac_paths_outside_users_are_refused_however_written() {
         return;
     }
     let mac = Mac::new(60);
-    mac.ok(&["pull", "alpine:3.22"]);
     let home = tempfile::tempdir_in(std::env::var("HOME").unwrap()).unwrap();
     let up = "../".repeat(home.path().components().count());
     let dotted = format!("{up}tmp:/x");
@@ -782,15 +894,7 @@ fn a_stopped_host_keeps_what_was_written() {
         "echo persisted > /d/f",
     ]);
     // Logging out ends the host with SIGTERM. It is the one process holding its lock.
-    let lsof = Command::new("lsof")
-        .arg("-t")
-        .arg(mac.home.path().join("run/host.lock"))
-        .output()
-        .unwrap();
-    let pid: i32 = String::from_utf8_lossy(&lsof.stdout)
-        .trim()
-        .parse()
-        .expect("one host");
+    let pid = mac.host_pid().expect("one host");
     // SAFETY: a signal to the host this test started.
     unsafe { libc::kill(pid, libc::SIGTERM) };
     let deadline = Instant::now() + Duration::from_secs(40);
@@ -817,7 +921,7 @@ fn commands_while_the_vm_stops_all_succeed() {
         return;
     }
     let mac = Mac::new(60);
-    mac.ok(&["pull", "alpine:3.22"]);
+    mac.ok(&["ps"]);
     // An old error in the host's log is not news.
     use std::io::Write;
     std::fs::OpenOptions::new()
@@ -851,21 +955,21 @@ fn mac_settings_stay_on_the_mac() {
         return;
     }
     let mac = Mac::new(60);
-    // Paths and programs of the Mac mean nothing in the VM.
-    let pulled = mac
-        .cmd(&["pull", "alpine:3.22"])
+    // Paths and programs of the Mac mean nothing in the VM: the VM's store and its
+    // openpod are used.
+    let ran = mac
+        .cmd(&["run", "--rm", "alpine:3.22", "true"])
         .env("OPENPOD_DATA_DIR", "/tmp/opm-elsewhere")
         .env("OPENPOD_BIN", "/nonexistent/openpod")
         .stdin(Stdio::null())
         .output()
         .unwrap();
     assert_eq!(
-        pulled.status.code(),
+        ran.status.code(),
         Some(0),
         "{}",
-        String::from_utf8_lossy(&pulled.stderr)
+        String::from_utf8_lossy(&ran.stderr)
     );
-    assert!(mac.ok(&["images"]).contains("alpine"));
 }
 
 #[test]
@@ -935,7 +1039,6 @@ fn a_signal_is_not_held_up_by_unread_input() {
         return;
     }
     let mac = Mac::new(60);
-    mac.ok(&["pull", "alpine:3.22"]);
     // Endless input that the container never reads, then a signal from another process.
     let mut run = mac
         .cmd(&[
@@ -972,4 +1075,532 @@ fn a_signal_is_not_held_up_by_unread_input() {
         std::thread::sleep(Duration::from_millis(100));
     };
     assert_eq!(status.code(), Some(3));
+}
+
+#[test]
+fn the_sockets_stay_while_the_vm_is_off() {
+    if !enabled() {
+        return;
+    }
+    let mac = Mac::new(2);
+    mac.ok(&["ps"]);
+    mac.wait_until_stopped();
+    // The VM is off; its sockets stay for the next command or docker client.
+    assert!(mac.sock().exists() && mac.docker_sock().exists());
+    // A docker client's first request starts a VM and gets its answer.
+    let ping = Command::new("curl")
+        .args(["-s", "-m", "180", "--unix-socket"])
+        .arg(mac.docker_sock())
+        .arg("http://localhost/_ping")
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&ping.stdout), "OK");
+    assert_eq!(mac.ok(&["vm", "status"]), "running");
+    mac.ok(&["ps"]);
+}
+
+#[test]
+fn standby_uses_little_memory() {
+    if !enabled() {
+        return;
+    }
+    let mac = Mac::new(2);
+    mac.ok(&["ps"]);
+    mac.wait_until_stopped();
+    let pid = mac.host_pid().expect("a standby holds the lock");
+    let rss = Command::new("ps")
+        .args(["-o", "rss=", "-p", &pid.to_string()])
+        .output()
+        .unwrap();
+    let kib: u64 = String::from_utf8_lossy(&rss.stdout).trim().parse().unwrap();
+    eprintln!("standby RSS: {kib} KiB");
+    assert!(kib < 20 * 1024, "standby RSS {kib} KiB");
+}
+
+#[test]
+fn vm_stop_ends_the_standby() {
+    if !enabled() {
+        return;
+    }
+    let mac = Mac::new(2);
+    mac.ok(&["ps"]);
+    mac.wait_until_stopped();
+    assert!(mac.sock().exists(), "no standby");
+    mac.ok(&["vm", "stop"]);
+    assert!(!mac.sock().exists() && !mac.docker_sock().exists());
+    assert_eq!(mac.host_pid(), None);
+}
+
+/// Docker Desktop's docker CLI, if there is one.
+fn have_docker() -> bool {
+    let found = Command::new("docker")
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !found {
+        eprintln!("no docker CLI: skipped");
+    }
+    found
+}
+
+/// A docker config of the tests' own (so nothing is written in ~/.docker), with the
+/// compose and buildx plugins of this Mac.
+fn docker_config() -> PathBuf {
+    static CONFIG: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    CONFIG
+        .get_or_init(|| {
+            let dir = repo().join("target/macos-test-docker");
+            let _ = std::fs::remove_dir_all(&dir);
+            let plugins = dir.join("cli-plugins");
+            std::fs::create_dir_all(&plugins).unwrap();
+            let home = PathBuf::from(std::env::var("HOME").unwrap());
+            for p in ["docker-compose", "docker-buildx"] {
+                let from = home.join(".docker/cli-plugins").join(p);
+                if from.exists() {
+                    std::os::unix::fs::symlink(&from, plugins.join(p)).unwrap();
+                }
+            }
+            dir
+        })
+        .clone()
+}
+
+impl Mac {
+    /// The docker CLI on this home's docker.sock: never the user's own Docker.
+    fn docker(&self, args: &[&str]) -> Command {
+        let mut c = Command::new("docker");
+        c.arg("-H")
+            .arg(format!("unix://{}", self.docker_sock().display()))
+            .args(args)
+            .env_remove("DOCKER_CONTEXT")
+            .env_remove("DOCKER_HOST")
+            .env("DOCKER_CONFIG", docker_config())
+            .stdin(Stdio::null());
+        c
+    }
+
+    fn docker_ok(&self, args: &[&str]) -> String {
+        let out = self.docker(args).output().unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "docker {args:?}: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim_end().to_string()
+    }
+}
+
+#[test]
+fn docker_runs_containers() {
+    if !enabled() || !have_docker() {
+        return;
+    }
+    let mac = Mac::new(60);
+    mac.ok(&["ps"]);
+    assert!(
+        mac.docker_ok(&["version", "--format", "{{.Server.Version}}"])
+            .len()
+            > 2
+    );
+    assert_eq!(
+        mac.docker_ok(&["run", "--rm", "alpine:3.22", "echo", "hi"]),
+        "hi"
+    );
+    mac.docker_ok(&["run", "-d", "--name", "web", "alpine:3.22", "sleep", "100"]);
+    assert!(mac.docker_ok(&["ps"]).contains("web"));
+    assert_eq!(mac.docker_ok(&["exec", "web", "echo", "inside"]), "inside");
+    mac.docker_ok(&["rm", "-f", "web"]);
+}
+
+#[test]
+fn docker_binds_follow_the_mac_rule() {
+    if !enabled() || !have_docker() {
+        return;
+    }
+    let mac = Mac::new(60);
+    mac.ok(&["ps"]);
+    let dir = tempfile::tempdir_in(std::env::var("HOME").unwrap()).unwrap();
+    std::fs::write(dir.path().join("note"), "from the mac\n").unwrap();
+    let bind = format!("{}:/d", dir.path().display());
+    assert_eq!(
+        mac.docker_ok(&["run", "--rm", "-v", &bind, "alpine:3.22", "cat", "/d/note"]),
+        "from the mac"
+    );
+    // A link under /Users that leads out of it is out too.
+    std::os::unix::fs::symlink("/tmp", dir.path().join("out")).unwrap();
+    let linked = format!("{}/out:/x", dir.path().display());
+    for args in [
+        &["run", "--rm", "-v", "/tmp:/x", "alpine:3.22", "true"][..],
+        &[
+            "run",
+            "--rm",
+            "--mount",
+            "type=bind,source=/opt,target=/x",
+            "alpine:3.22",
+            "true",
+        ],
+        &["run", "--rm", "-v", &linked, "alpine:3.22", "true"],
+    ] {
+        let out = mac.docker(args).output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_ne!(out.status.code(), Some(0), "{args:?}");
+        assert!(err.contains("mounts denied"), "{args:?}: {err}");
+    }
+    // Named volumes are the VM's own.
+    mac.docker_ok(&["run", "--rm", "-v", "data:/d", "alpine:3.22", "true"]);
+}
+
+#[test]
+fn docker_waits_for_the_vm() {
+    if !enabled() || !have_docker() {
+        return;
+    }
+    let mac = Mac::new(2);
+    mac.ok(&["ps"]);
+    mac.wait_until_stopped();
+    // The VM is off: the docker client's request starts it.
+    assert_eq!(
+        mac.docker_ok(&["run", "--rm", "alpine:3.22", "echo", "again"]),
+        "again"
+    );
+}
+
+#[test]
+fn docker_clock_follows_the_mac() {
+    if !enabled() || !have_docker() {
+        return;
+    }
+    let mac = Mac::new(60);
+    mac.ok(&["ps"]);
+    // The VM's clock goes wrong (as after the Mac slept)...
+    mac.docker_ok(&[
+        "run",
+        "--rm",
+        "--privileged",
+        "alpine:3.22",
+        "date",
+        "-s",
+        "@1000000000",
+    ]);
+    std::thread::sleep(Duration::from_secs(11));
+    // ...and a docker client's next request finds it right again.
+    let vm: u64 = mac
+        .docker_ok(&["run", "--rm", "alpine:3.22", "date", "+%s"])
+        .parse()
+        .unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    assert!(now.abs_diff(vm) < 10, "VM {vm}, Mac {now}");
+}
+
+#[test]
+fn compose_up_and_down() {
+    if !enabled() || !have_docker() {
+        return;
+    }
+    let mac = Mac::new(60);
+    mac.ok(&["ps"]);
+    let project = tempfile::tempdir_in(std::env::var("HOME").unwrap()).unwrap();
+    std::fs::create_dir(project.path().join("data")).unwrap();
+    std::fs::write(project.path().join("data/index"), "served from the mac\n").unwrap();
+    std::fs::write(
+        project.path().join("compose.yaml"),
+        r#"services:
+  web:
+    image: python:3.13-alpine
+    command: ["python3", "-m", "http.server", "8000", "--directory", "/data"]
+    volumes:
+      - ./data:/data
+  client:
+    image: alpine:3.22
+    command: ["sleep", "300"]
+"#,
+    )
+    .unwrap();
+    let compose = |args: &[&str]| {
+        let mut all = vec!["compose", "-p", "mac2t"];
+        all.extend(args);
+        let mut c = mac.docker(&all);
+        c.current_dir(project.path());
+        c.output().unwrap()
+    };
+    let up = compose(&["up", "-d"]);
+    assert!(
+        up.status.success(),
+        "{}",
+        String::from_utf8_lossy(&up.stderr)
+    );
+    // In openpod's VM (not some other Docker).
+    assert!(mac.ok(&["ps"]).contains("mac2t"));
+    // The client finds the web service by its name, on the project's network; the page
+    // comes from the Mac's directory.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let got = compose(&[
+            "exec",
+            "-T",
+            "client",
+            "wget",
+            "-qO-",
+            "http://web:8000/index",
+        ]);
+        if String::from_utf8_lossy(&got.stdout) == "served from the mac\n" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{}",
+            String::from_utf8_lossy(&got.stderr)
+        );
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    // What a container writes there is on the Mac.
+    let wrote = compose(&["exec", "-T", "web", "sh", "-c", "echo back > /data/back"]);
+    assert!(wrote.status.success());
+    assert_eq!(
+        std::fs::read_to_string(project.path().join("data/back")).unwrap(),
+        "back\n"
+    );
+    let down = compose(&["down", "-v"]);
+    assert!(
+        down.status.success(),
+        "{}",
+        String::from_utf8_lossy(&down.stderr)
+    );
+    assert!(!mac.docker_ok(&["ps", "-a"]).contains("mac2t"));
+}
+
+#[test]
+fn buildx_builds_and_loads() {
+    if !enabled() || !have_docker() {
+        return;
+    }
+    let mac = Mac::new(60);
+    mac.ok(&["ps"]);
+    let context = tempfile::tempdir_in(std::env::var("HOME").unwrap()).unwrap();
+    std::fs::write(
+        context.path().join("Dockerfile"),
+        "FROM mirror.gcr.io/library/alpine:3.22\nRUN echo built > /f\nCMD [\"cat\", \"/f\"]\n",
+    )
+    .unwrap();
+    mac.docker_ok(&[
+        "buildx",
+        "create",
+        "--name",
+        "mac2b",
+        "--driver",
+        "docker-container",
+        "--driver-opt",
+        "image=mirror.gcr.io/moby/buildkit:buildx-stable-1",
+    ]);
+    let built = mac
+        .docker(&[
+            "buildx",
+            "build",
+            "--builder",
+            "mac2b",
+            "--load",
+            "-t",
+            "mac2:test",
+            ".",
+        ])
+        .current_dir(context.path())
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    assert_eq!(mac.docker_ok(&["run", "--rm", "mac2:test"]), "built");
+    mac.docker_ok(&["buildx", "rm", "mac2b"]);
+}
+
+#[test]
+fn a_home_keeps_its_network_address() {
+    if !enabled() {
+        return;
+    }
+    let mac = Mac::new(60);
+    let address = || {
+        mac.ok(&[
+            "run",
+            "--rm",
+            "--network",
+            "host",
+            "alpine:3.22",
+            "cat",
+            "/sys/class/net/eth0/address",
+        ])
+    };
+    let first = address();
+    mac.ok(&["vm", "stop"]);
+    // The next VM of this home has the same MAC address, so the Mac's DHCP server gives
+    // it its address again instead of one more from its pool (253 addresses, leased for
+    // an hour).
+    assert_eq!(address(), first);
+}
+
+impl Mac {
+    /// How many lines of this home's host log contain `what`.
+    fn log_count(&self, what: &str) -> usize {
+        std::fs::read_to_string(self.home.path().join("run/host.log"))
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.contains(what))
+            .count()
+    }
+
+    /// Wait (60 s at most) until the host log has `n` lines with `what`.
+    fn wait_for_log(&self, what: &str, n: usize) {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while self.log_count(what) < n {
+            assert!(Instant::now() < deadline, "no {what:?} {n} in the host log");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
+#[test]
+fn vm_stop_at_the_standby_switch_ends_everything() {
+    if !enabled() {
+        return;
+    }
+    let mac = Mac::new(1);
+    for cycle in 1..=6 {
+        mac.ok(&["ps"]);
+        // Its VM is off: the host now starts the standby and ends.
+        mac.wait_for_log("]: stopped", cycle);
+        mac.ok(&["vm", "stop"]);
+        assert_eq!(
+            mac.host_pid(),
+            None,
+            "cycle {cycle}: something holds the lock"
+        );
+        assert!(!mac.sock().exists(), "cycle {cycle}: the socket stayed");
+    }
+}
+
+#[test]
+fn a_vm_that_cannot_start_says_so_to_docker_clients() {
+    if !enabled() || !have_docker() {
+        return;
+    }
+    let mac = Mac::new(2);
+    mac.ok(&["ps"]);
+    mac.wait_until_stopped();
+    // The disk breaks while the VM is off: its file system's superblock goes.
+    use std::os::unix::fs::FileExt;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(mac.home.path().join("disk.img"))
+        .unwrap()
+        .write_all_at(&[0u8; 4096], 1024)
+        .unwrap();
+    for attempt in 1..=2 {
+        let out = mac.docker(&["ps"]).output().unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_ne!(out.status.code(), Some(0), "attempt {attempt}");
+        assert!(err.contains("data disk"), "attempt {attempt}: {err}");
+    }
+    let cli = mac.run(&["ps"]);
+    let err = String::from_utf8_lossy(&cli.stderr);
+    assert_eq!(cli.status.code(), Some(125), "{err}");
+    assert!(err.contains("data disk"), "{err}");
+}
+
+#[test]
+fn clients_during_the_idle_stop_are_served() {
+    if !enabled() || !have_docker() {
+        return;
+    }
+    let mac = Mac::new(2);
+    mac.ok(&["ps"]);
+    // The moment the host decides to stop: these wait in the sockets' queues for the
+    // standby to start the next VM.
+    mac.wait_for_log("stopping (idle)", 1);
+    let ping = Command::new("curl")
+        .args(["-s", "-m", "180", "--unix-socket"])
+        .arg(mac.docker_sock())
+        .arg("http://localhost/_ping")
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&ping.stdout), "OK");
+    mac.docker_ok(&["ps"]);
+    mac.ok(&["ps"]);
+}
+
+#[test]
+fn the_vm_host_keeps_no_directory_busy() {
+    if !enabled() {
+        return;
+    }
+    let mac = Mac::new(60);
+    // Started from a directory the user may want to remove or eject.
+    let dir = tempfile::tempdir().unwrap();
+    let out = mac
+        .cmd(&["ps"])
+        .current_dir(dir.path())
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let pid = mac.host_pid().expect("a host");
+    let cwd = Command::new("lsof")
+        .args(["-a", "-d", "cwd", "-Fn", "-p", &pid.to_string()])
+        .output()
+        .unwrap();
+    let cwd = String::from_utf8_lossy(&cwd.stdout);
+    assert!(cwd.lines().any(|l| l == "n/"), "{cwd}");
+}
+
+#[test]
+fn ctrl_c_ends_a_command_without_a_handler() {
+    if !enabled() {
+        return;
+    }
+    let mac = Mac::new(60);
+    mac.ok(&[
+        "run",
+        "-d",
+        "--name",
+        "talker",
+        "alpine:3.22",
+        "sleep",
+        "300",
+    ]);
+    // `logs -f` sets no signal handler: a local one ends on SIGINT, and so must the VM's.
+    let mut logs = mac
+        .cmd(&["logs", "-f", "talker"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(2));
+    // SAFETY: a signal to the command this test started.
+    unsafe { libc::kill(logs.id() as i32, libc::SIGINT) };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = logs.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "SIGINT did not end it");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(status.code(), Some(130));
+    // The VM powers off at once: nothing in it holds SIGTERM back for 5 seconds.
+    mac.ok(&["rm", "-f", "talker"]);
+    let before = mac.log_count("]: stopped");
+    let started = Instant::now();
+    mac.ok(&["vm", "stop"]);
+    assert_eq!(mac.log_count("]: stopped"), before + 1);
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "it took {:?}",
+        started.elapsed()
+    );
 }

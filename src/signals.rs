@@ -69,9 +69,19 @@ pub fn notify_pipe(pipe_write: i32, signals: &[i32]) {
 }
 
 /// Hold these signals until `ignore` or `forward_to` handles them.
-/// Child processes started with `std::process::Command` get an empty mask.
+/// Child processes inherit the mask: `std::process::Command` keeps it (Rust 1.66 on).
 pub fn block(signals: &[i32]) {
     set_mask(libc::SIG_BLOCK, signals);
+}
+
+/// Block no signal: for a process whose parent passed it a mask it does not want.
+pub fn unblock_all() {
+    // SAFETY: an empty set made by sigemptyset.
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::pthread_sigmask(libc::SIG_SETMASK, &set, std::ptr::null_mut());
+    }
 }
 
 /// Ignore these signals, then deliver any that were held.

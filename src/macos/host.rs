@@ -4,14 +4,16 @@
 //! proxies them: `vm.sock` takes a first line `PORT <n>` (answered `OK` once the guest's
 //! port n is connected, then bytes both ways) or `STOP` (the VM is powered off, then the
 //! connection closes); `docker.sock` goes straight to the Docker API. One host runs per
-//! user (a lock file). It powers the VM off and ends when no connection has been open
-//! for the idle time (`OPENPOD_VM_IDLE`, seconds; 60) and the VM has no work, when asked,
-//! or on SIGTERM, SIGINT or SIGHUP (a logout).
+//! user (a lock file). When no connection has been open for the idle time
+//! (`OPENPOD_VM_IDLE`, seconds; 60) and the VM has no work, it powers the VM off and
+//! starts the standby (see [`super::standby`]) and ends: the sockets stay, and the next
+//! connection starts a VM again. When asked (`openpod vm stop`: SIGTERM, or `STOP`), and
+//! on SIGTERM, SIGINT or SIGHUP (a logout), it powers the VM off and ends.
 
 use super::vm::{Vm, VmSpec};
 use crate::vm::proto::{API_PORT, CLI_PORT, CliRequest, Frame};
 use std::io::{Read, Write};
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
@@ -32,6 +34,11 @@ pub struct Paths {
     pub docker_sock: PathBuf,
     pub lock: PathBuf,
     pub log: PathBuf,
+    /// `running` while the VM is up (read by `openpod vm status`, which must not
+    /// connect: a connection keeps the VM up).
+    pub state: PathBuf,
+    /// The process id of the host, or of its standby (a new process at each idle stop).
+    pub pid: PathBuf,
 }
 
 pub fn paths() -> Result<Paths, String> {
@@ -51,6 +58,8 @@ pub fn paths() -> Result<Paths, String> {
         docker_sock: run.join("docker.sock"),
         lock: run.join("host.lock"),
         log: run.join("host.log"),
+        state: run.join("state"),
+        pid: run.join("host.pid"),
         run,
         home,
     })
@@ -120,18 +129,6 @@ impl State {
         self.0.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// A new connection; false when the host is stopping (it is not served).
-    fn open(&self) -> bool {
-        let mut a = self.lock();
-        if a.stopping {
-            return false;
-        }
-        a.open += 1;
-        a.generation += 1;
-        a.changed = Some(Instant::now());
-        true
-    }
-
     fn close(&self) {
         let mut a = self.lock();
         a.open = a.open.saturating_sub(1);
@@ -164,6 +161,75 @@ impl State {
     }
 }
 
+/// What the host hands its standby and gets back (through exec): the lock and the two
+/// listening sockets, named by `OPENPOD_VM_FDS=<lock>,<docker>,<vm>`.
+pub struct Inherited {
+    pub lock: RawFd,
+    pub docker: RawFd,
+    pub vm: RawFd,
+}
+
+impl Inherited {
+    pub fn from_env() -> Option<Inherited> {
+        let fds: Vec<RawFd> = std::env::var("OPENPOD_VM_FDS")
+            .ok()?
+            .split(',')
+            .filter_map(|n| n.parse().ok())
+            .collect();
+        let [lock, docker, vm] = fds[..] else {
+            return None;
+        };
+        Some(Inherited { lock, docker, vm })
+    }
+
+    /// `openpod <what>` with these descriptors open in it.
+    fn command(&self, what: &str) -> std::io::Result<std::process::Command> {
+        for fd in [self.lock, self.docker, self.vm] {
+            // SAFETY: clears close-on-exec on descriptors this process owns.
+            unsafe { libc::fcntl(fd, libc::F_SETFD, 0) };
+        }
+        let mut cmd = std::process::Command::new(std::env::current_exe()?);
+        cmd.arg(what).env(
+            "OPENPOD_VM_FDS",
+            format!("{},{},{}", self.lock, self.docker, self.vm),
+        );
+        Ok(cmd)
+    }
+
+    /// Become `what` (the standby becomes `__vm-host`). Returns only on failure. Only a
+    /// process that never ran a VM does this: one that did has hung in the kernel's
+    /// exec (macOS 27).
+    pub fn exec(&self, what: &str) -> std::io::Error {
+        use std::os::unix::process::CommandExt;
+        match self.command(what) {
+            Ok(mut cmd) => cmd.exec(),
+            Err(e) => e,
+        }
+    }
+
+    /// `what` in a new process (the host starts its standby, then ends).
+    pub fn spawn(&self, what: &str) -> std::io::Result<std::process::Child> {
+        self.command(what)?
+            .stdin(std::process::Stdio::null())
+            .spawn()
+    }
+}
+
+/// The sockets: no new connection reaches this host.
+fn remove_sockets(p: &Paths) {
+    for f in [&p.vm_sock, &p.docker_sock] {
+        let _ = std::fs::remove_file(f);
+    }
+}
+
+/// The run directory's files of a host that ends; the pid file last (`openpod vm stop`
+/// waits for it to go).
+pub fn remove_files(p: &Paths) {
+    remove_sockets(p);
+    let _ = std::fs::remove_file(&p.state);
+    let _ = std::fs::remove_file(&p.pid);
+}
+
 /// Why the host's loop wakes before its second is up.
 enum Wake {
     /// `STOP` on vm.sock: the connection closes once the VM is off.
@@ -175,12 +241,85 @@ fn run() -> Result<(), String> {
     let p = paths()?;
     // SAFETY: umask only sets this process's mask for new files: they are the user's.
     unsafe { libc::umask(0o077) };
+    // The host and its standby live long: not in the directory of the command that
+    // started them (a disk to eject, a directory to remove).
+    let _ = std::env::set_current_dir("/");
     make_run_dir(&p)?;
-    let lock = std::fs::File::create(&p.lock).map_err(|e| format!("{}: {e}", p.lock.display()))?;
-    if !take_lock(&lock) {
-        // Another host runs (or is starting, or stopping): the CLI waits for it.
-        return Ok(());
+    // From the standby: the lock is held and the sockets listen already.
+    let inherited = Inherited::from_env();
+    let lock = match &inherited {
+        // SAFETY: the standby handed over these descriptors, which nothing else owns.
+        Some(fds) => unsafe { std::fs::File::from_raw_fd(fds.lock) },
+        None => {
+            let lock =
+                std::fs::File::create(&p.lock).map_err(|e| format!("{}: {e}", p.lock.display()))?;
+            if !take_lock(&lock) {
+                // Another host runs (or starts, or stops): the CLI waits for it.
+                return Ok(());
+            }
+            let _ = std::fs::write(&p.pid, std::process::id().to_string());
+            lock
+        }
+    };
+    let result = serve_vm(&p, &lock, inherited.as_ref());
+    if let Err(e) = &result {
+        match &inherited {
+            // Woken by clients: they get the error, and the standby waits again (the
+            // next client tries again).
+            Some(fds) => {
+                answer_queued(fds, e);
+                if fds.spawn("__vm-standby").is_err() {
+                    remove_files(&p);
+                }
+            }
+            None => remove_files(&p),
+        }
     }
+    result
+}
+
+/// Answer the connections waiting in the sockets' queues with `error`: a docker client an
+/// HTTP 500 (the docker CLI shows "Error response from daemon: …"), an openpod CLI an
+/// `ERR` line instead of `OK`.
+fn answer_queued(fds: &Inherited, error: &str) {
+    let message = format!("openpod: cannot start the VM: {error}");
+    for (fd, docker) in [(fds.docker, true), (fds.vm, false)] {
+        // SAFETY: a listening socket this process owns; ManuallyDrop leaves it open.
+        let listener = std::mem::ManuallyDrop::new(unsafe { UnixListener::from_raw_fd(fd) });
+        let _ = listener.set_nonblocking(true);
+        while let Ok((mut stream, _)) = listener.accept() {
+            let _ = stream.set_nonblocking(false);
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+            if docker {
+                // The request head, read before the answer.
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") && head.len() < 16 * 1024 {
+                    match stream.read(&mut byte) {
+                        Ok(1) => head.push(byte[0]),
+                        _ => break,
+                    }
+                }
+                let body = serde_json::json!({ "message": message }).to_string();
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            } else if read_first(&mut stream).is_ok() {
+                let _ =
+                    stream.write_all(format!("ERR {}\n", message.replace('\n', "\t")).as_bytes());
+            }
+        }
+        let _ = listener.set_nonblocking(false);
+    }
+}
+
+/// Start a VM and serve it until it stops; then become the standby, or end.
+fn serve_vm(p: &Paths, lock: &std::fs::File, inherited: Option<&Inherited>) -> Result<(), String> {
     // A logout ends the host with SIGTERM: the VM is powered off properly first.
     let signals = [libc::SIGTERM, libc::SIGINT, libc::SIGHUP];
     crate::signals::block(&signals);
@@ -200,7 +339,7 @@ fn run() -> Result<(), String> {
             ));
         }
     }
-    make_disk(&p)?;
+    make_disk(p)?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
@@ -221,50 +360,111 @@ fn run() -> Result<(), String> {
             crate::vm::proto::INIT_ARG
         ),
         share: PathBuf::from("/Users"),
+        mac: mac_address(&p.home),
     };
     let vm = Arc::new(Vm::start(&spec).map_err(start_error)?);
     let started = Instant::now();
-    if let Err(e) = wait_ready(&vm, &p) {
+    if let Err(e) = wait_ready(&vm, p) {
         power_off(&vm);
         return Err(e);
     }
     note("started");
+    let _ = std::fs::write(&p.state, "running");
+    // wait_ready's request set the VM's clock.
+    let clock = Arc::new(Mutex::new((std::time::SystemTime::now(), Instant::now())));
+    let (api, proxy) = match inherited {
+        // SAFETY: listening sockets the standby handed over.
+        Some(fds) => unsafe {
+            (
+                UnixListener::from_raw_fd(fds.docker),
+                UnixListener::from_raw_fd(fds.vm),
+            )
+        },
+        None => (listen(&p.docker_sock)?, listen(&p.vm_sock)?),
+    };
+    // Kept here too: a serve thread that ends must not close its socket.
+    let (api, proxy) = (Arc::new(api), Arc::new(proxy));
     let state = Arc::new(State::default());
-    let api = listen(&p.docker_sock)?;
-    let proxy = listen(&p.vm_sock)?;
-    for (listener, docker) in [(api, true), (proxy, false)] {
+    for (listener, docker) in [(api.clone(), true), (proxy.clone(), false)] {
         let (vm, state, wake) = (vm.clone(), state.clone(), wake.clone());
-        std::thread::spawn(move || serve(&listener, &vm, &state, &wake, docker));
+        let clock = docker.then(|| clock.clone());
+        std::thread::spawn(move || serve(&listener, &vm, &state, &wake, clock.as_ref()));
     }
     let idle = Duration::from_secs(env_number("OPENPOD_VM_IDLE", 60));
     let mut askers = Vec::new();
-    let why = loop {
+    let standby = loop {
         match woken.recv_timeout(Duration::from_secs(1)) {
             Ok(Wake::Asked(conn)) => {
                 askers.push(conn);
-                break "asked".to_string();
+                break false;
             }
-            Ok(Wake::Signal(sig)) => break format!("signal {sig}"),
+            Ok(Wake::Signal(sig)) => {
+                note(&format!("signal {sig}"));
+                break false;
+            }
             Err(_) => {}
         }
         if !vm.running() {
             note("the VM stopped by itself; see the console log");
-            remove_sockets(&p);
-            return Ok(());
+            state.stop();
+            break true;
         }
         let (quiet, generation) = state.idle(started);
         if quiet >= idle && !busy(&vm) && state.stop_if_unchanged(generation) {
-            break "idle".to_string();
+            break true;
         }
     };
-    // From here on no command reaches this VM: the next one starts another host.
+    // No connection is taken from here on: for a standby, new ones wait in the sockets'
+    // queues for the next VM; otherwise the sockets go at once.
     state.stop();
-    remove_sockets(&p);
-    note(&format!("stopping ({why})"));
+    if standby {
+        note("stopping (idle)");
+    } else {
+        remove_sockets(p);
+        note("stopping (asked)");
+    }
     power_off(&vm);
     note("stopped");
     drop(askers);
+    // A stop asked meanwhile ends the host instead.
+    if !standby || woken.try_recv().is_ok() {
+        remove_files(p);
+        return Ok(());
+    }
+    // The standby takes the lock and the sockets over; this process ends.
+    let fds = Inherited {
+        lock: lock.as_raw_fd(),
+        docker: api.as_raw_fd(),
+        vm: proxy.as_raw_fd(),
+    };
+    let mut standby = fds
+        .spawn("__vm-standby")
+        .map_err(|e| format!("cannot start the standby: {e}"))?;
+    // Written here too, before the last look at a stop: a `vm stop` from now on finds
+    // the standby (and signals it), never this ending process.
+    let _ = std::fs::write(&p.pid, standby.id().to_string());
+    let _ = std::fs::write(&p.state, "standby");
+    // A stop that came while it started ends it too.
+    if woken.try_recv().is_ok() {
+        // SAFETY: a signal to our own child.
+        unsafe { libc::kill(standby.id() as libc::pid_t, libc::SIGTERM) };
+        let _ = standby.wait();
+        remove_files(p);
+    }
     Ok(())
+}
+
+/// The VM's MAC address, from the home's path: locally administered and unicast (the
+/// first byte 02), the same at every start. A new address at each start would take one
+/// more of the 253 addresses the Mac's DHCP server leases for an hour.
+pub fn mac_address(home: &Path) -> [u8; 6] {
+    // FNV-1a: the same on every build, unlike std's hasher.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in home.as_os_str().as_encoded_bytes() {
+        hash = (hash ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3);
+    }
+    let h = hash.to_be_bytes();
+    [0x02, h[0], h[1], h[2], h[3], h[4]]
 }
 
 /// The lock, tried for a moment: a CLI may hold it briefly to see whether a host runs.
@@ -312,12 +512,6 @@ fn make_disk(p: &Paths) -> Result<(), String> {
     std::fs::rename(&part, &p.disk).map_err(|e| err(&p.disk, e))
 }
 
-fn remove_sockets(p: &Paths) {
-    for s in [&p.vm_sock, &p.docker_sock] {
-        let _ = std::fs::remove_file(s);
-    }
-}
-
 fn env_number(name: &str, default: u64) -> u64 {
     std::env::var(name)
         .ok()
@@ -336,6 +530,10 @@ fn start_error(why: String) -> String {
     }
 }
 
+/// How long a started VM may take to answer. It boots in about a second; when the Mac's
+/// DHCP server had no address left, the kernel waited 80 to 90 seconds for one.
+const BOOT_TIME: Duration = Duration::from_secs(120);
+
 /// Wait until the agent answers, and ask it whether the VM works.
 fn wait_ready(vm: &Vm, p: &Paths) -> Result<(), String> {
     let started = Instant::now();
@@ -345,12 +543,13 @@ fn wait_ready(vm: &Vm, p: &Paths) -> Result<(), String> {
             Ok((_, said)) => {
                 return Err(said.trim().trim_start_matches("openpod: ").to_string());
             }
-            Err(_) if started.elapsed() < Duration::from_secs(30) => {
+            Err(_) if started.elapsed() < BOOT_TIME => {
                 std::thread::sleep(Duration::from_millis(50));
             }
             Err(_) => {
                 return Err(format!(
-                    "the VM started but its agent did not answer within 30 seconds; see {}",
+                    "the VM started but its agent did not answer within {} seconds; see {}",
+                    BOOT_TIME.as_secs(),
                     p.console.display()
                 ));
             }
@@ -431,22 +630,44 @@ fn read_first(stream: &mut UnixStream) -> std::io::Result<First> {
     Err(std::io::Error::other("the first line is too long"))
 }
 
+/// Serve a listener: docker.sock (with `clock`, when the VM's clock was last set) or
+/// vm.sock.
 fn serve(
     listener: &UnixListener,
     vm: &Arc<Vm>,
     state: &Arc<State>,
     wake: &mpsc::Sender<Wake>,
-    docker: bool,
+    clock: Option<&Arc<Mutex<(std::time::SystemTime, Instant)>>>,
 ) {
-    for stream in listener.incoming() {
-        let Ok(mut stream) = stream else { continue };
-        // Stopping: closed unanswered, and the CLI waits for the next host.
-        if !state.open() {
-            continue;
+    let _ = listener.set_nonblocking(true);
+    loop {
+        let mut ready = libc::pollfd {
+            fd: listener.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one pollfd on the stack; woken regularly to see a stop.
+        unsafe { libc::poll(&mut ready, 1, 250) };
+        // Accepted under the lock the stop is decided under: once the host stops, what
+        // comes waits in the socket's queue for the next VM.
+        let mut a = state.lock();
+        if a.stopping {
+            return;
         }
+        let Ok((mut stream, _)) = listener.accept() else {
+            continue;
+        };
+        a.open += 1;
+        a.generation += 1;
+        a.changed = Some(Instant::now());
+        drop(a);
+        // macOS hands the listener's non-blocking mode to what it accepts.
+        let _ = stream.set_nonblocking(false);
         let (vm, state, wake) = (vm.clone(), state.clone(), wake.clone());
+        let clock = clock.cloned();
         std::thread::spawn(move || {
-            if docker {
+            if let Some(clock) = clock {
+                set_clock_if_due(&vm, &clock);
                 if let Ok(fd) = vm.connect(API_PORT) {
                     splice(stream, fd);
                 }
@@ -467,6 +688,31 @@ fn serve(
             }
             state.close();
         });
+    }
+}
+
+/// Docker clients send no clock: before one's request, the VM gets the Mac's when it is
+/// due (see [`clock_due`]).
+fn set_clock_if_due(vm: &Vm, last: &Mutex<(std::time::SystemTime, Instant)>) {
+    let mut last = last.lock().unwrap_or_else(|p| p.into_inner());
+    let now = (std::time::SystemTime::now(), Instant::now());
+    if clock_due(*last, now) && guest_command(vm, "__vm-check").is_ok() {
+        *last = now;
+    }
+}
+
+/// Whether the VM's clock is set again: 10 seconds after the last time by either clock
+/// (macOS's monotonic clock stands still while the Mac sleeps; the wall clock does not),
+/// when the two disagree by more than a second, or when the wall clock went back.
+fn clock_due(
+    last: (std::time::SystemTime, Instant),
+    now: (std::time::SystemTime, Instant),
+) -> bool {
+    let ten = Duration::from_secs(10);
+    let mono = now.1.saturating_duration_since(last.1);
+    match now.0.duration_since(last.0) {
+        Ok(wall) => wall > ten || mono > ten || wall.abs_diff(mono) > Duration::from_secs(1),
+        Err(_) => true,
     }
 }
 
@@ -495,5 +741,27 @@ fn power_off(vm: &Vm) {
     }
     if vm.running() {
         vm.stop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::SystemTime;
+
+    #[test]
+    fn the_clock_is_due_after_ten_seconds_or_a_sleep() {
+        let (wall, mono) = (SystemTime::now(), Instant::now());
+        let later = |w: u64, m: u64| (wall + Duration::from_secs(w), mono + Duration::from_secs(m));
+        let due = |(w, m): (SystemTime, Instant)| clock_due((wall, mono), (w, m));
+        assert!(!due(later(5, 5)));
+        assert!(due(later(11, 11)));
+        // The Mac slept: its monotonic clock stood still, the wall clock did not.
+        assert!(due(later(1800, 7)));
+        // The wall clock went back.
+        assert!(due((
+            wall - Duration::from_secs(60),
+            mono + Duration::from_secs(3)
+        )));
     }
 }

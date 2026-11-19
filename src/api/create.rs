@@ -343,6 +343,51 @@ fn check_host_path(path: &str, spec: &str) -> Result<()> {
     }
 }
 
+/// The host paths a create body binds (`HostConfig.Binds` and `Mounts` of type bind).
+pub fn bind_sources(body: &Value) -> Result<Vec<String>> {
+    let host = &body["HostConfig"];
+    let mut sources = Vec::new();
+    for bind in strings(&host["Binds"]) {
+        if let (MountRequest::Bind { source, .. }, _) = parse_bind(&bind)? {
+            sources.push(source);
+        }
+    }
+    for m in host["Mounts"].as_array().into_iter().flatten() {
+        if let (MountRequest::Bind { source, .. }, _) = parse_mount(m)? {
+            sources.push(source);
+        }
+    }
+    Ok(sources)
+}
+
+/// Whether `path` is `root` or below it, with links followed as far as the path exists
+/// and `..` taken out (a link under `root` may lead anywhere).
+pub fn lies_under(path: &std::path::Path, root: &std::path::Path) -> bool {
+    use std::path::{Component, PathBuf};
+    fn resolve(path: &std::path::Path) -> PathBuf {
+        if let Ok(real) = path.canonicalize() {
+            return real;
+        }
+        match (path.parent(), path.file_name()) {
+            (Some(dir), Some(name)) => resolve(dir).join(name),
+            _ => {
+                let mut clean = PathBuf::from("/");
+                for c in path.components() {
+                    match c {
+                        Component::ParentDir => {
+                            clean.pop();
+                        }
+                        Component::Normal(n) => clean.push(n),
+                        _ => {}
+                    }
+                }
+                clean
+            }
+        }
+    }
+    resolve(path).starts_with(root)
+}
+
 /// A `HostConfig.Binds` entry: `src:dst[:opts]`, src a host path or a volume name.
 fn parse_bind(spec: &str) -> Result<(MountRequest, Option<String>)> {
     let parts: Vec<&str> = spec.split(':').collect();
@@ -631,6 +676,26 @@ mod tests {
             None,
             &image(),
         )
+    }
+
+    #[test]
+    fn bind_sources_lie_under_a_root_after_links_and_dots() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("in")).unwrap();
+        std::os::unix::fs::symlink("/", root.join("out")).unwrap();
+        assert!(lies_under(&root.join("in"), &root));
+        assert!(lies_under(&root.join("in/not/made/yet"), &root));
+        assert!(!lies_under(&root.join("in/../../x"), &root));
+        assert!(!lies_under(&root.join("out/tmp"), &root));
+        let sibling = format!("{}-other", root.display());
+        assert!(!lies_under(std::path::Path::new(&sibling), &root));
+        let body = json!({"HostConfig": {
+            "Binds": ["/a:/a", "vol:/v"],
+            "Mounts": [{"Type": "bind", "Source": "/b", "Target": "/b"},
+                       {"Type": "volume", "Source": "v2", "Target": "/v2"}]
+        }});
+        assert_eq!(bind_sources(&body).unwrap(), ["/a", "/b"]);
     }
 
     #[test]
