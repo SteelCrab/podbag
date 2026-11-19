@@ -1,0 +1,113 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04 }
+          - { arch: aarch64, runner: ubuntu-24.04-arm }
+    env:
+      TARGET: ${{ matrix.arch }}-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.TARGET }}
+          components: rustfmt
+      - name: Packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools uidmap passt
+          # Rootless containers need user namespaces, which Ubuntu's AppArmor restricts.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          for f in /etc/subuid /etc/subgid; do
+            grep -q "^$USER:" "$f" || echo "$USER:100000:65536" | sudo tee -a "$f"
+          done
+      - run: cargo fmt --check
+      - name: Unit tests
+        run: cargo test --lib --bins --test wsl
+      - name: Static build
+        run: |
+          export "CC_${TARGET//-/_}=musl-gcc"
+          cargo build --release --target "$TARGET"
+          file "target/$TARGET/release/podbag"
+      - name: Run containers
+        run: |
+          sudo install -m 0755 "target/$TARGET/release/podbag" /usr/local/bin/podbag
+          podbag --version
+          podbag check || true
+          img=mirror.gcr.io/library/alpine:3.22
+          sudo podbag run --rm "$img" echo root
+          sudo podbag run --rm -v "$PWD:/src:ro" "$img" cat /src/Cargo.toml > /dev/null
+          export XDG_RUNTIME_DIR="$(mktemp -d)"
+          podbag run --rm --network none "$img" echo rootless
+      - uses: actions/upload-artifact@v4
+        with:
+          name: podbag-${{ matrix.arch }}-linux
+          path: target/${{ env.TARGET }}/release/podbag
+          if-no-files-found: error
+
+  windows:
+    name: Windows ${{ matrix.arch }}
+    needs: linux
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: windows-2025 }
+          - { arch: aarch64, runner: windows-11-arm }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Clang for ring
+        shell: pwsh
+        run: |
+          if (-not (Get-Command clang -ErrorAction SilentlyContinue)) {
+            $clang = Get-ChildItem -Recurse -Filter clang.exe -ErrorAction SilentlyContinue `
+              -Path "C:\Program Files\Microsoft Visual Studio", "C:\Program Files\LLVM" |
+              Select-Object -First 1
+            if ($clang) { Add-Content $env:GITHUB_PATH $clang.DirectoryName }
+          }
+      - uses: actions/download-artifact@v4
+        with:
+          name: podbag-${{ matrix.arch }}-linux
+          path: linux
+      - name: Tests
+        run: cargo test --test wsl --bin podbag
+      - name: Build
+        shell: pwsh
+        run: |
+          $env:PODBAG_LINUX_BIN = Join-Path $PWD "linux\podbag"
+          cargo build --release --features embed-linux
+          ./target/release/podbag.exe --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: podbag-${{ matrix.arch }}-windows
+          path: target/release/podbag.exe
+          if-no-files-found: error
+
+  macos:
+    name: macOS
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test
