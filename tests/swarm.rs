@@ -421,6 +421,68 @@ configs:
 }
 
 #[test]
+fn a_failing_update_rolls_back_by_itself() {
+    if !have_docker() {
+        return;
+    }
+    let s = Swarm::start();
+    let v1 = format!("{}:v1", s.repo);
+    let v2 = format!("{}:v2", s.repo);
+    s.ok(&[
+        "service",
+        "create",
+        "-q",
+        "--name",
+        "web",
+        "--replicas",
+        "2",
+        "--stop-grace-period",
+        "1s",
+        &v1,
+        "sh",
+        "-c",
+        WAIT,
+    ]);
+    // The new tasks end at once: the update gives up and goes back.
+    let out = s.docker(&[
+        "service",
+        "update",
+        "--image",
+        &v2,
+        "--args",
+        "false",
+        "--update-failure-action",
+        "rollback",
+        "--update-monitor",
+        "3s",
+        "web",
+    ]);
+    let said = format!("{}{}", stdout(&out), stderr(&out));
+    assert!(
+        said.contains("rolled back") || said.contains("rollback"),
+        "{said}"
+    );
+    // The CLI stops once the tasks run; the rollback still watches them a moment.
+    let state = || {
+        s.ok(&[
+            "service",
+            "inspect",
+            "web",
+            "--format",
+            "{{.UpdateStatus.State}}",
+        ])
+    };
+    assert!(
+        wait_for(Duration::from_secs(20), || state() == "rollback_completed"),
+        "{}",
+        state()
+    );
+    let tasks = s.running("web");
+    assert_eq!(tasks.len(), 2, "{tasks:?}");
+    assert!(tasks.iter().all(|t| t.1 == v1), "{tasks:?}");
+}
+
+#[test]
 fn global_mode_and_a_drained_node() {
     if !have_docker() {
         return;
