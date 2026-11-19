@@ -552,16 +552,16 @@ fn containers_cannot_reach_the_agent() {
     // vsock from a container, to every address that could lead back into the VM: an
     // answer would mean root in the VM and the Mac's /Users.
     let script = r#"import socket
-for cid in (1, 2, 3):
+for cid, port in [(c, p) for c in (1, 2, 3) for p in (2, 3, 2375)]:
     try:
         s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
         s.settimeout(3)
-        s.connect((cid, 2))
+        s.connect((cid, port))
         s.sendall(b'{"argv":["ps"],"env":[],"cwd":"/","tty":false,"rows":0,"cols":0,"time":[0,0]}\n')
         data = s.recv(64)
-        print("REACHED" if data else "closed", cid, data)
+        print("REACHED" if data else "closed", cid, port, data)
     except Exception as e:
-        print("refused", cid, e)
+        print("refused", cid, port, e)
 "#;
     for extra in [&[][..], &["--privileged"][..]] {
         let mut args = vec!["run", "--rm"];
@@ -1603,4 +1603,386 @@ fn ctrl_c_ends_a_command_without_a_handler() {
         "it took {:?}",
         started.elapsed()
     );
+}
+
+/// When the Mac's DHCP server ends the lease of the device with MAC address `mac`
+/// (seconds since the epoch).
+fn lease_end(mac: &str) -> Option<u64> {
+    // bootpd writes each octet without its leading zero.
+    let octets: Vec<String> = mac
+        .trim()
+        .split(':')
+        .map(|o| format!("{:x}", u8::from_str_radix(o, 16).unwrap()))
+        .collect();
+    let hw = format!("hw_address=1,{}\n", octets.join(":"));
+    let leases = std::fs::read_to_string("/var/db/dhcpd_leases").ok()?;
+    leases.split('{').find(|e| e.contains(&hw)).and_then(|e| {
+        e.lines()
+            .find_map(|l| l.trim().strip_prefix("lease=0x"))
+            .and_then(|h| u64::from_str_radix(h, 16).ok())
+    })
+}
+
+#[test]
+fn the_vm_renews_its_address_lease() {
+    if !enabled() {
+        return;
+    }
+    let mac = Mac::new(60);
+    let address = mac.ok(&[
+        "run",
+        "--rm",
+        "--network",
+        "host",
+        "alpine:3.22",
+        "cat",
+        "/sys/class/net/eth0/address",
+    ]);
+    let before = lease_end(&address).expect("the VM's lease");
+    std::thread::sleep(Duration::from_secs(3));
+    // The kernel took the lease at boot and never renews it: the agent does.
+    agent_request(&mac, &["__vm-renew"]);
+    let after = lease_end(&address).expect("the VM's lease");
+    assert!(after >= before + 3, "lease end {before} → {after}");
+}
+
+/// What `http://127.0.0.1:<port>/<path>` on the Mac answers (None: no answer).
+fn mac_get(port: u16, path: &str) -> Option<String> {
+    let out = Command::new("curl")
+        .args(["-s", "-f", "-m", "3"])
+        .arg(format!("http://127.0.0.1:{port}/{path}"))
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// Wait (30 s at most) until the Mac's port `port` answers `want` for /index.
+fn wait_for_answer(port: u16, want: &str) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while mac_get(port, "index").as_deref() != Some(want) {
+        assert!(
+            Instant::now() < deadline,
+            "port {port} never answered {want:?}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// A directory under /Users with an `index` file saying `text`, for a web server.
+fn site(text: &str) -> tempfile::TempDir {
+    let dir = tempfile::tempdir_in(std::env::var("HOME").unwrap()).unwrap();
+    std::fs::write(dir.path().join("index"), text).unwrap();
+    dir
+}
+
+#[test]
+fn published_ports_reach_the_macs_localhost() {
+    if !enabled() || !have_docker() {
+        return;
+    }
+    let mac = Mac::new(60);
+    mac.ok(&["ps"]);
+    let site = site("forwarded\n");
+    let bind = format!("{}:/srv", site.path().display());
+    let server = [
+        "python3",
+        "-m",
+        "http.server",
+        "8000",
+        "--directory",
+        "/srv",
+    ];
+    let mut args = vec![
+        "run",
+        "-d",
+        "--name",
+        "web",
+        "-p",
+        "18080:8000",
+        "-v",
+        &bind,
+    ];
+    args.push("python:3.13-alpine");
+    args.extend(server);
+    mac.docker_ok(&args);
+    wait_for_answer(18080, "forwarded\n");
+    // The container goes: so does the Mac's port.
+    mac.docker_ok(&["rm", "-f", "web"]);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while mac_get(18080, "index").is_some() {
+        assert!(Instant::now() < deadline, "port 18080 stayed open");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    // openpod's own -p too.
+    let mut args = vec![
+        "run",
+        "-d",
+        "--name",
+        "web2",
+        "-p",
+        "18081:8000",
+        "-v",
+        &bind,
+    ];
+    args.push("python:3.13-alpine");
+    args.extend(server);
+    mac.ok(&args);
+    wait_for_answer(18081, "forwarded\n");
+    mac.ok(&["rm", "-f", "web2"]);
+}
+
+#[test]
+fn a_taken_mac_port_is_reported_and_others_work() {
+    if !enabled() || !have_docker() {
+        return;
+    }
+    let mac = Mac::new(60);
+    mac.ok(&["ps"]);
+    // Another program has the Mac's port 18082.
+    let taken = std::net::TcpListener::bind("127.0.0.1:18082").unwrap();
+    let site = site("still served\n");
+    let bind = format!("{}:/srv", site.path().display());
+    mac.docker_ok(&[
+        "run",
+        "-d",
+        "-p",
+        "18082:8000",
+        "-p",
+        "18083:8000",
+        "-v",
+        &bind,
+        "python:3.13-alpine",
+        "python3",
+        "-m",
+        "http.server",
+        "8000",
+        "--directory",
+        "/srv",
+    ]);
+    wait_for_answer(18083, "still served\n");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while mac.log_count("18082") == 0 {
+        assert!(Instant::now() < deadline, "the taken port is not reported");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    drop(taken);
+}
+
+#[test]
+fn many_connections_leak_nothing() {
+    if !enabled() || !have_docker() {
+        return;
+    }
+    let mac = Mac::new(60);
+    mac.ok(&["ps"]);
+    let site = site("again\n");
+    let bind = format!("{}:/srv", site.path().display());
+    mac.docker_ok(&[
+        "run",
+        "-d",
+        "-p",
+        "18084:8000",
+        "-v",
+        &bind,
+        "python:3.13-alpine",
+        "python3",
+        "-m",
+        "http.server",
+        "8000",
+        "--directory",
+        "/srv",
+    ]);
+    wait_for_answer(18084, "again\n");
+    let open = || {
+        let pid = mac.host_pid().expect("a host").to_string();
+        let lsof = Command::new("lsof").args(["-p", &pid]).output().unwrap();
+        String::from_utf8_lossy(&lsof.stdout).lines().count()
+    };
+    let before = open();
+    for i in 0..300 {
+        assert_eq!(
+            mac_get(18084, "index").as_deref(),
+            Some("again\n"),
+            "request {i}"
+        );
+    }
+    std::thread::sleep(Duration::from_secs(1));
+    let after = open();
+    assert!(
+        after <= before + 20,
+        "the host's descriptors: {before} → {after}"
+    );
+}
+
+#[test]
+fn a_udp_port_is_reported_as_not_forwarded() {
+    if !enabled() || !have_docker() {
+        return;
+    }
+    let mac = Mac::new(60);
+    mac.ok(&["ps"]);
+    mac.docker_ok(&[
+        "run",
+        "-d",
+        "-p",
+        "18085:9000/udp",
+        "alpine:3.22",
+        "sleep",
+        "300",
+    ]);
+    // TCP only, for now: the host says so instead of leaving the port silently closed.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while mac.log_count("18085/udp") == 0 {
+        assert!(Instant::now() < deadline, "the UDP port is not reported");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+#[test]
+fn a_low_port_reaches_the_mac_and_stays_off_its_network() {
+    if !enabled() || !have_docker() {
+        return;
+    }
+    let mac = Mac::new(60);
+    mac.ok(&["ps"]);
+    let site = site("low\n");
+    let bind = format!("{}:/srv", site.path().display());
+    // Below 1024: macOS gives 127.0.0.1:<port> only to root.
+    mac.docker_ok(&[
+        "run",
+        "-d",
+        "-p",
+        "1007:8000",
+        "-v",
+        &bind,
+        "python:3.13-alpine",
+        "python3",
+        "-m",
+        "http.server",
+        "8000",
+        "--directory",
+        "/srv",
+    ]);
+    wait_for_answer(1007, "low\n");
+    // Not from the Mac's network: a connection to its own network address gets nothing.
+    let lan = Command::new("ipconfig")
+        .args(["getifaddr", "en0"])
+        .output()
+        .unwrap();
+    let lan = String::from_utf8_lossy(&lan.stdout).trim().to_string();
+    if !lan.is_empty() {
+        let got = Command::new("curl")
+            .args(["-s", "-f", "-m", "3"])
+            .arg(format!("http://{lan}:1007/index"))
+            .output()
+            .unwrap();
+        assert!(
+            !got.status.success(),
+            "{}",
+            String::from_utf8_lossy(&got.stdout)
+        );
+    }
+}
+
+#[test]
+fn many_connections_at_once_through_a_port() {
+    if !enabled() || !have_docker() {
+        return;
+    }
+    let mac = Mac::new(60);
+    // The host starts with macOS's usual limit of 256 open files.
+    let mut first = mac.cmd(&["ps"]);
+    // SAFETY: getrlimit and setrlimit between fork and exec, on plain data.
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        first.pre_exec(|| {
+            let mut lim = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim);
+            lim.rlim_cur = 256;
+            libc::setrlimit(libc::RLIMIT_NOFILE, &lim);
+            Ok(())
+        });
+    }
+    assert!(
+        first
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let site = site("crowd\n");
+    let bind = format!("{}:/srv", site.path().display());
+    mac.docker_ok(&[
+        "run",
+        "-d",
+        "-p",
+        "18086:8000",
+        "-v",
+        &bind,
+        "python:3.13-alpine",
+        "python3",
+        "-m",
+        "http.server",
+        "8000",
+        "--directory",
+        "/srv",
+    ]);
+    wait_for_answer(18086, "crowd\n");
+    // 100 connections that stay open (a client's pool), then 20 that ask for a page.
+    use std::io::{Read, Write};
+    let pool: Vec<std::net::TcpStream> = (0..100)
+        .map(|_| std::net::TcpStream::connect("127.0.0.1:18086").unwrap())
+        .collect();
+    std::thread::sleep(Duration::from_millis(500));
+    for i in 0..20 {
+        let mut c = std::net::TcpStream::connect("127.0.0.1:18086").unwrap();
+        c.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        c.write_all(b"GET /index HTTP/1.0\r\n\r\n").unwrap();
+        let mut reply = String::new();
+        let _ = c.read_to_string(&mut reply);
+        assert!(
+            reply.ends_with("crowd\n"),
+            "connection {i} beside the pool: {reply:?}"
+        );
+    }
+    drop(pool);
+}
+
+#[test]
+fn published_ports_answer_on_ipv6_localhost_too() {
+    if !enabled() || !have_docker() {
+        return;
+    }
+    let mac = Mac::new(60);
+    mac.ok(&["ps"]);
+    let site = site("six\n");
+    let bind = format!("{}:/srv", site.path().display());
+    mac.docker_ok(&[
+        "run",
+        "-d",
+        "-p",
+        "18087:8000",
+        "-v",
+        &bind,
+        "python:3.13-alpine",
+        "python3",
+        "-m",
+        "http.server",
+        "8000",
+        "--directory",
+        "/srv",
+    ]);
+    wait_for_answer(18087, "six\n");
+    // macOS resolves localhost to ::1 first; some clients (Node 18) do not fall back.
+    let got = Command::new("curl")
+        .args(["-s", "-f", "-m", "3", "-6", "http://[::1]:18087/index"])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&got.stdout), "six\n");
 }

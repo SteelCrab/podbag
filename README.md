@@ -315,8 +315,15 @@ The socket stays while the VM is off: a standby of about 8 MiB waits on it, and 
 request starts the VM. It appears with the first openpod command (`openpod vm start`) and
 goes with `openpod vm stop`. Bind mounts must come from under `/Users` (`mounts denied`
 otherwise); named volumes live in the VM. Each docker request after a pause brings the
-VM's clock to the Mac's. Still to come: published ports on the Mac's localhost, and memory
-and disk space given back while the VM runs.
+VM's clock to the Mac's.
+
+Published ports (`-p 8080:80`, from `docker` or `openpod`) answer on the Mac's
+`localhost:8080` (only there, not on the Mac's network) as soon as the command that
+published them ends, and close with their container. TCP only for now: a UDP port is
+named in `~/.openpod/run/host.log` as not forwarded, and so is a port another program
+holds on the Mac. The VM renews its DHCP lease (the Mac's lasts an hour), so it keeps its
+address however long it runs. Still to come: memory and disk space given back while the VM
+runs.
 
 ## Requirements
 

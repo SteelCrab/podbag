@@ -4,7 +4,7 @@
 //! `openpod system service`. Only the Mac (vsock CID 2) may connect: a container that
 //! reaches vsock gets nothing.
 
-use super::proto::{API_PORT, CLI_PORT, CliRequest, Frame};
+use super::proto::{API_PORT, CLI_PORT, CliRequest, FORWARD_PORT, Frame};
 use crate::{Error, Result};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -34,6 +34,7 @@ fn run() -> Result<()> {
     crate::signals::unblock_all();
     let api = listen(API_PORT)?;
     let cli = listen(CLI_PORT)?;
+    let forwarder = listen(FORWARD_PORT)?;
     let dirs = crate::paths::dirs()?;
     let mut ctx = crate::api::router::Ctx::new(dirs);
     // The Mac's paths: the VM sees only its /Users, at the same place.
@@ -41,11 +42,17 @@ fn run() -> Result<()> {
     let ctx = Arc::new(ctx);
     crate::helper::helpers_in_own_group();
     crate::helper::raise_descriptor_limit();
+    std::thread::spawn(keep_lease);
     eprintln!("openpod: VM agent listens");
     std::thread::spawn(move || {
         accept_each(&api, |stream| {
             let ctx = ctx.clone();
             std::thread::spawn(move || crate::api::handle_connection(stream, &ctx));
+        })
+    });
+    std::thread::spawn(move || {
+        accept_each(&forwarder, |stream| {
+            std::thread::spawn(move || forward(stream));
         })
     });
     accept_each(&cli, |stream| {
@@ -178,6 +185,16 @@ fn serve_cli(stream: UnixStream) -> std::io::Result<()> {
     } else {
         match first {
             Some("__vm-check") => 0,
+            Some("__vm-renew") => match super::dhcp::renew() {
+                Ok(secs) => {
+                    out.send(Frame::Stdout(format!("{secs}\n").into_bytes()))?;
+                    0
+                }
+                Err(e) => {
+                    out.send(Frame::Stderr(format!("openpod: {e}\n").into_bytes()))?;
+                    1
+                }
+            },
             Some("__vm-busy") => i32::from(!busy()),
             _ => run_command(&req, reader, &out)?,
         }
@@ -186,6 +203,73 @@ fn serve_cli(stream: UnixStream) -> std::io::Result<()> {
     // The thread that reads the Mac's frames learns from this that the command is over.
     let _ = stream.shutdown(std::net::Shutdown::Both);
     Ok(())
+}
+
+/// A connection the Mac forwards from one of its ports: `TCP <port>` names the port
+/// published in this VM, where the shim's proxy listens on every address.
+fn forward(mut stream: UnixStream) {
+    let mut line = Vec::new();
+    let mut byte = [0u8; 1];
+    while line.len() < 32 {
+        match stream.read(&mut byte) {
+            Ok(1) if byte[0] == b'\n' => break,
+            Ok(1) => line.push(byte[0]),
+            _ => return,
+        }
+    }
+    let port: Option<u16> = String::from_utf8_lossy(&line)
+        .strip_prefix("TCP ")
+        .and_then(|p| p.trim().parse().ok());
+    let target = port.map(|p| {
+        std::net::TcpStream::connect_timeout(
+            &std::net::SocketAddr::from(([127, 0, 0, 1], p)),
+            Duration::from_secs(5),
+        )
+    });
+    match target {
+        Some(Ok(target)) => {
+            if stream.write_all(b"OK\n").is_ok() {
+                carry(stream, target);
+            }
+        }
+        Some(Err(e)) => {
+            let _ = stream.write_all(format!("ERR {e}\n").as_bytes());
+        }
+        None => {
+            let _ = stream.write_all(b"ERR bad request\n");
+        }
+    }
+}
+
+/// Bytes both ways between the Mac and a TCP connection, until both directions end.
+fn carry(mac: UnixStream, target: std::net::TcpStream) {
+    let (Ok(mut mac_r), Ok(mut target_w)) = (mac.try_clone(), target.try_clone()) else {
+        return;
+    };
+    let up = std::thread::spawn(move || {
+        let _ = std::io::copy(&mut mac_r, &mut target_w);
+        let _ = target_w.shutdown(std::net::Shutdown::Write);
+    });
+    let (mut target_r, mut mac_w) = (target, mac);
+    let _ = std::io::copy(&mut target_r, &mut mac_w);
+    let _ = mac_w.shutdown(std::net::Shutdown::Write);
+    let _ = up.join();
+}
+
+/// The VM's DHCP lease, which the kernel took at boot and never renews: renewed at half
+/// its time (20 minutes until the first answer tells it), a minute after a failure.
+fn keep_lease() {
+    let mut wait = Duration::from_secs(20 * 60);
+    loop {
+        std::thread::sleep(wait);
+        wait = match super::dhcp::renew() {
+            Ok(secs) => Duration::from_secs(u64::from(secs.max(120)) / 2),
+            Err(e) => {
+                eprintln!("openpod: cannot renew the VM's address lease: {e}");
+                Duration::from_secs(60)
+            }
+        };
+    }
 }
 
 /// The Mac's clock wins when they drift apart (the VM may have slept). A request without

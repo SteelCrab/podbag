@@ -8,6 +8,9 @@ use std::io::{Read, Write};
 pub const CLI_PORT: u32 = 2;
 /// The Docker Engine API (`openpod system service`).
 pub const API_PORT: u32 = 2375;
+/// The forwarder of published ports: a first line `TCP <port>`, answered `OK` once the
+/// VM's `127.0.0.1:<port>` is connected (or `ERR …`), then bytes both ways.
+pub const FORWARD_PORT: u32 = 3;
 
 /// The argument the kernel passes the VM's /init (after `--` on its command line): only
 /// with it is openpod the VM's init.

@@ -3,6 +3,7 @@
 
 #[cfg(target_os = "linux")]
 pub mod agent;
+pub mod dhcp;
 #[cfg(target_os = "linux")]
 pub mod guest;
 pub mod proto;

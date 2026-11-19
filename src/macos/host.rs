@@ -11,7 +11,7 @@
 //! on SIGTERM, SIGINT or SIGHUP (a logout), it powers the VM off and ends.
 
 use super::vm::{Vm, VmSpec};
-use crate::vm::proto::{API_PORT, CLI_PORT, CliRequest, Frame};
+use crate::vm::proto::{API_PORT, CLI_PORT, CliRequest, FORWARD_PORT, Frame};
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -385,13 +385,19 @@ fn serve_vm(p: &Paths, lock: &std::fs::File, inherited: Option<&Inherited>) -> R
     // Kept here too: a serve thread that ends must not close its socket.
     let (api, proxy) = (Arc::new(api), Arc::new(proxy));
     let state = Arc::new(State::default());
+    let (refresh, refreshed) = mpsc::channel();
     for (listener, docker) in [(api.clone(), true), (proxy.clone(), false)] {
-        let (vm, state, wake) = (vm.clone(), state.clone(), wake.clone());
+        let (vm, state, wake, refresh) = (vm.clone(), state.clone(), wake.clone(), refresh.clone());
         let clock = docker.then(|| clock.clone());
-        std::thread::spawn(move || serve(&listener, &vm, &state, &wake, clock.as_ref()));
+        std::thread::spawn(move || serve(&listener, &vm, &state, &wake, clock.as_ref(), &refresh));
+    }
+    {
+        let vm = vm.clone();
+        std::thread::spawn(move || watch_ports(&vm, &refreshed));
     }
     let idle = Duration::from_secs(env_number("OPENPOD_VM_IDLE", 60));
     let mut askers = Vec::new();
+    let mut tick = (std::time::SystemTime::now(), Instant::now());
     let standby = loop {
         match woken.recv_timeout(Duration::from_secs(1)) {
             Ok(Wake::Asked(conn)) => {
@@ -404,6 +410,24 @@ fn serve_vm(p: &Paths, lock: &std::fs::File, inherited: Option<&Inherited>) -> R
             }
             Err(_) => {}
         }
+        let now = (std::time::SystemTime::now(), Instant::now());
+        if slept(tick, now) {
+            // The VM's clock and its DHCP lease stood still with the Mac; the lease may have
+            // ended meanwhile. `__vm-renew` renews it and sets the clock.
+            let vm = vm.clone();
+            std::thread::spawn(move || match guest_command(&vm, "__vm-renew") {
+                Ok((0, secs)) => note(&format!(
+                    "the Mac slept: the VM's address lease renewed for {} s",
+                    secs.trim()
+                )),
+                Ok((_, why)) => note(&format!(
+                    "the Mac slept, and the VM's address lease was not renewed: {}",
+                    why.trim()
+                )),
+                Err(e) => note(&format!("the Mac slept; the VM did not answer: {e}")),
+            });
+        }
+        tick = now;
         if !vm.running() {
             note("the VM stopped by itself; see the console log");
             state.stop();
@@ -638,6 +662,7 @@ fn serve(
     state: &Arc<State>,
     wake: &mpsc::Sender<Wake>,
     clock: Option<&Arc<Mutex<(std::time::SystemTime, Instant)>>>,
+    refresh: &mpsc::Sender<()>,
 ) {
     let _ = listener.set_nonblocking(true);
     loop {
@@ -663,7 +688,7 @@ fn serve(
         drop(a);
         // macOS hands the listener's non-blocking mode to what it accepts.
         let _ = stream.set_nonblocking(false);
-        let (vm, state, wake) = (vm.clone(), state.clone(), wake.clone());
+        let (vm, state, wake, refresh) = (vm.clone(), state.clone(), wake.clone(), refresh.clone());
         let clock = clock.cloned();
         std::thread::spawn(move || {
             if let Some(clock) = clock {
@@ -687,8 +712,183 @@ fn serve(
                 }
             }
             state.close();
+            // A command that ended may have published a port.
+            let _ = refresh.send(());
         });
     }
+}
+
+/// The Mac's side of published ports: every second, and right after a client connection
+/// closes (a `run -p` that just ended), the published TCP ports of the running
+/// containers, and a listener on the Mac's 127.0.0.1 for each (spec 3.4: not on its
+/// network). A port the Mac does not give is reported once and tried again.
+fn watch_ports(vm: &Arc<Vm>, refresh: &mpsc::Receiver<()>) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let mut open: std::collections::HashMap<u16, Arc<AtomicBool>> = Default::default();
+    let mut reported = std::collections::HashSet::new();
+    let mut udp_reported = std::collections::HashSet::new();
+    loop {
+        if let Err(mpsc::RecvTimeoutError::Disconnected) =
+            refresh.recv_timeout(Duration::from_secs(1))
+        {
+            std::thread::sleep(Duration::from_secs(1));
+        }
+        while refresh.try_recv().is_ok() {}
+        let Some((wanted, udp)) = published_ports(vm) else {
+            continue;
+        };
+        for port in udp {
+            if udp_reported.insert(port) {
+                note(&format!(
+                    "port {port}/udp is not forwarded to this Mac: TCP only"
+                ));
+            }
+        }
+        open.retain(|port, stop| {
+            let keep = wanted.contains(port);
+            if !keep {
+                stop.store(true, Ordering::SeqCst);
+            }
+            keep
+        });
+        for port in wanted {
+            if open.contains_key(&port) {
+                continue;
+            }
+            match mac_listeners(port) {
+                Ok(listeners) => {
+                    reported.remove(&port);
+                    let stop = Arc::new(AtomicBool::new(false));
+                    open.insert(port, stop.clone());
+                    for (listener, loopback_only) in listeners {
+                        let (vm, stop) = (vm.clone(), stop.clone());
+                        std::thread::spawn(move || {
+                            serve_port(port, &listener, loopback_only, &vm, &stop);
+                        });
+                    }
+                }
+                Err(e) => {
+                    if reported.insert(port) {
+                        note(&format!("cannot forward port {port} on this Mac: {e}"));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The published TCP and UDP ports of the running containers, from the VM's Docker API;
+/// None when it does not answer.
+type Published = (
+    std::collections::HashSet<u16>,
+    std::collections::HashSet<u16>,
+);
+
+fn published_ports(vm: &Vm) -> Option<Published> {
+    let mut s = UnixStream::from(vm.connect(API_PORT).ok()?);
+    s.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
+    s.write_all(b"GET /containers/json HTTP/1.0\r\n\r\n").ok()?;
+    let mut reply = Vec::new();
+    s.read_to_end(&mut reply).ok()?;
+    let reply = String::from_utf8_lossy(&reply);
+    let list: serde_json::Value = serde_json::from_str(reply.split_once("\r\n\r\n")?.1).ok()?;
+    let ports: Vec<serde_json::Value> = list
+        .as_array()?
+        .iter()
+        .flat_map(|c| c["Ports"].as_array().cloned().unwrap_or_default())
+        .collect();
+    let of = |kind: &str| {
+        ports
+            .iter()
+            .filter(|p| p["Type"] == kind)
+            .filter_map(|p| u16::try_from(p["PublicPort"].as_u64()?).ok())
+            .collect()
+    };
+    Some((of("tcp"), of("udp")))
+}
+
+/// One Mac port: each connection goes to the VM's forwarder, until `stop`.
+/// The Mac's listeners for `port`, each with whether it must turn away callers that are
+/// not on this Mac: 127.0.0.1 (macOS gives a port below 1024 there only to root: then
+/// every address, with that filter), and ::1 when the Mac gives it (`localhost` is ::1
+/// first on macOS, and some clients do not fall back).
+fn mac_listeners(port: u16) -> std::io::Result<Vec<(std::net::TcpListener, bool)>> {
+    use std::net::{Ipv4Addr, Ipv6Addr, TcpListener};
+    let v4 = match TcpListener::bind((Ipv4Addr::LOCALHOST, port)) {
+        Ok(l) => (l, false),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            (TcpListener::bind((Ipv4Addr::UNSPECIFIED, port))?, true)
+        }
+        Err(e) => return Err(e),
+    };
+    let mut all = vec![v4];
+    if let Ok(v6) = TcpListener::bind((Ipv6Addr::LOCALHOST, port)) {
+        all.push((v6, false));
+    }
+    Ok(all)
+}
+
+fn serve_port(
+    port: u16,
+    listener: &std::net::TcpListener,
+    loopback_only: bool,
+    vm: &Arc<Vm>,
+    stop: &std::sync::atomic::AtomicBool,
+) {
+    let _ = listener.set_nonblocking(true);
+    while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+        let mut ready = libc::pollfd {
+            fd: listener.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one pollfd on the stack; woken regularly to see a stop.
+        unsafe { libc::poll(&mut ready, 1, 250) };
+        let Ok((client, peer)) = listener.accept() else {
+            continue;
+        };
+        // A low port listens on every address: only this Mac's callers are served.
+        if loopback_only && !peer.ip().is_loopback() {
+            continue;
+        }
+        let _ = client.set_nonblocking(false);
+        let vm = vm.clone();
+        std::thread::spawn(move || forward_to_vm(client, port, &vm));
+    }
+}
+
+/// A Mac connection to the VM's forwarder for `port`.
+fn forward_to_vm(client: std::net::TcpStream, port: u16, vm: &Vm) {
+    let Ok(fd) = vm.connect(FORWARD_PORT) else {
+        return;
+    };
+    let mut guest = UnixStream::from(fd);
+    if guest.write_all(format!("TCP {port}\n").as_bytes()).is_err() {
+        return;
+    }
+    let mut answer = Vec::new();
+    let mut byte = [0u8; 1];
+    while answer.len() < 256 {
+        match guest.read(&mut byte) {
+            Ok(1) if byte[0] == b'\n' => break,
+            Ok(1) => answer.push(byte[0]),
+            _ => return,
+        }
+    }
+    if answer != b"OK" {
+        return;
+    }
+    let (Ok(mut client_r), Ok(mut guest_w)) = (client.try_clone(), guest.try_clone()) else {
+        return;
+    };
+    let up = std::thread::spawn(move || {
+        let _ = std::io::copy(&mut client_r, &mut guest_w);
+        let _ = guest_w.shutdown(std::net::Shutdown::Write);
+    });
+    let (mut guest_r, mut client_w) = (guest, client);
+    let _ = std::io::copy(&mut guest_r, &mut client_w);
+    let _ = client_w.shutdown(std::net::Shutdown::Write);
+    let _ = up.join();
 }
 
 /// Docker clients send no clock: before one's request, the VM gets the Mac's when it is
@@ -699,6 +899,15 @@ fn set_clock_if_due(vm: &Vm, last: &Mutex<(std::time::SystemTime, Instant)>) {
     if clock_due(*last, now) && guest_command(vm, "__vm-check").is_ok() {
         *last = now;
     }
+}
+
+/// Whether the Mac slept between two looks: its wall clock ran on while the monotonic
+/// clock (which stands still in sleep) did not.
+fn slept(last: (std::time::SystemTime, Instant), now: (std::time::SystemTime, Instant)) -> bool {
+    let mono = now.1.saturating_duration_since(last.1);
+    now.0
+        .duration_since(last.0)
+        .is_ok_and(|wall| wall > mono + Duration::from_secs(5))
 }
 
 /// Whether the VM's clock is set again: 10 seconds after the last time by either clock
@@ -763,5 +972,21 @@ mod tests {
             wall - Duration::from_secs(60),
             mono + Duration::from_secs(3)
         )));
+    }
+}
+
+#[cfg(test)]
+mod wake_tests {
+    use super::*;
+    use std::time::SystemTime;
+
+    #[test]
+    fn the_mac_slept_when_the_wall_clock_runs_ahead() {
+        let (wall, mono) = (SystemTime::now(), Instant::now());
+        let at = |w: u64, m: u64| (wall + Duration::from_secs(w), mono + Duration::from_secs(m));
+        assert!(!slept((wall, mono), at(1, 1)));
+        assert!(!slept((wall, mono), at(3, 1)));
+        // Asleep for an hour: the monotonic clock stood still.
+        assert!(slept((wall, mono), at(3601, 1)));
     }
 }
