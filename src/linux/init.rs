@@ -201,7 +201,7 @@ pub(super) fn die_with_parent(status_fd: i32) {
 }
 
 /// Start the command like Docker does: no blocked signals, every signal at its default action.
-/// Ignored signals survive execve, and this process inherited openpod's (Rust ignores SIGPIPE).
+/// Ignored signals survive execve, and this process inherited podbag's (Rust ignores SIGPIPE).
 pub(super) fn reset_signals() {
     // SAFETY: sa and set are initialized before use; SIG_DFL needs no handler code.
     unsafe {

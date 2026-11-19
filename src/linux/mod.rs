@@ -40,7 +40,7 @@ pub(crate) fn userns_denial(
         "cannot create an unprivileged user namespace",
         "AppArmor restricts user namespaces for programs without a profile \
          (kernel.apparmor_restrict_unprivileged_userns=1)",
-        "install an AppArmor profile for openpod that allows userns (see README, \"AppArmor\"), then run again",
+        "install an AppArmor profile for podbag that allows userns (see README, \"AppArmor\"), then run again",
     ))
 }
 
@@ -76,11 +76,11 @@ mod tests {
 
     #[test]
     fn an_installed_profile_is_not_blamed() {
-        // With the openpod profile, the process runs under that profile instead.
+        // With the podbag profile, the process runs under that profile instead.
         assert!(!is_apparmor_userns_denial(
             true,
             Some(libc::EPERM),
-            "openpod-dev (unconfined)"
+            "podbag-dev (unconfined)"
         ));
         assert!(!is_apparmor_userns_denial(
             true,

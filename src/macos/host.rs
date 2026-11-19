@@ -1,13 +1,13 @@
-//! `openpod __vm-host`: the Mac process that owns the VM while it runs.
+//! `podbag __vm-host`: the Mac process that owns the VM while it runs.
 //!
 //! Only the process that made a VM may open its vsock connections, so this one also
 //! proxies them: `vm.sock` takes a first line `PORT <n>` (answered `OK` once the guest's
 //! port n is connected, then bytes both ways) or `STOP` (the VM is powered off, then the
 //! connection closes); `docker.sock` goes straight to the Docker API. One host runs per
 //! user (a lock file). When no connection has been open for the idle time
-//! (`OPENPOD_VM_IDLE`, seconds; 60) and the VM has no work, it powers the VM off and
+//! (`PODBAG_VM_IDLE`, seconds; 60) and the VM has no work, it powers the VM off and
 //! starts the standby (see [`super::standby`]) and ends: the sockets stay, and the next
-//! connection starts a VM again. When asked (`openpod vm stop`: SIGTERM, or `STOP`), and
+//! connection starts a VM again. When asked (`podbag vm stop`: SIGTERM, or `STOP`), and
 //! on SIGTERM, SIGINT or SIGHUP (a logout), it powers the VM off and ends.
 
 use super::vm::{Vm, VmSpec};
@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 /// The files of the Mac side.
 #[derive(Debug, Clone)]
 pub struct Paths {
-    /// `~/.openpod` (`OPENPOD_MAC_HOME` for tests).
+    /// `~/.podbag` (`PODBAG_MAC_HOME` for tests).
     pub home: PathBuf,
     /// The user's alone (0700): its sockets give root in the VM.
     pub run: PathBuf,
@@ -34,7 +34,7 @@ pub struct Paths {
     pub docker_sock: PathBuf,
     pub lock: PathBuf,
     pub log: PathBuf,
-    /// `running` while the VM is up (read by `openpod vm status`, which must not
+    /// `running` while the VM is up (read by `podbag vm status`, which must not
     /// connect: a connection keeps the VM up).
     pub state: PathBuf,
     /// The process id of the host, or of its standby (a new process at each idle stop).
@@ -42,11 +42,11 @@ pub struct Paths {
 }
 
 pub fn paths() -> Result<Paths, String> {
-    let home = match std::env::var_os("OPENPOD_MAC_HOME") {
+    let home = match std::env::var_os("PODBAG_MAC_HOME") {
         Some(h) => PathBuf::from(h),
         None => {
             let user = std::env::var_os("HOME").ok_or("HOME is not set")?;
-            PathBuf::from(user).join(".openpod")
+            PathBuf::from(user).join(".podbag")
         }
     };
     let run = home.join("run");
@@ -65,16 +65,16 @@ pub fn paths() -> Result<Paths, String> {
     })
 }
 
-/// Where the guest files are: `OPENPOD_VM_GUEST`, then the guest this binary carries
-/// (written to `~/.openpod/vm/<id>/`), then `vm/` beside the program's directory
-/// (`target/vm` for a build in the repository), then `~/.openpod/vm`.
+/// Where the guest files are: `PODBAG_VM_GUEST`, then the guest this binary carries
+/// (written to `~/.podbag/vm/<id>/`), then `vm/` beside the program's directory
+/// (`target/vm` for a build in the repository), then `~/.podbag/vm`.
 fn guest_dir(home: &Path) -> PathBuf {
     let beside = std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent()?.parent().map(|d| d.join("vm")))
         .filter(|dir| dir.join("Image").exists());
     choose_guest(
-        std::env::var_os("OPENPOD_VM_GUEST").map(PathBuf::from),
+        std::env::var_os("PODBAG_VM_GUEST").map(PathBuf::from),
         || {
             let carried = super::embedded::EMBEDDED?;
             let root = home.join("vm");
@@ -82,7 +82,7 @@ fn guest_dir(home: &Path) -> PathBuf {
                 Ok(dir) => Some(dir),
                 Err(e) => {
                     eprintln!(
-                        "openpod: cannot write the VM's files to {}: {e}",
+                        "podbag: cannot write the VM's files to {}: {e}",
                         root.display()
                     );
                     None
@@ -123,13 +123,13 @@ pub fn host_main() -> i32 {
     match run() {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("openpod: {e}");
+            eprintln!("podbag: {e}");
             1
         }
     }
 }
 
-/// A line for the host's log (errors are the lines that start with `openpod: `).
+/// A line for the host's log (errors are the lines that start with `podbag: `).
 fn note(what: &str) {
     let at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -189,7 +189,7 @@ impl State {
 }
 
 /// What the host hands its standby and gets back (through exec): the lock and the two
-/// listening sockets, named by `OPENPOD_VM_FDS=<lock>,<docker>,<vm>`.
+/// listening sockets, named by `PODBAG_VM_FDS=<lock>,<docker>,<vm>`.
 pub struct Inherited {
     pub lock: RawFd,
     pub docker: RawFd,
@@ -198,7 +198,7 @@ pub struct Inherited {
 
 impl Inherited {
     pub fn from_env() -> Option<Inherited> {
-        let fds: Vec<RawFd> = std::env::var("OPENPOD_VM_FDS")
+        let fds: Vec<RawFd> = std::env::var("PODBAG_VM_FDS")
             .ok()?
             .split(',')
             .filter_map(|n| n.parse().ok())
@@ -209,7 +209,7 @@ impl Inherited {
         Some(Inherited { lock, docker, vm })
     }
 
-    /// `openpod <what>` with these descriptors open in it.
+    /// `podbag <what>` with these descriptors open in it.
     fn command(&self, what: &str) -> std::io::Result<std::process::Command> {
         for fd in [self.lock, self.docker, self.vm] {
             // SAFETY: clears close-on-exec on descriptors this process owns.
@@ -217,7 +217,7 @@ impl Inherited {
         }
         let mut cmd = std::process::Command::new(std::env::current_exe()?);
         cmd.arg(what).env(
-            "OPENPOD_VM_FDS",
+            "PODBAG_VM_FDS",
             format!("{},{},{}", self.lock, self.docker, self.vm),
         );
         Ok(cmd)
@@ -249,7 +249,7 @@ fn remove_sockets(p: &Paths) {
     }
 }
 
-/// The run directory's files of a host that ends; the pid file last (`openpod vm stop`
+/// The run directory's files of a host that ends; the pid file last (`podbag vm stop`
 /// waits for it to go).
 /// Write `text` to `path` whole: through a file of this process, renamed over it, so that
 /// a reader (`vm stop`, `vm status`) sees the old content or the new, never an empty file.
@@ -316,10 +316,10 @@ fn run() -> Result<(), String> {
 }
 
 /// Answer the connections waiting in the sockets' queues with `error`: a docker client an
-/// HTTP 500 (the docker CLI shows "Error response from daemon: …"), an openpod CLI an
+/// HTTP 500 (the docker CLI shows "Error response from daemon: …"), a podbag CLI an
 /// `ERR` line instead of `OK`.
 fn answer_queued(fds: &Inherited, error: &str) {
-    let message = format!("openpod: cannot start the VM: {error}");
+    let message = format!("podbag: cannot start the VM: {error}");
     for (fd, docker) in [(fds.docker, true), (fds.vm, false)] {
         // SAFETY: a listening socket this process owns; ManuallyDrop leaves it open.
         let listener = std::mem::ManuallyDrop::new(unsafe { UnixListener::from_raw_fd(fd) });
@@ -370,10 +370,10 @@ fn serve_vm(p: &Paths, lock: &std::fs::File, inherited: Option<&Inherited>) -> R
     for f in ["Image", "initramfs.gz"] {
         if !p.guest.join(f).exists() {
             return Err(format!(
-                "the VM's {f} is missing in {}: use a build of openpod that carries its \
+                "the VM's {f} is missing in {}: use a build of podbag that carries its \
                  guest (`cargo build --release --features embed-guest` after \
-                 `dev/vm.sh run dev/macos/build-guest.sh` in openpod's repository), or set \
-                 OPENPOD_VM_GUEST to a directory with Image, initramfs.gz and disk.zst",
+                 `dev/vm.sh run dev/macos/build-guest.sh` in podbag's repository), or set \
+                 PODBAG_VM_GUEST to a directory with Image, initramfs.gz and disk.zst",
                 p.guest.display()
             ));
         }
@@ -388,18 +388,18 @@ fn serve_vm(p: &Paths, lock: &std::fs::File, inherited: Option<&Inherited>) -> R
         disk: p.disk.clone(),
         console: p.console.clone(),
         cpus: vm_cpus(
-            std::env::var("OPENPOD_VM_CPUS")
+            std::env::var("PODBAG_VM_CPUS")
                 .ok()
                 .and_then(|v| v.trim().parse().ok()),
             std::thread::available_parallelism().map_or(2, |n| n.get()),
         ),
-        memory: env_number("OPENPOD_VM_MEMORY", 2048) << 20,
-        // After `--`: the argument of /init, which makes openpod the VM's init. The kernel
+        memory: env_number("PODBAG_VM_MEMORY", 2048) << 20,
+        // After `--`: the argument of /init, which makes podbag the VM's init. The kernel
         // sizes its bounce buffers for the VM's whole memory (64 MB at 8 GiB, written at
         // boot, so the Mac holds them), and nothing uses them: virtio here does not go
         // through the DMA API.
         cmdline: format!(
-            "console=hvc0 ip=dhcp loglevel=4 panic=-1 swiotlb=2048 openpod.time={}.{:09} -- {}",
+            "console=hvc0 ip=dhcp loglevel=4 panic=-1 swiotlb=2048 podbag.time={}.{:09} -- {}",
             now.as_secs(),
             now.subsec_nanos(),
             crate::vm::proto::INIT_ARG
@@ -440,7 +440,7 @@ fn serve_vm(p: &Paths, lock: &std::fs::File, inherited: Option<&Inherited>) -> R
         let vm = vm.clone();
         std::thread::spawn(move || watch_ports(&vm, &refreshed));
     }
-    let idle = Duration::from_secs(env_number("OPENPOD_VM_IDLE", 60));
+    let idle = Duration::from_secs(env_number("PODBAG_VM_IDLE", 60));
     let mut askers = Vec::new();
     let mut tick = (std::time::SystemTime::now(), Instant::now());
     let standby = loop {
@@ -582,7 +582,7 @@ fn make_disk(p: &Paths) -> Result<(), String> {
     std::fs::rename(&part, &p.disk).map_err(|e| err(&p.disk, e))
 }
 
-/// The VM's CPUs: `OPENPOD_VM_CPUS` when set (1 to the Mac's count), else the Mac's count
+/// The VM's CPUs: `PODBAG_VM_CPUS` when set (1 to the Mac's count), else the Mac's count
 /// up to 8.
 fn vm_cpus(setting: Option<u64>, mac: usize) -> usize {
     match setting {
@@ -601,8 +601,8 @@ fn env_number(name: &str, default: u64) -> u64 {
 fn start_error(why: String) -> String {
     if why.contains("entitlement") {
         format!(
-            "cannot start the VM: {why}\n  fix:   sign openpod with the virtualization \
-             entitlement: dev/macos/sign.sh <path to openpod>"
+            "cannot start the VM: {why}\n  fix:   sign podbag with the virtualization \
+             entitlement: dev/macos/sign.sh <path to podbag>"
         )
     } else {
         format!("cannot start the VM: {why}")
@@ -620,7 +620,7 @@ fn wait_ready(vm: &Vm, p: &Paths) -> Result<(), String> {
         match guest_command(vm, "__vm-check") {
             Ok((0, _)) => return Ok(()),
             Ok((_, said)) => {
-                return Err(said.trim().trim_start_matches("openpod: ").to_string());
+                return Err(said.trim().trim_start_matches("podbag: ").to_string());
             }
             // The agent listens about 200 ms after the kernel starts: look often, as a
             // client waits for this (a failed vsock connect costs little).
@@ -777,7 +777,7 @@ fn serve(
 
 /// The Mac's side of published ports: every second, and right after a client connection
 /// closes (a `run -p` that just ended), the published TCP ports of the running
-/// containers, and a listener on the Mac's 127.0.0.1 for each (spec 3.4: not on its
+/// containers, and a listener on the Mac's 127.0.0.1 for each (not on its
 /// network). A port the Mac does not give is reported once and tried again.
 fn watch_ports(vm: &Arc<Vm>, refresh: &mpsc::Receiver<()>) {
     use std::sync::atomic::{AtomicBool, Ordering};

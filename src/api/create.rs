@@ -1,4 +1,4 @@
-//! `POST /containers/create`: Docker's container config as an openpod [`Container`].
+//! `POST /containers/create`: Docker's container config as a podbag [`Container`].
 
 use crate::image::Image;
 use crate::network::{NetworkMode, PortMapping, Proto};
@@ -6,7 +6,7 @@ use crate::spec::SecurityOpt;
 use crate::{Access, Container, Error, ErrorKind, MountRequest, Result};
 use serde_json::Value;
 
-/// The container a create body describes, and warnings about settings openpod ignores.
+/// The container a create body describes, and warnings about settings podbag ignores.
 /// The image must be pulled: NotFound otherwise, so that the docker CLI pulls it and
 /// tries again.
 pub fn container_from_create(body: &Value, name: Option<&str>) -> Result<(Container, Vec<String>)> {
@@ -171,7 +171,7 @@ pub fn map_create(
             "apparmor" | "label" | "systempaths" | "writable-cgroups"
         ) {
             warnings.push(format!(
-                "security option {opt} is ignored (openpod has no {key} support)"
+                "security option {opt} is ignored (podbag has no {key} support)"
             ));
             continue;
         }
@@ -213,14 +213,14 @@ pub fn map_create(
     Ok((c, warnings))
 }
 
-/// Settings openpod cannot honor: an error now beats a container that is not what was
+/// Settings podbag cannot honor: an error now beats a container that is not what was
 /// asked for.
 fn refuse_unsupported(host: &Value) -> Result<()> {
     let refuse = |what: &str, next: &str| {
         Err(Error::new(
             ErrorKind::InvalidInput,
             "cannot create the container",
-            format!("openpod does not support {what}"),
+            format!("podbag does not support {what}"),
             next.to_string(),
         ))
     };
@@ -252,7 +252,7 @@ fn refuse_unsupported(host: &Value) -> Result<()> {
     Ok(())
 }
 
-/// Accepted settings that change nothing in openpod: warnings, not errors.
+/// Accepted settings that change nothing in podbag: warnings, not errors.
 fn ignored(body: &Value) -> Vec<String> {
     let host = &body["HostConfig"];
     let mut out = Vec::new();
@@ -283,13 +283,13 @@ fn ignored(body: &Value) -> Vec<String> {
         ("PublishAllPorts", "publish all ports (-P)"),
     ] {
         if set(&host[key]) {
-            note(format!("{what} setting is ignored by openpod"));
+            note(format!("{what} setting is ignored by podbag"));
         }
     }
     let driver = host["LogConfig"]["Type"].as_str().unwrap_or("");
     if !matches!(driver, "" | "json-file") {
         note(format!(
-            "log driver {driver} is ignored: openpod writes logs as json-file"
+            "log driver {driver} is ignored: podbag writes logs as json-file"
         ));
     }
     for (key, what) in [
@@ -299,7 +299,7 @@ fn ignored(body: &Value) -> Vec<String> {
         ("MacAddress", "mac address"),
     ] {
         if set(&body[key]) {
-            note(format!("{what} setting is ignored by openpod"));
+            note(format!("{what} setting is ignored by podbag"));
         }
     }
     out
@@ -876,7 +876,7 @@ mod tests {
     }
 
     #[test]
-    fn create_refuses_what_openpod_cannot_do() {
+    fn create_refuses_what_podbag_cannot_do() {
         let cases = [
             (
                 json!({"Devices": [{"PathOnHost": "/dev/fuse", "PathInContainer": "/dev/fuse", "CgroupPermissions": "rwm"}]}),

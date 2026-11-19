@@ -15,7 +15,7 @@ impl Service {
     pub fn start(sb: &Sandbox, extra: &[&str]) -> Service {
         let socket = sb.tmp.path().join("docker.sock");
         let child = sb
-            .openpod()
+            .podbag()
             .args(["system", "service", "--socket"])
             .arg(&socket)
             .args(extra)
@@ -165,7 +165,7 @@ impl Service {
         use std::os::unix::process::CommandExt;
         let socket = sb.tmp.path().join("docker.sock");
         let child = sb
-            .openpod()
+            .podbag()
             .args(["system", "service", "--socket"])
             .arg(&socket)
             .args(extra)

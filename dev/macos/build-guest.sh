@@ -1,11 +1,11 @@
 #!/bin/bash
-# Build the openpod VM guest for macOS (run inside the lima VM: `dev/vm.sh run dev/macos/build-guest.sh`).
+# Build the podbag VM guest for macOS (run inside the lima VM: `dev/vm.sh run dev/macos/build-guest.sh`).
 # Writes target/vm/{Image, Image.zst, initramfs.gz, disk.zst} in the repository.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 repo=$(pwd)
 version=6.18.64
-work=${OPENPOD_GUEST_WORK:-$HOME/openpod-guest}
+work=${PODBAG_GUEST_WORK:-$HOME/podbag-guest}
 out=$repo/target/vm
 mkdir -p "$work" "$out"
 
@@ -28,11 +28,11 @@ if [ ! -d "$src" ]; then
   rm linux-$version.tar.xz
 fi
 cd "$src"
-if ! cmp -s "$repo/dev/macos/kernel.config" .openpod-fragment; then
+if ! cmp -s "$repo/dev/macos/kernel.config" .podbag-fragment; then
   make -s defconfig
   scripts/kconfig/merge_config.sh -m .config "$repo/dev/macos/kernel.config" >/dev/null
   make -s olddefconfig
-  cp "$repo/dev/macos/kernel.config" .openpod-fragment
+  cp "$repo/dev/macos/kernel.config" .podbag-fragment
 fi
 # Every option of the fragment must have survived (a missing dependency drops one quietly).
 missing=$(grep -E '^CONFIG_[A-Z0-9_]+=' "$repo/dev/macos/kernel.config" | while IFS= read -r line; do
@@ -43,15 +43,15 @@ done)
 [ -z "$missing" ] || { echo "kernel options not set:"; echo "$missing"; exit 1; }
 make -s -j"$(nproc)" Image
 cp arch/arm64/boot/Image "$out/Image"
-# What a release build of openpod carries (`--features embed-guest`).
+# What a release build of podbag carries (`--features embed-guest`).
 zstd -q -19 -T0 -f "$out/Image" -o "$out/Image.zst"
 
-# The static openpod for the guest.
+# The static podbag for the guest.
 target=aarch64-unknown-linux-musl
 (cd "$repo" && env CC_aarch64_unknown_linux_musl=musl-gcc cargo build -q --release --target $target)
-bin=$CARGO_TARGET_DIR/$target/release/openpod
+bin=$CARGO_TARGET_DIR/$target/release/podbag
 
-# The initramfs: /init is openpod (it runs as `__vm-init` when it is PID 1).
+# The initramfs: /init is podbag (it runs as `__vm-init` when it is PID 1).
 list=$work/initramfs.list
 cat > "$list" <<LIST
 dir /dev 755 0 0
@@ -65,7 +65,7 @@ dir /root 700 0 0
 dir /etc 755 0 0
 dir /var 755 0 0
 dir /var/lib 755 0 0
-dir /var/lib/openpod 755 0 0
+dir /var/lib/podbag 755 0 0
 dir /Users 755 0 0
 file /init $bin 755 0 0
 file /etc/passwd $work/passwd 644 0 0
@@ -74,14 +74,14 @@ file /etc/hosts $work/hosts 644 0 0
 LIST
 printf 'root:x:0:0:root:/root:/init\n' > "$work/passwd"
 printf 'root:x:0:\n' > "$work/group"
-printf '127.0.0.1 localhost openpod\n::1 localhost\n' > "$work/hosts"
+printf '127.0.0.1 localhost podbag\n::1 localhost\n' > "$work/hosts"
 usr/gen_init_cpio "$list" | gzip -9 > "$out/initramfs.gz"
 
 # The data disk: an empty ext4 file system, as non-zero blocks only (see src/vm/template.rs).
 img=$work/disk.img
 rm -f "$img"
 truncate -s 64G "$img"
-mkfs.ext4 -F -q -L openpod -E lazy_itable_init=1,lazy_journal_init=1,nodiscard "$img"
+mkfs.ext4 -F -q -L podbag -E lazy_itable_init=1,lazy_journal_init=1,nodiscard "$img"
 python3 - "$img" "$work/disk.raw" <<'PY'
 import os, struct, sys
 src, dst = sys.argv[1], sys.argv[2]

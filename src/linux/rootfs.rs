@@ -423,7 +423,7 @@ fn set_read_only_recursive(path: &Path) -> std::io::Result<()> {
     }
 }
 
-/// Turn an OS error from one setup step into an openpod error.
+/// Turn an OS error from one setup step into a podbag error.
 fn step<T, E: Into<std::io::Error>>(
     rootless: bool,
     name: &str,

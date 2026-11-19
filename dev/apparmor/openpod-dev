@@ -1,6 +1,0 @@
-abi <abi/4.0>,
-include <tunables/global>
-
-profile openpod-dev /{usr/bin/openpod,usr/local/bin/openpod,home/*/openpod-target/**/openpod} flags=(unconfined) {
-  userns,
-}

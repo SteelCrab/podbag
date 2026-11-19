@@ -49,7 +49,7 @@ impl Registry {
     pub fn new() -> Registry {
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .http_status_as_error(false)
-            .user_agent(format!("openpod/{}", env!("CARGO_PKG_VERSION")))
+            .user_agent(format!("podbag/{}", env!("CARGO_PKG_VERSION")))
             .timeout_connect(Some(Duration::from_secs(30)))
             .timeout_resolve(Some(Duration::from_secs(30)))
             // A registry that stops sending for this long is treated as gone.

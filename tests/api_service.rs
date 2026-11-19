@@ -1,5 +1,5 @@
 #![cfg(target_os = "linux")]
-//! `openpod system service`: the Docker Engine API socket (design 6.14).
+//! `podbag system service`: the Docker Engine API socket.
 
 mod common;
 use common::api::*;
@@ -67,7 +67,7 @@ fn a_stale_socket_is_replaced_and_a_live_one_refused() {
     let _ = std::os::unix::net::UnixListener::bind(&stale).unwrap();
     let service = Service::start(&sb, &["--timeout", "0"]);
     let second = sb
-        .openpod()
+        .podbag()
         .args(["system", "service", "--timeout", "0", "--socket"])
         .arg(&service.socket)
         .output()
@@ -93,7 +93,7 @@ fn socket_activation_uses_fd_3() {
     }
     let sb = Sandbox::new();
     let socket = sb.tmp.path().join("act.sock");
-    let mut wrapper = sb.openpod_bin("systemd-socket-activate");
+    let mut wrapper = sb.podbag_bin("systemd-socket-activate");
     let mut child = wrapper
         .arg("-l")
         .arg(&socket)
@@ -121,7 +121,7 @@ fn socket_activation_uses_fd_3() {
 fn print_units_names_the_socket() {
     let sb = Sandbox::new();
     let out = sb
-        .openpod()
+        .podbag()
         .args(["system", "service", "--print-units"])
         .output()
         .unwrap();
@@ -140,7 +140,7 @@ fn an_abandoned_wait_lets_the_service_end() {
     let sb = Sandbox::new();
     let mut service = Service::start(&sb, &["--timeout", "2"]);
     let out = sb
-        .openpod()
+        .podbag()
         .args(["run", "-d", "--name", "long", "--rootfs"])
         .arg(rootfs())
         .args(["sleep", "300"])
@@ -158,7 +158,7 @@ fn an_abandoned_wait_lets_the_service_end() {
         service.exited_within(Duration::from_secs(10)).is_some(),
         "the service stayed for a client that left"
     );
-    let _ = sb.openpod().args(["rm", "-f", "long"]).output();
+    let _ = sb.podbag().args(["rm", "-f", "long"]).output();
 }
 
 #[test]

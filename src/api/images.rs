@@ -158,7 +158,7 @@ fn create(req: &Request) -> Reply {
     if req.query.get("fromSrc").is_some_and(|s| !s.is_empty()) {
         return not_supported(
             "importing a root filesystem (fromSrc)",
-            "pull an image, or run a directory with `openpod run --rootfs`",
+            "pull an image, or run a directory with `podbag run --rootfs`",
         );
     }
     let Some(from) = req.query.get("fromImage").filter(|f| !f.is_empty()) else {
@@ -193,7 +193,7 @@ fn create(req: &Request) -> Reply {
                 send(
                     out,
                     vec![failure(&format!(
-                        "cannot pull {reference} for {p}: openpod pulls images for this machine ({here}) only"
+                        "cannot pull {reference} for {p}: podbag pulls images for this machine ({here}) only"
                     ))],
                 );
                 return Ok(());
@@ -309,7 +309,7 @@ fn list(req: &Request, ctx: &Ctx) -> Reply {
             .get(key)
             .is_some_and(|v| v.iter().any(|x| x == value))
     };
-    // openpod keeps no image without a name, and no image labels.
+    // podbag keeps no image without a name, and no image labels.
     if wants("dangling", "true") || wants("dangling", "1") || filters.contains_key("label") {
         return Reply::Json(200, json!([]));
     }
@@ -421,7 +421,7 @@ fn inspect(ctx: &Ctx, name: &str) -> Reply {
             "Os": "linux",
             "Size": record.size,
             "VirtualSize": record.size,
-            "GraphDriver": {"Name": "openpod", "Data": null},
+            "GraphDriver": {"Name": "podbag", "Data": null},
             "RootFS": {"Type": "layers", "Layers": record.diff_ids},
             "Metadata": {"LastTagTime": "0001-01-01T00:00:00Z"},
         }),
@@ -452,7 +452,7 @@ fn remove(ctx: &Ctx, name: &str) -> Reply {
     Reply::Json(200, Value::Array(out))
 }
 
-/// `POST /images/prune`: dangling images by default (openpod has none), every unused
+/// `POST /images/prune`: dangling images by default (podbag has none), every unused
 /// image with `dangling=false`.
 fn prune(req: &Request) -> Reply {
     let filters = match req.query.filters() {
@@ -465,7 +465,7 @@ fn prune(req: &Request) -> Reply {
     let all = filters
         .get("dangling")
         .is_some_and(|v| v.iter().any(|d| d == "false" || d == "0"));
-    // Images have no labels in openpod: a label filter matches none.
+    // Images have no labels in podbag: a label filter matches none.
     if filters.contains_key("label") {
         return Reply::Json(200, json!({"ImagesDeleted": null, "SpaceReclaimed": 0}));
     }
@@ -638,7 +638,7 @@ mod tests {
     }
 
     #[test]
-    fn image_filters_openpod_lacks_are_refused() {
+    fn image_filters_podbag_lacks_are_refused() {
         let keys = |k: &str| BTreeMap::from([(k.to_string(), vec!["x".to_string()])]);
         assert!(check_list_filters(&keys("reference")).is_ok());
         assert!(check_list_filters(&keys("dangling")).is_ok());

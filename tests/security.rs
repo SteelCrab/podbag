@@ -128,11 +128,11 @@ fn mounts_do_not_leak_to_the_host() {
     let args = [
         "run", "-d", "--name", "leak", "--rootfs", &rootfs, "sleep", "30",
     ];
-    let id = ok(&sb.openpod().args(args).output().unwrap());
+    let id = ok(&sb.podbag().args(args).output().unwrap());
     std::thread::sleep(std::time::Duration::from_millis(300));
     let host = std::fs::read_to_string("/proc/self/mountinfo").unwrap();
     assert!(!host.contains(&id), "{host}");
-    ok(&sb.openpod().args(["rm", "-f", "leak"]).output().unwrap());
+    ok(&sb.podbag().args(["rm", "-f", "leak"]).output().unwrap());
 }
 
 #[test]
@@ -155,10 +155,10 @@ fn exec_gets_the_same_restrictions() {
         "sleep",
         "30",
     ];
-    ok(&sb.openpod().args(args).output().unwrap());
+    ok(&sb.podbag().args(args).output().unwrap());
     std::thread::sleep(std::time::Duration::from_millis(200));
     let out = sb
-        .openpod()
+        .podbag()
         .args(["exec", "e", "grep", "-E", "^(CapBnd|NoNewPrivs|Seccomp):"])
         .arg("/proc/self/status")
         .output()
@@ -171,7 +171,7 @@ fn exec_gets_the_same_restrictions() {
         fields,
         ["CapBnd: 0000000000002000", "NoNewPrivs: 1", "Seccomp: 2"]
     );
-    ok(&sb.openpod().args(["rm", "-f", "e"]).output().unwrap());
+    ok(&sb.podbag().args(["rm", "-f", "e"]).output().unwrap());
 }
 
 // A caller with inheritable or ambient capabilities (pam_cap, a systemd service with
@@ -183,7 +183,7 @@ fn inherited_capabilities_do_not_reach_the_container() {
     }
     let sb = Sandbox::new();
     let script = format!(
-        "exec env OPENPOD_DATA_DIR={} OPENPOD_RUNTIME_DIR={} {BIN} run --rm --rootfs {} \
+        "exec env PODBAG_DATA_DIR={} PODBAG_RUNTIME_DIR={} {BIN} run --rm --rootfs {} \
          grep -E '^Cap(Inh|Eff|Amb):' /proc/self/status",
         sb.data().display(),
         sb.runtime().display(),
@@ -296,7 +296,7 @@ fn exec_reaches_a_container_that_nests_cgroups() {
                   echo +$c > /sys/fs/cgroup/cgroup.subtree_control && touch /run/nested && sleep 300";
     let rootfs = rootfs();
     let out = sb
-        .openpod()
+        .podbag()
         .args([
             "run",
             "-d",
@@ -317,17 +317,17 @@ fn exec_reaches_a_container_that_nests_cgroups() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         let ready = sb
-            .openpod()
+            .podbag()
             .args(["exec", "nest", "test", "-e", "/run/nested"])
             .output()
             .unwrap();
         if ready.status.code() == Some(0) {
             break;
         }
-        let info = ok(&sb.openpod().args(["inspect", "nest"]).output().unwrap());
+        let info = ok(&sb.podbag().args(["inspect", "nest"]).output().unwrap());
         if info.contains("\"exit_code\":7") {
             eprintln!("no controller to turn on: skipped");
-            let _ = sb.openpod().args(["rm", "-f", "nest"]).output();
+            let _ = sb.podbag().args(["rm", "-f", "nest"]).output();
             return;
         }
         assert!(
@@ -338,11 +338,11 @@ fn exec_reaches_a_container_that_nests_cgroups() {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     ok(&sb
-        .openpod()
+        .podbag()
         .args(["exec", "nest", "echo", "inside"])
         .output()
         .unwrap());
-    ok(&sb.openpod().args(["rm", "-f", "nest"]).output().unwrap());
+    ok(&sb.podbag().args(["rm", "-f", "nest"]).output().unwrap());
 }
 
 /// The host's block device that holds `/`, as major and minor numbers.
@@ -369,12 +369,12 @@ fn host_devices_stay_closed() {
     );
     let image = format!("{}/img:v1", reg.host);
     let sb = Sandbox::new();
-    ok(&sb.openpod().args(["pull", &image]).output().unwrap());
+    ok(&sb.podbag().args(["pull", &image]).output().unwrap());
     let (major, minor) = host_disk();
     let script =
         format!("mknod /disk b {major} {minor}; head -c 1 /disk > /dev/null && echo OPENED");
     let out = sb
-        .openpod()
+        .podbag()
         .args(["run", "--rm", &image, "sh", "-c", &script])
         .output()
         .unwrap();
@@ -397,7 +397,7 @@ fn host_devices_stay_closed() {
 
 /// The cgroup directory of a running container, from `inspect`.
 fn cgroup_of(sb: &Sandbox, name: &str) -> String {
-    let text = ok(&sb.openpod().args(["inspect", name]).output().unwrap());
+    let text = ok(&sb.podbag().args(["inspect", name]).output().unwrap());
     let v: serde_json::Value = serde_json::from_str(&text).unwrap();
     let v = if v.is_array() { v[0].clone() } else { v };
     v["state"]["cgroup"]
@@ -416,7 +416,7 @@ fn a_container_that_nests_cgroups_starts_again() {
                   echo +$c > /sys/fs/cgroup/cgroup.subtree_control && touch /run/nested && sleep 300";
     let rootfs = rootfs();
     ok(&sb
-        .openpod()
+        .podbag()
         .args([
             "run",
             "-d",
@@ -437,14 +437,14 @@ fn a_container_that_nests_cgroups_starts_again() {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
             let ready = sb
-                .openpod()
+                .podbag()
                 .args(["exec", "nest2", "test", "-e", "/run/nested"])
                 .output()
                 .unwrap();
             if ready.status.code() == Some(0) {
                 return true;
             }
-            let info = ok(&sb.openpod().args(["inspect", "nest2"]).output().unwrap());
+            let info = ok(&sb.podbag().args(["inspect", "nest2"]).output().unwrap());
             if info.contains("\"exit_code\":7") {
                 return false;
             }
@@ -458,22 +458,22 @@ fn a_container_that_nests_cgroups_starts_again() {
     };
     if !nested(&sb) {
         eprintln!("no controller to turn on: skipped");
-        let _ = sb.openpod().args(["rm", "-f", "nest2"]).output();
+        let _ = sb.podbag().args(["rm", "-f", "nest2"]).output();
         return;
     }
     ok(&sb
-        .openpod()
+        .podbag()
         .args(["stop", "-t", "1", "nest2"])
         .output()
         .unwrap());
-    ok(&sb.openpod().args(["start", "nest2"]).output().unwrap());
+    ok(&sb.podbag().args(["start", "nest2"]).output().unwrap());
     assert!(nested(&sb));
     let group = cgroup_of(&sb, "nest2");
     assert!(
         !group.is_empty() && std::path::Path::new(&group).exists(),
         "{group}"
     );
-    ok(&sb.openpod().args(["rm", "-f", "nest2"]).output().unwrap());
+    ok(&sb.podbag().args(["rm", "-f", "nest2"]).output().unwrap());
     assert!(
         !std::path::Path::new(&group).exists(),
         "the container's cgroup stayed: {group}"
@@ -540,7 +540,7 @@ fn a_container_gets_an_oom_score_adj_of_0_like_docker() {
     // kernel never ends it when memory runs out; its containers must not be spared too.
     let sb = Sandbox::new();
     let rootfs = rootfs();
-    let mut run = sb.openpod();
+    let mut run = sb.podbag();
     run.args([
         "run",
         "--rm",
@@ -550,14 +550,14 @@ fn a_container_gets_an_oom_score_adj_of_0_like_docker() {
         "/proc/self/oom_score_adj",
     ]);
     assert_eq!(ok(&with_oom_score_300(run)).trim(), "0");
-    let mut start = sb.openpod();
+    let mut start = sb.podbag();
     start.args([
         "run", "-d", "--name", "adj", "--rootfs", &rootfs, "sleep", "100",
     ]);
     ok(&with_oom_score_300(start));
-    let mut exec = sb.openpod();
+    let mut exec = sb.podbag();
     exec.args(["exec", "adj", "cat", "/proc/self/oom_score_adj"]);
     let out = with_oom_score_300(exec);
-    let _ = sb.openpod().args(["rm", "-f", "adj"]).output();
+    let _ = sb.podbag().args(["rm", "-f", "adj"]).output();
     assert_eq!(ok(&out).trim(), "0");
 }

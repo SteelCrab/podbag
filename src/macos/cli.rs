@@ -1,4 +1,4 @@
-//! The Mac's `openpod`: commands run in the VM. It starts the VM host when none runs,
+//! The Mac's `podbag`: commands run in the VM. It starts the VM host when none runs,
 //! sends the command (see [`crate::vm::proto`]), and passes input, output, the terminal's
 //! size and signals until the command's exit code comes back.
 
@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 /// A command for the VM, and what the Mac's side must know of it.
 pub struct Forward {
-    /// The arguments after `openpod`.
+    /// The arguments after `podbag`.
     pub argv: Vec<String>,
     /// It reads stdin (`run -i`, `exec -i`, `start -ai`, `load`): only then is input sent,
     /// and a terminal put in raw mode.
@@ -27,14 +27,14 @@ pub struct Forward {
 const WAIT_FOR_VM: Duration = Duration::from_secs(180);
 
 /// The Mac's settings that mean the same in the VM. Paths and programs
-/// (OPENPOD_DATA_DIR, OPENPOD_BIN, …) are the Mac's own.
+/// (PODBAG_DATA_DIR, PODBAG_BIN, …) are the Mac's own.
 const SETTINGS: &[&str] = &[
-    "OPENPOD_KEEPER",
-    "OPENPOD_KEEPER_LINGER_MS",
-    "OPENPOD_IMAGE_MOUNT",
-    "OPENPOD_STORE_LIMIT",
-    "OPENPOD_MEMORY_BUDGET",
-    "OPENPOD_DEFAULT_SUBNET",
+    "PODBAG_KEEPER",
+    "PODBAG_KEEPER_LINGER_MS",
+    "PODBAG_IMAGE_MOUNT",
+    "PODBAG_STORE_LIMIT",
+    "PODBAG_MEMORY_BUDGET",
+    "PODBAG_DEFAULT_SUBNET",
 ];
 
 /// Input sent ahead of what the command took.
@@ -131,16 +131,16 @@ fn lock_is_free(lock: &Path) -> bool {
 fn error_since(log: &Path, at: u64) -> String {
     let text = std::fs::read(log).unwrap_or_default();
     let text = String::from_utf8_lossy(text.get(at as usize..).unwrap_or_default());
-    match text.rfind("openpod: ") {
+    match text.rfind("podbag: ") {
         Some(start) => text[start..]
             .trim()
-            .trim_start_matches("openpod: ")
+            .trim_start_matches("podbag: ")
             .to_string(),
         None => format!("the VM host ended; see {}", log.display()),
     }
 }
 
-/// `openpod vm start|stop|status|logs`.
+/// `podbag vm start|stop|status|logs`.
 pub fn vm_command(args: &[String]) -> i32 {
     let result = match args.first().map(String::as_str) {
         // A round trip to the VM's agent: the VM is up, and works.
@@ -163,12 +163,12 @@ pub fn vm_command(args: &[String]) -> i32 {
             print!("{log}");
             Ok(())
         }),
-        _ => Err("usage: openpod vm start|stop|status|logs".into()),
+        _ => Err("usage: podbag vm start|stop|status|logs".into()),
     };
     match result {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("openpod: {e}");
+            eprintln!("podbag: {e}");
             1
         }
     }
@@ -293,13 +293,13 @@ enum Failed {
     Error(String),
 }
 
-/// Run `openpod <argv>` in the VM; returns its exit code.
+/// Run `podbag <argv>` in the VM; returns its exit code.
 pub fn forward(f: Forward) -> i32 {
     // SAFETY: isatty has no memory arguments.
     let tty = unsafe { libc::isatty(0) == 1 && libc::isatty(1) == 1 };
     let here = std::env::current_dir().unwrap_or_else(|_| "/".into());
     if let Err(e) = check_paths(&f.paths, &here) {
-        eprintln!("openpod: {e}");
+        eprintln!("podbag: {e}");
         return 125;
     }
     // The VM has the same directory only under /Users.
@@ -320,11 +320,11 @@ pub fn forward(f: Forward) -> i32 {
                 std::thread::sleep(Duration::from_millis(50));
             }
             Err(Failed::NotTaken) => {
-                eprintln!("openpod: no VM took the command in time");
+                eprintln!("podbag: no VM took the command in time");
                 return 125;
             }
             Err(Failed::Error(e)) => {
-                eprintln!("openpod: {e}");
+                eprintln!("podbag: {e}");
                 return 125;
             }
         }
@@ -418,7 +418,7 @@ fn run_remote(mut stream: UnixStream, f: &Forward, tty: bool, cwd: &str) -> Resu
     let answer = String::from_utf8_lossy(&answer);
     if let Some(why) = answer.strip_prefix("ERR ") {
         return Err(Failed::Error(
-            why.trim_start_matches("openpod: ").replace('\t', "\n"),
+            why.trim_start_matches("podbag: ").replace('\t', "\n"),
         ));
     }
     if answer != "OK" {

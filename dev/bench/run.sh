@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Measure one container tool in the openpod-dev VM (design 9):
+# Measure one container tool in the podbag-dev VM:
 #   - start time of `run --rm --network none alpine true` (median and p90),
 #   - memory for N sleeping containers, without a network and on the default network
 #     (the system's available memory, the memory held by category, the tool's processes),
@@ -7,13 +7,13 @@
 #   - disk use of two Python images that share their Python files but not their base.
 # Results go to <results-dir>/<tool>.env as key=value lines (dev/bench/report.sh reads them).
 #
-# usage: dev/bench/run.sh openpod|openpod-root|podman|docker|kiri [results-dir]
-# (OPENPOD_IMAGE_MOUNT=hardlink with openpod-root: root mode without composefs;
-#  OPENPOD_KEEPER=0 with openpod or openpod-root: a shim per container, no keeper)
-# Needs `dev/vm.sh bench-setup` (Docker, Podman, Kiri) and `dev/vm.sh static` (openpod).
+# usage: dev/bench/run.sh podbag|podbag-root|podman|docker|kiri [results-dir]
+# (PODBAG_IMAGE_MOUNT=hardlink with podbag-root: root mode without composefs;
+#  PODBAG_KEEPER=0 with podbag or podbag-root: a shim per container, no keeper)
+# Needs `dev/vm.sh bench-setup` (Docker, Podman, Kiri) and `dev/vm.sh static` (podbag).
 set -euo pipefail
 
-tool="${1:?usage: dev/bench/run.sh openpod|openpod-root|podman|docker|kiri [results-dir]}"
+tool="${1:?usage: dev/bench/run.sh podbag|podbag-root|podman|docker|kiri [results-dir]}"
 out="${2:-$HOME/bench-results}"
 runs="${BENCH_RUNS:-100}"
 count="${BENCH_COUNT:-50}"
@@ -21,29 +21,29 @@ here="$(cd "$(dirname "$0")" && pwd)"
 alpine="docker.io/library/alpine:3.22"
 py1="docker.io/library/python:3.12-slim-bookworm"
 py2="docker.io/library/python:3.12-slim-trixie"
-static="${CARGO_TARGET_DIR:-$HOME/openpod-target}/$(uname -m)-unknown-linux-musl/release/openpod"
+static="${CARGO_TARGET_DIR:-$HOME/podbag-target}/$(uname -m)-unknown-linux-musl/release/podbag"
 mkdir -p "$out"
 
 case "$tool" in
-  openpod)
-    export OPENPOD_DATA_DIR=/var/tmp/openpod-bench/data
-    export OPENPOD_RUNTIME_DIR="$XDG_RUNTIME_DIR/openpod-bench"
+  podbag)
+    export PODBAG_DATA_DIR=/var/tmp/podbag-bench/data
+    export PODBAG_RUNTIME_DIR="$XDG_RUNTIME_DIR/podbag-bench"
     cli=("$static")
     # The keeper (and a shim for each container that still needs one), the session
     # holder and pasta.
-    proc_pattern='^(openpod.*|pasta.*)$'
-    store=("$OPENPOD_DATA_DIR")
-    version="$("$static" --version)${OPENPOD_KEEPER:+ (keeper $OPENPOD_KEEPER)}"
+    proc_pattern='^(podbag.*|pasta.*)$'
+    store=("$PODBAG_DATA_DIR")
+    version="$("$static" --version)${PODBAG_KEEPER:+ (keeper $PODBAG_KEEPER)}"
     ;;
-  openpod-root)
-    # OPENPOD_IMAGE_MOUNT=hardlink measures root mode without composefs.
-    cli=(sudo -n env OPENPOD_DATA_DIR=/var/tmp/openpod-bench-root/data
-      OPENPOD_RUNTIME_DIR=/run/openpod-bench-root
-      ${OPENPOD_IMAGE_MOUNT:+OPENPOD_IMAGE_MOUNT=$OPENPOD_IMAGE_MOUNT}
-      ${OPENPOD_KEEPER:+OPENPOD_KEEPER=$OPENPOD_KEEPER} "$static")
-    proc_pattern='^(openpod.*)$'
-    store=(/var/tmp/openpod-bench-root/data)
-    version="$("$static" --version) (root, ${OPENPOD_IMAGE_MOUNT:-composefs}${OPENPOD_KEEPER:+, keeper $OPENPOD_KEEPER})"
+  podbag-root)
+    # PODBAG_IMAGE_MOUNT=hardlink measures root mode without composefs.
+    cli=(sudo -n env PODBAG_DATA_DIR=/var/tmp/podbag-bench-root/data
+      PODBAG_RUNTIME_DIR=/run/podbag-bench-root
+      ${PODBAG_IMAGE_MOUNT:+PODBAG_IMAGE_MOUNT=$PODBAG_IMAGE_MOUNT}
+      ${PODBAG_KEEPER:+PODBAG_KEEPER=$PODBAG_KEEPER} "$static")
+    proc_pattern='^(podbag.*)$'
+    store=(/var/tmp/podbag-bench-root/data)
+    version="$("$static" --version) (root, ${PODBAG_IMAGE_MOUNT:-composefs}${PODBAG_KEEPER:+, keeper $PODBAG_KEEPER})"
     ;;
   podman)
     cli=(podman)
@@ -154,7 +154,7 @@ parts="${BENCH_PARTS:-start memory disk}"
 want() { [[ " $parts " == *" $1 "* ]]; }
 results="$out/$tool.env"
 if want start && want memory && want disk; then
-  # What a tool keeps with no containers: openpod's keeper leaves 10 s after the last one.
+  # What a tool keeps with no containers: podbag's keeper leaves 10 s after the last one.
   sleep "${BENCH_IDLE_WAIT:-12}"
   {
     echo "tool=$tool"
@@ -184,13 +184,13 @@ times="$("${timed_prefix[@]}" bash -c '
 echo "start_median_ms=$(pct 50 <<<"$times")" >>"$results"
 echo "start_p90_ms=$(pct 90 <<<"$times")" >>"$results"
 case "$tool" in
-  openpod*)
+  podbag*)
     # A start that finds no keeper (the first after 10 s without containers): with no
     # linger the keeper leaves after each container, so every run starts its own.
     cold="$("${timed_prefix[@]}" bash -c '
       for i in $(seq 33); do
         t0="${EPOCHREALTIME/./}"
-        OPENPOD_KEEPER_LINGER_MS=0 "${@:2}" run --rm --network none "$1" true >/dev/null
+        PODBAG_KEEPER_LINGER_MS=0 "${@:2}" run --rm --network none "$1" true >/dev/null
         t1="${EPOCHREALTIME/./}"
         [ "$i" -le 3 ] || echo $((t1 - t0))
         sleep 0.3
@@ -244,7 +244,7 @@ echo "disk: $py1, then $py2" >&2
 use() { "${timed_prefix[@]}" "${cli[@]}" run --rm --network none "$1" true >/dev/null; }
 prune() {
   case "$tool" in
-    openpod*) "${timed_prefix[@]}" "${cli[@]}" system prune -f ;;
+    podbag*) "${timed_prefix[@]}" "${cli[@]}" system prune -f ;;
     kiri) "${timed_prefix[@]}" "${cli[@]}" system prune -af --volumes ;;
     *) "${timed_prefix[@]}" "${cli[@]}" system prune -af ;;
   esac >/dev/null

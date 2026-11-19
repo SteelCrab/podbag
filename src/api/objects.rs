@@ -114,7 +114,7 @@ pub fn network_json(n: &Network, endpoints: &[(String, String, Ipv4Addr)]) -> Va
     })
 }
 
-/// `host` or `none`, which openpod keeps no record of.
+/// `host` or `none`, which podbag keeps no record of.
 pub fn special_network_json(name: &str) -> Value {
     json!({
         "Name": name,
@@ -225,7 +225,7 @@ fn create_volume(req: &Request) -> Reply {
     {
         return message(
             400,
-            "volume options are not supported (openpod volumes are plain directories)",
+            "volume options are not supported (podbag volumes are plain directories)",
         );
     }
     let name = body["Name"].as_str().filter(|n| !n.is_empty());
@@ -420,7 +420,7 @@ fn connect_network(req: &Request, id: &str, join: bool) -> Reply {
             .as_str()
             .is_some_and(|a| !a.is_empty())
         {
-            return message(400, "fixed addresses are not supported by openpod");
+            return message(400, "fixed addresses are not supported by podbag");
         }
         let aliases: Vec<String> = match &endpoint["Aliases"] {
             Value::Null => Vec::new(),
@@ -469,7 +469,7 @@ fn create_network(req: &Request) -> Reply {
     if !matches!(driver, "" | "bridge") {
         return message(
             400,
-            format!("network driver {driver} is not supported (openpod makes bridge networks)"),
+            format!("network driver {driver} is not supported (podbag makes bridge networks)"),
         );
     }
     if body["EnableIPv6"].as_bool().unwrap_or(false) || body["Ingress"].as_bool().unwrap_or(false) {
@@ -601,7 +601,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn object_filters_openpod_lacks_are_refused() {
+    fn object_filters_podbag_lacks_are_refused() {
         let keys = |k: &str| BTreeMap::from([(k.to_string(), vec!["x".to_string()])]);
         assert!(check_volume_filters(&keys("name")).is_ok());
         assert!(check_volume_filters(&keys("bogus")).is_err());
@@ -636,7 +636,7 @@ mod tests {
             id: "abcdef123456".into(),
             subnet: "10.78.1.0/24".into(),
             gateway: "10.78.1.1".into(),
-            bridge: "opd-1".into(),
+            bridge: "pbg-1".into(),
             created: 1_700_000_000,
             labels: [("a".to_string(), "b".to_string())].into_iter().collect(),
         };

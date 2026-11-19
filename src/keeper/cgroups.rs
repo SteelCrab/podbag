@@ -11,7 +11,7 @@ static PARENT: OnceLock<Option<PathBuf>> = OnceLock::new();
 /// As root: the group of the keepers and of the helpers they fork. Not the group of
 /// whoever started the first container (a login session, a service): that one may be
 /// stopped while containers of other callers run.
-const ROOT_GROUP: &str = "openpod.keeper";
+const ROOT_GROUP: &str = "podbag.keeper";
 
 fn root_group() -> PathBuf {
     Path::new(crate::cgroup::ROOT).join(ROOT_GROUP)
@@ -58,7 +58,7 @@ pub(super) fn settle() {
 }
 
 /// At the keeper's end, as root: go back to the root group and remove the keepers' group
-/// when this was its last process, so that nothing of openpod stays at rest.
+/// when this was its last process, so that nothing of podbag stays at rest.
 pub(super) fn leave() {
     // SAFETY: geteuid has no preconditions.
     if unsafe { libc::geteuid() } != 0 {
@@ -93,7 +93,7 @@ pub fn placement(wanted: &Placement, limits: &Limits) -> crate::Result<Placement
                 "the keeper runs outside a systemd scope, so it cannot make cgroups",
             )?;
             if let Some(w) = warning {
-                eprintln!("openpod: warning: {w}");
+                eprintln!("podbag: warning: {w}");
             }
             Ok(placement)
         }
@@ -123,7 +123,7 @@ pub fn create(
     if let (Some(dir), Some(name)) = (slice_dir, name) {
         if name != slice {
             eprintln!(
-                "openpod: warning: the keeper of this runtime directory runs in {name}; \
+                "podbag: warning: the keeper of this runtime directory runs in {name}; \
                  this container goes there, not to {slice}"
             );
         }

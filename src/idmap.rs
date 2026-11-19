@@ -182,12 +182,12 @@ mod tests {
         assert_eq!(current_user(None, None, 5000), "5000");
     }
 
-    const SUBUID: &str = "# comment\n\nroot:100000:65536\nbroken-line\npista:165536:65536\n1001:300000:1000\npista:900000:10\n";
+    const SUBUID: &str = "# comment\n\nroot:100000:65536\nbroken-line\nalice:165536:65536\n1001:300000:1000\nalice:900000:10\n";
 
     #[test]
     fn parse_subid_matches_by_name_and_takes_the_first_entry() {
         assert_eq!(
-            parse_subid(SUBUID, "pista", 1000),
+            parse_subid(SUBUID, "alice", 1000),
             Some(SubIdRange {
                 start: 165536,
                 count: 65536
@@ -209,13 +209,13 @@ mod tests {
     #[test]
     fn parse_subid_returns_none_without_an_entry() {
         assert_eq!(parse_subid(SUBUID, "nobody", 4242), None);
-        assert_eq!(parse_subid("pista:abc:10\npista:1:\n", "pista", 1000), None);
+        assert_eq!(parse_subid("alice:abc:10\nalice:1:\n", "alice", 1000), None);
     }
 
     #[test]
     fn user_name_reads_passwd() {
-        let passwd = "root:x:0:0:root:/root:/bin/bash\npista:x:1000:1000::/home/pista:/bin/bash\n";
-        assert_eq!(user_name(passwd, 1000), Some("pista".to_string()));
+        let passwd = "root:x:0:0:root:/root:/bin/bash\nalice:x:1000:1000::/home/alice:/bin/bash\n";
+        assert_eq!(user_name(passwd, 1000), Some("alice".to_string()));
         assert_eq!(user_name(passwd, 7), None);
     }
 

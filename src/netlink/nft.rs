@@ -1,4 +1,4 @@
-//! nftables over netlink: openpod's own table `openpod` (family ip) with one NAT chain per
+//! nftables over netlink: podbag's own table `podbag` (family ip) with one NAT chain per
 //! network, `post-<network>`, holding `ip saddr <subnet> oifname != <bridge> masquerade`.
 //! A chain per network makes removal simple: flush the chain, then delete it.
 
@@ -17,13 +17,13 @@ const NLM_F_DUMP: u16 = 0x300;
 /// NFTA_RULE_USERDATA.
 const RULE_USERDATA: u16 = 7;
 
-/// The mark on every rule that openpod writes (a rule comment: `nft list` shows it): this
+/// The mark on every rule that podbag writes (a rule comment: `nft list` shows it): this
 /// text and the network's subnet. With the bridge, which is in the chains' names, that is
 /// all the rules are made from. A start leaves a network's rules alone when all of them
 /// are there with this mark, so **change the number whenever the rules in
 /// `masquerade_batch` change**: hosts that have the rules of an earlier version then get
 /// the new ones at the next start.
-const RULES_VERSION: &str = "openpod rules 1";
+const RULES_VERSION: &str = "podbag rules 1";
 /// How many rules `masquerade_batch` puts into the NAT chain and into the forward chain.
 const NAT_RULES: usize = 1;
 const FORWARD_RULES: usize = 2;
@@ -77,8 +77,8 @@ const NFT_CMP_EQ: u32 = 0;
 const NFT_CMP_NEQ: u32 = 1;
 const IFNAMSIZ: usize = 16;
 
-/// The table openpod owns; no other table is touched.
-pub const TABLE: &str = "openpod";
+/// The table podbag owns; no other table is touched.
+pub const TABLE: &str = "podbag";
 
 /// `struct nfgenmsg`: family, version 0, resource ID (big-endian).
 fn nfgenmsg(family: u8, res_id: u16) -> [u8; 4] {
@@ -428,9 +428,9 @@ mod tests {
 
     #[test]
     fn rules_are_in_place_only_with_this_versions_mark() {
-        let (batch, _) = masquerade_batch(1, [10, 77, 1, 0], 24, "opd-1");
-        let nat = listed_rules(&batch, "post-opd-1");
-        let forward = listed_rules(&batch, "fwd-opd-1");
+        let (batch, _) = masquerade_batch(1, [10, 77, 1, 0], 24, "pbg-1");
+        let nat = listed_rules(&batch, "post-pbg-1");
+        let forward = listed_rules(&batch, "fwd-pbg-1");
         assert_eq!((nat.len(), forward.len()), (NAT_RULES, FORWARD_RULES));
         let in_place =
             |rules: &[Vec<u8>], expected| rules_in_place(rules, expected, [10, 77, 1, 0], 24);
@@ -470,30 +470,30 @@ mod tests {
         // The mark names the network, whatever the prefix.
         assert_eq!(
             &rules_mark([10, 77, 1, 9], 24)[2..],
-            b"openpod rules 1 10.77.1.0/24\0"
+            b"podbag rules 1 10.77.1.0/24\0"
         );
         assert_eq!(
             &rules_mark([10, 77, 1, 9], 0)[2..],
-            b"openpod rules 1 0.0.0.0/0\0"
+            b"podbag rules 1 0.0.0.0/0\0"
         );
         assert_eq!(
             &rules_mark([10, 77, 1, 9], 32)[2..],
-            b"openpod rules 1 10.77.1.9/32\0"
+            b"podbag rules 1 10.77.1.9/32\0"
         );
     }
 
     #[test]
     fn the_listing_asks_for_each_chain_of_the_network() {
-        let [(nat, n), (forward, f)] = rule_queries("opd-1");
+        let [(nat, n), (forward, f)] = rule_queries("pbg-1");
         assert_eq!((n, f), (NAT_RULES, FORWARD_RULES));
-        for (query, chain) in [(nat, "post-opd-1"), (forward, "fwd-opd-1")] {
+        for (query, chain) in [(nat, "post-pbg-1"), (forward, "fwd-pbg-1")] {
             let bytes = query.finish(7);
             let ty = u16::from_ne_bytes([bytes[4], bytes[5]]);
             let flags = u16::from_ne_bytes([bytes[6], bytes[7]]);
             assert_eq!(ty, (NFNL_SUBSYS_NFTABLES << 8) | NFT_MSG_GETRULE);
             assert_eq!(flags, NLM_F_REQUEST | NLM_F_DUMP);
             let a = attrs(&bytes[20..]);
-            assert_eq!(get(&a, 1), b"openpod\0");
+            assert_eq!(get(&a, 1), b"podbag\0");
             let mut name = chain.as_bytes().to_vec();
             name.push(0);
             assert_eq!(get(&a, 2), name);
@@ -539,7 +539,7 @@ mod tests {
 
     #[test]
     fn masquerade_batch_creates_table_chain_and_rule() {
-        let (bytes, last) = masquerade_batch(100, [10, 77, 1, 0], 24, "opd-1");
+        let (bytes, last) = masquerade_batch(100, [10, 77, 1, 0], 24, "pbg-1");
         let m = messages(&bytes);
         let types: Vec<u16> = m.iter().map(|x| x.0).collect();
         assert_eq!(
@@ -561,15 +561,15 @@ mod tests {
         assert_eq!(m[0].1, [0, 0, 0, 10], "batch for the nftables subsystem");
         assert_eq!(m[1].1, [2, 0, 0, 0], "family ip");
         assert_eq!(last, 108, "the last rule's sequence number");
-        assert_eq!(get(&m[1].2, 1), b"openpod\0");
+        assert_eq!(get(&m[1].2, 1), b"podbag\0");
         let chain = &m[2].2;
-        assert_eq!(get(chain, 1), b"openpod\0");
-        assert_eq!(get(chain, 3), b"post-opd-1\0");
+        assert_eq!(get(chain, 1), b"podbag\0");
+        assert_eq!(get(chain, 3), b"post-pbg-1\0");
         assert_eq!(get(chain, 7), b"nat\0");
         let hook = attrs(&get(chain, 4 | NLA_F_NESTED));
         assert_eq!(get(&hook, 1), 4u32.to_be_bytes(), "postrouting");
         assert_eq!(get(&hook, 2), 100u32.to_be_bytes(), "srcnat priority");
-        assert_eq!(get(&m[3].2, 2), b"post-opd-1\0", "flush that chain");
+        assert_eq!(get(&m[3].2, 2), b"post-pbg-1\0", "flush that chain");
 
         let rule = &m[4].2;
         let exprs = attrs(&get(rule, 4 | NLA_F_NESTED));
@@ -593,17 +593,17 @@ mod tests {
         assert_eq!(get(&data(2), 2), 0u32.to_be_bytes(), "eq");
         assert_eq!(get(&data(3), 2), 7u32.to_be_bytes(), "oifname");
         let mut ifname = [0u8; 16];
-        ifname[..5].copy_from_slice(b"opd-1");
+        ifname[..5].copy_from_slice(b"pbg-1");
         assert_eq!(value(&data(4), 3), ifname);
         assert_eq!(get(&data(4), 2), 1u32.to_be_bytes(), "neq");
     }
 
     #[test]
     fn forward_chain_isolates_the_network() {
-        let (bytes, _) = masquerade_batch(1, [10, 78, 1, 0], 24, "opd-1");
+        let (bytes, _) = masquerade_batch(1, [10, 78, 1, 0], 24, "pbg-1");
         let m = messages(&bytes);
         let chain = &m[5].2;
-        assert_eq!(get(chain, 3), b"fwd-opd-1\0");
+        assert_eq!(get(chain, 3), b"fwd-pbg-1\0");
         assert_eq!(get(chain, 7), b"filter\0");
         let hook = attrs(&get(chain, 4 | NLA_F_NESTED));
         assert_eq!(get(&hook, 1), 2u32.to_be_bytes(), "forward");
@@ -648,15 +648,15 @@ mod tests {
 
     #[test]
     fn removal_flushes_then_deletes_the_chains() {
-        let (bytes, last) = remove_masquerade_batch(7, "opd-1");
+        let (bytes, last) = remove_masquerade_batch(7, "pbg-1");
         let m = messages(&bytes);
         let types: Vec<u16> = m.iter().map(|x| x.0).collect();
         assert_eq!(
             types,
             [0x10, SUBSYS | 8, SUBSYS | 5, SUBSYS | 8, SUBSYS | 5, 0x11]
         );
-        assert_eq!(get(&m[2].2, 3), b"post-opd-1\0");
-        assert_eq!(get(&m[4].2, 3), b"fwd-opd-1\0");
+        assert_eq!(get(&m[2].2, 3), b"post-pbg-1\0");
+        assert_eq!(get(&m[4].2, 3), b"fwd-pbg-1\0");
         assert_eq!(last, 11);
     }
 

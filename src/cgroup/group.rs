@@ -13,13 +13,13 @@ use std::time::{Duration, Instant};
 /// Where cgroup v2 is mounted.
 pub const ROOT: &str = "/sys/fs/cgroup";
 
-/// The controllers openpod uses.
+/// The controllers podbag uses.
 const CONTROLLERS: [&str; 3] = ["cpu", "memory", "pids"];
 
-/// The name of the group (or systemd slice) that holds all containers: `openpod`, or
-/// `OPENPOD_CGROUP_PARENT`.
+/// The name of the group (or systemd slice) that holds all containers: `podbag`, or
+/// `PODBAG_CGROUP_PARENT`.
 pub fn parent_name() -> Result<String> {
-    let name = std::env::var("OPENPOD_CGROUP_PARENT").unwrap_or_else(|_| "openpod".into());
+    let name = std::env::var("PODBAG_CGROUP_PARENT").unwrap_or_else(|_| "podbag".into());
     let valid = !name.is_empty()
         && name
             .bytes()
@@ -28,8 +28,8 @@ pub fn parent_name() -> Result<String> {
         return Err(Error::new(
             ErrorKind::InvalidInput,
             format!("invalid cgroup parent {name:?}"),
-            "OPENPOD_CGROUP_PARENT may hold only a-z, 0-9 and _",
-            "unset it, or choose a name like openpod_test",
+            "PODBAG_CGROUP_PARENT may hold only a-z, 0-9 and _",
+            "unset it, or choose a name like podbag_test",
         ));
     }
     Ok(name)
@@ -107,13 +107,13 @@ pub fn user_manager() -> bool {
         .is_some_and(|d| Path::new(&d).join("systemd/private").exists())
 }
 
-/// The systemd-run program: `OPENPOD_SYSTEMD_RUN`, or `systemd-run` in PATH.
+/// The systemd-run program: `PODBAG_SYSTEMD_RUN`, or `systemd-run` in PATH.
 pub fn systemd_run() -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     let executable = |p: &Path| {
         std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
     };
-    if let Some(p) = std::env::var_os("OPENPOD_SYSTEMD_RUN") {
+    if let Some(p) = std::env::var_os("PODBAG_SYSTEMD_RUN") {
         let p = PathBuf::from(p);
         return executable(&p).then_some(p);
     }
@@ -126,7 +126,7 @@ pub fn systemd_run() -> Option<PathBuf> {
 pub struct Group {
     path: PathBuf,
     dir: OwnedFd,
-    /// openpod created it and removes it (root mode); systemd removes a scope.
+    /// podbag created it and removes it (root mode); systemd removes a scope.
     owned: bool,
 }
 
@@ -215,7 +215,7 @@ pub fn create(
 }
 
 fn warn_budget(e: impl std::fmt::Display) {
-    eprintln!("openpod: warning: cannot set the memory budget: {e}");
+    eprintln!("podbag: warning: cannot set the memory budget: {e}");
 }
 
 /// The budget's `memory.high` and `memory.max`, unless `dir` already has them.
@@ -348,7 +348,7 @@ pub fn own_cgroup() -> std::io::Result<PathBuf> {
     Ok(Path::new(ROOT).join(rel.trim_start_matches('/')))
 }
 
-/// Turn on the controllers openpod uses for the children of `dir`, where available.
+/// Turn on the controllers podbag uses for the children of `dir`, where available.
 /// Returns the ones that are on.
 pub fn enable_controllers(dir: &Path) -> std::io::Result<Vec<String>> {
     enable(dir)
@@ -386,7 +386,7 @@ pub(super) fn configure(path: &Path, enabled: &[String], limits: &Limits) -> Res
                     "the cgroup {controller} controller is not available in {}",
                     path.parent().unwrap_or(path).display()
                 ),
-                "enable the controller for openpod's cgroup, or run without the option",
+                "enable the controller for podbag's cgroup, or run without the option",
             ))
         }
     };
@@ -453,10 +453,10 @@ mod tests {
     fn unusable_root_runs_without_a_cgroup_and_warns() {
         let root = stuck_root();
         let (placement, warning) =
-            direct_placement(root.path(), "openpod", &Limits::default()).unwrap();
+            direct_placement(root.path(), "podbag", &Limits::default()).unwrap();
         assert_eq!(placement, Placement::None);
         let warning = warning.unwrap();
-        assert!(warning.contains("openpod"), "{warning}");
+        assert!(warning.contains("podbag"), "{warning}");
     }
 
     #[test]
@@ -466,7 +466,7 @@ mod tests {
             pids: Some(10),
             ..Default::default()
         };
-        let e = direct_placement(root.path(), "openpod", &limits).unwrap_err();
+        let e = direct_placement(root.path(), "podbag", &limits).unwrap_err();
         assert_eq!(e.kind, ErrorKind::MissingRequirement);
     }
 }

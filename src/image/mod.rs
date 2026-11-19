@@ -255,7 +255,7 @@ pub(crate) fn not_pulled(name: &str) -> Error {
         ErrorKind::NotFound,
         format!("cannot find image {name}"),
         "it has not been pulled",
-        format!("run `openpod pull {name}`"),
+        format!("run `podbag pull {name}`"),
     )
 }
 
@@ -318,7 +318,7 @@ pub struct ImageConfig {
     /// Paths the image declares as volumes (`Volumes`); each becomes an anonymous volume.
     #[serde(default)]
     pub volumes: Vec<String>,
-    /// Its health check (`HEALTHCHECK`). Images pulled before openpod read it have none.
+    /// Its health check (`HEALTHCHECK`). Images pulled before podbag read it have none.
     #[serde(default)]
     pub healthcheck: Option<crate::health::HealthSettings>,
 }

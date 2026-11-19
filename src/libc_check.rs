@@ -1,5 +1,5 @@
-//! `openpod check-image`: find programs and libraries in an image that cannot run there —
-//! built for another C library (their loader is missing) or another CPU (design 6.9).
+//! `podbag check-image`: find programs and libraries in an image that cannot run there —
+//! built for another C library (their loader is missing) or another CPU.
 //! Files are read, never executed.
 
 use crate::elf::{Libc, Machine};
@@ -13,7 +13,7 @@ pub enum Problem {
     /// Built for another CPU.
     WrongMachine { file: Machine, image: Machine },
     /// A library it needs is in none of the usual places (a warning: it may come from
-    /// somewhere openpod cannot see, such as a path set at run time).
+    /// somewhere podbag cannot see, such as a path set at run time).
     MissingLibrary { name: String },
 }
 

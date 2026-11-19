@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 
 /// Each log file holds up to this many bytes; with one older file kept, a container keeps
-/// about 10 MiB of logs (design 6.5).
+/// about 10 MiB of logs.
 pub const LOG_FILE_LIMIT: u64 = 5 << 20;
 
 /// Longest log line. Longer output without a newline is split, as Docker does.

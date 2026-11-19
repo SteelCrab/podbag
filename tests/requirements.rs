@@ -9,7 +9,7 @@ fn missing_newuidmap_is_explained() {
     }
     let sb = Sandbox::new();
     let out = sb
-        .openpod()
+        .podbag()
         .env("PATH", "/nonexistent")
         .args(["run", "--rootfs", &rootfs(), "true"])
         .output()
@@ -18,11 +18,11 @@ fn missing_newuidmap_is_explained() {
     // Without PATH, systemd-run is missing too: a warning comes first.
     let err: String = stderr(&out)
         .lines()
-        .filter(|l| !l.starts_with("openpod: warning:"))
+        .filter(|l| !l.starts_with("podbag: warning:"))
         .map(|l| format!("{l}\n"))
         .collect();
     assert!(
-        err.starts_with("openpod: cannot map user IDs for the container\n"),
+        err.starts_with("podbag: cannot map user IDs for the container\n"),
         "{err}"
     );
     assert!(
@@ -47,18 +47,18 @@ fn apparmor_restriction_is_explained() {
     }
     // Copy the binary to a path that no AppArmor profile covers.
     let dir = tempfile::tempdir_in("/tmp").unwrap();
-    let copy = dir.path().join("openpod");
+    let copy = dir.path().join("podbag");
     std::fs::copy(BIN, &copy).unwrap();
     let sb = Sandbox::new();
     let out = sb
-        .openpod_bin(copy.to_str().unwrap())
+        .podbag_bin(copy.to_str().unwrap())
         .args(["run", "--rootfs", &rootfs(), "true"])
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(125));
     let err = stderr(&out);
     assert!(
-        err.starts_with("openpod: cannot create an unprivileged user namespace\n"),
+        err.starts_with("podbag: cannot create an unprivileged user namespace\n"),
         "{err}"
     );
     assert!(err.contains("AppArmor"), "{err}");
@@ -70,7 +70,7 @@ fn failed_setup_leaves_nothing_behind() {
         return;
     }
     let sb = Sandbox::new();
-    sb.openpod()
+    sb.podbag()
         .env("PATH", "/nonexistent")
         .args(["run", "--rootfs", &rootfs(), "true"])
         .output()
@@ -82,7 +82,7 @@ fn failed_setup_leaves_nothing_behind() {
     assert!(left.is_empty(), "{left:?}");
 }
 
-/// The line of `openpod check` output for one item: `<level> <name> ...`.
+/// The line of `podbag check` output for one item: `<level> <name> ...`.
 fn check_line<'a>(out: &'a str, name: &str) -> &'a str {
     out.lines()
         .find(|l| {
@@ -98,7 +98,7 @@ fn check_line<'a>(out: &'a str, name: &str) -> &'a str {
 #[test]
 fn check_passes_on_the_test_system() {
     let sb = Sandbox::new();
-    let out = sb.openpod().arg("check").output().unwrap();
+    let out = sb.podbag().arg("check").output().unwrap();
     let text = stdout(&out);
     assert_eq!(out.status.code(), Some(0), "{text}{}", stderr(&out));
     assert!(check_line(&text, "kernel").starts_with("ok"), "{text}");
@@ -114,7 +114,7 @@ fn check_passes_on_the_test_system() {
 #[test]
 fn check_shows_the_image_mount_method() {
     let sb = Sandbox::new();
-    let out = sb.openpod().arg("check").output().unwrap();
+    let out = sb.podbag().arg("check").output().unwrap();
     let text = stdout(&out);
     let line = check_line(&text, "image mount");
     if root_mode() {
@@ -132,9 +132,9 @@ fn check_reports_a_missing_pasta() {
     }
     let sb = Sandbox::new();
     let out = sb
-        .openpod()
+        .podbag()
         .arg("check")
-        .env("OPENPOD_PASTA", "/nonexistent/pasta")
+        .env("PODBAG_PASTA", "/nonexistent/pasta")
         .output()
         .unwrap();
     let text = stdout(&out);
@@ -147,7 +147,7 @@ fn check_reports_a_missing_pasta() {
 fn check_prints_the_apparmor_profile() {
     let sb = Sandbox::new();
     let out = sb
-        .openpod()
+        .podbag()
         .args(["check", "--apparmor-profile"])
         .output()
         .unwrap();
@@ -155,25 +155,25 @@ fn check_prints_the_apparmor_profile() {
     let text = stdout(&out);
     assert!(text.contains("  userns,"), "{text}");
     // The profile names this binary's real path.
-    let bin = std::fs::canonicalize(env!("CARGO_BIN_EXE_openpod")).unwrap();
+    let bin = std::fs::canonicalize(env!("CARGO_BIN_EXE_podbag")).unwrap();
     assert!(
-        text.contains(&format!("profile openpod {} ", bin.display())),
+        text.contains(&format!("profile podbag {} ", bin.display())),
         "{text}"
     );
 }
 
 #[test]
 fn check_shows_the_keeper() {
-    let on = Sandbox::with_env("OPENPOD_KEEPER", "1");
-    let text = stdout(&on.openpod().arg("check").output().unwrap());
+    let on = Sandbox::with_env("PODBAG_KEEPER", "1");
+    let text = stdout(&on.podbag().arg("check").output().unwrap());
     let line = check_line(&text, "keeper");
     assert!(line.starts_with("ok"), "{text}");
     assert!(
         line.contains("one process watches all detached containers"),
         "{text}"
     );
-    let off = Sandbox::with_env("OPENPOD_KEEPER", "0");
-    let text = stdout(&off.openpod().arg("check").output().unwrap());
+    let off = Sandbox::with_env("PODBAG_KEEPER", "0");
+    let text = stdout(&off.podbag().arg("check").output().unwrap());
     let line = check_line(&text, "keeper");
     assert!(line.starts_with("ok"), "{text}");
     assert!(

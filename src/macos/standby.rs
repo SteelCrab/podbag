@@ -1,25 +1,25 @@
-//! `openpod __vm-standby`: what stays of the VM host while its VM is off. The host starts
+//! `podbag __vm-standby`: what stays of the VM host while its VM is off. The host starts
 //! it with the lock and the two listening sockets (inherited) and ends; the standby waits:
 //! when one of the sockets has a connection, it becomes the host (exec `__vm-host`), which
 //! starts a VM and serves the waiting connection. So `docker.sock` answers while the VM is
-//! off, and the standby holds no VM. SIGTERM, SIGINT or SIGHUP (`openpod vm stop`, a
+//! off, and the standby holds no VM. SIGTERM, SIGINT or SIGHUP (`podbag vm stop`, a
 //! logout) end it.
 
 use super::host::{Inherited, paths, remove_files, write_whole};
 
 pub fn standby_main() -> i32 {
     let Some(fds) = Inherited::from_env() else {
-        eprintln!("openpod: __vm-standby is started by the VM host");
+        eprintln!("podbag: __vm-standby is started by the VM host");
         return 2;
     };
     let p = match paths() {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("openpod: {e}");
+            eprintln!("podbag: {e}");
             return 1;
         }
     };
-    // `openpod vm stop` signals the process in the pid file, and a standby whatever state it
+    // `podbag vm stop` signals the process in the pid file, and a standby whatever state it
     // finds: the state first, so that this pid never shows with the host's old state.
     write_whole(&p.state, "standby");
     write_whole(&p.pid, &std::process::id().to_string());
@@ -28,7 +28,7 @@ pub fn standby_main() -> i32 {
     // SAFETY: pipe fills two descriptors; both are made close-on-exec.
     unsafe {
         if libc::pipe(pipe.as_mut_ptr()) != 0 {
-            eprintln!("openpod: {}", std::io::Error::last_os_error());
+            eprintln!("podbag: {}", std::io::Error::last_os_error());
             return 1;
         }
         for fd in pipe {
@@ -50,7 +50,7 @@ pub fn standby_main() -> i32 {
             if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
                 continue;
             }
-            eprintln!("openpod: {}", std::io::Error::last_os_error());
+            eprintln!("podbag: {}", std::io::Error::last_os_error());
             remove_files(&p);
             return 1;
         }
@@ -94,7 +94,7 @@ pub fn standby_main() -> i32 {
                 return 0;
             }
             let e = fds.exec("__vm-host");
-            eprintln!("openpod: cannot start the VM host again: {e}");
+            eprintln!("podbag: cannot start the VM host again: {e}");
             remove_files(&p);
             return 1;
         }

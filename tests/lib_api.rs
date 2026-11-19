@@ -1,20 +1,20 @@
 #![cfg(target_os = "linux")]
 mod common;
 use common::*;
-use openpod::Container;
+use podbag::Container;
 use std::sync::OnceLock;
 
 static TMP: OnceLock<tempfile::TempDir> = OnceLock::new();
 
-// Library tests run openpod as the test user, so they are rootless only.
+// Library tests run podbag as the test user, so they are rootless only.
 fn setup() {
     TMP.get_or_init(|| {
         let tmp = tempfile::tempdir().unwrap();
         // SAFETY: every test sets the same values once, before any test reads them.
         unsafe {
-            std::env::set_var("OPENPOD_BIN", BIN);
-            std::env::set_var("OPENPOD_DATA_DIR", tmp.path().join("data"));
-            std::env::set_var("OPENPOD_RUNTIME_DIR", tmp.path().join("run"));
+            std::env::set_var("PODBAG_BIN", BIN);
+            std::env::set_var("PODBAG_DATA_DIR", tmp.path().join("data"));
+            std::env::set_var("PODBAG_RUNTIME_DIR", tmp.path().join("run"));
         }
         tmp
     });
@@ -103,9 +103,9 @@ fn errors_are_typed() {
         .command(["/no/such/program"])
         .run()
         .unwrap_err();
-    assert_eq!(e.kind, openpod::ErrorKind::CommandNotFound);
+    assert_eq!(e.kind, podbag::ErrorKind::CommandNotFound);
     let e = Container::from_rootfs(rootfs()).run().unwrap_err();
-    assert_eq!(e.kind, openpod::ErrorKind::InvalidInput);
+    assert_eq!(e.kind, podbag::ErrorKind::InvalidInput);
 }
 
 // A host app may hold descriptors without close-on-exec (common with C libraries).
@@ -146,7 +146,7 @@ fn library_start_and_wait() {
     let logs: Vec<String> = handle.logs().unwrap().into_iter().map(|l| l.log).collect();
     assert_eq!(logs, ["hi\n"]);
     handle.remove(false).unwrap();
-    assert!(openpod::ContainerHandle::get("libbox").is_err());
+    assert!(podbag::ContainerHandle::get("libbox").is_err());
 }
 
 #[test]
@@ -163,7 +163,7 @@ fn library_exec_captures_output() {
     let out = handle
         .exec(
             &["sh", "-c", "echo in; echo err >&2; exit 2"],
-            &openpod::ExecOptions::default(),
+            &podbag::ExecOptions::default(),
         )
         .unwrap();
     assert_eq!(
@@ -183,8 +183,8 @@ fn library_runs_as_root() {
         // Run this test again, as root.
         let out = std::process::Command::new("sudo")
             .args(["-n", "env"])
-            .arg(format!("OPENPOD_TEST_ROOTFS={}", rootfs()))
-            .arg("OPENPOD_TEST_ROOT=1")
+            .arg(format!("PODBAG_TEST_ROOTFS={}", rootfs()))
+            .arg("PODBAG_TEST_ROOT=1")
             .arg(std::env::current_exe().unwrap())
             .args(["--exact", "library_runs_as_root", "--nocapture"])
             .output()
@@ -224,9 +224,9 @@ fn conflicts_have_their_own_kind() {
         .command(["true"])
         .create()
         .unwrap_err();
-    assert_eq!(again.kind, openpod::ErrorKind::Conflict, "{again}");
+    assert_eq!(again.kind, podbag::ErrorKind::Conflict, "{again}");
     let running = first.remove(false).unwrap_err();
-    assert_eq!(running.kind, openpod::ErrorKind::Conflict, "{running}");
+    assert_eq!(running.kind, podbag::ErrorKind::Conflict, "{running}");
     first.remove(true).unwrap();
 }
 
@@ -266,9 +266,9 @@ fn resize_reaches_the_container_tty() {
     let (mut out_r, out_w) = std::io::pipe().unwrap();
     let running = handle
         .start_attached(
-            openpod::helper::Io::Fd(stdin_r.into()),
-            openpod::helper::Io::Fd(out_w.into()),
-            openpod::helper::Io::Null,
+            podbag::helper::Io::Fd(stdin_r.into()),
+            podbag::helper::Io::Fd(out_w.into()),
+            podbag::helper::Io::Null,
         )
         .unwrap();
     handle.resize(30, 100).unwrap();
@@ -288,7 +288,7 @@ fn exec_with_pipes_and_resize() {
         .command(["sleep", "30"])
         .start()
         .unwrap();
-    let options = openpod::ExecOptions {
+    let options = podbag::ExecOptions {
         tty: true,
         size: Some((20, 80)),
         ..Default::default()

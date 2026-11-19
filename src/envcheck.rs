@@ -1,4 +1,4 @@
-//! `openpod check`: is this system ready for openpod (design 6.11)? Facts are gathered on
+//! `podbag check`: is this system ready for podbag? Facts are gathered on
 //! Linux; the verdicts are plain functions of them, testable anywhere.
 
 use std::path::Path;
@@ -20,7 +20,7 @@ pub struct Facts {
     pub systemd_user: bool,
     /// `kernel.apparmor_restrict_unprivileged_userns=1`.
     pub apparmor_restricts_userns: bool,
-    /// openpod runs under an AppArmor profile (one that should allow `userns`).
+    /// podbag runs under an AppArmor profile (one that should allow `userns`).
     pub apparmor_profile: bool,
     /// Lingering is on for this user; `None` without systemd.
     pub linger: Option<bool>,
@@ -33,7 +33,7 @@ pub struct Facts {
     pub image_mount: crate::config::ImageMount,
     /// As root: whether the composefs probe passed, and why not. None when rootless.
     pub composefs: Option<Result<(), String>>,
-    /// The `keeper` setting (design 6.15).
+    /// The `keeper` setting.
     pub keeper: bool,
 }
 
@@ -89,7 +89,7 @@ pub fn evaluate(f: &Facts) -> Vec<Item> {
         item(
             "kernel",
             Fail,
-            format!("{major}.{minor}; openpod needs 5.12 or later"),
+            format!("{major}.{minor}; podbag needs 5.12 or later"),
             Some("upgrade the kernel to 5.12 or later"),
         )
     });
@@ -125,7 +125,7 @@ pub fn evaluate(f: &Facts) -> Vec<Item> {
                 "docker firewall",
                 Warn,
                 "Docker's firewall drops forwarded traffic: bridge containers cannot reach other hosts",
-                Some("sudo iptables -I DOCKER-USER -i openpod0 -j ACCEPT; sudo iptables -I DOCKER-USER -o openpod0 -j ACCEPT; and the same with opd-+ for other networks"),
+                Some("sudo iptables -I DOCKER-USER -i podbag0 -j ACCEPT; sudo iptables -I DOCKER-USER -o podbag0 -j ACCEPT; and the same with pbg-+ for other networks"),
             )
         } else {
             item("docker firewall", Ok, "Docker is not running", None)
@@ -152,7 +152,7 @@ pub fn evaluate(f: &Facts) -> Vec<Item> {
             Some(n) => item(
                 name,
                 Fail,
-                format!("{n} IDs in /etc/{name}; openpod needs {MIN_SUBIDS}"),
+                format!("{n} IDs in /etc/{name}; podbag needs {MIN_SUBIDS}"),
                 fix,
             ),
             None => item(
@@ -192,12 +192,12 @@ pub fn evaluate(f: &Facts) -> Vec<Item> {
     });
     items.push(match (f.apparmor_restricts_userns, f.apparmor_profile) {
         (false, _) => item("apparmor", Ok, "user namespaces are not restricted", None),
-        (true, true) => item("apparmor", Ok, "openpod runs under its own profile", None),
+        (true, true) => item("apparmor", Ok, "podbag runs under its own profile", None),
         (true, false) => item(
             "apparmor",
             Fail,
-            "user namespaces are restricted (kernel.apparmor_restrict_unprivileged_userns=1) and openpod has no profile",
-            Some("openpod check --apparmor-profile | sudo tee /etc/apparmor.d/openpod && sudo apparmor_parser -r /etc/apparmor.d/openpod"),
+            "user namespaces are restricted (kernel.apparmor_restrict_unprivileged_userns=1) and podbag has no profile",
+            Some("podbag check --apparmor-profile | sudo tee /etc/apparmor.d/podbag && sudo apparmor_parser -r /etc/apparmor.d/podbag"),
         ),
     });
     items.push(match f.linger {
@@ -239,7 +239,7 @@ pub fn evaluate(f: &Facts) -> Vec<Item> {
     items
 }
 
-/// How containers get their images: only root mode can use composefs (design 4.5.1).
+/// How containers get their images: only root mode can use composefs.
 fn image_mount(f: &Facts) -> Item {
     use Level::*;
     let name = "image mount";
@@ -261,7 +261,7 @@ fn image_mount(f: &Facts) -> Item {
             name,
             Ok,
             format!(
-                "hard-link trees: composefs is not available: {why}; openpod tries again after a \
+                "hard-link trees: composefs is not available: {why}; podbag tries again after a \
                  day (to try now, delete mount-method.json in the image store)"
             ),
             None,
@@ -269,7 +269,7 @@ fn image_mount(f: &Facts) -> Item {
     }
 }
 
-/// Who watches detached containers (design 6.15). Never a failure: both ways work.
+/// Who watches detached containers. Never a failure: both ways work.
 fn keeper(f: &Facts) -> Item {
     let detail = if f.keeper {
         "one process watches all detached containers and leaves after the last one"
@@ -295,7 +295,7 @@ pub fn parse_kernel(release: &str) -> Option<(u32, u32)> {
 /// The AppArmor profile that lets `binary` use user namespaces (README, "AppArmor").
 pub fn apparmor_profile(binary: &Path) -> String {
     format!(
-        "abi <abi/4.0>,\ninclude <tunables/global>\n\nprofile openpod {} flags=(unconfined) {{\n  userns,\n}}\n",
+        "abi <abi/4.0>,\ninclude <tunables/global>\n\nprofile podbag {} flags=(unconfined) {{\n  userns,\n}}\n",
         binary.display()
     )
 }
@@ -581,7 +581,7 @@ mod tests {
         assert_eq!(i.level, Level::Warn, "{i:?}");
         let fix = i.fix.as_deref().unwrap();
         assert!(
-            fix.contains("DOCKER-USER") && fix.contains("openpod0") && fix.contains("opd-+"),
+            fix.contains("DOCKER-USER") && fix.contains("podbag0") && fix.contains("pbg-+"),
             "{fix}"
         );
         assert_eq!(exit_code(&items), 0);
@@ -608,9 +608,9 @@ mod tests {
 
     #[test]
     fn apparmor_profile_text() {
-        let p = apparmor_profile(Path::new("/opt/bin/openpod"));
+        let p = apparmor_profile(Path::new("/opt/bin/podbag"));
         assert!(
-            p.contains("profile openpod /opt/bin/openpod flags=(unconfined)"),
+            p.contains("profile podbag /opt/bin/podbag flags=(unconfined)"),
             "{p}"
         );
         assert!(p.contains("  userns,"), "{p}");

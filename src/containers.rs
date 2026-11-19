@@ -24,7 +24,7 @@ pub struct ExecOptions {
     pub size: Option<(u16, u16)>,
 }
 
-/// What `openpod inspect` and `openpod ps` show about a container.
+/// What `podbag inspect` and `podbag ps` show about a container.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct ContainerInfo {
     pub id: String,
@@ -387,7 +387,7 @@ impl ContainerHandle {
                 ErrorKind::Conflict,
                 format!("cannot start container {}", info.name),
                 "it is already running",
-                "stop it first, or use `openpod restart`",
+                "stop it first, or use `podbag restart`",
             ));
         }
         Ok(())
@@ -465,7 +465,7 @@ impl ContainerHandle {
                 ErrorKind::Conflict,
                 format!("container {} is not running", info.name),
                 "exec needs a running container",
-                "start a new container, or run `openpod ps -a` to see its state",
+                "start a new container, or run `podbag ps -a` to see its state",
             ));
         }
         let req = crate::linux::exec::ExecRequest {
@@ -482,7 +482,7 @@ impl ContainerHandle {
             )
         })?;
         // Rootless: a plain session may not move a process into the container's cgroup;
-        // a process in a scope of the same slice may (design: exec in the same cgroup).
+        // a process in a scope of the same slice may.
         let scope = match (
             &state::read_config(&paths::dirs()?, &self.id)?.cgroup,
             &info.state.cgroup,
@@ -493,7 +493,7 @@ impl ContainerHandle {
                         ErrorKind::MissingRequirement,
                         "cannot run the command in the container's cgroup",
                         "systemd-run was not found",
-                        "install systemd, or set OPENPOD_SYSTEMD_RUN",
+                        "install systemd, or set PODBAG_SYSTEMD_RUN",
                     )
                 })?,
                 slice: slice.clone(),
@@ -681,7 +681,7 @@ impl ContainerHandle {
                     ErrorKind::Conflict,
                     format!("cannot remove container {short}"),
                     "it is running",
-                    "stop it first, or use `openpod rm -f`",
+                    "stop it first, or use `podbag rm -f`",
                 ));
             }
             if std::time::Instant::now() >= deadline {
@@ -768,7 +768,7 @@ impl ContainerHandle {
                 ErrorKind::NotFound,
                 what,
                 "it is not connected to that network",
-                "run `openpod inspect` to see its networks",
+                "run `podbag inspect` to see its networks",
             ))
         })
     }
@@ -790,7 +790,7 @@ impl ContainerHandle {
                     ErrorKind::Conflict,
                     format!("cannot remove container {}", info.name),
                     "it is running",
-                    "stop it first, or use `openpod rm -f`",
+                    "stop it first, or use `podbag rm -f`",
                 ));
             }
             let _ = self.kill(libc::SIGKILL);
@@ -844,7 +844,7 @@ impl ContainerHandle {
                     crate::id::short_id(&self.id)
                 ),
                 "its shim ended unexpectedly",
-                "check `openpod logs` for the last output",
+                "check `podbag logs` for the last output",
             )
         })
     }

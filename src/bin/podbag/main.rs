@@ -14,16 +14,16 @@ use args::{Cli, Cmd};
 use clap::Parser;
 
 fn main() {
-    // PID 1 of the macOS VM: openpod is its initramfs's /init, which the kernel starts as
+    // PID 1 of the macOS VM: podbag is its initramfs's /init, which the kernel starts as
     // `/init __vm-init`. Anywhere else (a container's entry point, `unshare -pf`), PID 1
     // is a CLI like any other.
     #[cfg(target_os = "linux")]
     if std::process::id() == 1
         && std::env::args_os()
             .nth(1)
-            .is_some_and(|a| a == openpod::vm::proto::INIT_ARG)
+            .is_some_and(|a| a == podbag::vm::proto::INIT_ARG)
     {
-        openpod::vm::guest::vm_init_main();
+        podbag::vm::guest::vm_init_main();
     }
     #[cfg(target_os = "macos")]
     if let Some(code) = macos_front(std::env::args().skip(1).collect()) {
@@ -33,35 +33,35 @@ fn main() {
     std::process::exit(dispatch(cli.cmd));
 }
 
-/// On macOS, commands run in openpod's Linux VM; only `vm …`, help and the version stay
+/// On macOS, commands run in podbag's Linux VM; only `vm …`, help and the version stay
 /// here.
 #[cfg(target_os = "macos")]
 fn macos_front(args: Vec<String>) -> Option<i32> {
     match args.first().map(String::as_str) {
-        Some("__vm-host") => Some(openpod::macos::host::host_main()),
-        Some("__vm-standby") => Some(openpod::macos::standby::standby_main()),
-        Some("vm") => Some(openpod::macos::cli::vm_command(&args[1..])),
+        Some("__vm-host") => Some(podbag::macos::host::host_main()),
+        Some("__vm-standby") => Some(podbag::macos::standby::standby_main()),
+        Some("vm") => Some(podbag::macos::cli::vm_command(&args[1..])),
         None | Some("-h" | "--help" | "help" | "-V" | "--version") => None,
         // Helpers the library starts on this Mac (`__store`, `__shim`, …) run here.
         Some(helper) if helper.starts_with("__") => None,
         // Checked here first: help and wrong arguments need no VM.
         Some(_) => match parse(&args) {
             Err(e) => e.exit(),
-            Ok(cli) => Some(openpod::macos::cli::forward(mac_command(&cli, args))),
+            Ok(cli) => Some(podbag::macos::cli::forward(mac_command(&cli, args))),
         },
     }
 }
 
 #[cfg(target_os = "macos")]
 fn parse(args: &[String]) -> Result<Cli, clap::Error> {
-    Cli::try_parse_from(std::iter::once("openpod".to_string()).chain(args.iter().cloned()))
+    Cli::try_parse_from(std::iter::once("podbag".to_string()).chain(args.iter().cloned()))
 }
 
 /// What the Mac's side must know of a command it sends to the VM: whether it reads stdin,
 /// the Mac paths it names, and the Mac's values of `-e NAME`.
 #[cfg(target_os = "macos")]
-fn mac_command(cli: &Cli, argv: Vec<String>) -> openpod::macos::cli::Forward {
-    let mut f = openpod::macos::cli::Forward {
+fn mac_command(cli: &Cli, argv: Vec<String>) -> podbag::macos::cli::Forward {
+    let mut f = podbag::macos::cli::Forward {
         argv,
         stdin: false,
         paths: Vec::new(),
@@ -70,8 +70,8 @@ fn mac_command(cli: &Cli, argv: Vec<String>) -> openpod::macos::cli::Forward {
         Cmd::Run(a) | Cmd::Create(a) => {
             f.stdin = matches!(cli.cmd, Cmd::Run(_)) && a.interactive && !a.detach;
             for v in &a.volume {
-                if let Ok(openpod::MountRequest::Bind { source, .. }) =
-                    openpod::volume::parse_volume_arg(v)
+                if let Ok(podbag::MountRequest::Bind { source, .. }) =
+                    podbag::volume::parse_volume_arg(v)
                 {
                     f.paths.push(source);
                 }
@@ -202,14 +202,14 @@ fn dispatch(cmd: Cmd) -> i32 {
         Cmd::ExecHelper { id, request } => exec_helper(&id, &request),
         Cmd::ArchiveHelper { id, request } => archive_helper(&id, &request),
         #[cfg(target_os = "linux")]
-        Cmd::VmAgent => openpod::vm::agent::vm_agent_main(),
+        Cmd::VmAgent => podbag::vm::agent::vm_agent_main(),
         #[cfg(not(target_os = "linux"))]
         Cmd::VmAgent => unsupported(),
         #[cfg(target_os = "linux")]
-        Cmd::Keeper { runtime } => openpod::keeper::keeper_main(&runtime),
+        Cmd::Keeper { runtime } => podbag::keeper::keeper_main(&runtime),
         #[cfg(not(target_os = "linux"))]
         Cmd::Keeper { .. } => {
-            eprintln!("openpod: the keeper runs on Linux only");
+            eprintln!("podbag: the keeper runs on Linux only");
             1
         }
         Cmd::Shim {
@@ -218,16 +218,16 @@ fn dispatch(cmd: Cmd) -> i32 {
             keep_on_failure,
         } => {
             let mode = match mode.as_deref() {
-                Some("attached") => Some(openpod::helper::ShimMode::Attached),
-                Some("detached") => Some(openpod::helper::ShimMode::Detached),
+                Some("attached") => Some(podbag::helper::ShimMode::Attached),
+                Some("detached") => Some(podbag::helper::ShimMode::Detached),
                 _ => None,
             };
-            openpod::shim::shim_main(&id, mode, keep_on_failure)
+            podbag::shim::shim_main(&id, mode, keep_on_failure)
         }
-        Cmd::Store { op } => openpod::store::ops::helper_main(&op),
+        Cmd::Store { op } => podbag::store::ops::helper_main(&op),
         Cmd::Session => session_helper(),
-        Cmd::Restarter { id } => openpod::restart::restart_main(&id),
-        Cmd::Probe { id, start_period } => openpod::health::probe_main(&id, start_period),
+        Cmd::Restarter { id } => podbag::restart::restart_main(&id),
+        Cmd::Probe { id, start_period } => podbag::health::probe_main(&id, start_period),
     }
 }
 
@@ -251,17 +251,17 @@ fn dispatch(cmd: Cmd) -> i32 {
 
 #[cfg(not(target_os = "linux"))]
 fn unsupported() -> i32 {
-    image::report(&openpod::Error::new(
-        openpod::ErrorKind::Unsupported,
+    image::report(&podbag::Error::new(
+        podbag::ErrorKind::Unsupported,
         "cannot run containers on this operating system",
-        "openpod runs containers only on Linux",
-        "run openpod on Linux",
+        "podbag runs containers only on Linux",
+        "run podbag on Linux",
     ))
 }
 
 #[cfg(target_os = "linux")]
 fn exec_helper(id: &str, request: &str) -> i32 {
-    openpod::linux::exec::exec_main(id, request)
+    podbag::linux::exec::exec_main(id, request)
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
@@ -271,7 +271,7 @@ fn exec_helper(_id: &str, _request: &str) -> i32 {
 
 #[cfg(target_os = "linux")]
 fn archive_helper(id: &str, request: &str) -> i32 {
-    openpod::linux::archive::archive_main(id, request)
+    podbag::linux::archive::archive_main(id, request)
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
@@ -281,7 +281,7 @@ fn archive_helper(_id: &str, _request: &str) -> i32 {
 
 #[cfg(target_os = "linux")]
 fn session_helper() -> i32 {
-    openpod::linux::session::session_main()
+    podbag::linux::session::session_main()
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]

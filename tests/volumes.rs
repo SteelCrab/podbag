@@ -6,8 +6,8 @@ use common::*;
 use std::path::Path;
 use std::process::Output;
 
-fn openpod(sb: &Sandbox, args: &[&str]) -> Output {
-    sb.openpod().args(args).output().unwrap()
+fn podbag(sb: &Sandbox, args: &[&str]) -> Output {
+    sb.podbag().args(args).output().unwrap()
 }
 
 fn ok(out: &Output) -> String {
@@ -65,7 +65,7 @@ fn relative_bind_and_missing_source() {
     let sb = Sandbox::new();
     let host = shared_dir();
     let out = sb
-        .openpod()
+        .podbag()
         .current_dir(host.path())
         .args(["run", "--rm", "--rootfs", &rootfs(), "-v", "./sub:/srv"])
         .args(["sh", "-c", "echo made > /srv/f"])
@@ -145,7 +145,7 @@ fn symlinked_target_stays_inside_the_rootfs() {
     let link = format!("/../../../../../..{}", escape.display());
     std::os::unix::fs::symlink(&link, root.join("data")).unwrap();
     let out = sb
-        .openpod()
+        .podbag()
         .args(["run", "--rm", "--rootfs"])
         .arg(&root)
         .args(["-v", "vol:/data/inner", "true"])
@@ -197,7 +197,7 @@ fn concurrent_first_use_copies_once_or_twice_safely() {
 }
 
 fn volume_names(sb: &Sandbox) -> Vec<String> {
-    ok(&openpod(sb, &["volume", "ls", "-q"]))
+    ok(&podbag(sb, &["volume", "ls", "-q"]))
         .lines()
         .map(String::from)
         .collect()
@@ -206,13 +206,13 @@ fn volume_names(sb: &Sandbox) -> Vec<String> {
 #[test]
 fn volume_commands() {
     let sb = Sandbox::new();
-    assert_eq!(ok(&openpod(&sb, &["volume", "create", "data"])), "data");
-    let table = ok(&openpod(&sb, &["volume", "ls"]));
+    assert_eq!(ok(&podbag(&sb, &["volume", "create", "data"])), "data");
+    let table = ok(&podbag(&sb, &["volume", "ls"]));
     assert!(table.starts_with("DRIVER    VOLUME NAME"), "{table}");
     assert!(table.lines().any(|l| l == "local     data"), "{table}");
     assert_eq!(volume_names(&sb), ["data"]);
     let info: serde_json::Value =
-        serde_json::from_str(&ok(&openpod(&sb, &["volume", "inspect", "data"]))).unwrap();
+        serde_json::from_str(&ok(&podbag(&sb, &["volume", "inspect", "data"]))).unwrap();
     assert_eq!(info["name"], "data");
     assert!(
         info["mountpoint"]
@@ -221,9 +221,9 @@ fn volume_commands() {
             .ends_with("volumes/data/data"),
         "{info}"
     );
-    assert_eq!(ok(&openpod(&sb, &["volume", "rm", "data"])), "data");
+    assert_eq!(ok(&podbag(&sb, &["volume", "rm", "data"])), "data");
     assert_eq!(
-        openpod(&sb, &["volume", "inspect", "data"]).status.code(),
+        podbag(&sb, &["volume", "inspect", "data"]).status.code(),
         Some(125)
     );
     assert!(volume_names(&sb).is_empty());
@@ -245,12 +245,12 @@ fn volume_in_use_cannot_be_removed() {
         "sleep",
         "30",
     ];
-    ok(&openpod(&sb, &start));
-    let out = openpod(&sb, &["volume", "rm", "busy"]);
+    ok(&podbag(&sb, &start));
+    let out = podbag(&sb, &["volume", "rm", "busy"]);
     assert_eq!(out.status.code(), Some(125));
     assert!(stderr(&out).contains("u"), "{}", stderr(&out));
-    ok(&openpod(&sb, &["rm", "-f", "u"]));
-    ok(&openpod(&sb, &["volume", "rm", "busy"]));
+    ok(&podbag(&sb, &["rm", "-f", "u"]));
+    ok(&podbag(&sb, &["volume", "rm", "busy"]));
 }
 
 #[test]
@@ -262,18 +262,18 @@ fn anonymous_volume_follows_rm() {
     let keep = [
         "run", "--name", "keep", "-v", "/mnt", "--rootfs", &rootfs, "true",
     ];
-    ok(&openpod(&sb, &keep));
+    ok(&podbag(&sb, &keep));
     let names = volume_names(&sb);
     assert_eq!(names.len(), 1);
     assert_eq!(names[0].len(), 64);
-    ok(&openpod(&sb, &["rm", "keep"]));
+    ok(&podbag(&sb, &["rm", "keep"]));
     assert_eq!(volume_names(&sb), names, "plain rm removed the volume");
     let gone = [
         "run", "--name", "gone", "-v", "/mnt", "--rootfs", &rootfs, "true",
     ];
-    ok(&openpod(&sb, &gone));
+    ok(&podbag(&sb, &gone));
     assert_eq!(volume_names(&sb).len(), 2);
-    ok(&openpod(&sb, &["rm", "-v", "gone"]));
+    ok(&podbag(&sb, &["rm", "-v", "gone"]));
     assert_eq!(volume_names(&sb), names, "rm -v kept the volume");
 }
 
@@ -298,7 +298,7 @@ fn volume_rm_removes_files_of_other_users() {
         &["-u", "405", "-v", "owned:/mnt"],
         &["sh", "-c", script],
     ));
-    ok(&openpod(&sb, &["volume", "rm", "owned"]));
+    ok(&podbag(&sb, &["volume", "rm", "owned"]));
     assert!(volume_names(&sb).is_empty());
     assert!(!sb.data().join("volumes/owned").exists());
 }
@@ -321,9 +321,9 @@ fn inspect_shows_mounts() {
         "sleep",
         "30",
     ];
-    ok(&openpod(&sb, &start));
+    ok(&podbag(&sb, &start));
     let info: serde_json::Value =
-        serde_json::from_str(&ok(&openpod(&sb, &["inspect", "m"]))).unwrap();
+        serde_json::from_str(&ok(&podbag(&sb, &["inspect", "m"]))).unwrap();
     let mounts = info["mounts"].as_array().expect("mounts");
     assert_eq!(mounts.len(), 2, "{info}");
     assert_eq!(mounts[0]["kind"], "volume");
@@ -332,7 +332,7 @@ fn inspect_shows_mounts() {
     assert_eq!(mounts[0]["read_only"], true);
     assert_eq!(mounts[1]["kind"], "tmpfs");
     assert_eq!(mounts[1]["target"], "/srv");
-    ok(&openpod(&sb, &["rm", "-f", "m"]));
+    ok(&podbag(&sb, &["rm", "-f", "m"]));
 }
 
 /// A copy of the fixture rootfs whose `/data` is a link to `to`.
@@ -359,7 +359,7 @@ fn links_to_proc_sys_or_root_are_refused() {
         let tmp = tempfile::tempdir().unwrap();
         let root = rootfs_with_data_link(tmp.path(), to);
         let out = sb
-            .openpod()
+            .podbag()
             .args(["run", "--rm", "--rootfs"])
             .arg(&root)
             .args(["-v", "vol:/data:nocopy", "ls", "/proc"])
@@ -376,7 +376,7 @@ fn links_to_proc_sys_or_root_are_refused() {
 fn anonymous_volume_in_use_is_kept_by_rm_v() {
     let sb = Sandbox::new();
     let rootfs = rootfs();
-    ok(&openpod(
+    ok(&podbag(
         &sb,
         &[
             "run", "--name", "a", "-v", "/mnt", "--rootfs", &rootfs, "true",
@@ -387,12 +387,12 @@ fn anonymous_volume_in_use_is_kept_by_rm_v() {
     let b = [
         "run", "-d", "--name", "b", "-v", &shared, "--rootfs", &rootfs, "sleep", "30",
     ];
-    ok(&openpod(&sb, &b));
-    ok(&openpod(&sb, &["rm", "-v", "a"]));
+    ok(&podbag(&sb, &b));
+    ok(&podbag(&sb, &["rm", "-v", "a"]));
     assert_eq!(volume_names(&sb), names, "rm -v removed a volume in use");
-    let out = openpod(&sb, &["volume", "rm", &names[0]]);
+    let out = podbag(&sb, &["volume", "rm", &names[0]]);
     assert_eq!(out.status.code(), Some(125));
-    ok(&openpod(&sb, &["rm", "-f", "b"]));
+    ok(&podbag(&sb, &["rm", "-f", "b"]));
 }
 
 // A start that fails before the shim (here: a name in use) removes its new anonymous
@@ -401,14 +401,14 @@ fn anonymous_volume_in_use_is_kept_by_rm_v() {
 fn early_failure_with_an_anonymous_volume_returns_promptly() {
     let sb = Sandbox::new();
     let rootfs = rootfs();
-    ok(&openpod(
+    ok(&podbag(
         &sb,
         &[
             "run", "-d", "--name", "dup", "--rootfs", &rootfs, "sleep", "30",
         ],
     ));
     let mut child = sb
-        .openpod()
+        .podbag()
         .args([
             "run", "--name", "dup", "-v", "/mnt", "--rootfs", &rootfs, "true",
         ])
@@ -429,5 +429,5 @@ fn early_failure_with_an_anonymous_volume_returns_promptly() {
     };
     assert_eq!(status.code(), Some(125));
     assert!(volume_names(&sb).is_empty(), "{:?}", volume_names(&sb));
-    ok(&openpod(&sb, &["rm", "-f", "dup"]));
+    ok(&podbag(&sb, &["rm", "-f", "dup"]));
 }

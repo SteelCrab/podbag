@@ -339,7 +339,7 @@ pub(super) fn run(
     };
     let id = spec.id.as_str();
     // A detached container of the keeper needs no process of its own: the keeper becomes
-    // its parent and takes over the watching once it runs (design 6.15). Published ports
+    // its parent and takes over the watching once it runs. Published ports
     // are relayed by a shim, so such a container keeps this process.
     let hand_over = spec.detach && crate::keeper::under_keeper() && spec.publish.is_empty();
     let mut io = match Io::prepare(spec) {

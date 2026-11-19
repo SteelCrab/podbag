@@ -48,7 +48,7 @@ class Colima(unittest.TestCase):
         tool = mac.TOOLS["colima"]
         self.assertIn("--profile", tool["up"][0])
         self.assertIn("--profile", tool["down"][0])
-        self.assertIn("openpod-bench/docker.sock", tool["cli"][-1])
+        self.assertIn("podbag-bench/docker.sock", tool["cli"][-1])
 
 
 if __name__ == "__main__":

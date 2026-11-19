@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Control the openpod-dev lima VM.
+# Control the podbag-dev lima VM.
 set -euo pipefail
 
-name="openpod-dev"
+name="podbag-dev"
 repo="$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 
 # Run a command inside the VM, in the repository, with the test environment.
@@ -11,9 +11,9 @@ vm_run() {
   printf -v cmd '%q ' "$@"
   limactl shell --workdir "$repo" "$name" bash -lc "
     . \"\$HOME/.cargo/env\"
-    export CARGO_TARGET_DIR=\"\$HOME/openpod-target\"
-    export OPENPOD_TEST_ROOTFS=\"\$HOME/openpod-fixtures/alpine\"
-    ${OPENPOD_TEST_ROOT:+export OPENPOD_TEST_ROOT=1}
+    export CARGO_TARGET_DIR=\"\$HOME/podbag-target\"
+    export PODBAG_TEST_ROOTFS=\"\$HOME/podbag-fixtures/alpine\"
+    ${PODBAG_TEST_ROOT:+export PODBAG_TEST_ROOT=1}
     $cmd"
 }
 
@@ -34,7 +34,7 @@ case "${1:-}" in
   test) shift; vm_run cargo test "$@" ;;
   test-root)
     shift
-    OPENPOD_TEST_ROOT=1 vm_run cargo test "$@"
+    PODBAG_TEST_ROOT=1 vm_run cargo test "$@"
     # The whole suite also runs the library tests that need real root.
     [ $# -gt 0 ] || vm_run dev/root-lib-tests.sh
     ;;
@@ -44,7 +44,7 @@ case "${1:-}" in
     # ring compiles C code; build it with musl-gcc for the musl target.
     cc_var="CC_$(echo "$target" | tr '-' '_')"
     vm_run env "$cc_var=musl-gcc" cargo build --release --target "$target"
-    vm_run bash -c "dev/check-binary.sh \"\$CARGO_TARGET_DIR/$target/release/openpod\""
+    vm_run bash -c "dev/check-binary.sh \"\$CARGO_TARGET_DIR/$target/release/podbag\""
     ;;
   down) limactl stop "$name" ;;
   *)

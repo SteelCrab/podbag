@@ -2,7 +2,7 @@
 
 use crate::args::{ExecArgs, parse_env, parse_signal};
 use crate::image::report;
-use openpod::{
+use podbag::{
     ContainerHandle, ContainerInfo, Error, ErrorKind, ExecOptions, Image, Status, Stream,
 };
 use std::io::Write;
@@ -17,7 +17,7 @@ pub fn ps(all: bool, quiet: bool) -> i32 {
         list.iter().for_each(|c| println!("{}", &c.id[..12]));
         return 0;
     }
-    let now = openpod::state::now();
+    let now = podbag::state::now();
     let rows: Vec<[String; 7]> = list
         .iter()
         .map(|c| {
@@ -113,7 +113,7 @@ pub fn rm(targets: &[String], force: bool, volumes: bool) -> i32 {
     // (the state, the network address, the cgroup) happens for all at the same time, not
     // for one after another.
     const SIGKILL: i32 = 9;
-    let dirs = openpod::paths::dirs().ok();
+    let dirs = podbag::paths::dirs().ok();
     let mut lookup = ContainerHandle::lookup().ok();
     // Each container that is there now, and whether it removes itself when it ends
     // (`--rm`): only such a one may be gone before its turn comes.
@@ -122,7 +122,7 @@ pub fn rm(targets: &[String], force: bool, volumes: bool) -> i32 {
         .map(|t| {
             let handle = lookup.as_mut()?.get(t).ok()?;
             let removes_itself = dirs.as_ref().is_some_and(|d| {
-                openpod::state::read_config(d, handle.id()).is_ok_and(|c| c.auto_remove)
+                podbag::state::read_config(d, handle.id()).is_ok_and(|c| c.auto_remove)
             });
             Some((handle, removes_itself))
         })
@@ -131,7 +131,7 @@ pub fn rm(targets: &[String], force: bool, volumes: bool) -> i32 {
         // One that does not run says so when it is removed, below.
         let _ = h.kill(SIGKILL);
     }
-    let gone = |h: &ContainerHandle| matches!(ContainerHandle::get(h.id()), Err(e) if e.kind == openpod::ErrorKind::NotFound);
+    let gone = |h: &ContainerHandle| matches!(ContainerHandle::get(h.id()), Err(e) if e.kind == podbag::ErrorKind::NotFound);
     let mut code = 0;
     let mut done = std::collections::HashSet::new();
     for (t, entry) in targets.iter().zip(&found) {
@@ -165,28 +165,28 @@ pub fn rm(targets: &[String], force: bool, volumes: bool) -> i32 {
     code
 }
 
-/// `openpod start`: in the background, or with `-a` attached to this terminal (one
+/// `podbag start`: in the background, or with `-a` attached to this terminal (one
 /// container); `-i` connects stdin.
 pub fn start(targets: &[String], attach: bool, interactive: bool) -> i32 {
     if !attach {
         return each(targets, |h| h.start().map(|()| println!("{}", h.id())));
     }
     if targets.len() != 1 {
-        eprintln!("openpod: start -a takes one container");
+        eprintln!("podbag: start -a takes one container");
         return 125;
     }
     let handle = match ContainerHandle::get(&targets[0]) {
         Ok(h) => h,
         Err(e) => {
-            eprintln!("openpod: {e}");
+            eprintln!("podbag: {e}");
             return e.exit_code();
         }
     };
-    let tty = openpod::state::read_config(
-        &match openpod::paths::dirs() {
+    let tty = podbag::state::read_config(
+        &match podbag::paths::dirs() {
             Ok(d) => d,
             Err(e) => {
-                eprintln!("openpod: {e}");
+                eprintln!("podbag: {e}");
                 return e.exit_code();
             }
         },
@@ -194,7 +194,7 @@ pub fn start(targets: &[String], attach: bool, interactive: bool) -> i32 {
     )
     .map(|s| s.tty)
     .unwrap_or(false);
-    use openpod::helper::Io;
+    use podbag::helper::Io;
     let result = crate::run::foreground(tty && interactive, |_| {
         let stdin = if interactive { Io::Inherit } else { Io::Null };
         handle.start_attached(stdin, Io::Inherit, Io::Inherit)
@@ -202,13 +202,13 @@ pub fn start(targets: &[String], attach: bool, interactive: bool) -> i32 {
     match result {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("openpod: {e}");
+            eprintln!("podbag: {e}");
             e.exit_code()
         }
     }
 }
 
-/// `openpod restart`.
+/// `podbag restart`.
 pub fn restart(targets: &[String], seconds: u64) -> i32 {
     each(targets, |h| {
         h.restart(Duration::from_secs(seconds))
@@ -253,7 +253,7 @@ pub fn exec(a: ExecArgs) -> i32 {
         size: None,
     };
     let forwarded = [libc::SIGINT, libc::SIGQUIT, libc::SIGTERM, libc::SIGHUP];
-    openpod::signals::block(&forwarded);
+    podbag::signals::block(&forwarded);
     let result = ContainerHandle::get(target).and_then(|h| {
         let _raw = (a.tty && a.interactive)
             .then(crate::run::raw_terminal)
@@ -265,14 +265,14 @@ pub fn exec(a: ExecArgs) -> i32 {
     match result {
         Ok(code) => code,
         Err(e) => {
-            openpod::signals::ignore(&forwarded);
+            podbag::signals::ignore(&forwarded);
             report(&e)
         }
     }
 }
 
 /// Apply `f` to each container; report errors and keep going, like Docker.
-fn each(targets: &[String], f: impl Fn(&ContainerHandle) -> openpod::Result<()>) -> i32 {
+fn each(targets: &[String], f: impl Fn(&ContainerHandle) -> podbag::Result<()>) -> i32 {
     let mut code = 0;
     // One look at the container list for all of them.
     let mut lookup = ContainerHandle::lookup().ok();
@@ -316,8 +316,8 @@ fn ports(c: &ContainerInfo) -> String {
         .iter()
         .map(|p| {
             let proto = match p.proto {
-                openpod::network::Proto::Tcp => "tcp",
-                openpod::network::Proto::Udp => "udp",
+                podbag::network::Proto::Tcp => "tcp",
+                podbag::network::Proto::Udp => "udp",
             };
             format!(
                 "{}:{}->{}/{proto}",

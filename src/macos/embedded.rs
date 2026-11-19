@@ -1,6 +1,6 @@
 //! The guest files a release build carries (the `embed-guest` feature): written once per
-//! guest to `~/.openpod/vm/<id>/`, so that the openpod binary alone runs containers on a
-//! Mac (design 2026-11-19 macOS, 3.1).
+//! guest to `~/.podbag/vm/<id>/`, so that the podbag binary alone runs containers on a
+//! Mac.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -15,21 +15,21 @@ pub struct Embedded {
 
 #[cfg(feature = "embed-guest")]
 pub const EMBEDDED: Option<Embedded> = Some(Embedded {
-    id: env!("OPENPOD_GUEST_ID"),
+    id: env!("PODBAG_GUEST_ID"),
     files: &[
         (
             "Image",
-            include_bytes!(concat!(env!("OPENPOD_GUEST_DIR"), "/Image.zst")),
+            include_bytes!(concat!(env!("PODBAG_GUEST_DIR"), "/Image.zst")),
             true,
         ),
         (
             "initramfs.gz",
-            include_bytes!(concat!(env!("OPENPOD_GUEST_DIR"), "/initramfs.gz")),
+            include_bytes!(concat!(env!("PODBAG_GUEST_DIR"), "/initramfs.gz")),
             false,
         ),
         (
             "disk.zst",
-            include_bytes!(concat!(env!("OPENPOD_GUEST_DIR"), "/disk.zst")),
+            include_bytes!(concat!(env!("PODBAG_GUEST_DIR"), "/disk.zst")),
             false,
         ),
     ],
@@ -65,7 +65,7 @@ pub fn extract(e: &Embedded, root: &Path) -> std::io::Result<PathBuf> {
         Ok(()) => Ok(dir),
         Err(err) => {
             let _ = std::fs::remove_dir_all(&part);
-            // Another openpod wrote the same guest meanwhile.
+            // Another podbag wrote the same guest meanwhile.
             if complete(&dir, e.id) {
                 Ok(dir)
             } else {

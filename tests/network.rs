@@ -1,11 +1,11 @@
 #![cfg(target_os = "linux")]
-//! Pulls real images from Docker Hub. Runs only with OPENPOD_TEST_NETWORK=1.
+//! Pulls real images from Docker Hub. Runs only with PODBAG_TEST_NETWORK=1.
 
 mod common;
 use common::*;
 
 fn enabled() -> bool {
-    std::env::var("OPENPOD_TEST_NETWORK").as_deref() == Ok("1")
+    std::env::var("PODBAG_TEST_NETWORK").as_deref() == Ok("1")
 }
 
 #[test]
@@ -15,7 +15,7 @@ fn runs_alpine_from_docker_hub() {
     }
     let sb = Sandbox::new();
     let out = sb
-        .openpod()
+        .podbag()
         .args(["run", "alpine", "cat", "/etc/os-release"])
         .output()
         .unwrap();
@@ -30,7 +30,7 @@ fn runs_a_glibc_image_from_docker_hub() {
     }
     let sb = Sandbox::new();
     let out = sb
-        .openpod()
+        .podbag()
         .args([
             "run",
             "debian:stable-slim",
@@ -52,9 +52,9 @@ fn check_image_passes_alpine_and_debian() {
     }
     let sb = Sandbox::new();
     for image in ["alpine", "debian:stable-slim"] {
-        let out = sb.openpod().args(["pull", image]).output().unwrap();
+        let out = sb.podbag().args(["pull", image]).output().unwrap();
         assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
-        let out = sb.openpod().args(["check-image", image]).output().unwrap();
+        let out = sb.podbag().args(["check-image", image]).output().unwrap();
         assert_eq!(out.status.code(), Some(0), "{image}: {}", stdout(&out));
         assert!(
             stdout(&out).contains("no problems found"),

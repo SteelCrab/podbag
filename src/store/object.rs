@@ -230,7 +230,7 @@ pub(crate) fn io_error(path: &Path, e: std::io::Error) -> Error {
         ErrorKind::Runtime,
         "cannot write to the image store",
         format!("{}: {e}", path.display()),
-        "check free disk space and the permissions of the openpod data directory",
+        "check free disk space and the permissions of the podbag data directory",
     )
 }
 

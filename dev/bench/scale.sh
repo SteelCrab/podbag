@@ -1,31 +1,31 @@
 #!/usr/bin/env bash
-# Many containers on one user network (design 9: 300 containers): does starting get slower
+# Many containers on one user network (300 containers): does starting get slower
 # as the network fills (locks, hosts files, the shared session), and what do 300 sleeping
 # containers cost? Times every start; memory at 50 and at the end. Results go to
 # <results-dir>/scale-<tool>.env (dev/bench/report.sh reads them).
 #
-# usage: dev/bench/scale.sh openpod|openpod-root|kiri [results-dir]
+# usage: dev/bench/scale.sh podbag|podbag-root|kiri [results-dir]
 # (BENCH_SCALE: how many, default 300)
 set -euo pipefail
 
-tool="${1:?usage: dev/bench/scale.sh openpod|openpod-root|kiri [results-dir]}"
+tool="${1:?usage: dev/bench/scale.sh podbag|podbag-root|kiri [results-dir]}"
 out="${2:-$HOME/bench-results}"
 total="${BENCH_SCALE:-300}"
 alpine="docker.io/library/alpine:3.22"
-bin="${CARGO_TARGET_DIR:-$HOME/openpod-target}/$(uname -m)-unknown-linux-musl/release/openpod"
+bin="${CARGO_TARGET_DIR:-$HOME/podbag-target}/$(uname -m)-unknown-linux-musl/release/podbag"
 mkdir -p "$out"
 
 case "$tool" in
-  openpod)
-    export OPENPOD_DATA_DIR=/var/tmp/openpod-scale/data
-    export OPENPOD_RUNTIME_DIR="$XDG_RUNTIME_DIR/openpod-scale"
+  podbag)
+    export PODBAG_DATA_DIR=/var/tmp/podbag-scale/data
+    export PODBAG_RUNTIME_DIR="$XDG_RUNTIME_DIR/podbag-scale"
     cli=("$bin")
-    proc_pattern='^(openpod.*|pasta.*)$'
+    proc_pattern='^(podbag.*|pasta.*)$'
     ;;
-  openpod-root)
-    cli=(sudo -n env OPENPOD_DATA_DIR=/var/tmp/openpod-scale-root/data
-      OPENPOD_RUNTIME_DIR=/run/openpod-scale-root "$bin")
-    proc_pattern='^(openpod.*)$'
+  podbag-root)
+    cli=(sudo -n env PODBAG_DATA_DIR=/var/tmp/podbag-scale-root/data
+      PODBAG_RUNTIME_DIR=/run/podbag-scale-root "$bin")
+    proc_pattern='^(podbag.*)$'
     ;;
   kiri)
     # The daemon runs only while it is measured (as in run.sh).

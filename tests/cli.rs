@@ -1,6 +1,6 @@
 use std::process::Command;
 
-const BIN: &str = env!("CARGO_BIN_EXE_openpod");
+const BIN: &str = env!("CARGO_BIN_EXE_podbag");
 
 #[test]
 fn version_prints_package_version() {
@@ -8,7 +8,7 @@ fn version_prints_package_version() {
     assert!(out.status.success());
     assert_eq!(
         String::from_utf8_lossy(&out.stdout).trim(),
-        format!("openpod {}", env!("CARGO_PKG_VERSION"))
+        format!("podbag {}", env!("CARGO_PKG_VERSION"))
     );
 }
 
@@ -48,7 +48,7 @@ fn image_commands_exist() {
     }
 }
 
-// openpod as the first process of a PID namespace (a container's entry point, or
+// podbag as the first process of a PID namespace (a container's entry point, or
 // `unshare -pf`) is a CLI like any other: only the macOS VM's /init is an init.
 //
 // It runs in a sandbox, so a regression cannot reach this machine: a root of its own
@@ -70,7 +70,7 @@ fn pid_one_runs_the_cli() {
         std::fs::create_dir_all(to.parent().unwrap()).unwrap();
         std::fs::copy(from, to).unwrap();
     };
-    place(std::path::Path::new(BIN), &root.path().join("openpod"));
+    place(std::path::Path::new(BIN), &root.path().join("podbag"));
     let ldd = Command::new("ldd").arg(BIN).output().unwrap();
     for lib in String::from_utf8_lossy(&ldd.stdout)
         .split_whitespace()
@@ -92,7 +92,7 @@ fn pid_one_runs_the_cli() {
             "--root",
         ])
         .arg(root.path())
-        .args(["/openpod", "--version"])
+        .args(["/podbag", "--version"])
         .output()
         .unwrap();
     assert_eq!(
@@ -101,5 +101,5 @@ fn pid_one_runs_the_cli() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(String::from_utf8_lossy(&out.stdout).contains("openpod"));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("podbag"));
 }

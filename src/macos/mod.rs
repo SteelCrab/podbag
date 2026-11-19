@@ -1,5 +1,4 @@
-//! openpod on macOS: commands run in a Linux VM that openpod starts and stops itself
-//! (design: `2026-11-19-openpod-macos-design.md`).
+//! podbag on macOS: commands run in a Linux VM that podbag starts and stops itself.
 
 pub mod cli;
 pub mod embedded;

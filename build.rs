@@ -1,18 +1,18 @@
 //! With the `embed-guest` feature on a macOS target, the binary carries the VM's guest
-//! files (design 2026-11-19 macOS, 3.1): this script names their directory and an id for
+//! files: this script names their directory and an id for
 //! them, which `src/macos/embedded.rs` uses.
 
 use std::path::PathBuf;
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-env-changed=OPENPOD_GUEST_DIR");
+    println!("cargo:rerun-if-env-changed=PODBAG_GUEST_DIR");
     let embed = std::env::var_os("CARGO_FEATURE_EMBED_GUEST").is_some();
     let macos = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos");
     if !embed || !macos {
         return;
     }
-    let dir = std::env::var_os("OPENPOD_GUEST_DIR")
+    let dir = std::env::var_os("PODBAG_GUEST_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("target/vm")
@@ -34,6 +34,6 @@ fn main() {
             id = id.wrapping_mul(0x0100_0000_01b3);
         }
     }
-    println!("cargo:rustc-env=OPENPOD_GUEST_DIR={}", dir.display());
-    println!("cargo:rustc-env=OPENPOD_GUEST_ID={id:016x}");
+    println!("cargo:rustc-env=PODBAG_GUEST_DIR={}", dir.display());
+    println!("cargo:rustc-env=PODBAG_GUEST_ID={id:016x}");
 }

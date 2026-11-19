@@ -1,5 +1,5 @@
-//! Health checks (design 6.14, M8b). There is no resident process for them: the process
-//! that watches a running container (the keeper, or its shim) starts `openpod __health
+//! Health checks. There is no resident process for them: the process
+//! that watches a running container (the keeper, or its shim) starts `podbag __health
 //! <id>` when a check is due; that process runs the check inside the container, writes the
 //! result to `health.json` in the container's directory and ends. Between checks nothing
 //! runs.
@@ -317,7 +317,7 @@ fn write(dirs: &Dirs, id: &str, health: &Health) -> Result<()> {
             Error::io(
                 "cannot write the container's health",
                 &e,
-                "check that the openpod data directory is writable",
+                "check that the podbag data directory is writable",
             )
         })
 }
@@ -416,13 +416,13 @@ impl Schedule {
 
 /// The environment a keeper gives a probe: the container's saved settings, or (when there
 /// are none) the keeper's own. An empty environment would leave the probe without HOME and
-/// the openpod directories: every check would fail without a word.
+/// the podbag directories: every check would fail without a word.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn probe_env(saved: &[(String, String)]) -> Option<&[(String, String)]> {
     (!saved.is_empty()).then_some(saved)
 }
 
-/// Start a probe for container `id` (`openpod __health <id>`), with `env` as its whole
+/// Start a probe for container `id` (`podbag __health <id>`), with `env` as its whole
 /// environment when given. Its watcher reaps it. None when no process could be started.
 #[cfg(target_os = "linux")]
 pub(crate) fn spawn_probe(
@@ -450,7 +450,7 @@ pub(crate) fn spawn_probe(
     Some(pid)
 }
 
-/// `openpod __health <id>`: run container `id`'s check once inside it, and write the
+/// `podbag __health <id>`: run container `id`'s check once inside it, and write the
 /// result into its health record.
 pub fn probe_main(id: &str, in_start_period: bool) -> i32 {
     #[cfg(target_os = "linux")]
@@ -781,7 +781,7 @@ mod tests {
 
     #[test]
     fn a_probe_without_saved_settings_keeps_the_watchers_environment() {
-        // An empty list is no environment at all: HOME and the openpod directories would
+        // An empty list is no environment at all: HOME and the podbag directories would
         // be missing, and every check would fail without a word.
         assert_eq!(probe_env(&[]), None);
         let saved = vec![("HOME".to_string(), "/h".to_string())];

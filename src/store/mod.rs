@@ -87,7 +87,7 @@ pub struct Store {
     can_build: bool,
 }
 
-/// The two ways an image's tree is kept for containers (design 6.3.2).
+/// The two ways an image's tree is kept for containers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Artifact {
     /// `rootfs.erofs`: the EROFS metadata composefs mounts.
@@ -220,7 +220,7 @@ impl Store {
         method::support(&self.root, &kernel, probe)
     }
 
-    /// Choose how containers get image files for this command (design 6.3.3): what pulls
+    /// Choose how containers get image files for this command: what pulls
     /// build and what `image_root` returns. Returns the method.
     pub fn use_mount_method(&mut self, rootless: bool, setting: ImageMount) -> MountMethod {
         let method = method::choose(setting, rootless, || self.composefs_support());
@@ -288,7 +288,7 @@ impl Store {
                 let report = tree::materialize(tree, &self.objects, dest, self.can_mknod)?;
                 if report.skipped_devices > 0 {
                     eprintln!(
-                        "openpod: skipped {} device files: rootless mode cannot create them",
+                        "podbag: skipped {} device files: rootless mode cannot create them",
                         report.skipped_devices
                     );
                 }
@@ -331,7 +331,7 @@ impl Store {
         match self.place(dir, want, tree, created) {
             Err(e) if want == Artifact::Erofs && e.kind == ErrorKind::InvalidInput => {
                 eprintln!(
-                    "openpod: warning: this image cannot use composefs ({}); it uses a hard-link tree",
+                    "podbag: warning: this image cannot use composefs ({}); it uses a hard-link tree",
                     e.why
                 );
                 let refused = dir.join(REFUSED);
@@ -360,7 +360,7 @@ impl Store {
                 ErrorKind::NotFound,
                 format!("cannot use image {}", crate::id::short_id(hex_of(digest))),
                 format!("its {} is missing from the store", want.name()),
-                "pull the image again (`openpod pull <image>`)",
+                "pull the image again (`podbag pull <image>`)",
             ));
         }
         let mut layers = Vec::new();
@@ -371,7 +371,7 @@ impl Store {
         self.build_in(&dir, want, &tree, record.created)
     }
 
-    /// Mount the image's EROFS metadata for containers, once per image (design 6.3.3).
+    /// Mount the image's EROFS metadata for containers, once per image.
     #[cfg(target_os = "linux")]
     fn mount_composefs(&self, digest: &str) -> Result<ImageRoot> {
         let lower = self.mount_point(digest).ok_or_else(|| {
@@ -1322,7 +1322,7 @@ fn not_pulled(name: &str) -> Error {
         ErrorKind::NotFound,
         format!("cannot find image {name}"),
         "it has not been pulled",
-        format!("run `openpod pull {name}`"),
+        format!("run `podbag pull {name}`"),
     )
 }
 
@@ -1588,7 +1588,7 @@ mod tests {
         let mut ro = Store::open_existing(&dirs).unwrap();
         ro.method = MountMethod::Composefs;
         let e = ro.ensure_artifact(&rec.digest).unwrap_err();
-        assert!(e.next.contains("openpod pull"), "{e:?}");
+        assert!(e.next.contains("podbag pull"), "{e:?}");
         assert!(!ro.erofs_path(&rec.digest).exists());
     }
 

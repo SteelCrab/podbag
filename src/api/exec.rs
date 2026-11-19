@@ -97,7 +97,7 @@ pub fn exec_from_body(body: &Value) -> Result<(Vec<String>, ExecOptions, Wanted)
         return Err(Error::new(
             ErrorKind::Unsupported,
             "cannot run a privileged exec",
-            "openpod does not run privileged commands",
+            "podbag does not run privileged commands",
             "drop --privileged",
         ));
     }

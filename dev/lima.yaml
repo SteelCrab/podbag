@@ -1,4 +1,4 @@
-# Development VM for openpod. Created and managed by dev/vm.sh.
+# Development VM for podbag. Created and managed by dev/vm.sh.
 vmType: vz
 mountType: virtiofs
 cpus: 4

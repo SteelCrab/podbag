@@ -5,8 +5,8 @@ mod common;
 use common::*;
 use std::time::{Duration, Instant};
 
-fn openpod(sb: &Sandbox, args: &[&str]) -> std::process::Output {
-    sb.openpod().args(args).output().unwrap()
+fn podbag(sb: &Sandbox, args: &[&str]) -> std::process::Output {
+    sb.podbag().args(args).output().unwrap()
 }
 
 fn ok(out: &std::process::Output) -> String {
@@ -21,11 +21,11 @@ fn start(sb: &Sandbox, options: &[&str], command: &[&str]) -> String {
     let rootfs = rootfs();
     args.extend_from_slice(&["--rootfs", &rootfs]);
     args.extend_from_slice(command);
-    ok(&openpod(sb, &args))
+    ok(&podbag(sb, &args))
 }
 
 fn inspect(sb: &Sandbox, c: &str) -> serde_json::Value {
-    serde_json::from_str(&ok(&openpod(sb, &["inspect", c]))).unwrap()
+    serde_json::from_str(&ok(&podbag(sb, &["inspect", c]))).unwrap()
 }
 
 fn wait_for_status(sb: &Sandbox, c: &str, status: &str) -> serde_json::Value {
@@ -73,7 +73,7 @@ fn logs_show_detached_output_in_order() {
         ],
     );
     wait_for_status(&sb, &id, "exited");
-    let out = openpod(&sb, &["logs", &id]);
+    let out = podbag(&sb, &["logs", &id]);
     assert_eq!(stdout(&out), "one\nthree");
     assert_eq!(stderr(&out).trim(), "two");
 }
@@ -82,19 +82,19 @@ fn logs_show_detached_output_in_order() {
 fn foreground_output_is_also_logged() {
     let sb = Sandbox::new();
     assert_eq!(
-        ok(&openpod(
+        ok(&podbag(
             &sb,
             &["run", "--name", "fg", "--rootfs", &rootfs(), "echo", "hi"]
         )),
         "hi"
     );
-    assert_eq!(ok(&openpod(&sb, &["logs", "fg"])), "hi");
+    assert_eq!(ok(&podbag(&sb, &["logs", "fg"])), "hi");
 }
 
 #[test]
 fn exited_container_stays_without_rm() {
     let sb = Sandbox::new();
-    let out = openpod(
+    let out = podbag(
         &sb,
         &[
             "run",
@@ -121,7 +121,7 @@ fn exited_container_stays_without_rm() {
 #[test]
 fn rm_flag_removes_the_container() {
     let sb = Sandbox::new();
-    ok(&openpod(
+    ok(&podbag(
         &sb,
         &[
             "run",
@@ -133,7 +133,7 @@ fn rm_flag_removes_the_container() {
             "true",
         ],
     ));
-    let out = openpod(&sb, &["inspect", "gone"]);
+    let out = podbag(&sb, &["inspect", "gone"]);
     assert_eq!(out.status.code(), Some(125));
     assert!(
         stderr(&out).contains("cannot find container gone"),
@@ -146,11 +146,11 @@ fn rm_flag_removes_the_container() {
 fn ps_lists_running_and_all() {
     let sb = Sandbox::new();
     let running = start(&sb, &["--name", "busy"], &["sleep", "5"]);
-    ok(&openpod(
+    ok(&podbag(
         &sb,
         &["run", "--name", "done", "--rootfs", &rootfs(), "true"],
     ));
-    let ps = ok(&openpod(&sb, &["ps"]));
+    let ps = ok(&podbag(&sb, &["ps"]));
     assert!(
         ps.lines().next().unwrap().starts_with("CONTAINER ID"),
         "{ps}"
@@ -160,21 +160,21 @@ fn ps_lists_running_and_all() {
         "{ps}"
     );
     assert!(!ps.contains("done"), "{ps}");
-    let all = ok(&openpod(&sb, &["ps", "-a"]));
+    let all = ok(&podbag(&sb, &["ps", "-a"]));
     assert!(all.contains("done") && all.contains("Exited (0)"), "{all}");
-    let quiet = ok(&openpod(&sb, &["ps", "-a", "-q"]));
+    let quiet = ok(&podbag(&sb, &["ps", "-a", "-q"]));
     assert_eq!(quiet.lines().count(), 2, "{quiet}");
-    ok(&openpod(&sb, &["rm", "-f", "busy"]));
+    ok(&podbag(&sb, &["rm", "-f", "busy"]));
 }
 
 #[test]
 fn duplicate_names_are_rejected() {
     let sb = Sandbox::new();
-    ok(&openpod(
+    ok(&podbag(
         &sb,
         &["run", "--name", "web", "--rootfs", &rootfs(), "true"],
     ));
-    let out = openpod(
+    let out = podbag(
         &sb,
         &["run", "--name", "web", "--rootfs", &rootfs(), "true"],
     );
@@ -190,21 +190,21 @@ fn duplicate_names_are_rejected() {
 fn rm_refuses_a_running_container_without_force() {
     let sb = Sandbox::new();
     start(&sb, &["--name", "live"], &["sleep", "10"]);
-    let out = openpod(&sb, &["rm", "live"]);
+    let out = podbag(&sb, &["rm", "live"]);
     assert_eq!(out.status.code(), Some(125));
     assert!(stderr(&out).contains("is running"), "{}", stderr(&out));
-    ok(&openpod(&sb, &["rm", "-f", "live"]));
-    assert_eq!(openpod(&sb, &["inspect", "live"]).status.code(), Some(125));
+    ok(&podbag(&sb, &["rm", "-f", "live"]));
+    assert_eq!(podbag(&sb, &["inspect", "live"]).status.code(), Some(125));
 }
 
 #[test]
 fn rm_removes_an_exited_container_and_its_files() {
     let sb = Sandbox::new();
-    ok(&openpod(
+    ok(&podbag(
         &sb,
         &["run", "--name", "x", "--rootfs", &rootfs(), "true"],
     ));
-    ok(&openpod(&sb, &["rm", "x"]));
+    ok(&podbag(&sb, &["rm", "x"]));
     let left: Vec<_> = std::fs::read_dir(sb.data().join("containers"))
         .unwrap()
         .map(|e| e.unwrap().file_name())
@@ -217,7 +217,7 @@ fn logs_follow_ends_when_the_container_exits() {
     let sb = Sandbox::new();
     let id = start(&sb, &[], &["sh", "-c", "echo a; sleep 1; echo b"]);
     let t = Instant::now();
-    let out = openpod(&sb, &["logs", "-f", &id]);
+    let out = podbag(&sb, &["logs", "-f", &id]);
     assert_eq!(stdout(&out), "a\nb");
     assert!(t.elapsed() < Duration::from_secs(10));
 }
@@ -239,7 +239,7 @@ fn stop_ends_a_container_that_handles_sigterm() {
         ],
     );
     let t = Instant::now();
-    ok(&openpod(&sb, &["stop", "-t", "5", "polite"]));
+    ok(&podbag(&sb, &["stop", "-t", "5", "polite"]));
     assert!(
         t.elapsed() < Duration::from_secs(4),
         "stop took {:?}",
@@ -257,7 +257,7 @@ fn stop_escalates_to_sigkill_after_the_timeout() {
         &["sh", "-c", "trap '' TERM; while true; do sleep 0.1; done"],
     );
     let t = Instant::now();
-    ok(&openpod(&sb, &["stop", "-t", "1", "stubborn"]));
+    ok(&podbag(&sb, &["stop", "-t", "1", "stubborn"]));
     let took = t.elapsed();
     assert!(
         took >= Duration::from_secs(1) && took < Duration::from_secs(5),
@@ -279,7 +279,7 @@ fn kill_sends_the_named_signal() {
         ],
     );
     std::thread::sleep(Duration::from_millis(300));
-    ok(&openpod(&sb, &["kill", "-s", "USR1", "k"]));
+    ok(&podbag(&sb, &["kill", "-s", "USR1", "k"]));
     assert_eq!(exit_code(&sb, "k"), 42);
 }
 
@@ -298,7 +298,7 @@ fn stop_reaches_a_non_root_container_user() {
         ],
     );
     std::thread::sleep(Duration::from_millis(300));
-    ok(&openpod(&sb, &["stop", "-t", "5", "guest"]));
+    ok(&podbag(&sb, &["stop", "-t", "5", "guest"]));
     assert_eq!(exit_code(&sb, "guest"), 7);
 }
 
@@ -324,8 +324,8 @@ fn ps_marks_a_container_with_a_dead_shim_as_exited() {
     );
     let info = wait_for_status(&sb, "orphan", "exited");
     assert!(info["state"]["exit_code"].is_null(), "{info}");
-    assert!(ok(&openpod(&sb, &["ps", "-a"])).contains("Exited (?)"));
-    ok(&openpod(&sb, &["rm", "orphan"]));
+    assert!(ok(&podbag(&sb, &["ps", "-a"])).contains("Exited (?)"));
+    ok(&podbag(&sb, &["rm", "orphan"]));
 }
 
 fn running(sb: &Sandbox, name: &str, options: &[&str]) -> String {
@@ -340,16 +340,16 @@ fn running(sb: &Sandbox, name: &str, options: &[&str]) -> String {
 fn exec_runs_in_the_container_namespaces() {
     let sb = Sandbox::new();
     let id = running(&sb, "ns", &[]);
-    assert_eq!(ok(&openpod(&sb, &["exec", "ns", "hostname"])), id[..12]);
+    assert_eq!(ok(&podbag(&sb, &["exec", "ns", "hostname"])), id[..12]);
     assert_eq!(
-        ok(&openpod(
+        ok(&podbag(
             &sb,
             &["exec", "ns", "sh", "-c", "tr '\\0' ' ' < /proc/1/cmdline"]
         )),
         "sleep 30"
     );
-    assert!(ok(&openpod(&sb, &["exec", "ns", "cat", "/etc/alpine-release"])).starts_with('3'));
-    ok(&openpod(&sb, &["rm", "-f", "ns"]));
+    assert!(ok(&podbag(&sb, &["exec", "ns", "cat", "/etc/alpine-release"])).starts_with('3'));
+    ok(&podbag(&sb, &["rm", "-f", "ns"]));
 }
 
 #[test]
@@ -357,18 +357,18 @@ fn exec_uses_container_env_and_user_flag() {
     let sb = Sandbox::new();
     running(&sb, "env", &["-e", "FOO=bar", "-w", "/tmp"]);
     assert_eq!(
-        ok(&openpod(
+        ok(&podbag(
             &sb,
             &["exec", "env", "sh", "-c", "echo $FOO; id -u; pwd"]
         )),
         "bar\n0\n/tmp"
     );
     assert_eq!(
-        ok(&openpod(&sb, &["exec", "-u", "405", "env", "id", "-u"])),
+        ok(&podbag(&sb, &["exec", "-u", "405", "env", "id", "-u"])),
         "405"
     );
     assert_eq!(
-        ok(&openpod(
+        ok(&podbag(
             &sb,
             &[
                 "exec",
@@ -384,7 +384,7 @@ fn exec_uses_container_env_and_user_flag() {
         )),
         "1\n/etc"
     );
-    ok(&openpod(&sb, &["rm", "-f", "env"]));
+    ok(&podbag(&sb, &["rm", "-f", "env"]));
 }
 
 #[test]
@@ -392,33 +392,33 @@ fn exec_exit_code_propagates() {
     let sb = Sandbox::new();
     running(&sb, "codes", &[]);
     assert_eq!(
-        openpod(&sb, &["exec", "codes", "sh", "-c", "exit 5"])
+        podbag(&sb, &["exec", "codes", "sh", "-c", "exit 5"])
             .status
             .code(),
         Some(5)
     );
-    let out = openpod(&sb, &["exec", "codes", "/no/such"]);
+    let out = podbag(&sb, &["exec", "codes", "/no/such"]);
     assert_eq!(out.status.code(), Some(127), "{}", stderr(&out));
-    ok(&openpod(&sb, &["rm", "-f", "codes"]));
+    ok(&podbag(&sb, &["rm", "-f", "codes"]));
 }
 
 #[test]
 fn exec_does_not_stop_the_container() {
     let sb = Sandbox::new();
     running(&sb, "stay", &[]);
-    ok(&openpod(&sb, &["exec", "stay", "true"]));
+    ok(&podbag(&sb, &["exec", "stay", "true"]));
     assert_eq!(inspect(&sb, "stay")["state"]["status"], "running");
-    ok(&openpod(&sb, &["rm", "-f", "stay"]));
+    ok(&podbag(&sb, &["rm", "-f", "stay"]));
 }
 
 #[test]
 fn exec_into_a_stopped_container_fails() {
     let sb = Sandbox::new();
-    ok(&openpod(
+    ok(&podbag(
         &sb,
         &["run", "--name", "over", "--rootfs", &rootfs(), "true"],
     ));
-    let out = openpod(&sb, &["exec", "over", "true"]);
+    let out = podbag(&sb, &["exec", "over", "true"]);
     assert_eq!(out.status.code(), Some(125));
     assert!(stderr(&out).contains("is not running"), "{}", stderr(&out));
 }
@@ -444,13 +444,13 @@ fn detached_run_keeps_every_option() {
         &["sh", "-c", "id -u; echo $X; pwd; hostname"],
     );
     wait_for_status(&sb, "opts", "exited");
-    assert_eq!(ok(&openpod(&sb, &["logs", "opts"])), "405\n1\n/tmp\nhh");
+    assert_eq!(ok(&podbag(&sb, &["logs", "opts"])), "405\n1\n/tmp\nhh");
 }
 
 #[test]
 fn tty_gives_the_container_a_terminal() {
     let sb = Sandbox::new();
-    let out = openpod(&sb, &["run", "--rm", "-t", "--rootfs", &rootfs(), "tty"]);
+    let out = podbag(&sb, &["run", "--rm", "-t", "--rootfs", &rootfs(), "tty"]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     assert_eq!(stdout(&out), "/dev/pts/0");
 }
@@ -459,16 +459,16 @@ fn tty_gives_the_container_a_terminal() {
 fn exec_tty_gives_a_terminal() {
     let sb = Sandbox::new();
     running(&sb, "termy", &[]);
-    let out = openpod(&sb, &["exec", "-t", "termy", "tty"]);
+    let out = podbag(&sb, &["exec", "-t", "termy", "tty"]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     assert!(stdout(&out).starts_with("/dev/pts/"), "{}", stdout(&out));
-    ok(&openpod(&sb, &["rm", "-f", "termy"]));
+    ok(&podbag(&sb, &["rm", "-f", "termy"]));
 }
 
 #[test]
 fn tty_output_is_one_stream_in_logs() {
     let sb = Sandbox::new();
-    ok(&openpod(
+    ok(&podbag(
         &sb,
         &[
             "run",
@@ -482,25 +482,25 @@ fn tty_output_is_one_stream_in_logs() {
             "echo out; echo err >&2",
         ],
     ));
-    let out = openpod(&sb, &["logs", "one"]);
+    let out = podbag(&sb, &["logs", "one"]);
     assert_eq!(stdout(&out).replace('\r', ""), "out\nerr");
     assert_eq!(stderr(&out), "");
 }
 
 // Review fixes.
 
-// A normal desktop user's runtime directory (/run/user/1000/openpod) left no room in the
+// A normal desktop user's runtime directory (/run/user/1000/podbag) left no room in the
 // 108-byte socket address for the container's control socket.
 #[test]
 fn runs_with_a_long_runtime_dir() {
     let mut sb = Sandbox::new();
     let long = sb.tmp.path().join("r".repeat(80));
     sb.env
-        .push(("OPENPOD_RUNTIME_DIR".into(), long.display().to_string()));
+        .push(("PODBAG_RUNTIME_DIR".into(), long.display().to_string()));
     let out = sb.run(&["true"]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     start(&sb, &["--name", "far"], &["sleep", "30"]);
-    ok(&openpod(&sb, &["kill", "far"]));
+    ok(&podbag(&sb, &["kill", "far"]));
     wait_for_status(&sb, "far", "exited");
 }
 
@@ -534,12 +534,12 @@ fn killed_shim_takes_a_non_root_container_with_it() {
     }
 }
 
-/// Run openpod with a new terminal as its controlling terminal, like a user's shell does.
+/// Run podbag with a new terminal as its controlling terminal, like a user's shell does.
 fn on_terminal(sb: &Sandbox, args: &[&str]) -> (std::process::Child, std::fs::File) {
     use std::os::unix::process::CommandExt;
-    let (master, slave) = openpod::linux::pty::open(None).unwrap();
+    let (master, slave) = podbag::linux::pty::open(None).unwrap();
     let slave = std::fs::File::from(slave);
-    let mut cmd = sb.openpod();
+    let mut cmd = sb.podbag();
     cmd.args(args)
         .stdin(slave.try_clone().unwrap())
         .stdout(slave.try_clone().unwrap())
@@ -594,7 +594,7 @@ fn wait_with_timeout(child: &mut std::process::Child, timeout: Duration) -> Opti
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            panic!("openpod did not end within {timeout:?}");
+            panic!("podbag did not end within {timeout:?}");
         }
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -648,13 +648,13 @@ fn container_cannot_reach_the_callers_terminal() {
     let seen = read_until(&mut term, "tty-", Duration::from_secs(10));
     wait_with_timeout(&mut child, Duration::from_secs(5));
     assert!(!seen.contains("tty-open"), "exec: {seen:?}");
-    ok(&openpod(&sb, &["rm", "-f", "probe"]));
+    ok(&podbag(&sb, &["rm", "-f", "probe"]));
 }
 
 /// Wait until a container started in the background reaches "running".
 fn wait_until_running(sb: &Sandbox, name: &str) {
     let deadline = Instant::now() + Duration::from_secs(15);
-    while openpod(sb, &["inspect", name]).status.code() != Some(0) {
+    while podbag(sb, &["inspect", name]).status.code() != Some(0) {
         assert!(Instant::now() < deadline, "container {name} never appeared");
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -663,7 +663,7 @@ fn wait_until_running(sb: &Sandbox, name: &str) {
 
 fn timed_stop(sb: &Sandbox, name: &str) -> Duration {
     let begin = Instant::now();
-    let out = openpod(sb, &["stop", "-t", "2", name]);
+    let out = podbag(sb, &["stop", "-t", "2", name]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     begin.elapsed()
 }
@@ -676,7 +676,7 @@ fn stdin_flood_does_not_block_stop() {
     use std::process::Stdio;
     let sb = Sandbox::new();
     let mut cli = sb
-        .openpod()
+        .podbag()
         .args([
             "run",
             "--rm",
@@ -721,7 +721,7 @@ fn slow_reader_does_not_block_stop() {
     use std::process::Stdio;
     let sb = Sandbox::new();
     let mut cli = sb
-        .openpod()
+        .podbag()
         .args(["run", "--name", "slow", "--rootfs", &rootfs(), "sh", "-c"])
         .arg("while :; do echo 0123456789012345678901234567890123456789; done")
         .stdout(Stdio::piped())
@@ -736,7 +736,7 @@ fn slow_reader_does_not_block_stop() {
     drop(cli.stdout.take());
     let _ = cli.wait();
     wait_for_status(&sb, "slow", "exited");
-    ok(&openpod(&sb, &["rm", "slow"]));
+    ok(&podbag(&sb, &["rm", "slow"]));
 }
 
 /// A free-looking local port for this test process.
@@ -748,24 +748,24 @@ fn port(offset: u16) -> String {
 fn create_then_start_runs_the_container() {
     let sb = Sandbox::new();
     let rootfs = rootfs();
-    let id = ok(&openpod(
+    let id = ok(&podbag(
         &sb,
         &[
             "create", "--name", "c", "--rootfs", &rootfs, "sh", "-c", "echo hi",
         ],
     ));
     assert_eq!(id.len(), 64, "{id}");
-    let ps = ok(&openpod(&sb, &["ps", "-a"]));
+    let ps = ok(&podbag(&sb, &["ps", "-a"]));
     assert!(
         ps.lines()
             .any(|l| l.contains("Created") && l.ends_with(" c")),
         "{ps}"
     );
     assert!(
-        !ok(&openpod(&sb, &["ps"])).contains(" c\n"),
+        !ok(&podbag(&sb, &["ps"])).contains(" c\n"),
         "created is not running"
     );
-    let out = openpod(&sb, &["start", "-a", "c"]);
+    let out = podbag(&sb, &["start", "-a", "c"]);
     assert_eq!(ok(&out), "hi");
     let info = wait_for_status(&sb, "c", "exited");
     assert_eq!(info["state"]["exit_code"], 0);
@@ -781,9 +781,9 @@ fn an_exited_container_starts_again() {
         &["sh", "-c", "echo run >> /mnt/runs; cat /mnt/runs | wc -l"],
     );
     wait_for_status(&sb, &id, "exited");
-    let out = openpod(&sb, &["start", "-a", "r"]);
+    let out = podbag(&sb, &["start", "-a", "r"]);
     assert_eq!(ok(&out), "2");
-    let logs = ok(&openpod(&sb, &["logs", "r"]));
+    let logs = ok(&podbag(&sb, &["logs", "r"]));
     assert_eq!(logs, "1\n2", "both runs are in the log");
     assert_eq!(inspect(&sb, "r")["id"], id.as_str());
 }
@@ -794,11 +794,11 @@ fn restart_stops_and_starts() {
     start(&sb, &["--name", "s"], &["sleep", "60"]);
     let first = inspect(&sb, "s")["state"]["started"].as_u64().unwrap();
     std::thread::sleep(Duration::from_millis(1100));
-    ok(&openpod(&sb, &["restart", "-t", "1", "s"]));
+    ok(&podbag(&sb, &["restart", "-t", "1", "s"]));
     let info = inspect(&sb, "s");
     assert_eq!(info["state"]["status"], "running", "{info}");
     assert!(info["state"]["started"].as_u64().unwrap() > first, "{info}");
-    ok(&openpod(&sb, &["rm", "-f", "s"]));
+    ok(&podbag(&sb, &["rm", "-f", "s"]));
 }
 
 #[test]
@@ -807,17 +807,17 @@ fn a_failed_start_keeps_the_created_container() {
     let rootfs = rootfs();
     let publish = format!("127.0.0.1:{}:80", port(0));
     for name in ["p1", "p2"] {
-        ok(&openpod(
+        ok(&podbag(
             &sb,
             &[
                 "create", "--name", name, "-p", &publish, "--rootfs", &rootfs, "sleep", "30",
             ],
         ));
     }
-    ok(&openpod(&sb, &["start", "p1"]));
-    let second = openpod(&sb, &["start", "p2"]);
+    ok(&podbag(&sb, &["start", "p1"]));
+    let second = podbag(&sb, &["start", "p2"]);
     assert_ne!(second.status.code(), Some(0), "the port is taken");
-    let ps = ok(&openpod(&sb, &["ps", "-a"]));
+    let ps = ok(&podbag(&sb, &["ps", "-a"]));
     assert!(
         ps.lines()
             .any(|l| l.contains("Created") && l.ends_with(" p2")),
@@ -825,22 +825,22 @@ fn a_failed_start_keeps_the_created_container() {
     );
     // `run` still leaves nothing behind when its start fails.
     let before = ps.lines().count();
-    let run = openpod(
+    let run = podbag(
         &sb,
         &[
             "run", "-d", "-p", &publish, "--rootfs", &rootfs, "sleep", "30",
         ],
     );
     assert_ne!(run.status.code(), Some(0));
-    assert_eq!(ok(&openpod(&sb, &["ps", "-a"])).lines().count(), before);
-    ok(&openpod(&sb, &["rm", "-f", "p1", "p2"]));
+    assert_eq!(ok(&podbag(&sb, &["ps", "-a"])).lines().count(), before);
+    ok(&podbag(&sb, &["rm", "-f", "p1", "p2"]));
 }
 
 #[test]
 fn start_waits_for_the_last_shim_to_finish() {
     let sb = Sandbox::new();
     let run = |args: &[&str]| {
-        let out = sb.openpod().args(args).output().unwrap();
+        let out = sb.podbag().args(args).output().unwrap();
         assert_eq!(out.status.code(), Some(0), "{args:?}: {}", stderr(&out));
         stdout(&out)
     };
@@ -876,7 +876,7 @@ fn start_waits_for_the_last_shim_to_finish() {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     assert!(marker.exists(), "flock did not take the lock");
-    let out = sb.openpod().args(["start", "ss"]).output().unwrap();
+    let out = sb.podbag().args(["start", "ss"]).output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     let _ = holder.wait();
     let ps = run(&["ps"]);
@@ -887,7 +887,7 @@ fn start_waits_for_the_last_shim_to_finish() {
     );
     // A container that really runs is refused at once, without waiting.
     let begun = std::time::Instant::now();
-    let out = sb.openpod().args(["start", "ss"]).output().unwrap();
+    let out = sb.podbag().args(["start", "ss"]).output().unwrap();
     assert_ne!(out.status.code(), Some(0));
     assert!(stderr(&out).contains("already running"), "{}", stderr(&out));
     assert!(begun.elapsed() < std::time::Duration::from_secs(3));
@@ -901,13 +901,13 @@ fn rm_f_of_a_container_that_removes_itself_succeeds() {
     let sb = Sandbox::new();
     for round in 0..20 {
         let out = sb
-            .openpod()
+            .podbag()
             .args(["run", "-d", "--rm", "--rootfs", &rootfs(), "sleep", "300"])
             .output()
             .unwrap();
         assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
         let id = stdout(&out);
-        let out = sb.openpod().args(["rm", "-f", &id]).output().unwrap();
+        let out = sb.podbag().args(["rm", "-f", &id]).output().unwrap();
         assert_eq!(
             out.status.code(),
             Some(0),
@@ -925,7 +925,7 @@ fn rm_f_ends_every_container_before_it_removes_the_first() {
     let sb = Sandbox::new();
     // On a network: what follows a container's end there (its address, the others'
     // name lists) is the slow part.
-    ok(&openpod(&sb, &["network", "create", "many"]));
+    ok(&podbag(&sb, &["network", "create", "many"]));
     let count = 100;
     let names: Vec<String> = (0..count).map(|i| format!("many{i}")).collect();
     let mut pids = Vec::new();
@@ -938,7 +938,7 @@ fn rm_f_ends_every_container_before_it_removes_the_first() {
         pids.push(inspect(&sb, name)["state"]["pid"].as_u64().unwrap());
     }
     let mut rm = sb
-        .openpod()
+        .podbag()
         .args(["rm", "-f"])
         .args(&names)
         .stdout(std::process::Stdio::null())
@@ -975,8 +975,8 @@ fn rm_f_ends_every_container_before_it_removes_the_first() {
         *last <= half_removed.unwrap(),
         "containers still ran when half of them were removed"
     );
-    assert!(stdout(&openpod(&sb, &["ps", "-aq"])).is_empty());
-    ok(&openpod(&sb, &["network", "rm", "many"]));
+    assert!(stdout(&podbag(&sb, &["ps", "-aq"])).is_empty());
+    ok(&podbag(&sb, &["network", "rm", "many"]));
 }
 
 #[test]
@@ -990,7 +990,7 @@ fn rm_f_of_many_reports_each_and_removes_the_rest() {
     let stopped = start(&sb, &["--network", "none", "--name", "down"], &["true"]);
     wait_for_status(&sb, "down", "exited");
     // A running one, one that has ended, a name nobody has, and one name twice.
-    let out = openpod(&sb, &["rm", "-f", "up", "nope", "down", "up"]);
+    let out = podbag(&sb, &["rm", "-f", "up", "nope", "down", "up"]);
     assert_eq!(out.status.code(), Some(125), "{}", stderr(&out));
     assert_eq!(
         stdout(&out),
@@ -999,7 +999,7 @@ fn rm_f_of_many_reports_each_and_removes_the_rest() {
     let err = stderr(&out);
     assert!(err.contains("cannot find container nope"), "{err}");
     assert!(err.contains("cannot find container up"), "{err}");
-    assert!(stdout(&openpod(&sb, &["ps", "-aq"])).is_empty());
+    assert!(stdout(&podbag(&sb, &["ps", "-aq"])).is_empty());
 }
 
 #[test]
@@ -1018,7 +1018,7 @@ fn rm_f_of_many_takes_a_container_that_removes_itself() {
             &["--network", "none", "--name", "other"],
             &["sleep", "300"],
         );
-        let out = openpod(&sb, &["rm", "-f", "other", "self"]);
+        let out = podbag(&sb, &["rm", "-f", "other", "self"]);
         assert_eq!(
             out.status.code(),
             Some(0),
@@ -1026,7 +1026,7 @@ fn rm_f_of_many_takes_a_container_that_removes_itself() {
             stderr(&out)
         );
         assert_eq!(stdout(&out), format!("{}\n{}", other.trim(), own.trim()));
-        assert!(stdout(&openpod(&sb, &["ps", "-aq"])).is_empty());
+        assert!(stdout(&podbag(&sb, &["ps", "-aq"])).is_empty());
     }
 }
 
@@ -1053,12 +1053,12 @@ fn rm_fv_of_many_reports_volumes_it_could_not_remove() {
             .status()
     };
     assert!(broke.unwrap().success());
-    let out = openpod(&sb, &["rm", "-f", "-v", "a", "b"]);
+    let out = podbag(&sb, &["rm", "-f", "-v", "a", "b"]);
     // The containers are gone; that their volumes stayed is said, for each.
     assert_ne!(out.status.code(), Some(0), "the failure was not reported");
     let err = stderr(&out);
     assert_eq!(err.matches(".lock").count(), 2, "{err}");
-    assert!(stdout(&openpod(&sb, &["ps", "-aq"])).is_empty());
+    assert!(stdout(&podbag(&sb, &["ps", "-aq"])).is_empty());
 }
 
 /// Wait up to `secs` for `f` to give a value.
@@ -1099,7 +1099,7 @@ fn a_container_that_fails_is_started_again() {
         (i["state"]["status"] == "exited" && i["state"]["exit_code"] == 0).then_some(i)
     });
     assert_eq!(restarts(&info), 2, "{info}");
-    ok(&openpod(&sb, &["rm", &c]));
+    ok(&podbag(&sb, &["rm", &c]));
 }
 
 #[test]
@@ -1116,7 +1116,7 @@ fn on_failure_gives_up_after_its_limit() {
     assert_eq!(restarts(&info), 2, "{info}");
     assert_eq!(info["state"]["status"], "exited", "{info}");
     assert_eq!(info["state"]["exit_code"], 1, "{info}");
-    ok(&openpod(&sb, &["rm", &c]));
+    ok(&podbag(&sb, &["rm", &c]));
 }
 
 #[test]
@@ -1126,9 +1126,9 @@ fn always_starts_a_clean_exit_again() {
     wait_until(20, "two restarts", || {
         (restarts(&inspect(&sb, &c)) >= 2).then_some(())
     });
-    ok(&openpod(&sb, &["rm", "-f", &c]));
+    ok(&podbag(&sb, &["rm", "-f", &c]));
     std::thread::sleep(Duration::from_millis(1500));
-    assert!(ok(&openpod(&sb, &["ps", "-aq"])).is_empty());
+    assert!(ok(&podbag(&sb, &["ps", "-aq"])).is_empty());
 }
 
 #[test]
@@ -1136,21 +1136,21 @@ fn a_stopped_container_stays_stopped() {
     let sb = Sandbox::new();
     let c = start(&sb, &["--restart", "always"], &["sleep", "300"]);
     wait_for_status(&sb, &c, "running");
-    ok(&openpod(&sb, &["stop", "-t", "1", &c]));
+    ok(&podbag(&sb, &["stop", "-t", "1", &c]));
     std::thread::sleep(Duration::from_millis(1500));
     let info = inspect(&sb, &c);
     assert_eq!(info["state"]["status"], "exited", "{info}");
     assert_eq!(restarts(&info), 0, "{info}");
     // Started again by the user, then killed: it stays stopped too.
-    ok(&openpod(&sb, &["start", &c]));
+    ok(&podbag(&sb, &["start", &c]));
     wait_for_status(&sb, &c, "running");
-    ok(&openpod(&sb, &["kill", &c]));
+    ok(&podbag(&sb, &["kill", &c]));
     wait_for_status(&sb, &c, "exited");
     std::thread::sleep(Duration::from_millis(1500));
     let info = inspect(&sb, &c);
     assert_eq!(info["state"]["status"], "exited", "{info}");
     assert_eq!(restarts(&info), 0, "{info}");
-    ok(&openpod(&sb, &["rm", &c]));
+    ok(&podbag(&sb, &["rm", &c]));
 }
 
 #[test]
@@ -1161,7 +1161,7 @@ fn stop_during_the_delay_ends_the_restarts() {
     wait_until(20, "three restarts", || {
         (restarts(&inspect(&sb, &c)) >= 3).then_some(())
     });
-    ok(&openpod(&sb, &["stop", &c]));
+    ok(&podbag(&sb, &["stop", &c]));
     // A start that was under way when the stop came ends by itself.
     std::thread::sleep(Duration::from_millis(500));
     let before = restarts(&inspect(&sb, &c));
@@ -1169,7 +1169,7 @@ fn stop_during_the_delay_ends_the_restarts() {
     let info = inspect(&sb, &c);
     assert_eq!(restarts(&info), before, "{info}");
     assert_eq!(info["state"]["status"], "exited", "{info}");
-    ok(&openpod(&sb, &["rm", &c]));
+    ok(&podbag(&sb, &["rm", &c]));
 }
 
 /// Processes of this machine whose command line has every one of `words`.
@@ -1195,9 +1195,9 @@ fn rm_during_the_delay_removes_it_for_good() {
         (restarts(&inspect(&sb, &c)) >= 3).then_some(())
     });
     // It may be starting at this moment: -f.
-    ok(&openpod(&sb, &["rm", "-f", &c]));
+    ok(&podbag(&sb, &["rm", "-f", &c]));
     std::thread::sleep(Duration::from_millis(2500));
-    assert!(ok(&openpod(&sb, &["ps", "-aq"])).is_empty());
+    assert!(ok(&podbag(&sb, &["ps", "-aq"])).is_empty());
     let left = processes_with(&["__restart", &c]);
     assert!(left.is_empty(), "{left:?}");
 }
@@ -1210,14 +1210,14 @@ fn a_failing_container_is_not_started_in_a_busy_loop() {
     // 100, 200, 400, 800, 1600 ms between them: about four in three seconds.
     let n = restarts(&inspect(&sb, &c));
     assert!((2..=6).contains(&n), "{n} restarts in 3 s");
-    ok(&openpod(&sb, &["rm", "-f", &c]));
+    ok(&podbag(&sb, &["rm", "-f", &c]));
 }
 
 #[test]
 fn restart_and_rm_do_not_go_together() {
     let sb = Sandbox::new();
     let rootfs = rootfs();
-    let both = openpod(
+    let both = podbag(
         &sb,
         &[
             "run",
@@ -1231,7 +1231,7 @@ fn restart_and_rm_do_not_go_together() {
     );
     assert_eq!(both.status.code(), Some(125), "{}", stderr(&both));
     assert!(stderr(&both).contains("--rm"), "{}", stderr(&both));
-    let odd = openpod(
+    let odd = podbag(
         &sb,
         &[
             "run",
@@ -1245,7 +1245,7 @@ fn restart_and_rm_do_not_go_together() {
     );
     assert_eq!(odd.status.code(), Some(125), "{}", stderr(&odd));
     assert!(stderr(&odd).contains("restart"), "{}", stderr(&odd));
-    assert!(ok(&openpod(&sb, &["ps", "-aq"])).is_empty());
+    assert!(ok(&podbag(&sb, &["ps", "-aq"])).is_empty());
 }
 
 fn health(info: &serde_json::Value) -> String {
@@ -1265,9 +1265,9 @@ fn a_healthy_container_says_so() {
     wait_until(15, "healthy", || {
         (health(&inspect(&sb, &c)) == "healthy").then_some(())
     });
-    let ps = ok(&openpod(&sb, &["ps"]));
+    let ps = ok(&podbag(&sb, &["ps"]));
     assert!(ps.contains("(healthy)"), "{ps}");
-    ok(&openpod(&sb, &["rm", "-f", &c]));
+    ok(&podbag(&sb, &["rm", "-f", &c]));
 }
 
 #[test]
@@ -1290,9 +1290,9 @@ fn an_unhealthy_container_says_so_after_its_retries() {
         (health(&i) == "unhealthy").then_some(i)
     });
     assert_eq!(info["health"]["failing_streak"], 2, "{info}");
-    let ps = ok(&openpod(&sb, &["ps"]));
+    let ps = ok(&podbag(&sb, &["ps"]));
     assert!(ps.contains("(unhealthy)"), "{ps}");
-    ok(&openpod(&sb, &["rm", "-f", &c]));
+    ok(&podbag(&sb, &["rm", "-f", &c]));
 }
 
 #[test]
@@ -1333,7 +1333,7 @@ fn a_start_period_forgives_early_failures() {
         .cloned()
         .unwrap_or_default();
     assert!(log.iter().any(|p| p["exit_code"] != 0), "{info}");
-    ok(&openpod(&sb, &["rm", "-f", &c]));
+    ok(&podbag(&sb, &["rm", "-f", &c]));
 }
 
 #[test]
@@ -1362,12 +1362,12 @@ fn a_probe_that_hangs_is_ended_at_its_timeout() {
         "{info}"
     );
     // The checks that ran too long do not stay: one at a time at most.
-    let left = ok(&openpod(
+    let left = ok(&podbag(
         &sb,
         &["exec", &c, "sh", "-c", "pgrep -f '^sleep 60$' | wc -l"],
     ));
     assert!(left.trim().parse::<u32>().unwrap() <= 1, "{left}");
-    ok(&openpod(&sb, &["rm", "-f", &c]));
+    ok(&podbag(&sb, &["rm", "-f", &c]));
 }
 
 #[test]
@@ -1388,7 +1388,7 @@ fn no_probe_outlives_its_container() {
     wait_until(15, "a probe", || {
         (!processes_with(&["__health", &c]).is_empty()).then_some(())
     });
-    ok(&openpod(&sb, &["rm", "-f", &c]));
+    ok(&podbag(&sb, &["rm", "-f", &c]));
     std::thread::sleep(Duration::from_millis(1500));
     let left: Vec<String> = processes_with(&["__health", &c])
         .into_iter()
@@ -1406,7 +1406,7 @@ fn rm_f_waits_for_a_start_in_progress() {
     // A start under way holds the lock: the record must stay until it lets go.
     let mut holder = hold_shim_lock(&sb, &full, "1.5");
     let began = Instant::now();
-    let rm = openpod(&sb, &["rm", "-f", &c]);
+    let rm = podbag(&sb, &["rm", "-f", &c]);
     assert_eq!(rm.status.code(), Some(0), "{}", stderr(&rm));
     assert!(
         began.elapsed() >= Duration::from_millis(1000),
@@ -1414,7 +1414,7 @@ fn rm_f_waits_for_a_start_in_progress() {
         began.elapsed()
     );
     let _ = holder.wait();
-    assert!(ok(&openpod(&sb, &["ps", "-aq"])).is_empty());
+    assert!(ok(&podbag(&sb, &["ps", "-aq"])).is_empty());
 }
 
 #[test]
@@ -1422,7 +1422,7 @@ fn a_restart_that_meets_a_stop_does_not_start() {
     let sb = Sandbox::new();
     let c = start(&sb, &["--restart", "always"], &["sleep", "300"]);
     wait_for_status(&sb, &c, "running");
-    ok(&openpod(&sb, &["stop", "-t", "0", &c]));
+    ok(&podbag(&sb, &["stop", "-t", "0", &c]));
     wait_for_status(&sb, &c, "exited");
     // A restarter that decided to start it (no mark then) waits for the lock...
     let full = inspect(&sb, &c)["id"].as_str().unwrap().to_string();
@@ -1436,7 +1436,7 @@ fn a_restart_that_meets_a_stop_does_not_start() {
         let _ = std::fs::remove_file(&mark);
     }
     let mut holder = hold_shim_lock(&sb, &full, "1");
-    let mut restarter = sb.openpod().args(["__restart", &full]).spawn().unwrap();
+    let mut restarter = sb.podbag().args(["__restart", &full]).spawn().unwrap();
     std::thread::sleep(Duration::from_millis(400));
     // ...while the user stops it.
     mark_stopped(&sb, &full);
@@ -1445,14 +1445,14 @@ fn a_restart_that_meets_a_stop_does_not_start() {
     std::thread::sleep(Duration::from_millis(500));
     let info = inspect(&sb, &c);
     assert_eq!(info["state"]["status"], "exited", "{info}");
-    ok(&openpod(&sb, &["rm", "-f", &c]));
+    ok(&podbag(&sb, &["rm", "-f", &c]));
 }
 
 #[test]
 fn a_start_does_not_meet_the_last_runs_scope() {
     // Without the keeper, rootless, each run of a container gets a systemd scope; the last
     // run's scope can still be there for a moment when the next run starts.
-    if root_mode() || std::env::var("OPENPOD_TEST_KEEPER").as_deref() != Ok("0") {
+    if root_mode() || std::env::var("PODBAG_TEST_KEEPER").as_deref() != Ok("0") {
         return;
     }
     let sb = Sandbox::new();
@@ -1462,13 +1462,13 @@ fn a_start_does_not_meet_the_last_runs_scope() {
     // A unit with the name a scope of the last run would have.
     let mut squatter = std::process::Command::new("systemd-run")
         .args(["--user", "--scope", "--quiet", "--collect"])
-        .arg(format!("--unit=openpod-{full}"))
+        .arg(format!("--unit=podbag-{full}"))
         .args(["sleep", "5"])
         .spawn()
         .unwrap();
     std::thread::sleep(Duration::from_millis(500));
-    ok(&openpod(&sb, &["start", &c]));
+    ok(&podbag(&sb, &["start", &c]));
     let _ = squatter.kill();
     let _ = squatter.wait();
-    ok(&openpod(&sb, &["rm", "-f", &c]));
+    ok(&podbag(&sb, &["rm", "-f", &c]));
 }

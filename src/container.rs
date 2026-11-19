@@ -7,13 +7,13 @@ use serde::{Deserialize, Serialize};
 /// A container to run. Build it, then call a `run` method.
 ///
 /// ```no_run
-/// let image = openpod::Image::pull("alpine")?;
-/// let out = openpod::Container::from_image(&image)
+/// let image = podbag::Image::pull("alpine")?;
+/// let out = podbag::Container::from_image(&image)
 ///     .env("GREETING", "hello")
 ///     .command(["sh", "-c", "echo $GREETING"])
 ///     .run()?;
 /// assert_eq!(out.stdout, b"hello\n");
-/// # Ok::<(), openpod::Error>(())
+/// # Ok::<(), podbag::Error>(())
 /// ```
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -815,7 +815,7 @@ mod linux_launch {
         let rootless = unsafe { libc::geteuid() } != 0;
         let (placement, warning) = crate::cgroup::choose_placement(rootless, &limits)?;
         if let Some(w) = warning {
-            eprintln!("openpod: warning: {w}");
+            eprintln!("podbag: warning: {w}");
         }
         let dirs = paths::dirs()?;
         let network = c.network.clone().unwrap_or_default();
@@ -823,9 +823,7 @@ mod linux_launch {
         if !c.publish.is_empty() {
             match network {
                 crate::network::NetworkMode::Host => {
-                    eprintln!(
-                        "openpod: warning: published ports are discarded with --network host"
-                    );
+                    eprintln!("podbag: warning: published ports are discarded with --network host");
                     c.publish.clear();
                 }
                 crate::network::NetworkMode::None => {
@@ -849,7 +847,7 @@ mod linux_launch {
             && !(crate::cgroup::systemd_run().is_some() && crate::cgroup::user_manager())
         {
             eprintln!(
-                "openpod: warning: the restart policy needs the keeper or a systemd user session; \
+                "podbag: warning: the restart policy needs the keeper or a systemd user session; \
                  this container will not be started again"
             );
         }
@@ -953,11 +951,11 @@ mod linux_launch {
                         ErrorKind::NotFound,
                         format!("cannot find image {}", image.name),
                         "it has not been pulled",
-                        format!("run `openpod pull {}`", image.name),
+                        format!("run `podbag pull {}`", image.name),
                     )
                 };
-                // As root the store may build what this mount method needs (design
-                // 6.3.2); rootless stores always hold the hard-link tree a pull made.
+                // As root the store may build what this mount method needs; rootless stores
+                // always hold the hard-link tree a pull made.
                 let mut store = if rootless {
                     Store::open_existing(&dirs).ok_or_else(not_pulled)?
                 } else {
@@ -1025,7 +1023,7 @@ mod linux_launch {
                             Error::io(
                                 format!("cannot create {}", path.display()),
                                 &e,
-                                "check the permissions of the openpod data directory",
+                                "check the permissions of the podbag data directory",
                             )
                         })?;
                 }
@@ -1066,7 +1064,7 @@ mod linux_launch {
         use crate::keeper::client::Asked;
         let spec = state::read_config(dirs, id)?;
         state::wait_for_previous_shim(dirs, id, std::time::Duration::from_secs(5))?;
-        // Through the keeper when there is one (design 6.15); a shim of our own otherwise.
+        // Through the keeper when there is one; a shim of our own otherwise.
         let io = [stdin, stdout, stderr];
         if crate::keeper::enabled(dirs) {
             let scope = matches!(spec.cgroup, crate::cgroup::Placement::Scope { .. });
@@ -1083,8 +1081,8 @@ mod linux_launch {
                             ErrorKind::Runtime,
                             format!("cannot start container {}", crate::id::short_id(id)),
                             "the keeper of this runtime directory did not answer in time",
-                            "look at it with `openpod ps -a`, then start or remove it; \
-                             `OPENPOD_KEEPER=0` starts containers without the keeper",
+                            "look at it with `podbag ps -a`, then start or remove it; \
+                             `PODBAG_KEEPER=0` starts containers without the keeper",
                         ),
                         unanswered: true,
                     });
@@ -1099,13 +1097,13 @@ mod linux_launch {
                         ErrorKind::MissingRequirement,
                         "cannot start the container in a systemd scope",
                         "systemd-run was not found",
-                        "install systemd, or set OPENPOD_SYSTEMD_RUN",
+                        "install systemd, or set PODBAG_SYSTEMD_RUN",
                     )
                 })?,
                 slice: slice.clone(),
                 // A name of this run's own: the last run's scope can still be there for a
                 // moment (systemd removes it after its last process).
-                unit: Some(format!("openpod-{id}-{}", &id::new_id()?[..8])),
+                unit: Some(format!("podbag-{id}-{}", &id::new_id()?[..8])),
                 delegate: true,
             }),
             _ => None,
@@ -1133,7 +1131,7 @@ mod linux_launch {
                     ErrorKind::Runtime,
                     "the container was stopped",
                     format!("the keeper that watched it ended ({e})"),
-                    "run it again; `openpod ps -a` shows what is left of it",
+                    "run it again; `podbag ps -a` shows what is left of it",
                 )
             } else {
                 Error::io("cannot wait for the container", &e, "report this bug")

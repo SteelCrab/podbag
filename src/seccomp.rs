@@ -1,7 +1,7 @@
 //! The default seccomp filter: a deny list of dangerous system calls, as classic BPF.
 //! The program is built here for each CPU type; installing it is Linux-only.
 
-/// CPU types openpod builds filters for.
+/// CPU types podbag builds filters for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Arch {
     X86_64,

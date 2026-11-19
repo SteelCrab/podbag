@@ -1,7 +1,7 @@
-//! `openpod __vm-agent`: the macOS VM's side of the Mac's commands. On vsock port
-//! [`CLI_PORT`] it runs `openpod <argv…>` for the Mac's CLI (see [`super::proto`]); on
+//! `podbag __vm-agent`: the macOS VM's side of the Mac's commands. On vsock port
+//! [`CLI_PORT`] it runs `podbag <argv…>` for the Mac's CLI (see [`super::proto`]); on
 //! [`API_PORT`] it serves the Docker Engine API, the same handler as
-//! `openpod system service`. Only the Mac (vsock CID 2) may connect: a container that
+//! `podbag system service`. Only the Mac (vsock CID 2) may connect: a container that
 //! reaches vsock gets nothing.
 
 use super::proto::{API_PORT, CLI_PORT, CliRequest, FORWARD_PORT, Frame};
@@ -16,13 +16,13 @@ use std::time::{Duration, Instant};
 
 /// Where PID 1 writes why the VM cannot work (a mount that failed). The agent answers
 /// every command with it.
-pub const BROKEN: &str = "/run/openpod-vm-error";
+pub const BROKEN: &str = "/run/podbag-vm-error";
 
 pub fn vm_agent_main() -> i32 {
     match run() {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("openpod: {e}");
+            eprintln!("podbag: {e}");
             1
         }
     }
@@ -37,7 +37,7 @@ fn run() -> Result<()> {
     // Containers set their own score back to 0 (`linux::security`), and the commands run
     // here get 0 too (`command`).
     if let Err(e) = std::fs::write("/proc/self/oom_score_adj", "-1000") {
-        eprintln!("openpod: cannot protect the VM agent from OOM kills: {e}");
+        eprintln!("podbag: cannot protect the VM agent from OOM kills: {e}");
     }
     let api = listen(API_PORT)?;
     let cli = listen(CLI_PORT)?;
@@ -51,7 +51,7 @@ fn run() -> Result<()> {
     crate::helper::raise_descriptor_limit();
     std::thread::spawn(keep_lease);
     std::thread::spawn(guard_memory);
-    eprintln!("openpod: VM agent listens");
+    eprintln!("podbag: VM agent listens");
     std::thread::spawn(move || {
         accept_each(&api, |stream| {
             let ctx = ctx.clone();
@@ -66,7 +66,7 @@ fn run() -> Result<()> {
     accept_each(&cli, |stream| {
         std::thread::spawn(move || {
             if let Err(e) = serve_cli(stream) {
-                eprintln!("openpod: a command from the Mac failed: {e}");
+                eprintln!("podbag: a command from the Mac failed: {e}");
             }
         });
     });
@@ -136,7 +136,7 @@ fn accept_each(listener: &OwnedFd, mut each: impl FnMut(UnixStream)) {
         // vsock), which must not run commands as root here.
         if addr.svm_cid != libc::VMADDR_CID_HOST {
             eprintln!(
-                "openpod: refused a vsock connection from CID {}",
+                "podbag: refused a vsock connection from CID {}",
                 addr.svm_cid
             );
             continue;
@@ -188,7 +188,7 @@ fn serve_cli(stream: UnixStream) -> std::io::Result<()> {
         _ => {}
     }
     let code = if let Some(why) = broken() {
-        out.send(Frame::Stderr(format!("openpod: {why}\n").into_bytes()))?;
+        out.send(Frame::Stderr(format!("podbag: {why}\n").into_bytes()))?;
         125
     } else {
         match first {
@@ -199,7 +199,7 @@ fn serve_cli(stream: UnixStream) -> std::io::Result<()> {
                     0
                 }
                 Err(e) => {
-                    out.send(Frame::Stderr(format!("openpod: {e}\n").into_bytes()))?;
+                    out.send(Frame::Stderr(format!("podbag: {e}\n").into_bytes()))?;
                     1
                 }
             },
@@ -273,7 +273,7 @@ fn keep_lease() {
         wait = match super::dhcp::renew() {
             Ok(secs) => Duration::from_secs(u64::from(secs.max(120)) / 2),
             Err(e) => {
-                eprintln!("openpod: cannot renew the VM's address lease: {e}");
+                eprintln!("podbag: cannot renew the VM's address lease: {e}");
                 Duration::from_secs(60)
             }
         };
@@ -301,7 +301,7 @@ fn busy() -> bool {
     running || restart_pending()
 }
 
-/// A restarter (`openpod __restart`) lives while a container waits to start again.
+/// A restarter (`podbag __restart`) lives while a container waits to start again.
 fn restart_pending() -> bool {
     let Ok(procs) = std::fs::read_dir("/proc") else {
         return false;
@@ -332,7 +332,7 @@ fn guard_memory() {
     let psi = match psi {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("openpod: no thrashing guard (memory pressure): {e}");
+            eprintln!("podbag: no thrashing guard (memory pressure): {e}");
             return;
         }
     };
@@ -378,7 +378,7 @@ fn guard_memory() {
         ) {
             continue;
         }
-        eprintln!("openpod: the VM ran out of memory: ending process {pid}");
+        eprintln!("podbag: the VM ran out of memory: ending process {pid}");
         // SAFETY: kill with a pid read from /proc; the worst case is a pid reused meanwhile.
         unsafe { libc::kill(pid, libc::SIGKILL) };
         let gone = Instant::now() + Duration::from_secs(10);
@@ -473,11 +473,11 @@ fn oom_choice_in(proc: &Path) -> Option<i32> {
 }
 
 /// In the VM, its size is the containers' memory budget: they may use all of it, and the
-/// thrashing guard ([`guard_memory`]) ends one that wants more. openpod's usual
+/// thrashing guard ([`guard_memory`]) ends one that wants more. podbag's usual
 /// budget, half the memory, would hold a container at a cgroup limit of half the VM, where
 /// it evicts its own code for minutes instead of being killed. A budget set on the Mac
-/// (`OPENPOD_MEMORY_BUDGET`, forwarded to commands) still applies.
-pub const VM_BUDGET: (&str, &str) = ("OPENPOD_MEMORY_BUDGET", "0");
+/// (`PODBAG_MEMORY_BUDGET`, forwarded to commands) still applies.
+pub const VM_BUDGET: (&str, &str) = ("PODBAG_MEMORY_BUDGET", "0");
 
 fn command(req: &CliRequest) -> std::process::Command {
     let mut cmd = std::process::Command::new("/init");
@@ -490,8 +490,8 @@ fn command(req: &CliRequest) -> std::process::Command {
         .env("HOME", "/root")
         .env(VM_BUDGET.0, VM_BUDGET.1)
         .envs(req.env.iter().map(|(k, v)| (k, v)))
-        // Last: openpod is /init here, whatever the Mac sent.
-        .env("OPENPOD_BIN", "/init");
+        // Last: podbag is /init here, whatever the Mac sent.
+        .env("PODBAG_BIN", "/init");
     // A command is the user's work, not the agent's: it may be ended when memory runs out.
     // SAFETY: only open, write and close between fork and exec; no allocation.
     unsafe {
@@ -825,7 +825,7 @@ mod tests {
 
     fn budget(cmd: &std::process::Command) -> Option<String> {
         cmd.get_envs()
-            .find(|(k, _)| *k == "OPENPOD_MEMORY_BUDGET")
+            .find(|(k, _)| *k == "PODBAG_MEMORY_BUDGET")
             .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
     }
 
@@ -855,9 +855,9 @@ mod tests {
             )
             .unwrap();
         };
-        events("openpod", 0, 0);
-        events("openpod/a", 2, 1);
-        events("openpod/b", 0, 3);
+        events("podbag", 0, 0);
+        events("podbag/a", 2, 1);
+        events("podbag/b", 0, 3);
         assert_eq!(limit_events_in(root.path()), 6);
     }
 
@@ -895,7 +895,7 @@ mod tests {
     #[test]
     fn a_command_in_the_vm_has_no_budget_but_the_one_the_mac_sends() {
         assert_eq!(budget(&command(&request(&[]))).as_deref(), Some("0"));
-        let sent = request(&[("OPENPOD_MEMORY_BUDGET", "50%")]);
+        let sent = request(&[("PODBAG_MEMORY_BUDGET", "50%")]);
         assert_eq!(budget(&command(&sent)).as_deref(), Some("50%"));
     }
 }

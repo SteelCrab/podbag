@@ -79,7 +79,7 @@ fn store_error(path: &std::path::Path, e: std::io::Error) -> Error {
     Error::io(
         format!("cannot use {}", path.display()),
         &e,
-        "check the permissions of the openpod data directory",
+        "check the permissions of the podbag data directory",
     )
 }
 
@@ -181,7 +181,7 @@ pub(crate) fn get_in(dirs: &Dirs, name: &str) -> Result<Volume> {
                 ErrorKind::NotFound,
                 format!("no such volume: {name}"),
                 "it does not exist",
-                "run `openpod volume ls` to list volumes",
+                "run `podbag volume ls` to list volumes",
             )
         } else {
             store_error(&path, e)
@@ -192,7 +192,7 @@ pub(crate) fn get_in(dirs: &Dirs, name: &str) -> Result<Volume> {
             ErrorKind::Internal,
             format!("cannot read volume {name}"),
             format!("{} is damaged: {e}", path.display()),
-            "remove the volume with `openpod volume rm`",
+            "remove the volume with `podbag volume rm`",
         )
     })?;
     Ok(volume_of(dirs, meta))
@@ -275,7 +275,7 @@ pub(crate) fn remove_in(dirs: &Dirs, name: &str, force: bool) -> Result<()> {
             ErrorKind::Conflict,
             format!("cannot remove volume {name}"),
             format!("it is used by container {}", users.join(", ")),
-            "remove those containers first (`openpod rm`)",
+            "remove those containers first (`podbag rm`)",
         ));
     }
     remove_files(dirs, name)
@@ -593,7 +593,7 @@ pub fn check_name(name: &str) -> Result<()> {
 }
 
 /// A mount target: an absolute path, not `/`, without `..`, and not in `/proc` or `/sys`
-/// (the kernel's views there must stay as openpod set them up).
+/// (the kernel's views there must stay as podbag set them up).
 pub fn check_target(target: &str) -> Result<()> {
     let bad = |why: &str| {
         invalid(

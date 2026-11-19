@@ -128,16 +128,17 @@ mod tests {
 
     #[test]
     fn new_bridge_message() {
-        let b = new_bridge("openpod0").finish(1);
+        // A name whose attribute needs padding.
+        let b = new_bridge("podbag10").finish(1);
         assert_eq!(u16_at(&b, 4), RTM_NEWLINK);
         assert_eq!(
             u16_at(&b, 6),
             NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL
         );
         assert_eq!(&b[16..32], &[0u8; 16], "ifinfomsg");
-        // IFLA_IFNAME "openpod0\0" = 4 + 9 = 13 → 16 bytes.
+        // IFLA_IFNAME "podbag10\0" = 4 + 9 = 13 → 16 bytes.
         assert_eq!((u16_at(&b, 32), u16_at(&b, 34)), (13, IFLA_IFNAME));
-        assert_eq!(&b[36..45], b"openpod0\0");
+        assert_eq!(&b[36..45], b"podbag10\0");
         // IFLA_LINKINFO { IFLA_INFO_KIND "bridge\0" (4 + 7 = 11 → 12) } = 16.
         assert_eq!((u16_at(&b, 48), u16_at(&b, 50)), (16, IFLA_LINKINFO));
         assert_eq!((u16_at(&b, 52), u16_at(&b, 54)), (11, IFLA_INFO_KIND));

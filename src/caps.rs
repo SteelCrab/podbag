@@ -48,7 +48,7 @@ const NAMES: [&str; 41] = [
     "CHECKPOINT_RESTORE",
 ];
 
-/// The highest capability number openpod knows (CHECKPOINT_RESTORE).
+/// The highest capability number podbag knows (CHECKPOINT_RESTORE).
 pub const LAST: u32 = NAMES.len() as u32 - 1;
 
 /// Docker's default set: CHOWN, DAC_OVERRIDE, FSETID, FOWNER, MKNOD, NET_RAW, SETGID,

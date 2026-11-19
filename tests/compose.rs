@@ -1,5 +1,5 @@
 #![cfg(target_os = "linux")]
-//! Docker Compose against `openpod system service` (M8b): the real `docker compose`.
+//! Docker Compose against `podbag system service`: the real `docker compose`.
 //! Skipped with a message when the docker CLI has no compose plugin.
 
 mod common;

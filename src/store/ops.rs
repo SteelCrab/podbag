@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-/// A change to the image store, run inside the `openpod __store` helper.
+/// A change to the image store, run inside the `podbag __store` helper.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum StoreOp {
@@ -40,7 +40,7 @@ pub enum StoreOp {
     },
 }
 
-/// Entry point of `openpod __store '<json>'`. Returns the process exit code.
+/// Entry point of `podbag __store '<json>'`. Returns the process exit code.
 #[cfg(unix)]
 pub fn helper_main(json: &str) -> i32 {
     let mut status = crate::helper::StatusChannel::take();
@@ -64,10 +64,10 @@ pub fn helper_main(json: &str) -> i32 {
     }
 }
 
-/// Entry point of `openpod __store '<json>'`: no store helper on this system.
+/// Entry point of `podbag __store '<json>'`: no store helper on this system.
 #[cfg(not(unix))]
 pub fn helper_main(_json: &str) -> i32 {
-    eprintln!("openpod: {}", crate::Error::unsupported_os());
+    eprintln!("podbag: {}", crate::Error::unsupported_os());
     1
 }
 

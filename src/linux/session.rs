@@ -1,4 +1,4 @@
-//! The rootless network session (design 6.8.4): one process per user (per runtime
+//! The rootless network session: one process per user (per runtime
 //! directory) that holds a user namespace with the full subordinate ID map and a network
 //! namespace owned by it. Bridges and NAT rules live in that network namespace; `pasta`
 //! connects it to the host. Rootless bridge containers are created inside the session's
@@ -29,7 +29,7 @@ fn io_error(what: &str, e: std::io::Error) -> Error {
     Error::io(
         format!("cannot {what} the rootless network session"),
         &e,
-        "check that the openpod runtime directory is writable",
+        "check that the podbag runtime directory is writable",
     )
 }
 
@@ -55,7 +55,7 @@ fn read_pid(path: &std::path::Path) -> Option<u32> {
     std::fs::read_to_string(path).ok()?.trim().parse().ok()
 }
 
-/// The holder process, if it still runs (and is ours: a fork of `openpod __session`).
+/// The holder process, if it still runs (and is ours: a fork of `podbag __session`).
 fn holder(dirs: &Dirs) -> Option<u32> {
     let pid = read_pid(&dir(dirs).join("pid"))?;
     let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
@@ -135,13 +135,13 @@ fn stop(dirs: &Dirs) {
     let _ = std::fs::remove_file(d.join("pid"));
 }
 
-/// The pasta program: `OPENPOD_PASTA`, or `pasta` in PATH.
+/// The pasta program: `PODBAG_PASTA`, or `pasta` in PATH.
 pub(crate) fn pasta() -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     let executable = |p: &std::path::Path| {
         std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
     };
-    if let Some(p) = std::env::var_os("OPENPOD_PASTA") {
+    if let Some(p) = std::env::var_os("PODBAG_PASTA") {
         let p = PathBuf::from(p);
         return executable(&p).then_some(p);
     }
@@ -159,7 +159,7 @@ fn missing_pasta() -> Error {
     )
 }
 
-/// Start `openpod __session` (in its own systemd scope when there is one, so it does not
+/// Start `podbag __session` (in its own systemd scope when there is one, so it does not
 /// live in a container's cgroup) and wait until it reports the holder's PID.
 fn start() -> Result<u32> {
     // What every rootless container needs comes first, then what only the network needs.
@@ -175,7 +175,7 @@ fn start() -> Result<u32> {
             systemd_run,
             slice: format!(
                 "{}.slice",
-                crate::cgroup::parent_name().unwrap_or_else(|_| "openpod".into())
+                crate::cgroup::parent_name().unwrap_or_else(|_| "podbag".into())
             ),
             unit: None,
             delegate: false,
@@ -203,7 +203,7 @@ pub fn join_userns(pid: u32) -> Result<()> {
     Ok(())
 }
 
-/// `openpod __session`: create the holder (new user and network namespaces, mapped like a
+/// `podbag __session`: create the holder (new user and network namespaces, mapped like a
 /// container's), start pasta for its network, report the holder's PID, and exit. The
 /// holder stays, asleep, until the last container stops it.
 pub fn session_main() -> i32 {
@@ -287,7 +287,7 @@ fn create() -> Result<u32> {
             ErrorKind::Runtime,
             "cannot start the rootless network session",
             "its holder process ended during setup",
-            "run `openpod check` to see what this system lacks",
+            "run `podbag check` to see what this system lacks",
         ))
     });
     if let Err(e) = ready {

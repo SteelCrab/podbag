@@ -4,20 +4,20 @@ use crate::cgroup::{Budget, parse_budget};
 use crate::paths::Dirs;
 use crate::{Error, ErrorKind, Result};
 
-/// The default image store limit (design 6.3.4).
+/// The default image store limit.
 pub const DEFAULT_STORE_LIMIT: u64 = 10 << 30;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     /// Bytes of image content to keep before the least recently used images are removed.
     pub store_limit: u64,
-    /// How much memory all containers may use together (design 6.6).
+    /// How much memory all containers may use together.
     pub memory_budget: Budget,
-    /// The default network's subnet (design 6.8.2).
+    /// The default network's subnet.
     pub default_subnet: String,
-    /// How root mode mounts images (design 6.3.3).
+    /// How root mode mounts images.
     pub image_mount: ImageMount,
-    /// One keeper process watches the detached containers (design 6.15); without it each
+    /// One keeper process watches the detached containers; without it each
     /// container has a shim process of its own.
     pub keeper: bool,
     /// How long the keeper stays after its last container, in milliseconds.
@@ -27,7 +27,7 @@ pub struct Config {
 /// Whether the keeper is used when nothing says otherwise.
 pub const KEEPER_DEFAULT: bool = true;
 
-/// `image_mount`: `auto` uses composefs when openpod runs as root and the kernel passes
+/// `image_mount`: `auto` uses composefs when podbag runs as root and the kernel passes
 /// the probe, hard-link trees otherwise; `hardlink` always uses hard-link trees.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ImageMount {
@@ -69,9 +69,9 @@ fn parse_switch(value: &str) -> std::result::Result<bool, String> {
     }
 }
 
-/// Read `<config>/config.toml` (missing file = defaults). `OPENPOD_STORE_LIMIT`,
-/// `OPENPOD_MEMORY_BUDGET`, `OPENPOD_DEFAULT_SUBNET`, `OPENPOD_IMAGE_MOUNT`, `OPENPOD_KEEPER`
-/// and `OPENPOD_KEEPER_LINGER_MS` override it.
+/// Read `<config>/config.toml` (missing file = defaults). `PODBAG_STORE_LIMIT`,
+/// `PODBAG_MEMORY_BUDGET`, `PODBAG_DEFAULT_SUBNET`, `PODBAG_IMAGE_MOUNT`, `PODBAG_KEEPER`
+/// and `PODBAG_KEEPER_LINGER_MS` override it.
 pub fn load(dirs: &Dirs) -> Result<Config> {
     let path = dirs.config.join("config.toml");
     let mut config = match std::fs::read_to_string(&path) {
@@ -94,21 +94,21 @@ pub fn load(dirs: &Dirs) -> Result<Config> {
 
 /// The environment variables that override the file.
 fn apply_overrides(config: &mut Config, var: impl Fn(&str) -> Option<String>) -> Result<()> {
-    if let Some(v) = var("OPENPOD_STORE_LIMIT") {
+    if let Some(v) = var("PODBAG_STORE_LIMIT") {
         config.store_limit = parse_size(&v)?;
     }
-    if let Some(v) = var("OPENPOD_MEMORY_BUDGET") {
+    if let Some(v) = var("PODBAG_MEMORY_BUDGET") {
         config.memory_budget = parse_budget(&v)?;
     }
-    if let Some(v) = var("OPENPOD_DEFAULT_SUBNET") {
+    if let Some(v) = var("PODBAG_DEFAULT_SUBNET") {
         crate::network::parse_cidr(&v)?;
         config.default_subnet = v;
     }
-    if let Some(v) = var("OPENPOD_IMAGE_MOUNT") {
+    if let Some(v) = var("PODBAG_IMAGE_MOUNT") {
         config.image_mount = ImageMount::parse(&v).map_err(|why| {
             Error::new(
                 ErrorKind::InvalidInput,
-                "invalid OPENPOD_IMAGE_MOUNT",
+                "invalid PODBAG_IMAGE_MOUNT",
                 why,
                 "set it to auto or hardlink, or unset it",
             )
@@ -122,13 +122,13 @@ fn apply_overrides(config: &mut Config, var: impl Fn(&str) -> Option<String>) ->
             "set it to 1 or 0, or unset it",
         )
     };
-    if let Some(v) = var("OPENPOD_KEEPER") {
-        config.keeper = parse_switch(&v).map_err(|why| invalid("OPENPOD_KEEPER", why))?;
+    if let Some(v) = var("PODBAG_KEEPER") {
+        config.keeper = parse_switch(&v).map_err(|why| invalid("PODBAG_KEEPER", why))?;
     }
-    if let Some(v) = var("OPENPOD_KEEPER_LINGER_MS") {
+    if let Some(v) = var("PODBAG_KEEPER_LINGER_MS") {
         config.keeper_linger_ms = v.parse().map_err(|_| {
             invalid(
-                "OPENPOD_KEEPER_LINGER_MS",
+                "PODBAG_KEEPER_LINGER_MS",
                 format!("{v} is not a number of milliseconds"),
             )
         })?;
@@ -281,16 +281,16 @@ mod tests {
         assert!(parse("keeper = \"maybe\"").is_err());
         let mut c = Config::default();
         let env = |k: &str| match k {
-            "OPENPOD_KEEPER" => Some("1".to_string()),
-            "OPENPOD_KEEPER_LINGER_MS" => Some("300".to_string()),
+            "PODBAG_KEEPER" => Some("1".to_string()),
+            "PODBAG_KEEPER_LINGER_MS" => Some("300".to_string()),
             _ => None,
         };
         apply_overrides(&mut c, env).unwrap();
         assert_eq!((c.keeper, c.keeper_linger_ms), (true, 300));
-        let off = |k: &str| (k == "OPENPOD_KEEPER").then(|| "0".to_string());
+        let off = |k: &str| (k == "PODBAG_KEEPER").then(|| "0".to_string());
         apply_overrides(&mut c, off).unwrap();
         assert!(!c.keeper);
-        let bad = |k: &str| (k == "OPENPOD_KEEPER").then(|| "perhaps".to_string());
+        let bad = |k: &str| (k == "PODBAG_KEEPER").then(|| "perhaps".to_string());
         assert!(apply_overrides(&mut c, bad).is_err());
     }
 
@@ -309,12 +309,12 @@ mod tests {
         );
         let mut c = parse("image_mount = \"auto\"").unwrap();
         apply_overrides(&mut c, |k| {
-            (k == "OPENPOD_IMAGE_MOUNT").then(|| "hardlink".to_string())
+            (k == "PODBAG_IMAGE_MOUNT").then(|| "hardlink".to_string())
         })
         .unwrap();
         assert_eq!(c.image_mount, ImageMount::Hardlink);
         assert!(
-            apply_overrides(&mut c, |k| (k == "OPENPOD_IMAGE_MOUNT").then(|| "x".into())).is_err()
+            apply_overrides(&mut c, |k| (k == "PODBAG_IMAGE_MOUNT").then(|| "x".into())).is_err()
         );
     }
 

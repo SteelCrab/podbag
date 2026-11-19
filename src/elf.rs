@@ -50,7 +50,7 @@ impl Machine {
         }
     }
 
-    /// The CPU this openpod runs on.
+    /// The CPU this podbag runs on.
     pub fn host() -> Machine {
         if cfg!(target_arch = "x86_64") {
             Machine::X86_64

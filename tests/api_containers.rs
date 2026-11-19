@@ -1,5 +1,5 @@
 #![cfg(target_os = "linux")]
-//! Containers through the Docker Engine API: the docker CLI against `openpod system service`.
+//! Containers through the Docker Engine API: the docker CLI against `podbag system service`.
 
 mod common;
 use common::api::*;
@@ -530,7 +530,7 @@ fn an_exec_client_that_leaves_ends_the_relay() {
 }
 
 #[test]
-fn filters_openpod_lacks_are_refused() {
+fn filters_podbag_lacks_are_refused() {
     let s = setup();
     s.ok(&["run", "-d", "--name", "keep", &s.image, "sleep", "30"]);
     let out = s.docker(&["ps", "-aq", "--filter", "volume=x"]);
@@ -632,7 +632,7 @@ fn signals_for_the_service_do_not_reach_its_containers() {
     .spawn()
     .unwrap();
     let running = || {
-        let out = sb.openpod().args(["ps"]).output().unwrap();
+        let out = sb.podbag().args(["ps"]).output().unwrap();
         stdout(&out)
             .lines()
             .any(|l| l.split_whitespace().last() == Some("att"))
@@ -648,7 +648,7 @@ fn signals_for_the_service_do_not_reach_its_containers() {
     assert!(running(), "the container died with the service's signal");
     let _ = attached.kill();
     let _ = attached.wait();
-    let _ = sb.openpod().args(["rm", "-f", "att"]).output();
+    let _ = sb.podbag().args(["rm", "-f", "att"]).output();
 }
 
 #[test]
@@ -983,7 +983,7 @@ fn a_hostile_archive_stays_in_the_container() {
     let s = setup();
     s.ok(&["create", "--name", "h", &s.image, "true"]);
     let dir = tempfile::tempdir().unwrap();
-    let marker = format!("openpod-escape-{}", std::process::id());
+    let marker = format!("podbag-escape-{}", std::process::id());
     // Raw names: tar-rs refuses to write `..` itself.
     let entry = |name: &str, kind: tar::EntryType, link: &str, data: &[u8]| {
         let mut h = tar::Header::new_gnu();
@@ -1101,7 +1101,7 @@ fn links_a_running_container_plants_stay_inside_it() {
     // The container makes links to `/` and to its init's root; copies through them reach
     // its own files, never the host's (as root the helper runs as the host's root).
     let s = setup();
-    let marker = format!("openpod-marker-{}", std::process::id());
+    let marker = format!("podbag-marker-{}", std::process::id());
     let script = format!(
         "ln -s / /out && ln -s /proc/1/root /out2 && echo inside > /etc/{marker} && sleep 300"
     );

@@ -457,7 +457,7 @@ impl Files {
                             ErrorKind::Runtime,
                             "cannot load the image archive",
                             "the store's disk is nearly full",
-                            "free some space (`openpod system prune`), then try again",
+                            "free some space (`podbag system prune`), then try again",
                         ));
                     }
                 }

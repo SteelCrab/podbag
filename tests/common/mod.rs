@@ -4,15 +4,15 @@ pub mod api;
 pub mod registry;
 use std::process::{Command, Output};
 
-pub const BIN: &str = env!("CARGO_BIN_EXE_openpod");
+pub const BIN: &str = env!("CARGO_BIN_EXE_podbag");
 
 /// The unpacked Alpine root filesystem. Fails with instructions when it is not set.
 pub fn rootfs() -> String {
-    std::env::var("OPENPOD_TEST_ROOTFS")
-        .expect("OPENPOD_TEST_ROOTFS is not set; run these tests with `dev/vm.sh test`")
+    std::env::var("PODBAG_TEST_ROOTFS")
+        .expect("PODBAG_TEST_ROOTFS is not set; run these tests with `dev/vm.sh test`")
 }
 
-/// True when the tests run openpod as root (`dev/vm.sh test-root`).
+/// True when the tests run podbag as root (`dev/vm.sh test-root`).
 /// As root, every sandbox's user networks live in the host's one namespace, and separate
 /// data directories pick the same automatic subnets: tests that create networks take turns.
 pub fn network_turn() -> Option<std::fs::File> {
@@ -23,7 +23,7 @@ pub fn network_turn() -> Option<std::fs::File> {
         .create(true)
         .truncate(false)
         .write(true)
-        .open("/tmp/openpod-test-networks.lock")
+        .open("/tmp/podbag-test-networks.lock")
         .unwrap();
     lock.lock().unwrap();
     Some(lock)
@@ -83,13 +83,13 @@ pub fn mark_stopped(sb: &Sandbox, c: &str) {
 }
 
 pub fn root_mode() -> bool {
-    std::env::var("OPENPOD_TEST_ROOT").as_deref() == Ok("1")
+    std::env::var("PODBAG_TEST_ROOT").as_deref() == Ok("1")
 }
 
 /// Separate data and runtime directories for one test.
 pub struct Sandbox {
     pub tmp: tempfile::TempDir,
-    /// Extra environment for openpod; passed through sudo in root mode.
+    /// Extra environment for podbag; passed through sudo in root mode.
     pub env: Vec<(String, String)>,
 }
 
@@ -98,13 +98,13 @@ pub struct Sandbox {
 impl Drop for Sandbox {
     fn drop(&mut self) {
         // A test that failed half-way may leave containers running (and holding ports).
-        if let Ok(out) = self.openpod().args(["ps", "-aq"]).output() {
+        if let Ok(out) = self.podbag().args(["ps", "-aq"]).output() {
             let ids: Vec<String> = String::from_utf8_lossy(&out.stdout)
                 .split_whitespace()
                 .map(String::from)
                 .collect();
             if !ids.is_empty() {
-                let _ = self.openpod().args(["rm", "-f"]).args(&ids).output();
+                let _ = self.podbag().args(["rm", "-f"]).args(&ids).output();
             }
         }
         // The sandbox's keeper, if one still lingers: nothing of a test stays behind.
@@ -133,7 +133,7 @@ impl Drop for Sandbox {
                     "sh",
                     "-c",
                     r#"for f in "$1"/networks/*.json; do
-                         b=$(sed -n 's/.*"bridge": *"\(opd-[^"]*\)".*/\1/p' "$f" 2>/dev/null)
+                         b=$(sed -n 's/.*"bridge": *"\(pbg-[^"]*\)".*/\1/p' "$f" 2>/dev/null)
                          [ -n "$b" ] || continue
                          # The ports of containers that were just removed go a moment later.
                          n=0
@@ -143,8 +143,8 @@ impl Drop for Sandbox {
                          [ -z "$(ls "/sys/class/net/$b/brif" 2>/dev/null)" ] || continue
                          ip link del "$b" 2>/dev/null
                          for c in "post-$b" "fwd-$b"; do
-                           nft flush chain ip openpod "$c" 2>/dev/null
-                           nft delete chain ip openpod "$c" 2>/dev/null
+                           nft flush chain ip podbag "$c" 2>/dev/null
+                           nft delete chain ip podbag "$c" 2>/dev/null
                          done
                        done"#,
                     "_",
@@ -183,19 +183,19 @@ impl Sandbox {
             let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let slot = (std::process::id() + n) % 250 + 1;
             sb.env.push((
-                "OPENPOD_DEFAULT_SUBNET".to_string(),
+                "PODBAG_DEFAULT_SUBNET".to_string(),
                 format!("10.79.{slot}.0/24"),
             ));
         }
         // The keeper of a sandbox leaves soon after its last container (a later value
         // of the same variable wins, for tests that want another time).
         sb.env
-            .push(("OPENPOD_KEEPER_LINGER_MS".to_string(), "300".to_string()));
-        // OPENPOD_TEST_KEEPER=0 runs the suite with a shim per container.
-        if std::env::var("OPENPOD_TEST_KEEPER").as_deref() == Ok("0") {
-            sb.env.push(("OPENPOD_KEEPER".to_string(), "0".to_string()));
+            .push(("PODBAG_KEEPER_LINGER_MS".to_string(), "300".to_string()));
+        // PODBAG_TEST_KEEPER=0 runs the suite with a shim per container.
+        if std::env::var("PODBAG_TEST_KEEPER").as_deref() == Ok("0") {
+            sb.env.push(("PODBAG_KEEPER".to_string(), "0".to_string()));
         }
-        // Created by the test user, so the test can list it even when openpod runs as root.
+        // Created by the test user, so the test can list it even when podbag runs as root.
         std::fs::create_dir_all(sb.data().join("containers")).unwrap();
         sb
     }
@@ -214,19 +214,19 @@ impl Sandbox {
         self.tmp.path().join("run")
     }
 
-    /// rootless: run openpod directly. root: run it through `sudo -n env ...`.
-    pub fn openpod(&self) -> Command {
-        self.openpod_bin(BIN)
+    /// rootless: run podbag directly. root: run it through `sudo -n env ...`.
+    pub fn podbag(&self) -> Command {
+        self.podbag_bin(BIN)
     }
 
-    pub fn openpod_bin(&self, bin: &str) -> Command {
+    pub fn podbag_bin(&self, bin: &str) -> Command {
         let mut vars = vec![
             (
-                "OPENPOD_DATA_DIR".to_string(),
+                "PODBAG_DATA_DIR".to_string(),
                 self.data().display().to_string(),
             ),
             (
-                "OPENPOD_RUNTIME_DIR".to_string(),
+                "PODBAG_RUNTIME_DIR".to_string(),
                 self.runtime().display().to_string(),
             ),
         ];
@@ -244,18 +244,18 @@ impl Sandbox {
         }
     }
 
-    /// `openpod run --rm --rootfs <rootfs()> <args...>`
+    /// `podbag run --rm --rootfs <rootfs()> <args...>`
     pub fn run(&self, args: &[&str]) -> Output {
-        self.openpod()
+        self.podbag()
             .args(["run", "--rm", "--rootfs", &rootfs()])
             .args(args)
             .output()
             .unwrap()
     }
 
-    /// `openpod run --rm --rootfs <rootfs()> <options...> <command...>`
+    /// `podbag run --rm --rootfs <rootfs()> <options...> <command...>`
     pub fn run_with(&self, options: &[&str], command: &[&str]) -> Output {
-        self.openpod()
+        self.podbag()
             .args(["run", "--rm", "--rootfs", &rootfs()])
             .args(options)
             .args(command)

@@ -5,8 +5,8 @@ mod common;
 use common::*;
 use std::process::Output;
 
-fn openpod(sb: &Sandbox, args: &[&str]) -> Output {
-    sb.openpod().args(args).output().unwrap()
+fn podbag(sb: &Sandbox, args: &[&str]) -> Output {
+    sb.podbag().args(args).output().unwrap()
 }
 
 fn ok(out: &Output) -> String {
@@ -58,7 +58,7 @@ fn network_record(sb: &Sandbox, name: &str) -> serde_json::Value {
 
 /// The container's IPv4 address on eth0 (from inside it).
 fn eth0_address(sb: &Sandbox, name: &str) -> String {
-    let out = ok(&openpod(
+    let out = ok(&podbag(
         sb,
         &["exec", name, "sh", "-c", "ip -4 -o addr show eth0"],
     ));
@@ -75,7 +75,7 @@ fn start(sb: &Sandbox, name: &str, options: &[&str], command: &[&str]) {
     args.extend_from_slice(options);
     args.extend_from_slice(&["--rootfs", &rootfs]);
     args.extend_from_slice(command);
-    ok(&openpod(sb, &args));
+    ok(&podbag(sb, &args));
     std::thread::sleep(std::time::Duration::from_millis(200));
 }
 
@@ -119,9 +119,9 @@ fn bridge_container_gets_an_address() {
         .values()
         .any(|m| m["ip"] == ip.as_str());
     assert!(listed, "{record}");
-    let hosts = ok(&openpod(&sb, &["exec", "a", "cat", "/etc/hosts"]));
+    let hosts = ok(&podbag(&sb, &["exec", "a", "cat", "/etc/hosts"]));
     assert!(hosts.contains(&ip), "{hosts}");
-    ok(&openpod(&sb, &["rm", "-f", "a"]));
+    ok(&podbag(&sb, &["rm", "-f", "a"]));
     let record = network_record(&sb, "bridge");
     assert!(
         record["containers"].as_object().unwrap().is_empty(),
@@ -145,7 +145,7 @@ fn host_reaches_container_and_back() {
     let mut got = String::new();
     std::io::BufRead::read_line(&mut std::io::BufReader::new(conn), &mut got).unwrap();
     assert_eq!(got, "hi\n");
-    ok(&openpod(&sb, &["rm", "-f", "srv"]));
+    ok(&podbag(&sb, &["rm", "-f", "srv"]));
 }
 
 #[test]
@@ -156,7 +156,7 @@ fn containers_on_one_network_reach_each_other_by_ip() {
     assert!(ip.starts_with("10.7"), "{ip}");
     let out = ok(&sb.run_with(&[], &["sh", "-c", &format!("nc -w 2 {ip} 9000 </dev/null")]));
     assert_eq!(out, "pong");
-    ok(&openpod(&sb, &["rm", "-f", "srv2"]));
+    ok(&podbag(&sb, &["rm", "-f", "srv2"]));
 }
 
 #[test]
@@ -173,7 +173,7 @@ fn failed_start_releases_the_address() {
 
 #[test]
 fn bridge_container_reaches_the_internet() {
-    if std::env::var("OPENPOD_TEST_NETWORK").as_deref() != Ok("1") {
+    if std::env::var("PODBAG_TEST_NETWORK").as_deref() != Ok("1") {
         return;
     }
     let sb = Sandbox::new();
@@ -216,7 +216,7 @@ fn missing_pasta_is_explained() {
     if root_mode() {
         return;
     }
-    let sb = Sandbox::with_env("OPENPOD_PASTA", "/nonexistent");
+    let sb = Sandbox::with_env("PODBAG_PASTA", "/nonexistent");
     let out = sb.run(&["true"]);
     assert_eq!(out.status.code(), Some(125), "{}", stderr(&out));
     assert!(stderr(&out).contains("pasta"), "{}", stderr(&out));
@@ -242,7 +242,7 @@ fn parallel_starts_share_one_session() {
     let userns = |pid: u64| std::fs::read_link(format!("/proc/{pid}/ns/user")).unwrap();
     for i in 0..4 {
         let info: serde_json::Value =
-            serde_json::from_str(&ok(&openpod(&sb, &["inspect", &format!("p{i}")]))).unwrap();
+            serde_json::from_str(&ok(&podbag(&sb, &["inspect", &format!("p{i}")]))).unwrap();
         let pid = info["state"]["pid"].as_u64().unwrap();
         assert_eq!(userns(pid), userns(u64::from(session)), "p{i}");
     }
@@ -253,7 +253,7 @@ fn parallel_starts_share_one_session() {
     ips.dedup();
     assert_eq!(ips.len(), 4, "{ips:?}");
     for i in 0..4 {
-        ok(&openpod(&sb, &["rm", "-f", &format!("p{i}")]));
+        ok(&podbag(&sb, &["rm", "-f", &format!("p{i}")]));
     }
 }
 
@@ -266,9 +266,9 @@ fn session_ends_with_the_last_container() {
     start(&sb, "s1", &[], &["sleep", "30"]);
     start(&sb, "s2", &[], &["sleep", "30"]);
     let session = session_pid(&sb).expect("a session");
-    ok(&openpod(&sb, &["rm", "-f", "s1"]));
+    ok(&podbag(&sb, &["rm", "-f", "s1"]));
     assert!(std::path::Path::new(&format!("/proc/{session}")).exists());
-    ok(&openpod(&sb, &["rm", "-f", "s2"]));
+    ok(&podbag(&sb, &["rm", "-f", "s2"]));
     assert!(
         wait_until(3, || !std::path::Path::new(&format!("/proc/{session}"))
             .exists()),
@@ -281,7 +281,7 @@ fn killed_shim_releases_its_address() {
     let sb = Sandbox::new();
     start(&sb, "k", &[], &["sleep", "30"]);
     let info: serde_json::Value =
-        serde_json::from_str(&ok(&openpod(&sb, &["inspect", "k"]))).unwrap();
+        serde_json::from_str(&ok(&podbag(&sb, &["inspect", "k"]))).unwrap();
     let shim = info["state"]["shim_pid"].as_u64().unwrap().to_string();
     let killer: Vec<&str> = if root_mode() {
         vec!["sudo", "-n", "kill", "-KILL", &shim]
@@ -296,7 +296,7 @@ fn killed_shim_releases_its_address() {
             .success()
     );
     assert!(wait_until(10, || {
-        let ps = ok(&openpod(&sb, &["ps", "-a"]));
+        let ps = ok(&podbag(&sb, &["ps", "-a"]));
         ps.lines()
             .any(|l| l.ends_with(" k") && l.contains("Exited"))
     }));
@@ -311,7 +311,7 @@ fn killed_shim_releases_its_address() {
             "session still runs"
         );
     }
-    ok(&openpod(&sb, &["rm", "k"]));
+    ok(&podbag(&sb, &["rm", "k"]));
 }
 
 // Rootless containers ask pasta's DNS forwarder; root ones the host's upstream servers.
@@ -344,7 +344,7 @@ fn orphaned_session_ends_by_itself() {
             .exists()),
         "the session lingers without its record"
     );
-    let _ = openpod(&sb, &["rm", "-f", "o"]);
+    let _ = podbag(&sb, &["rm", "-f", "o"]);
 }
 
 fn connect_line(port: u16) -> std::io::Result<String> {
@@ -367,9 +367,9 @@ fn published_tcp_port_reaches_the_container() {
         wait_until(3, || connect_line(18080).is_ok_and(|l| l == "hi\n")),
         "a second connection"
     );
-    let ps = ok(&openpod(&sb, &["ps"]));
+    let ps = ok(&podbag(&sb, &["ps"]));
     assert!(ps.contains("0.0.0.0:18080->8080/tcp"), "{ps}");
-    ok(&openpod(&sb, &["rm", "-f", "web"]));
+    ok(&podbag(&sb, &["rm", "-f", "web"]));
 }
 
 #[test]
@@ -390,7 +390,7 @@ fn published_udp_port() {
     let mut buf = [0u8; 64];
     let (n, _) = socket.recv_from(&mut buf).unwrap();
     assert_eq!(&buf[..n], b"ping\n");
-    ok(&openpod(&sb, &["rm", "-f", "dns"]));
+    ok(&podbag(&sb, &["rm", "-f", "dns"]));
 }
 
 #[test]
@@ -398,11 +398,11 @@ fn automatic_host_port_is_shown() {
     let sb = Sandbox::new();
     start(&sb, "auto", &["-p", "8080"], &["sh", "-c", TCP_SERVER]);
     let info: serde_json::Value =
-        serde_json::from_str(&ok(&openpod(&sb, &["inspect", "auto"]))).unwrap();
+        serde_json::from_str(&ok(&podbag(&sb, &["inspect", "auto"]))).unwrap();
     let port = info["state"]["ports"][0]["host_port"].as_u64().unwrap() as u16;
     assert_ne!(port, 0, "{info}");
     assert_eq!(connect_line(port).unwrap(), "hi\n");
-    ok(&openpod(&sb, &["rm", "-f", "auto"]));
+    ok(&podbag(&sb, &["rm", "-f", "auto"]));
 }
 
 #[test]
@@ -414,7 +414,7 @@ fn published_port_closes_with_the_container() {
             .is_err()),
         "the port stayed open"
     );
-    let _ = openpod(&sb, &["rm", "brief"]);
+    let _ = podbag(&sb, &["rm", "brief"]);
 }
 
 #[test]
@@ -430,20 +430,20 @@ fn port_in_use_is_an_error() {
 fn containers_reach_each_other_by_name() {
     let _turn = network_turn();
     let sb = Sandbox::new();
-    ok(&openpod(&sb, &["network", "create", "app"]));
+    ok(&podbag(&sb, &["network", "create", "app"]));
     start(&sb, "db", &["--network", "app"], &["sleep", "30"]);
     start(&sb, "web", &["--network", "app"], &["sleep", "30"]);
-    ok(&openpod(&sb, &["exec", "web", "ping", "-c1", "-W2", "db"]));
+    ok(&podbag(&sb, &["exec", "web", "ping", "-c1", "-W2", "db"]));
     // db started first: its hosts file learned about web afterwards.
-    ok(&openpod(&sb, &["exec", "db", "ping", "-c1", "-W2", "web"]));
-    ok(&openpod(&sb, &["rm", "-f", "db"]));
-    let hosts = ok(&openpod(&sb, &["exec", "web", "cat", "/etc/hosts"]));
+    ok(&podbag(&sb, &["exec", "db", "ping", "-c1", "-W2", "web"]));
+    ok(&podbag(&sb, &["rm", "-f", "db"]));
+    let hosts = ok(&podbag(&sb, &["exec", "web", "cat", "/etc/hosts"]));
     assert!(
         !hosts.contains("\tdb\n") && !hosts.ends_with("\tdb"),
         "{hosts}"
     );
-    ok(&openpod(&sb, &["rm", "-f", "web"]));
-    ok(&openpod(&sb, &["network", "rm", "app"]));
+    ok(&podbag(&sb, &["rm", "-f", "web"]));
+    ok(&podbag(&sb, &["network", "rm", "app"]));
 }
 
 #[test]
@@ -451,22 +451,22 @@ fn default_network_has_no_names() {
     let sb = Sandbox::new();
     start(&sb, "n1", &[], &["sleep", "30"]);
     start(&sb, "n2", &[], &["sleep", "30"]);
-    let hosts = ok(&openpod(&sb, &["exec", "n2", "cat", "/etc/hosts"]));
+    let hosts = ok(&podbag(&sb, &["exec", "n2", "cat", "/etc/hosts"]));
     assert!(!hosts.contains("n1"), "{hosts}");
-    ok(&openpod(&sb, &["rm", "-f", "n1", "n2"]));
+    ok(&podbag(&sb, &["rm", "-f", "n1", "n2"]));
 }
 
 #[test]
 fn network_commands() {
     let _turn = network_turn();
     let sb = Sandbox::new();
-    let id = ok(&openpod(&sb, &["network", "create", "back"]));
+    let id = ok(&podbag(&sb, &["network", "create", "back"]));
     assert_eq!(id.len(), 12, "{id}");
-    ok(&openpod(
+    ok(&podbag(
         &sb,
         &["network", "create", "--subnet", "172.31.7.0/24", "fixed"],
     ));
-    let table = ok(&openpod(&sb, &["network", "ls"]));
+    let table = ok(&podbag(&sb, &["network", "ls"]));
     assert!(table.starts_with("NETWORK ID"), "{table}");
     for name in ["back", "bridge", "fixed", "host", "none"] {
         assert!(
@@ -477,28 +477,28 @@ fn network_commands() {
         );
     }
     let info: serde_json::Value =
-        serde_json::from_str(&ok(&openpod(&sb, &["network", "inspect", "fixed"]))).unwrap();
+        serde_json::from_str(&ok(&podbag(&sb, &["network", "inspect", "fixed"]))).unwrap();
     assert_eq!(info["subnet"], "172.31.7.0/24");
     assert_eq!(info["gateway"], "172.31.7.1");
-    let out = openpod(
+    let out = podbag(
         &sb,
         &["network", "create", "--subnet", "172.31.7.128/25", "clash"],
     );
     assert_eq!(out.status.code(), Some(125), "{}", stderr(&out));
     start(&sb, "user", &["--network", "back"], &["sleep", "30"]);
-    let out = openpod(&sb, &["network", "rm", "back"]);
+    let out = podbag(&sb, &["network", "rm", "back"]);
     assert_eq!(out.status.code(), Some(125));
     assert!(stderr(&out).contains("user"), "{}", stderr(&out));
     assert_eq!(
-        openpod(&sb, &["network", "rm", "bridge"]).status.code(),
+        podbag(&sb, &["network", "rm", "bridge"]).status.code(),
         Some(125)
     );
-    ok(&openpod(&sb, &["rm", "-f", "user"]));
+    ok(&podbag(&sb, &["rm", "-f", "user"]));
     assert_eq!(
-        ok(&openpod(&sb, &["network", "rm", "back", "fixed"])),
+        ok(&podbag(&sb, &["network", "rm", "back", "fixed"])),
         "back\nfixed"
     );
-    let out = openpod(
+    let out = podbag(
         &sb,
         &[
             "run",
@@ -518,8 +518,8 @@ fn network_commands() {
 fn exec_into_host_network_container() {
     let sb = Sandbox::new();
     start(&sb, "h", &["--network", "host"], &["sleep", "30"]);
-    ok(&openpod(&sb, &["exec", "h", "true"]));
-    ok(&openpod(&sb, &["rm", "-f", "h"]));
+    ok(&podbag(&sb, &["exec", "h", "true"]));
+    ok(&podbag(&sb, &["rm", "-f", "h"]));
 }
 
 // Design chapter 9's scenario, with a root filesystem instead of images.
@@ -531,7 +531,7 @@ fn scenario_without_images() {
     std::fs::write(html.path().join("index.html"), "hello from web\n").unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(html.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
-    ok(&openpod(&sb, &["network", "create", "app"]));
+    ok(&podbag(&sb, &["network", "create", "app"]));
     start(
         &sb,
         "db",
@@ -547,12 +547,12 @@ fn scenario_without_images() {
         &["--network", "app", "-p", "18090:80", "-v", &web_volume],
         &["sh", "-c", server],
     );
-    ok(&openpod(&sb, &["exec", "web", "ping", "-c1", "-W2", "db"]));
+    ok(&podbag(&sb, &["exec", "web", "ping", "-c1", "-W2", "db"]));
     assert!(wait_until(3, || connect_line(18090)
         .is_ok_and(|l| l == "hello from web\n")));
-    ok(&openpod(&sb, &["stop", "-t", "1", "web", "db"]));
-    ok(&openpod(&sb, &["rm", "web", "db"]));
-    ok(&openpod(&sb, &["network", "rm", "app"]));
+    ok(&podbag(&sb, &["stop", "-t", "1", "web", "db"]));
+    ok(&podbag(&sb, &["rm", "web", "db"]));
+    ok(&podbag(&sb, &["network", "rm", "app"]));
 }
 
 // su, sudo -u and CI shells often have systemd-run but no user manager: a rootless bridge
@@ -566,7 +566,7 @@ fn rootless_bridge_without_a_user_manager() {
     let fake = sb.tmp.path().join("xdg");
     std::fs::create_dir_all(&fake).unwrap();
     let out = sb
-        .openpod()
+        .podbag()
         .env("XDG_RUNTIME_DIR", &fake)
         .env_remove("DBUS_SESSION_BUS_ADDRESS")
         .args(["run", "--rm", "--rootfs", &rootfs(), "echo", "hi"])
@@ -608,8 +608,8 @@ fn host_loopback_is_not_reachable() {
 fn networks_are_isolated() {
     let _turn = network_turn();
     let sb = Sandbox::new();
-    ok(&openpod(&sb, &["network", "create", "aa"]));
-    ok(&openpod(&sb, &["network", "create", "bb"]));
+    ok(&podbag(&sb, &["network", "create", "aa"]));
+    ok(&podbag(&sb, &["network", "create", "bb"]));
     start(&sb, "inb", &["--network", "bb"], &["sh", "-c", TCP_SERVER]);
     let ip = eth0_address(&sb, "inb");
     let probe = format!("nc -w 2 {ip} 8080 </dev/null; true");
@@ -625,7 +625,7 @@ fn networks_are_isolated() {
         out.contains("hi"),
         "the same network must still work: {out}"
     );
-    ok(&openpod(&sb, &["rm", "-f", "inb"]));
+    ok(&podbag(&sb, &["rm", "-f", "inb"]));
 }
 
 // A stale pasta.pid (pasta ended with its holder) may name another process of the user by
@@ -679,7 +679,7 @@ fn published_port_is_closed_before_the_address_is_released() {
         "-c",
         work,
     ];
-    let id = ok(&openpod(&sb, &args));
+    let id = ok(&podbag(&sb, &args));
     let listed = |sb: &Sandbox| {
         network_record(sb, "bridge")["containers"]
             .get(&id)
@@ -716,51 +716,51 @@ fn open_connection_ends_with_the_container() {
             || matches!(&got, Err(e) if e.kind() != std::io::ErrorKind::WouldBlock && e.kind() != std::io::ErrorKind::TimedOut),
         "the connection hung: {got:?}"
     );
-    assert!(wait_until(10, || ok(&openpod(&sb, &["ps", "-a"]))
+    assert!(wait_until(10, || ok(&podbag(&sb, &["ps", "-a"]))
         .lines()
         .any(|l| l.ends_with(" holder") && l.contains("Exited"))));
-    let _ = openpod(&sb, &["rm", "holder"]);
+    let _ = podbag(&sb, &["rm", "holder"]);
 }
 
 #[test]
 fn labels_from_the_command_line() {
     let _turn = network_turn();
     let sb = Sandbox::new();
-    ok(&openpod(
+    ok(&podbag(
         &sb,
         &["network", "create", "--label", "a=b", "--label", "c", "lab"],
     ));
     let net: serde_json::Value =
-        serde_json::from_str(&ok(&openpod(&sb, &["network", "inspect", "lab"]))).unwrap();
+        serde_json::from_str(&ok(&podbag(&sb, &["network", "inspect", "lab"]))).unwrap();
     assert_eq!(net["labels"], serde_json::json!({"a": "b", "c": ""}));
-    let vol = ok(&openpod(
+    let vol = ok(&podbag(
         &sb,
         &["volume", "create", "--label", "eq=x=y", "labvol"],
     ));
     assert_eq!(vol.trim(), "labvol");
     let vol: serde_json::Value =
-        serde_json::from_str(&ok(&openpod(&sb, &["volume", "inspect", "labvol"]))).unwrap();
+        serde_json::from_str(&ok(&podbag(&sb, &["volume", "inspect", "labvol"]))).unwrap();
     let vol = if vol.is_array() { vol[0].clone() } else { vol };
     assert_eq!(vol["labels"], serde_json::json!({"eq": "x=y"}));
     // A label without a key is refused, and nothing is made.
-    let bad = openpod(&sb, &["network", "create", "--label", "=v", "nolabel"]);
+    let bad = podbag(&sb, &["network", "create", "--label", "=v", "nolabel"]);
     assert_eq!(bad.status.code(), Some(125), "{}", stderr(&bad));
     assert!(stderr(&bad).contains("label"), "{}", stderr(&bad));
     assert_ne!(
-        openpod(&sb, &["network", "inspect", "nolabel"])
+        podbag(&sb, &["network", "inspect", "nolabel"])
             .status
             .code(),
         Some(0)
     );
-    ok(&openpod(&sb, &["network", "rm", "lab"]));
-    ok(&openpod(&sb, &["volume", "rm", "labvol"]));
+    ok(&podbag(&sb, &["network", "rm", "lab"]));
+    ok(&podbag(&sb, &["volume", "rm", "labvol"]));
 }
 
 #[test]
 fn containers_find_each_other_by_alias() {
     let _turn = network_turn();
     let sb = Sandbox::new();
-    ok(&openpod(&sb, &["network", "create", "app"]));
+    ok(&podbag(&sb, &["network", "create", "app"]));
     start(
         &sb,
         "db",
@@ -776,15 +776,12 @@ fn containers_find_each_other_by_alias() {
     );
     start(&sb, "web", &["--network", "app"], &["sleep", "30"]);
     for name in ["db", "database", "store"] {
-        ok(&openpod(&sb, &["exec", "web", "ping", "-c1", "-W2", name]));
+        ok(&podbag(&sb, &["exec", "web", "ping", "-c1", "-W2", name]));
     }
     // Its own aliases name itself.
-    ok(&openpod(
-        &sb,
-        &["exec", "db", "ping", "-c1", "-W2", "store"],
-    ));
+    ok(&podbag(&sb, &["exec", "db", "ping", "-c1", "-W2", "store"]));
     // The default network has no names, so no aliases either.
-    let bad = openpod(
+    let bad = podbag(
         &sb,
         &[
             "run",
@@ -798,16 +795,16 @@ fn containers_find_each_other_by_alias() {
     );
     assert_eq!(bad.status.code(), Some(125), "{}", stderr(&bad));
     assert!(stderr(&bad).contains("alias"), "{}", stderr(&bad));
-    ok(&openpod(&sb, &["rm", "-f", "db", "web"]));
-    ok(&openpod(&sb, &["network", "rm", "app"]));
+    ok(&podbag(&sb, &["rm", "-f", "db", "web"]));
+    ok(&podbag(&sb, &["network", "rm", "app"]));
 }
 
 #[test]
 fn a_container_on_two_networks_reaches_both() {
     let _turn = network_turn();
     let sb = Sandbox::new();
-    ok(&openpod(&sb, &["network", "create", "front"]));
-    ok(&openpod(&sb, &["network", "create", "back"]));
+    ok(&podbag(&sb, &["network", "create", "front"]));
+    ok(&podbag(&sb, &["network", "create", "back"]));
     start(&sb, "web", &["--network", "front"], &["sleep", "30"]);
     start(&sb, "db", &["--network", "back"], &["sleep", "30"]);
     start(
@@ -817,41 +814,41 @@ fn a_container_on_two_networks_reaches_both() {
         &["sleep", "30"],
     );
     for name in ["web", "db"] {
-        ok(&openpod(&sb, &["exec", "api", "ping", "-c1", "-W2", name]));
+        ok(&podbag(&sb, &["exec", "api", "ping", "-c1", "-W2", name]));
     }
     // Each network's containers reach it; the networks stay apart.
-    ok(&openpod(&sb, &["exec", "web", "ping", "-c1", "-W2", "api"]));
-    ok(&openpod(&sb, &["exec", "db", "ping", "-c1", "-W2", "api"]));
-    let hosts = ok(&openpod(&sb, &["exec", "web", "cat", "/etc/hosts"]));
+    ok(&podbag(&sb, &["exec", "web", "ping", "-c1", "-W2", "api"]));
+    ok(&podbag(&sb, &["exec", "db", "ping", "-c1", "-W2", "api"]));
+    let hosts = ok(&podbag(&sb, &["exec", "web", "cat", "/etc/hosts"]));
     assert!(!hosts.contains("\tdb"), "{hosts}");
     // An interface on each network, and one default route (through the first).
-    let addrs = ok(&openpod(&sb, &["exec", "api", "ip", "-o", "-4", "addr"]));
+    let addrs = ok(&podbag(&sb, &["exec", "api", "ip", "-o", "-4", "addr"]));
     assert!(addrs.contains("eth0") && addrs.contains("eth1"), "{addrs}");
     // (busybox's `ip route show` lists every route: pick the default ones.)
-    let routes = ok(&openpod(&sb, &["exec", "api", "ip", "route"]));
+    let routes = ok(&podbag(&sb, &["exec", "api", "ip", "route"]));
     let defaults: Vec<&str> = routes
         .lines()
         .filter(|l| l.starts_with("default"))
         .collect();
     assert_eq!(defaults.len(), 1, "{routes}");
     assert!(defaults[0].contains("dev eth0"), "{routes}");
-    ok(&openpod(&sb, &["rm", "-f", "web", "db", "api"]));
-    ok(&openpod(&sb, &["network", "rm", "front", "back"]));
+    ok(&podbag(&sb, &["rm", "-f", "web", "db", "api"]));
+    ok(&podbag(&sb, &["network", "rm", "front", "back"]));
 }
 
 #[test]
 fn the_addresses_of_all_networks_come_back() {
     let _turn = network_turn();
     let sb = Sandbox::new();
-    ok(&openpod(&sb, &["network", "create", "front"]));
-    ok(&openpod(&sb, &["network", "create", "back"]));
+    ok(&podbag(&sb, &["network", "create", "front"]));
+    ok(&podbag(&sb, &["network", "create", "back"]));
     let members = |network: &str| {
         network_record(&sb, network)["containers"]
             .as_object()
             .map_or(0, |m| m.len())
     };
     let rootfs = rootfs();
-    ok(&openpod(
+    ok(&podbag(
         &sb,
         &[
             "run",
@@ -867,7 +864,7 @@ fn the_addresses_of_all_networks_come_back() {
     ));
     assert_eq!((members("front"), members("back")), (0, 0));
     // A start that fails on its second network gives the first one's address back.
-    let failed = openpod(
+    let failed = podbag(
         &sb,
         &[
             "run",
@@ -883,50 +880,50 @@ fn the_addresses_of_all_networks_come_back() {
     );
     assert_ne!(failed.status.code(), Some(0));
     assert_eq!(members("front"), 0);
-    ok(&openpod(&sb, &["network", "rm", "front", "back"]));
+    ok(&podbag(&sb, &["network", "rm", "front", "back"]));
 }
 
 #[test]
 fn connect_and_disconnect_a_stopped_container() {
     let _turn = network_turn();
     let sb = Sandbox::new();
-    ok(&openpod(&sb, &["network", "create", "front"]));
-    ok(&openpod(&sb, &["network", "create", "back"]));
+    ok(&podbag(&sb, &["network", "create", "front"]));
+    ok(&podbag(&sb, &["network", "create", "back"]));
     start(&sb, "web", &["--network", "front"], &["sleep", "300"]);
     // A container that runs keeps its networks until it stops.
-    let busy = openpod(&sb, &["network", "connect", "back", "web"]);
+    let busy = podbag(&sb, &["network", "connect", "back", "web"]);
     assert_eq!(busy.status.code(), Some(125), "{}", stderr(&busy));
     assert!(stderr(&busy).contains("stop"), "{}", stderr(&busy));
-    ok(&openpod(&sb, &["stop", "-t", "0", "web"]));
-    ok(&openpod(
+    ok(&podbag(&sb, &["stop", "-t", "0", "web"]));
+    ok(&podbag(
         &sb,
         &["network", "connect", "--alias", "w", "back", "web"],
     ));
     // Twice is a conflict.
-    let twice = openpod(&sb, &["network", "connect", "back", "web"]);
+    let twice = podbag(&sb, &["network", "connect", "back", "web"]);
     assert_eq!(twice.status.code(), Some(125), "{}", stderr(&twice));
-    ok(&openpod(&sb, &["start", "web"]));
-    let addrs = ok(&openpod(&sb, &["exec", "web", "ip", "-o", "-4", "addr"]));
+    ok(&podbag(&sb, &["start", "web"]));
+    let addrs = ok(&podbag(&sb, &["exec", "web", "ip", "-o", "-4", "addr"]));
     assert!(addrs.contains("eth1"), "{addrs}");
-    ok(&openpod(&sb, &["exec", "web", "ping", "-c1", "-W2", "w"]));
-    ok(&openpod(&sb, &["stop", "-t", "0", "web"]));
-    ok(&openpod(&sb, &["network", "disconnect", "back", "web"]));
+    ok(&podbag(&sb, &["exec", "web", "ping", "-c1", "-W2", "w"]));
+    ok(&podbag(&sb, &["stop", "-t", "0", "web"]));
+    ok(&podbag(&sb, &["network", "disconnect", "back", "web"]));
     // Its primary network stays.
-    let primary = openpod(&sb, &["network", "disconnect", "front", "web"]);
+    let primary = podbag(&sb, &["network", "disconnect", "front", "web"]);
     assert_eq!(primary.status.code(), Some(125), "{}", stderr(&primary));
-    ok(&openpod(&sb, &["start", "web"]));
-    let addrs = ok(&openpod(&sb, &["exec", "web", "ip", "-o", "-4", "addr"]));
+    ok(&podbag(&sb, &["start", "web"]));
+    let addrs = ok(&podbag(&sb, &["exec", "web", "ip", "-o", "-4", "addr"]));
     assert!(!addrs.contains("eth1"), "{addrs}");
-    ok(&openpod(&sb, &["rm", "-f", "web"]));
-    ok(&openpod(&sb, &["network", "rm", "front", "back"]));
+    ok(&podbag(&sb, &["rm", "-f", "web"]));
+    ok(&podbag(&sb, &["network", "rm", "front", "back"]));
 }
 
 #[test]
 fn a_killed_watcher_gives_back_every_network() {
     let _turn = network_turn();
     let sb = Sandbox::new();
-    ok(&openpod(&sb, &["network", "create", "front"]));
-    ok(&openpod(&sb, &["network", "create", "back"]));
+    ok(&podbag(&sb, &["network", "create", "front"]));
+    ok(&podbag(&sb, &["network", "create", "back"]));
     start(
         &sb,
         "k2",
@@ -941,7 +938,7 @@ fn a_killed_watcher_gives_back_every_network() {
     assert_eq!((members("front"), members("back")), (1, 1));
     // Its watcher dies without cleaning up (as at a crash or a reboot).
     let info: serde_json::Value =
-        serde_json::from_str(&ok(&openpod(&sb, &["inspect", "k2"]))).unwrap();
+        serde_json::from_str(&ok(&podbag(&sb, &["inspect", "k2"]))).unwrap();
     let watcher = info["state"]["shim_pid"].as_u64().unwrap().to_string();
     let killer: Vec<&str> = if root_mode() {
         vec!["sudo", "-n", "kill", "-KILL", &watcher]
@@ -957,34 +954,34 @@ fn a_killed_watcher_gives_back_every_network() {
     );
     // The next state check gives back its address on every network.
     assert!(wait_until(10, || {
-        let ps = ok(&openpod(&sb, &["ps", "-a"]));
+        let ps = ok(&podbag(&sb, &["ps", "-a"]));
         ps.lines()
             .any(|l| l.ends_with(" k2") && l.contains("Exited"))
     }));
     assert_eq!((members("front"), members("back")), (0, 0));
-    ok(&openpod(&sb, &["rm", "-f", "k2"]));
-    ok(&openpod(&sb, &["network", "rm", "front", "back"]));
+    ok(&podbag(&sb, &["rm", "-f", "k2"]));
+    ok(&podbag(&sb, &["network", "rm", "front", "back"]));
 }
 
 #[test]
 fn connect_waits_for_the_cleanup_of_the_last_run() {
     let _turn = network_turn();
     let sb = Sandbox::new();
-    ok(&openpod(&sb, &["network", "create", "front"]));
-    ok(&openpod(&sb, &["network", "create", "back"]));
+    ok(&podbag(&sb, &["network", "create", "front"]));
+    ok(&podbag(&sb, &["network", "create", "back"]));
     start(&sb, "w", &["--network", "front"], &["true"]);
     assert!(wait_until(10, || {
-        ok(&openpod(&sb, &["ps", "-a"]))
+        ok(&podbag(&sb, &["ps", "-a"]))
             .lines()
             .any(|l| l.ends_with(" w") && l.contains("Exited"))
     }));
     let info: serde_json::Value =
-        serde_json::from_str(&ok(&openpod(&sb, &["inspect", "w"]))).unwrap();
+        serde_json::from_str(&ok(&podbag(&sb, &["inspect", "w"]))).unwrap();
     let id = info["id"].as_str().unwrap().to_string();
     // The cleanup of its last run holds the lock for a moment after a stop returns.
     let mut holder = hold_shim_lock(&sb, &id, "1");
-    ok(&openpod(&sb, &["network", "connect", "back", "w"]));
+    ok(&podbag(&sb, &["network", "connect", "back", "w"]));
     let _ = holder.wait();
-    ok(&openpod(&sb, &["rm", "w"]));
-    ok(&openpod(&sb, &["network", "rm", "front", "back"]));
+    ok(&podbag(&sb, &["rm", "w"]));
+    ok(&podbag(&sb, &["network", "rm", "front", "back"]));
 }

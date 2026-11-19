@@ -171,7 +171,7 @@ impl Vm {
     /// Make the VM and start it; returns once the framework says it runs.
     pub fn start(spec: &VmSpec) -> Result<Vm, String> {
         let config = Shared(configuration(spec)?);
-        let queue = DispatchQueue::new("dev.openpod.vm", None);
+        let queue = DispatchQueue::new("dev.podbag.vm", None);
         let (made, take) = mpsc::channel();
         let on_queue = queue.clone();
         queue.exec_sync(move || {

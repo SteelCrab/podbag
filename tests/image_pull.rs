@@ -20,8 +20,8 @@ fn name(reg: &FakeRegistry, repo: &str) -> String {
     format!("{}/{repo}:v1", reg.host)
 }
 
-fn openpod(sb: &Sandbox, args: &[&str]) -> Output {
-    sb.openpod().args(args).output().unwrap()
+fn podbag(sb: &Sandbox, args: &[&str]) -> Output {
+    sb.podbag().args(args).output().unwrap()
 }
 
 fn ok(out: &Output) -> String {
@@ -29,9 +29,9 @@ fn ok(out: &Output) -> String {
     stdout(out)
 }
 
-/// The Objects size from `openpod system df`, in bytes.
+/// The Objects size from `podbag system df`, in bytes.
 fn object_bytes(sb: &Sandbox) -> f64 {
-    let out = ok(&openpod(sb, &["system", "df"]));
+    let out = ok(&podbag(sb, &["system", "df"]));
     let line = out
         .lines()
         .find(|l| l.starts_with("Objects"))
@@ -88,9 +88,9 @@ fn pull_then_run_uses_image_config() {
         ),
     );
     let sb = Sandbox::new();
-    ok(&openpod(&sb, &["pull", &name(&reg, "test/app")]));
+    ok(&podbag(&sb, &["pull", &name(&reg, "test/app")]));
     assert_eq!(
-        ok(&openpod(&sb, &["run", &name(&reg, "test/app")])),
+        ok(&podbag(&sb, &["run", &name(&reg, "test/app")])),
         "hi from /app as 0"
     );
 }
@@ -108,7 +108,7 @@ fn command_after_the_image_replaces_cmd() {
     );
     let sb = Sandbox::new();
     assert_eq!(
-        ok(&openpod(&sb, &["run", &name(&reg, "t"), "echo", "x"])),
+        ok(&podbag(&sb, &["run", &name(&reg, "t"), "echo", "x"])),
         "x"
     );
 }
@@ -126,7 +126,7 @@ fn entrypoint_flag_replaces_entrypoint_and_cmd() {
     );
     let sb = Sandbox::new();
     assert_eq!(
-        ok(&openpod(
+        ok(&podbag(
             &sb,
             &["run", "--entrypoint", "/bin/echo", &name(&reg, "t"), "y"]
         )),
@@ -167,7 +167,7 @@ fn image_user_and_file_ownership() {
     reg.push("u", "v1", &user_image());
     let sb = Sandbox::new();
     assert_eq!(
-        ok(&openpod(&sb, &["run", &name(&reg, "u")])),
+        ok(&podbag(&sb, &["run", &name(&reg, "u")])),
         "101\n101:101 640\n/home/app"
     );
 }
@@ -178,7 +178,7 @@ fn user_flag_overrides_the_image_user() {
     reg.push("u", "v1", &user_image());
     let sb = Sandbox::new();
     assert_eq!(
-        ok(&openpod(
+        ok(&podbag(
             &sb,
             &["run", "-u", "0", &name(&reg, "u"), "id", "-u"]
         )),
@@ -211,7 +211,7 @@ fn whiteouts_and_opaque_dirs_apply() {
     };
     reg.push("w", "v1", &image);
     let sb = Sandbox::new();
-    assert_eq!(ok(&openpod(&sb, &["run", &name(&reg, "w")])), "b\n1");
+    assert_eq!(ok(&podbag(&sb, &["run", &name(&reg, "w")])), "b\n1");
 }
 
 #[test]
@@ -232,7 +232,7 @@ fn hardlinks_share_an_inode() {
         ),
     );
     let sb = Sandbox::new();
-    let out = ok(&openpod(&sb, &["run", &name(&reg, "h")]));
+    let out = ok(&podbag(&sb, &["run", &name(&reg, "h")]));
     let inodes: Vec<&str> = out.lines().collect();
     assert_eq!(inodes.len(), 2);
     assert_eq!(inodes[0], inodes[1]);
@@ -246,8 +246,8 @@ fn shared_layer_is_downloaded_once() {
     reg.push("a", "v1", &a);
     reg.push("b", "v1", &b);
     let sb = Sandbox::new();
-    ok(&openpod(&sb, &["pull", &name(&reg, "a")]));
-    ok(&openpod(&sb, &["pull", &name(&reg, "b")]));
+    ok(&podbag(&sb, &["pull", &name(&reg, "a")]));
+    ok(&podbag(&sb, &["pull", &name(&reg, "b")]));
     let alpine_blob = format!("GET /v2/b/blobs/{}", FakeRegistry::layer_digests(&b)[0]);
     let alpine_blob_a = format!("GET /v2/a/blobs/{}", FakeRegistry::layer_digests(&a)[0]);
     let fetched = reg
@@ -282,9 +282,9 @@ fn identical_files_are_stored_once() {
         },
     );
     let sb = Sandbox::new();
-    ok(&openpod(&sb, &["pull", &name(&reg, "a")]));
+    ok(&podbag(&sb, &["pull", &name(&reg, "a")]));
     let first = object_bytes(&sb);
-    ok(&openpod(&sb, &["pull", &name(&reg, "b")]));
+    ok(&podbag(&sb, &["pull", &name(&reg, "b")]));
     let growth = object_bytes(&sb) - first;
     assert!(first >= 1e6, "first image stored {first} bytes");
     assert!(growth < 1e5, "the second image added {growth} bytes");
@@ -297,11 +297,11 @@ fn corrupted_layer_is_rejected() {
     reg.push("c", "v1", &image);
     reg.corrupt(&FakeRegistry::layer_digests(&image)[1]);
     let sb = Sandbox::new();
-    let out = openpod(&sb, &["pull", &name(&reg, "c")]);
+    let out = podbag(&sb, &["pull", &name(&reg, "c")]);
     assert_eq!(out.status.code(), Some(125));
     assert!(stderr(&out).contains("sha256 mismatch"), "{}", stderr(&out));
     assert_eq!(
-        ok(&openpod(&sb, &["images"])).lines().count(),
+        ok(&podbag(&sb, &["images"])).lines().count(),
         1,
         "only the header line"
     );
@@ -312,7 +312,7 @@ fn token_auth_flow_works() {
     let reg = FakeRegistry::start(true);
     reg.push("p", "v1", &alpine_with(vec![], serde_json::json!({})));
     let sb = Sandbox::new();
-    ok(&openpod(&sb, &["pull", &name(&reg, "p")]));
+    ok(&podbag(&sb, &["pull", &name(&reg, "p")]));
 }
 
 #[test]
@@ -327,14 +327,14 @@ fn rmi_frees_unshared_objects() {
         },
     );
     let sb = Sandbox::new();
-    ok(&openpod(&sb, &["pull", &name(&reg, "a")]));
+    ok(&podbag(&sb, &["pull", &name(&reg, "a")]));
     assert!(object_bytes(&sb) >= 1e6);
     assert_eq!(
-        ok(&openpod(&sb, &["rmi", &name(&reg, "a")])),
+        ok(&podbag(&sb, &["rmi", &name(&reg, "a")])),
         format!("Untagged: {}", name(&reg, "a"))
     );
     assert!(object_bytes(&sb) < 1e5);
-    assert_eq!(ok(&openpod(&sb, &["images"])).lines().count(), 1);
+    assert_eq!(ok(&podbag(&sb, &["images"])).lines().count(), 1);
 }
 
 #[test]
@@ -362,10 +362,10 @@ fn store_limit_evicts_the_least_recently_used_image() {
             config: serde_json::json!({}),
         },
     );
-    let sb = Sandbox::with_env("OPENPOD_STORE_LIMIT", "3MB");
-    ok(&openpod(&sb, &["pull", &name(&reg, "a")]));
-    ok(&openpod(&sb, &["pull", &name(&reg, "b")]));
-    let images = ok(&openpod(&sb, &["images"]));
+    let sb = Sandbox::with_env("PODBAG_STORE_LIMIT", "3MB");
+    ok(&podbag(&sb, &["pull", &name(&reg, "a")]));
+    ok(&podbag(&sb, &["pull", &name(&reg, "b")]));
+    let images = ok(&podbag(&sb, &["images"]));
     assert!(images.contains(&name(&reg, "b")), "{images}");
     assert!(!images.contains(&name(&reg, "a")), "{images}");
 }
@@ -379,9 +379,9 @@ fn image_used_by_a_running_container_is_kept() {
         &alpine_with(vec![], serde_json::json!({"Env": [PATH]})),
     );
     let sb = Sandbox::new();
-    ok(&openpod(&sb, &["pull", &name(&reg, "a")]));
+    ok(&podbag(&sb, &["pull", &name(&reg, "a")]));
     let mut running = sb
-        .openpod()
+        .podbag()
         .args(["run", &name(&reg, "a"), "sleep", "5"])
         .stdout(Stdio::null())
         .spawn()
@@ -395,7 +395,7 @@ fn image_used_by_a_running_container_is_kept() {
         );
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    let out = openpod(&sb, &["rmi", &name(&reg, "a")]);
+    let out = podbag(&sb, &["rmi", &name(&reg, "a")]);
     assert_eq!(out.status.code(), Some(125));
     assert!(stderr(&out).contains("uses it"), "{}", stderr(&out));
     assert_eq!(running.wait().unwrap().code(), Some(0));
@@ -410,7 +410,7 @@ fn run_pulls_a_missing_image() {
         &alpine_with(vec![], serde_json::json!({"Env": [PATH]})),
     );
     let sb = Sandbox::new();
-    let out = openpod(&sb, &["run", &name(&reg, "a"), "true"]);
+    let out = podbag(&sb, &["run", &name(&reg, "a"), "true"]);
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     assert!(stderr(&out).contains("Pulling"), "{}", stderr(&out));
 }
@@ -420,7 +420,7 @@ fn container_files_owned_by_other_users_are_cleaned_up() {
     let reg = FakeRegistry::start(false);
     reg.push("u", "v1", &user_image());
     let sb = Sandbox::new();
-    ok(&openpod(
+    ok(&podbag(
         &sb,
         &[
             "run",
@@ -445,7 +445,7 @@ fn oversized_blob_is_rejected() {
     reg.push("o", "v1", &image);
     reg.pad(&FakeRegistry::layer_digests(&image)[1], 1 << 20);
     let sb = Sandbox::new();
-    let out = openpod(&sb, &["pull", &name(&reg, "o")]);
+    let out = podbag(&sb, &["pull", &name(&reg, "o")]);
     assert_eq!(out.status.code(), Some(125));
     assert!(
         stderr(&out).contains("bytes, the manifest says"),
@@ -468,7 +468,7 @@ fn failed_pull_leaves_no_objects() {
     reg.corrupt(&FakeRegistry::layer_digests(&image)[1]);
     let sb = Sandbox::new();
     assert_eq!(
-        openpod(&sb, &["pull", &name(&reg, "f")]).status.code(),
+        podbag(&sb, &["pull", &name(&reg, "f")]).status.code(),
         Some(125)
     );
     assert!(
@@ -491,10 +491,10 @@ fn run_is_not_blocked_by_a_slow_pull() {
     let stalled = FakeRegistry::layer_digests(&slow)[1].clone();
     reg.stall(&stalled);
     let sb = Sandbox::new();
-    ok(&openpod(&sb, &["pull", &name(&reg, "a")]));
+    ok(&podbag(&sb, &["pull", &name(&reg, "a")]));
 
     let mut pull = sb
-        .openpod()
+        .podbag()
         .args(["pull", &name(&reg, "slow")])
         .stderr(Stdio::null())
         .spawn()
@@ -509,7 +509,7 @@ fn run_is_not_blocked_by_a_slow_pull() {
     }
 
     let mut run = sb
-        .openpod()
+        .podbag()
         .args(["run", &name(&reg, "a"), "true"])
         .spawn()
         .unwrap();
@@ -532,7 +532,7 @@ fn run_is_not_blocked_by_a_slow_pull() {
     );
 }
 
-/// Stop a spawned openpod (through sudo in root mode) and every process below it.
+/// Stop a spawned podbag (through sudo in root mode) and every process below it.
 /// Only this test's processes: other tests run in parallel.
 fn kill_tree(child: &mut std::process::Child) {
     fn descendants(pid: u32, out: &mut Vec<u32>) {
@@ -575,8 +575,8 @@ fn check_image_passes_a_clean_image() {
         &alpine_with(vec![], serde_json::json!({"Env": [PATH]})),
     );
     let sb = Sandbox::new();
-    ok(&openpod(&sb, &["pull", &name(&reg, "clean")]));
-    let out = ok(&openpod(&sb, &["check-image", &name(&reg, "clean")]));
+    ok(&podbag(&sb, &["pull", &name(&reg, "clean")]));
+    let out = ok(&podbag(&sb, &["check-image", &name(&reg, "clean")]));
     assert!(out.contains("the image has musl"), "{out}");
     assert!(out.contains("no problems found"), "{out}");
 }
@@ -598,8 +598,8 @@ fn check_image_finds_a_glibc_program_in_a_musl_image() {
     );
     reg.push("mixed", "v1", &image);
     let sb = Sandbox::new();
-    ok(&openpod(&sb, &["pull", &name(&reg, "mixed")]));
-    let out = openpod(&sb, &["check-image", &name(&reg, "mixed")]);
+    ok(&podbag(&sb, &["pull", &name(&reg, "mixed")]));
+    let out = podbag(&sb, &["check-image", &name(&reg, "mixed")]);
     assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
     let text = stdout(&out);
     let errors: Vec<&str> = text.lines().filter(|l| l.starts_with("error:")).collect();
@@ -614,7 +614,7 @@ fn check_image_finds_a_glibc_program_in_a_musl_image() {
 #[test]
 fn check_image_needs_a_pulled_image() {
     let sb = Sandbox::new();
-    let out = openpod(&sb, &["check-image", "nothere:v1"]);
+    let out = podbag(&sb, &["check-image", "nothere:v1"]);
     assert_ne!(out.status.code(), Some(0));
     assert!(stderr(&out).contains("pull"), "{}", stderr(&out));
 }
@@ -631,22 +631,22 @@ fn restart_keeps_the_writable_layer() {
         ),
     );
     let sb = Sandbox::new();
-    ok(&openpod(
+    ok(&podbag(
         &sb,
         &["run", "-d", "--name", "w", &name(&reg, "w")],
     ));
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     loop {
         let info: serde_json::Value =
-            serde_json::from_str(&ok(&openpod(&sb, &["inspect", "w"]))).unwrap();
+            serde_json::from_str(&ok(&podbag(&sb, &["inspect", "w"]))).unwrap();
         if info["state"]["status"] == "exited" {
             break;
         }
         assert!(std::time::Instant::now() < deadline, "{info}");
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    assert_eq!(ok(&openpod(&sb, &["start", "-a", "w"])), "2");
-    ok(&openpod(&sb, &["rm", "w"]));
+    assert_eq!(ok(&podbag(&sb, &["start", "-a", "w"])), "2");
+    ok(&podbag(&sb, &["rm", "w"]));
 }
 
 #[test]
@@ -662,17 +662,17 @@ fn save_and_load_through_a_pipe() {
     );
     let image = name(&reg, "piped");
     let sb = Sandbox::new();
-    ok(&openpod(&sb, &["pull", &image]));
+    ok(&podbag(&sb, &["pull", &image]));
     let saved = sb
-        .openpod()
+        .podbag()
         .args(["save", &image])
         .stdout(Stdio::piped())
         .output()
         .unwrap();
     assert_eq!(saved.status.code(), Some(0), "{}", stderr(&saved));
-    ok(&openpod(&sb, &["rmi", &image]));
+    ok(&podbag(&sb, &["rmi", &image]));
     let mut load = sb
-        .openpod()
+        .podbag()
         .args(["load"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -687,8 +687,5 @@ fn save_and_load_through_a_pipe() {
         "{}",
         stdout(&loaded)
     );
-    assert_eq!(
-        ok(&openpod(&sb, &["run", "--rm", &image])),
-        "through a pipe"
-    );
+    assert_eq!(ok(&podbag(&sb, &["run", "--rm", &image])), "through a pipe");
 }

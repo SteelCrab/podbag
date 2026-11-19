@@ -227,7 +227,7 @@ fn connect(dirs: &Dirs) -> Option<UnixStream> {
     }
 }
 
-/// Start `openpod __keeper`. Rootless with a systemd user session: in a delegated scope
+/// Start `podbag __keeper`. Rootless with a systemd user session: in a delegated scope
 /// of its own, where it makes the cgroups of its containers. It reports when it listens
 /// (or when another keeper has the directory).
 fn spawn(dirs: &Dirs) -> crate::Result<()> {
@@ -240,13 +240,13 @@ fn spawn(dirs: &Dirs) -> crate::Result<()> {
             systemd_run,
             slice: format!(
                 "{}.slice",
-                crate::cgroup::parent_name().unwrap_or_else(|_| "openpod".into())
+                crate::cgroup::parent_name().unwrap_or_else(|_| "podbag".into())
             ),
             unit: None,
             delegate: true,
         });
     let runtime = dirs.runtime.to_string_lossy();
-    // Only this client's settings for openpod: the keeper lives on with what it gets.
+    // Only this client's settings for podbag: the keeper lives on with what it gets.
     let mut helper =
         crate::helper::spawn_with_env(&["__keeper", &runtime], scope.as_ref(), super::settings())?;
     helper.wait_started()?;

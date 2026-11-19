@@ -1,6 +1,6 @@
 //! Why a program that exists could not be started: a missing loader (a glibc program in a
-//! musl image), a script whose interpreter is missing, or a program for another CPU
-//! (design 6.9). Used when `execve` fails inside the container.
+//! musl image), a script whose interpreter is missing, or a program for another CPU.
+//! Used when `execve` fails inside the container.
 
 use crate::elf::Machine;
 use std::path::Path;
@@ -105,7 +105,7 @@ fn missing_loader(
     Some((
         libc,
         loader,
-        format!("{next}; `openpod check-image` lists such programs"),
+        format!("{next}; `podbag check-image` lists such programs"),
     ))
 }
 

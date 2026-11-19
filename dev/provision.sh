@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Provision the openpod-dev VM. Safe to run more than once.
+# Provision the podbag-dev VM. Safe to run more than once.
 set -euo pipefail
 
 repo="$(cd "$(dirname "$0")/.." && pwd)"
@@ -13,8 +13,8 @@ grep -q "^$user:" /etc/subuid 2>/dev/null || sudo usermod --add-subuids 100000-1
 grep -q "^$user:" /etc/subgid 2>/dev/null || sudo usermod --add-subgids 100000-165535 "$user"
 
 # Ubuntu 24.04+ restricts unprivileged user namespaces to profiled programs.
-sudo install -m 0644 "$repo/dev/apparmor/openpod-dev" /etc/apparmor.d/openpod-dev
-sudo apparmor_parser -r /etc/apparmor.d/openpod-dev
+sudo install -m 0644 "$repo/dev/apparmor/podbag-dev" /etc/apparmor.d/podbag-dev
+sudo apparmor_parser -r /etc/apparmor.d/podbag-dev
 
 if ! command -v rustup >/dev/null 2>&1 && [ ! -x "$HOME/.cargo/bin/rustup" ]; then
   curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable >/dev/null
@@ -23,8 +23,8 @@ fi
 . "$HOME/.cargo/env"
 rustup target add "$(uname -m)-unknown-linux-musl" >/dev/null
 
-if [ ! -x "$HOME/openpod-fixtures/alpine/bin/busybox" ]; then
-  "$repo/dev/fetch-rootfs.sh" "$HOME/openpod-fixtures/alpine"
+if [ ! -x "$HOME/podbag-fixtures/alpine/bin/busybox" ]; then
+  "$repo/dev/fetch-rootfs.sh" "$HOME/podbag-fixtures/alpine"
 fi
 
 # The docker CLI for the Docker API tests (tests/api_*.rs). Ubuntu ships it only with the
@@ -52,4 +52,4 @@ if [ "${1:-}" = "--bench" ]; then
   fi
 fi
 
-echo "provisioned openpod-dev"
+echo "provisioned podbag-dev"

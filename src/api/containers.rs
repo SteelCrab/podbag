@@ -185,7 +185,7 @@ fn create(req: &Request, ctx: &Ctx) -> Reply {
         if !super::images::is_this_platform(p) {
             return message(
                 400,
-                format!("cannot run {p} images: openpod runs images for this machine only"),
+                format!("cannot run {p} images: podbag runs images for this machine only"),
             );
         }
     }
@@ -876,7 +876,7 @@ mod tests {
     }
 
     #[test]
-    fn filters_openpod_lacks_are_refused_not_ignored() {
+    fn filters_podbag_lacks_are_refused_not_ignored() {
         assert!(check_list_filters(&keys(&["label", "name", "id", "status"])).is_ok());
         // Ignoring these would select every container: `docker rm $(docker ps -aq
         // --filter volume=x)` would remove them all.

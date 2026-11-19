@@ -1,4 +1,4 @@
-//! `openpod __exec <id> '<json>'`: run another command inside a running container.
+//! `podbag __exec <id> '<json>'`: run another command inside a running container.
 //!
 //! The helper opens the container's namespaces through /proc, joins them (the user
 //! namespace first when rootless), and forks so the child lands in the container's PID
@@ -343,7 +343,7 @@ fn not_running(name: &str) -> Error {
         ErrorKind::InvalidInput,
         format!("container {name} is not running"),
         "exec needs a running container",
-        "start a new container, or run `openpod ps -a` to see its state",
+        "start a new container, or run `podbag ps -a` to see its state",
     )
 }
 

@@ -53,7 +53,7 @@ fn killed_by_signal_exits_128_plus_signal() {
     }
     let sb = Sandbox::new();
     let mut child = sb
-        .openpod()
+        .podbag()
         .args([
             "run",
             "--rootfs",
@@ -68,8 +68,8 @@ fn killed_by_signal_exits_128_plus_signal() {
     wait_ready(&mut child);
     // The container's first process, from its record: the CLI has no child of its own
     // when the keeper starts the container.
-    let id = stdout(&sb.openpod().args(["ps", "-q"]).output().unwrap());
-    let info = stdout(&sb.openpod().args(["inspect", id.trim()]).output().unwrap());
+    let id = stdout(&sb.podbag().args(["ps", "-q"]).output().unwrap());
+    let info = stdout(&sb.podbag().args(["inspect", id.trim()]).output().unwrap());
     let info: serde_json::Value = serde_json::from_str(&info).unwrap();
     let init = info["state"]["pid"].as_u64().unwrap();
     unsafe { libc::kill(init as i32, libc::SIGKILL) };
@@ -80,7 +80,7 @@ fn killed_by_signal_exits_128_plus_signal() {
 fn closed_stdin_does_not_hang() {
     let sb = Sandbox::new();
     let out = sb
-        .openpod()
+        .podbag()
         .args(["run", "--rootfs", &rootfs(), "cat"])
         .stdin(Stdio::null())
         .output()
@@ -96,7 +96,7 @@ fn sigterm_reaches_the_container() {
     }
     let sb = Sandbox::new();
     let mut child = sb
-        .openpod()
+        .podbag()
         .args([
             "run",
             "--rootfs",
@@ -113,7 +113,7 @@ fn sigterm_reaches_the_container() {
     assert_eq!(child.wait().unwrap().code(), Some(42));
 }
 
-// The container must not inherit blocked or ignored signals from openpod (Rust ignores SIGPIPE).
+// The container must not inherit blocked or ignored signals from podbag (Rust ignores SIGPIPE).
 #[test]
 fn container_starts_with_default_signal_handling() {
     let out = Sandbox::new().run(&["grep", "-E", "^Sig(Blk|Ign):", "/proc/self/status"]);
@@ -127,7 +127,7 @@ fn container_starts_with_default_signal_handling() {
 
 // `kill -INT <cli>` comes from a process, so it is forwarded like `docker run` does.
 // Ctrl+C from a terminal is different: the terminal already sends it to the container
-// directly, so openpod must not forward that copy (see signals::forward_to).
+// directly, so podbag must not forward that copy (see signals::forward_to).
 #[test]
 fn sigint_sent_to_the_cli_reaches_the_container() {
     if root_mode() {
@@ -135,7 +135,7 @@ fn sigint_sent_to_the_cli_reaches_the_container() {
     }
     let sb = Sandbox::new();
     let mut child = sb
-        .openpod()
+        .podbag()
         .args([
             "run",
             "--rootfs",
@@ -152,24 +152,24 @@ fn sigint_sent_to_the_cli_reaches_the_container() {
     assert_eq!(child.wait().unwrap().code(), Some(43));
 }
 
-// Every "fix" line must be something the user can do now; `openpod check` does not exist yet.
+// Every "fix" line must be something the user can do now; `podbag check` does not exist yet.
 #[test]
 fn failed_setup_gives_advice_that_works() {
-    let out = Sandbox::new().run_with(&["-w", "/proc/openpod-test"], &["true"]);
+    let out = Sandbox::new().run_with(&["-w", "/proc/podbag-test"], &["true"]);
     assert_eq!(out.status.code(), Some(125));
     let err = stderr(&out);
     assert!(
-        err.starts_with("openpod: cannot enter the working directory /proc/openpod-test\n"),
+        err.starts_with("podbag: cannot enter the working directory /proc/podbag-test\n"),
         "{err}"
     );
     assert!(err.contains("\n  fix:   "), "{err}");
-    assert!(!err.contains("openpod check"), "{err}");
+    assert!(!err.contains("podbag check"), "{err}");
 }
 
 fn run_with_stdin(sb: &Sandbox, options: &[&str], input: &str) -> std::process::Output {
     use std::io::Write;
     let mut child = sb
-        .openpod()
+        .podbag()
         .args(["run", "--rm"])
         .args(options)
         .args(["--rootfs", &rootfs(), "cat"])

@@ -538,7 +538,7 @@ fn common_headers() -> [(&'static str, String); 4] {
         ("Api-Version", super::router::API_VERSION.to_string()),
         ("Docker-Experimental", "false".to_string()),
         ("Ostype", "linux".to_string()),
-        ("Server", format!("openpod/{}", env!("CARGO_PKG_VERSION"))),
+        ("Server", format!("podbag/{}", env!("CARGO_PKG_VERSION"))),
     ]
 }
 

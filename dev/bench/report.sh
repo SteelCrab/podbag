@@ -9,8 +9,8 @@ set -euo pipefail
 in="${1:-$HOME/bench-results}"
 repo="$(cd "$(dirname "$0")/../.." && pwd)"
 doc="$repo/docs/benchmarks.md"
-all_tools=(openpod openpod-root podman docker kiri)
-all_titles=("openpod (rootless)" "openpod (root)" "Podman (rootless)" "Docker (root daemon)" "Kiri (root daemon)")
+all_tools=(podbag podbag-root podman docker kiri)
+all_titles=("podbag (rootless)" "podbag (root)" "Podman (rootless)" "Docker (root daemon)" "Kiri (root daemon)")
 # Only the tools that were measured.
 tools=()
 titles=()
@@ -34,7 +34,7 @@ row() {
   echo "$line"
 }
 start() { echo "$(get "$1" start_median_ms) / $(get "$1" start_p90_ms)"; }
-# The first start when nothing of the tool runs: openpod starts its keeper then. Podman has
+# The first start when nothing of the tool runs: podbag starts its keeper then. Podman has
 # nothing to start first; Docker's and Kiri's daemons stay, so they have no such start.
 cold() {
   local v
@@ -72,10 +72,10 @@ disk_both() { mb "$(get "$1" disk_both_kb)"; }
 disk_second() { mb $(($(get "$1" disk_both_kb) - $(get "$1" disk_first_kb))); }
 version() { get "$1" version; }
 
-count="$(get openpod count)"
-runs="$(get openpod runs)"
+count="$(get podbag count)"
+runs="$(get podbag runs)"
 mac="$repo/bench-results/mac"
-mac_tools=(docker-desktop orbstack kiri podman colima openpod-mac openpod-mac-default)
+mac_tools=(docker-desktop orbstack kiri podman colima podbag-mac podbag-mac-default)
 {
   echo "# Benchmarks"
   echo
@@ -117,15 +117,15 @@ mac_tools=(docker-desktop orbstack kiri podman colima openpod-mac openpod-mac-de
   echo "  KernelStack + PageTables + Percpu + VmallocUsed of \`/proc/meminfo\`: what processes and"
   echo "  the kernel hold, without the page cache. Caches are dropped before each reading; the"
   echo "  value is the median of three rounds; the rounds of one tool differ by at most"
-  echo "  $(held_spread openpod openpod-root kiri) MiB for openpod and Kiri ($(held_spread podman docker) MiB for Podman and Docker). It includes"
+  echo "  $(held_spread podbag podbag-root kiri) MiB for podbag and Kiri ($(held_spread podman docker) MiB for Podman and Docker). It includes"
   echo "  the containers' own processes (the same $count \`sleep\` for every tool) and the kernel's"
   echo "  memory for their namespaces and cgroups, not daemons that already ran (Docker's), and"
   echo "  not pages the kernel takes straight from its page allocator (they are in no category)."
   echo "- \"Change in MemTotal − MemAvailable\" is the kernel's estimate of memory that is no longer"
   echo "  available, read at the same moments. It cannot tell the small tools apart. The three"
-  echo "  rounds without a network gave, in MiB: openpod rootless $(rounds openpod mem_none_all_kb); openpod as root"
-  echo "  $(rounds openpod-root mem_none_all_kb); Kiri $(rounds kiri mem_none_all_kb). The sums by category of the same rounds:"
-  echo "  $(rounds openpod held_none_all_kb); $(rounds openpod-root held_none_all_kb); $(rounds kiri held_none_all_kb). Where this row and the sum"
+  echo "  rounds without a network gave, in MiB: podbag rootless $(rounds podbag mem_none_all_kb); podbag as root"
+  echo "  $(rounds podbag-root mem_none_all_kb); Kiri $(rounds kiri mem_none_all_kb). The sums by category of the same rounds:"
+  echo "  $(rounds podbag held_none_all_kb); $(rounds podbag-root held_none_all_kb); $(rounds kiri held_none_all_kb). Where this row and the sum"
   echo "  by category disagree, no counter of the kernel says where the memory would be; in a"
   echo "  separate reading three identical rounds of Kiri moved free memory by −9.5, −17.3 and"
   echo "  +6.4 MiB. The row stays for the large numbers."
@@ -133,7 +133,7 @@ mac_tools=(docker-desktop orbstack kiri podman colima openpod-mac openpod-mac-de
   echo "  23 MiB during one run of 150 containers, shrank by 46 MiB during the next, and took a"
   echo "  fifth of the CPU time while containers started. A Linux host has no guest agent. Both"
   echo "  system-wide rows also leave its anonymous memory out, should it run."
-  echo "- \"The tool's processes\": openpod's keeper (and a helper for each container that is"
+  echo "- \"The tool's processes\": podbag's keeper (and a helper for each container that is"
   echo "  attached or publishes ports), session holder and pasta; Podman's"
   echo "  conmon, pasta and helpers; Docker's dockerd, containerd and shims; Kiri's daemon and"
   echo "  the one init process all its containers share. PSS divides shared"
@@ -175,12 +175,12 @@ mac_tools=(docker-desktop orbstack kiri podman colima openpod-mac openpod-mac-de
     echo "$(sed -n 's/^cpus=//p' "$mac/mac.env") CPUs, $(awk -v k="$(sed -n 's/^mem_kb=//p' "$mac/mac.env")" 'BEGIN{printf "%.0f GiB", k/1048576}'),"
     # Each column's date; results from before the date was recorded per tool carry mac.env's.
     m_date() { local d; d="$(m "$1" date)"; echo "${d:-$(sed -n 's/^date=//p' "$mac/mac.env")}"; }
-    od="$(m_date openpod-mac)"; kd="$(m_date kiri)"
+    od="$(m_date podbag-mac)"; kd="$(m_date kiri)"
     if [ "$od" = "$kd" ]; then
       echo "macOS $(sed -n 's/^macos=//p' "$mac/mac.env"), $od. One tool ran at a time; the others were stopped."
     else
       echo "macOS $(sed -n 's/^macos=//p' "$mac/mac.env"). The other tools on $kd, one at a time with the others stopped;"
-      echo "openpod on $od, while Docker Desktop's app (its VM stopped) and the lima VM openpod is developed in ran."
+      echo "podbag on $od, while Docker Desktop's app (its VM stopped) and the lima VM podbag is developed in ran."
     fi
     echo
     header="| |"
@@ -194,7 +194,7 @@ mac_tools=(docker-desktop orbstack kiri podman colima openpod-mac openpod-mac-de
     mrow "Version" m_version
     mrow "VM size" m_vm
     mrow "Start: \`run --rm --network none alpine true\`, median / p90 (ms, $mruns runs)" m_start
-    mrow "… through openpod's own CLI (\`openpod run\`), median / p90 (ms)" m_own
+    mrow "… through podbag's own CLI (\`podbag run\`), median / p90 (ms)" m_own
     mrow "First \`run\` after 6 minutes without containers (ms)" m_wake
     mrow "Memory on the Mac (the tool's processes, VM included): just started" m_idle
     mrow "… with $mcount sleeping containers" m_busy
@@ -206,19 +206,19 @@ mac_tools=(docker-desktop orbstack kiri podman colima openpod-mac openpod-mac-de
     echo "- Every VM was set to 10 CPUs and 8 GiB, Docker Desktop's default here (the script"
     echo "  cannot change Docker Desktop's settings); OrbStack's VM reports more than the 8 GiB"
     echo "  it was limited to. The size is an upper limit: the memory rows show what each VM"
-    echo "  takes from the Mac. openpod is shown at that size and at its own default (the"
+    echo "  takes from the Mac. podbag is shown at that size and at its own default (the"
     echo "  Mac's CPUs up to 8, 2 GiB): what its VM holds grows with the size, as the guest"
     echo "  kernel sets up its bookkeeping for all of the VM's memory when it boots."
-    echo "- Docker Desktop, OrbStack, Kiri, Colima and openpod were driven by the same docker"
-    echo "  CLI through their sockets, Podman by its own CLI. openpod runs a VM of its own"
-    echo "  (Virtualization.framework, Linux 6.18 with openpod as its init); it powers the VM"
+    echo "- Docker Desktop, OrbStack, Kiri, Colima and podbag were driven by the same docker"
+    echo "  CLI through their sockets, Podman by its own CLI. podbag runs a VM of its own"
+    echo "  (Virtualization.framework, Linux 6.18 with podbag as its init); it powers the VM"
     echo "  off 60 s after the last container and leaves a small standby process, which starts"
     echo "  the VM again for the next client."
     echo "- \"Memory on the Mac\" is the sum of macOS physical footprint (\`footprint\`) of the"
     echo "  tool's app, helpers and VM process; root helpers by resident size. Other VMs on the Mac"
     echo "  are not counted (another project's VM ran during the measurements)."
     echo "- Containers on the default network; the script removes only the containers it labels"
-    echo "  (openpod's are in a home of its own), so Docker Desktop's existing images and"
+    echo "  (podbag's are in a home of its own), so Docker Desktop's existing images and"
     echo "  containers stayed. For that reason disk use is compared in the Linux table only."
   fi
   # The many-containers run: a column for each tool that was measured.

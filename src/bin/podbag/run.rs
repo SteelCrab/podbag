@@ -1,18 +1,18 @@
 use crate::args::{RunArgs, parse_env};
-use openpod::{Container, ErrorKind, Image};
+use podbag::{Container, ErrorKind, Image};
 
-/// `openpod run`. Returns the process exit code.
+/// `podbag run`. Returns the process exit code.
 pub fn run(args: RunArgs) -> i32 {
     match start_and_wait(args) {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("openpod: {e}");
+            eprintln!("podbag: {e}");
             e.exit_code()
         }
     }
 }
 
-/// `openpod create`: the container is made but not started. Prints its ID.
+/// `podbag create`: the container is made but not started. Prints its ID.
 pub fn create(args: RunArgs) -> i32 {
     match build(args).and_then(|c| c.create()) {
         Ok(handle) => {
@@ -20,13 +20,13 @@ pub fn create(args: RunArgs) -> i32 {
             0
         }
         Err(e) => {
-            eprintln!("openpod: {e}");
+            eprintln!("podbag: {e}");
             e.exit_code()
         }
     }
 }
 
-fn start_and_wait(args: RunArgs) -> openpod::Result<i32> {
+fn start_and_wait(args: RunArgs) -> podbag::Result<i32> {
     // With -it, keystrokes go to the container as typed (raw mode); restored on return.
     let raw = args.tty && args.interactive && !args.detach;
     let detach = args.detach;
@@ -42,28 +42,28 @@ fn start_and_wait(args: RunArgs) -> openpod::Result<i32> {
 /// Run `start` with this terminal: raw mode for `-it`, signals forwarded to the helper.
 pub fn foreground(
     raw: bool,
-    start: impl FnOnce(()) -> openpod::Result<openpod::Running>,
-) -> openpod::Result<i32> {
+    start: impl FnOnce(()) -> podbag::Result<podbag::Running>,
+) -> podbag::Result<i32> {
     // Hold signals until the helper is running, so none is lost in between. Signals that
     // another process sends to the CLI are forwarded to the helper, like `docker run`.
     // Ctrl+C from the terminal is not forwarded: it reaches the container directly.
     let forwarded = [libc::SIGINT, libc::SIGQUIT, libc::SIGTERM, libc::SIGHUP];
     let _raw = raw.then(raw_terminal).flatten();
-    openpod::signals::block(&forwarded);
+    podbag::signals::block(&forwarded);
     match start(()) {
         Ok(r) => {
             r.forward_signals(&forwarded);
             r.wait()
         }
         Err(e) => {
-            openpod::signals::ignore(&forwarded);
+            podbag::signals::ignore(&forwarded);
             Err(e)
         }
     }
 }
 
 /// The container `run` and `create` describe.
-fn build(args: RunArgs) -> openpod::Result<Container> {
+fn build(args: RunArgs) -> podbag::Result<Container> {
     // Read before the arguments are taken apart below.
     let health = health_settings(&args)?;
     let mut c = match args.rootfs {
@@ -120,7 +120,7 @@ fn build(args: RunArgs) -> openpod::Result<Container> {
         c = c.hostname(h);
     }
     if let Some(m) = args.memory {
-        c = c.memory(openpod::cgroup::parse_memory(&m)?);
+        c = c.memory(podbag::cgroup::parse_memory(&m)?);
     }
     if let Some(n) = args.cpus {
         c = c.cpus(n);
@@ -136,12 +136,12 @@ fn build(args: RunArgs) -> openpod::Result<Container> {
     }
     let mut networks = args.network.iter();
     if let Some(n) = networks.next() {
-        c = c.network(openpod::network::parse_network_arg(n)?);
+        c = c.network(podbag::network::parse_network_arg(n)?);
     }
     for n in networks {
         // `host` and `none` stay as given: the check refuses them with a reason.
-        let name = match openpod::network::parse_network_arg(n)? {
-            openpod::network::NetworkMode::Bridge { network } => network,
+        let name = match podbag::network::parse_network_arg(n)? {
+            podbag::network::NetworkMode::Bridge { network } => network,
             _ => n.clone(),
         };
         c = c.extra_network(name, Vec::new());
@@ -150,18 +150,18 @@ fn build(args: RunArgs) -> openpod::Result<Container> {
         c = c.network_alias(alias.clone());
     }
     for p in &args.publish {
-        c = c.publish(openpod::network::parse_publish_arg(p)?);
+        c = c.publish(podbag::network::parse_publish_arg(p)?);
     }
     for v in &args.volume {
-        c = c.mount(openpod::volume::parse_volume_arg(v)?);
+        c = c.mount(podbag::volume::parse_volume_arg(v)?);
     }
     for t in &args.tmpfs {
-        c = c.mount(openpod::volume::parse_tmpfs_arg(t)?);
+        c = c.mount(podbag::volume::parse_tmpfs_arg(t)?);
     }
     for opt in &args.security_opt {
-        c = match openpod::spec::parse_security_opt(opt)? {
-            openpod::spec::SecurityOpt::NoNewPrivileges(yes) => c.no_new_privileges(yes),
-            openpod::spec::SecurityOpt::SeccompUnconfined => c.seccomp(false),
+        c = match podbag::spec::parse_security_opt(opt)? {
+            podbag::spec::SecurityOpt::NoNewPrivileges(yes) => c.no_new_privileges(yes),
+            podbag::spec::SecurityOpt::SeccompUnconfined => c.seccomp(false),
         };
     }
     Ok(c)
@@ -169,8 +169,8 @@ fn build(args: RunArgs) -> openpod::Result<Container> {
 
 /// Put this terminal in raw mode for `-t`; restored when the value is dropped.
 #[cfg(target_os = "linux")]
-pub fn raw_terminal() -> Option<openpod::linux::pty::RawMode> {
-    openpod::linux::pty::RawMode::enable(0)
+pub fn raw_terminal() -> Option<podbag::linux::pty::RawMode> {
+    podbag::linux::pty::RawMode::enable(0)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -179,8 +179,8 @@ pub fn raw_terminal() -> Option<()> {
 }
 
 /// The `--health-*` options: None when none was given (the image's check, if any).
-fn health_settings(args: &RunArgs) -> openpod::Result<Option<openpod::health::HealthSettings>> {
-    use openpod::health::{HealthSettings, parse_duration};
+fn health_settings(args: &RunArgs) -> podbag::Result<Option<podbag::health::HealthSettings>> {
+    use podbag::health::{HealthSettings, parse_duration};
     let given = args.health_cmd.is_some()
         || args.health_interval.is_some()
         || args.health_timeout.is_some()
@@ -189,8 +189,8 @@ fn health_settings(args: &RunArgs) -> openpod::Result<Option<openpod::health::He
         || args.health_start_interval.is_some();
     if args.no_healthcheck {
         if given {
-            return Err(openpod::Error::new(
-                openpod::ErrorKind::InvalidInput,
+            return Err(podbag::Error::new(
+                podbag::ErrorKind::InvalidInput,
                 "cannot run the container",
                 "--no-healthcheck does not go with the --health options",
                 "drop one of them",
@@ -201,7 +201,7 @@ fn health_settings(args: &RunArgs) -> openpod::Result<Option<openpod::health::He
     if !given {
         return Ok(None);
     }
-    let ms = |text: &Option<String>| -> openpod::Result<Option<u64>> {
+    let ms = |text: &Option<String>| -> podbag::Result<Option<u64>> {
         text.as_deref()
             .map(|t| parse_duration(t).map(|d| d.as_millis() as u64))
             .transpose()

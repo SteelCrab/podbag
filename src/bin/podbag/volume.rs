@@ -2,11 +2,11 @@
 
 use crate::args::VolumeCmd;
 use crate::image::report;
-use openpod::Volume;
+use podbag::Volume;
 
 pub fn run(cmd: VolumeCmd) -> i32 {
     match cmd {
-        VolumeCmd::Create { labels, name } => match openpod::network::parse_labels(&labels)
+        VolumeCmd::Create { labels, name } => match podbag::network::parse_labels(&labels)
             .and_then(|labels| Volume::create_with(name.as_deref(), labels))
         {
             Ok(v) => {

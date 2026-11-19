@@ -44,7 +44,7 @@ pub fn version() -> Reply {
     Reply::Json(
         200,
         json!({
-            "Platform": {"Name": "openpod"},
+            "Platform": {"Name": "podbag"},
             "Components": [{
                 "Name": "Engine",
                 "Version": v,
@@ -81,7 +81,7 @@ pub fn info(ctx: &Ctx) -> Reply {
     Reply::Json(
         200,
         json!({
-            "ID": "openpod",
+            "ID": "podbag",
             "Containers": containers.len(),
             "ContainersRunning": count(Status::Running),
             "ContainersPaused": 0,
@@ -102,8 +102,8 @@ pub fn info(ctx: &Ctx) -> Reply {
             "CgroupVersion": if cgroup2 { "2" } else { "1" },
             "LoggingDriver": "json-file",
             "SecurityOptions": security,
-            "Runtimes": {"openpod": {"path": "openpod"}},
-            "DefaultRuntime": "openpod",
+            "Runtimes": {"podbag": {"path": "podbag"}},
+            "DefaultRuntime": "podbag",
             "Swarm": {"LocalNodeState": "inactive", "NodeID": "", "NodeAddr": "", "ControlAvailable": false},
             "Plugins": {"Volume": ["local"], "Network": ["bridge", "host", "null"], "Log": ["json-file"]},
             "Warnings": [],

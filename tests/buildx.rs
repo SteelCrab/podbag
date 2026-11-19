@@ -1,8 +1,8 @@
 #![cfg(target_os = "linux")]
-//! buildx's docker-container driver against `openpod system service`: BuildKit runs in a
-//! privileged openpod container, builds through `buildctl dial-stdio` over exec, and the
+//! buildx's docker-container driver against `podbag system service`: BuildKit runs in a
+//! privileged podbag container, builds through `buildctl dial-stdio` over exec, and the
 //! image comes back through `POST /images/load`. Pulls moby/buildkit and alpine from Docker
-//! Hub: runs only with OPENPOD_TEST_NETWORK=1.
+//! Hub: runs only with PODBAG_TEST_NETWORK=1.
 
 mod common;
 use common::api::*;
@@ -10,8 +10,8 @@ use common::*;
 use std::process::Output;
 
 fn enabled() -> bool {
-    if std::env::var("OPENPOD_TEST_NETWORK").as_deref() != Ok("1") {
-        eprintln!("OPENPOD_TEST_NETWORK is not 1: skipped");
+    if std::env::var("PODBAG_TEST_NETWORK").as_deref() != Ok("1") {
+        eprintln!("PODBAG_TEST_NETWORK is not 1: skipped");
         return false;
     }
     let buildx = std::process::Command::new("docker")
@@ -107,7 +107,7 @@ fn buildx_builds_and_loads_an_image() {
         s.ok(&["run", "--rm", "local/built:v1"]),
         "built-here\nfrom the context"
     );
-    // The builder is an openpod container, privileged.
+    // The builder is a podbag container, privileged.
     let privileged = s.ok(&[
         "inspect",
         "--format",

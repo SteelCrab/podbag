@@ -182,7 +182,7 @@ pub fn read_state(dirs: &Dirs, id: &str) -> Result<State> {
         Error::io(
             format!("cannot load container {id}"),
             &e,
-            "run `openpod ps -a` to list containers",
+            "run `podbag ps -a` to list containers",
         )
     })?;
     serde_json::from_slice(&bytes).map_err(|e| {
@@ -190,7 +190,7 @@ pub fn read_state(dirs: &Dirs, id: &str) -> Result<State> {
             ErrorKind::Internal,
             format!("cannot load container {id}"),
             format!("{} is damaged: {e}", path.display()),
-            "remove the container with `openpod rm -f`",
+            "remove the container with `podbag rm -f`",
         )
     })
 }
@@ -235,7 +235,7 @@ fn not_found(name_or_id: &str) -> Error {
         ErrorKind::NotFound,
         format!("cannot find container {name_or_id}"),
         "no container has this name or ID",
-        "run `openpod ps -a` to list containers",
+        "run `podbag ps -a` to list containers",
     )
 }
 
@@ -357,7 +357,7 @@ pub fn create(dirs: &Dirs, spec: &ContainerSpec) -> Result<()> {
             Error::io(
                 "cannot lock the container list",
                 &e,
-                "check the permissions of the openpod data directory",
+                "check the permissions of the podbag data directory",
             )
         })?;
     // Released when `lock` is dropped.
@@ -365,7 +365,7 @@ pub fn create(dirs: &Dirs, spec: &ContainerSpec) -> Result<()> {
         Error::io(
             "cannot lock the container list",
             &e,
-            "check the permissions of the openpod data directory",
+            "check the permissions of the podbag data directory",
         )
     })?;
     for other in list_ids(dirs)? {
@@ -463,7 +463,7 @@ fn already_running(id: &str) -> Error {
         ErrorKind::Conflict,
         format!("cannot start container {}", id::short_id(id)),
         "it is already running",
-        "stop it first, or use `openpod restart`",
+        "stop it first, or use `podbag restart`",
     )
 }
 
@@ -513,7 +513,7 @@ fn lock_error(id: &str, e: std::io::Error) -> Error {
     Error::io(
         format!("cannot check container {}", id::short_id(id)),
         &e,
-        "check the permissions of the openpod data directory",
+        "check the permissions of the podbag data directory",
     )
 }
 
@@ -523,7 +523,7 @@ pub fn reconcile(dirs: &Dirs, id: &str) -> Result<State> {
     let state = read_state(dirs, id)?;
     let state = settle(dirs, id, state)?;
     // An ended container's cgroup may remain when an earlier removal found it busy (root
-    // mode); every state check tries once more (design 6.12).
+    // mode); every state check tries once more.
     #[cfg(target_os = "linux")]
     if state.status == Status::Exited {
         if let Some(path) = state.cgroup.as_deref() {

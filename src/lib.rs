@@ -1,4 +1,4 @@
-//! openpod: a daemonless, rootless container engine.
+//! podbag: a daemonless, rootless container engine.
 //!
 //! The command-line tool is a thin layer over this library.
 
@@ -42,7 +42,7 @@ pub mod libc_check;
 #[cfg(target_os = "linux")]
 #[doc(hidden)]
 pub mod linux;
-/// openpod on macOS: the VM host and the CLI that forwards to it.
+/// podbag on macOS: the VM host and the CLI that forwards to it.
 #[cfg(target_os = "macos")]
 #[doc(hidden)]
 pub mod macos;

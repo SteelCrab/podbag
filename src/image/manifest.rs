@@ -215,7 +215,7 @@ pub fn layer_compression(media_type: &str) -> Result<Compression> {
     }
 }
 
-/// The parts of an image config file that openpod uses.
+/// The parts of an image config file that podbag uses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigFile {
     pub architecture: String,

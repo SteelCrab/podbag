@@ -124,7 +124,7 @@ fn install_seccomp(caps: u64) -> Result<()> {
         Error::new(
             ErrorKind::Unsupported,
             "cannot apply the seccomp filter",
-            "openpod has no filter for this CPU type",
+            "podbag has no filter for this CPU type",
             "run with --security-opt seccomp=unconfined",
         )
     })?;

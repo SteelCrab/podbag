@@ -1,6 +1,6 @@
-//! The `/etc/hostname`, `/etc/hosts` and `/etc/resolv.conf` a container gets (design
-//! 6.4.3 step 4). The shim writes them into the container directory; the container
-//! mounts them over the image's files.
+//! The `/etc/hostname`, `/etc/hosts` and `/etc/resolv.conf` a container gets. The shim
+//! writes them into the container directory; the container mounts them over the image's
+//! files.
 
 use crate::network::NetworkMode;
 use std::net::Ipv4Addr;

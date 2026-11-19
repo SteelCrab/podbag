@@ -143,13 +143,20 @@ struct ProgAttach {
     replace_bpf_fd: u32,
 }
 
+/// The program's name, as `bpf_attr.prog_name` holds it: NUL-terminated, 16 bytes.
+fn prog_name() -> [u8; 16] {
+    const NAME: &[u8] = b"podbag_devices";
+    let mut name = [0u8; 16];
+    name[..NAME.len()].copy_from_slice(NAME);
+    name
+}
+
 /// Attach the device rules to the cgroup open at `group`. They hold for every process
 /// that enters it or a group below it, until the group is removed.
 pub fn restrict(group: BorrowedFd<'_>) -> std::io::Result<()> {
     let insns = program();
     let license = c"Apache";
-    let mut name = [0u8; 16];
-    name[..15].copy_from_slice(b"openpod_devices");
+    let name = prog_name();
     let load = ProgLoad {
         prog_type: BPF_PROG_TYPE_CGROUP_DEVICE,
         insn_cnt: insns.len() as u32,
@@ -205,6 +212,13 @@ pub fn restrict(group: BorrowedFd<'_>) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_program_name_fits_with_its_nul() {
+        let name = prog_name();
+        assert!(name.starts_with(b"podbag_devices\0"), "{name:?}");
+        assert_eq!(name[15], 0);
+    }
 
     /// Run the program on one access, as the kernel would (a small interpreter of the
     /// instructions it uses).

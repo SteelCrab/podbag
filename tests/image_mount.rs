@@ -1,5 +1,5 @@
 #![cfg(target_os = "linux")]
-//! How containers get their image files (design 6.3.3): composefs as root, hard-link trees
+//! How containers get their image files: composefs as root, hard-link trees
 //! rootless or with `image_mount = "hardlink"`. Both must show the same tree.
 
 mod common;
@@ -16,11 +16,11 @@ fn ok(out: &Output) -> String {
     stdout(out)
 }
 
-fn openpod(sb: &Sandbox, args: &[&str]) -> Output {
-    sb.openpod().args(args).output().unwrap()
+fn podbag(sb: &Sandbox, args: &[&str]) -> Output {
+    sb.podbag().args(args).output().unwrap()
 }
 
-/// `test -e`, as root when openpod runs as root (the store is private to its owner).
+/// `test -e`, as root when podbag runs as root (the store is private to its owner).
 fn exists(path: &Path) -> bool {
     let mut cmd = if root_mode() {
         let mut c = Command::new("sudo");
@@ -173,7 +173,7 @@ fn tree_listing(sb: &Sandbox, image: &str) -> String {
         find . -xdev ! -type d -exec stat -c '%n|%f|%u|%g|%t:%T|%s|%i|%N' {} + ; \
         find . -xdev -type d -exec stat -c '%n|%f|%u|%g' {} + ; \
         find . -xdev -type f -exec md5sum {} + ; }";
-    let out = ok(&openpod(
+    let out = ok(&podbag(
         sb,
         &[
             "run",
@@ -231,7 +231,7 @@ fn assert_composefs(sb: &Sandbox) {
 }
 
 fn hardlink_sandbox() -> Sandbox {
-    Sandbox::with_env("OPENPOD_IMAGE_MOUNT", "hardlink")
+    Sandbox::with_env("PODBAG_IMAGE_MOUNT", "hardlink")
 }
 
 #[test]
@@ -246,11 +246,11 @@ fn root_mode_mounts_images_with_composefs() {
         vec![vec![file("hello", b"composefs\n", 0o644, 0)]],
     );
     let sb = Sandbox::new();
-    ok(&openpod(&sb, &["pull", &image]));
+    ok(&podbag(&sb, &["pull", &image]));
     let dir = image_dir(&sb);
     assert!(exists(&dir.join("rootfs.erofs")));
     assert!(!exists(&dir.join("rootfs")));
-    let out = ok(&openpod(
+    let out = ok(&podbag(
         &sb,
         &[
             "run",
@@ -281,13 +281,13 @@ fn rootless_mode_keeps_hardlink_trees() {
     let reg = FakeRegistry::start(false);
     let image = push(&reg, "r", vec![vec![file("hello", b"tree\n", 0o644, 0)]]);
     let sb = Sandbox::new();
-    ok(&openpod(&sb, &["pull", &image]));
+    ok(&podbag(&sb, &["pull", &image]));
     let dir = image_dir(&sb);
     assert!(exists(&dir.join("rootfs/hello")));
     assert!(!exists(&dir.join("rootfs.erofs")));
     assert!(!exists(&sb.data().join("store/mount-method.json")));
     assert_eq!(
-        ok(&openpod(&sb, &["run", "--rm", &image, "cat", "/hello"])),
+        ok(&podbag(&sb, &["run", "--rm", &image, "cat", "/hello"])),
         "tree"
     );
 }
@@ -348,7 +348,7 @@ fn file_capabilities_work_with_both_methods() {
         }]],
     );
     for sb in [Sandbox::new(), hardlink_sandbox()] {
-        let out = ok(&openpod(
+        let out = ok(&podbag(
             &sb,
             &[
                 "run",
@@ -364,7 +364,7 @@ fn file_capabilities_work_with_both_methods() {
         ));
         let eff = out.lines().find(|l| l.starts_with("CapEff:")).unwrap();
         assert_eq!(eff, "CapEff:\t0000000000002000", "{out}");
-        if !sb.env.iter().any(|(k, _)| k == "OPENPOD_IMAGE_MOUNT") {
+        if !sb.env.iter().any(|(k, _)| k == "PODBAG_IMAGE_MOUNT") {
             assert_composefs(&sb);
             assert_eq!(erofs_mounts(&sb).len(), 1);
         }
@@ -387,7 +387,7 @@ fn writes_copy_contents_up_from_the_object_store() {
         ]],
     );
     let sb = Sandbox::new();
-    let out = ok(&openpod(
+    let out = ok(&podbag(
         &sb,
         &[
             "run",
@@ -412,22 +412,22 @@ fn a_missing_artifact_is_built_on_first_use() {
     let image = push(&reg, "m", vec![vec![file("hello", b"hi\n", 0o644, 0)]]);
     // Pulled for hard links, run with composefs.
     let mut sb = hardlink_sandbox();
-    ok(&openpod(&sb, &["pull", &image]));
+    ok(&podbag(&sb, &["pull", &image]));
     assert!(!exists(&image_dir(&sb).join("rootfs.erofs")));
-    sb.env.retain(|(k, _)| k != "OPENPOD_IMAGE_MOUNT");
+    sb.env.retain(|(k, _)| k != "PODBAG_IMAGE_MOUNT");
     assert_eq!(
-        ok(&openpod(&sb, &["run", "--rm", &image, "cat", "/hello"])),
+        ok(&podbag(&sb, &["run", "--rm", &image, "cat", "/hello"])),
         "hi"
     );
     assert!(exists(&image_dir(&sb).join("rootfs.erofs")));
     // Pulled for composefs, run with hard links.
     let mut sb = Sandbox::new();
-    ok(&openpod(&sb, &["pull", &image]));
+    ok(&podbag(&sb, &["pull", &image]));
     assert!(!exists(&image_dir(&sb).join("rootfs")));
     sb.env
-        .push(("OPENPOD_IMAGE_MOUNT".to_string(), "hardlink".to_string()));
+        .push(("PODBAG_IMAGE_MOUNT".to_string(), "hardlink".to_string()));
     assert_eq!(
-        ok(&openpod(&sb, &["run", "--rm", &image, "cat", "/hello"])),
+        ok(&podbag(&sb, &["run", "--rm", &image, "cat", "/hello"])),
         "hi"
     );
     assert!(exists(&image_dir(&sb).join("rootfs/hello")));
@@ -441,10 +441,10 @@ fn concurrent_starts_share_one_mount() {
     let reg = FakeRegistry::start(false);
     let image = push(&reg, "p", vec![vec![file("hello", b"hi\n", 0o644, 0)]]);
     let sb = Sandbox::new();
-    ok(&openpod(&sb, &["pull", &image]));
+    ok(&podbag(&sb, &["pull", &image]));
     let children: Vec<_> = (0..6)
         .map(|_| {
-            sb.openpod()
+            sb.podbag()
                 .args(["run", "-d", "--network", "none", &image, "sleep", "60"])
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
@@ -467,7 +467,7 @@ fn a_lost_image_mount_is_mounted_again() {
     let image = push(&reg, "l", vec![vec![file("hello", b"hi\n", 0o644, 0)]]);
     let sb = Sandbox::new();
     assert_eq!(
-        ok(&openpod(&sb, &["run", "--rm", &image, "cat", "/hello"])),
+        ok(&podbag(&sb, &["run", "--rm", &image, "cat", "/hello"])),
         "hi"
     );
     let point = erofs_mounts(&sb).pop().unwrap();
@@ -484,7 +484,7 @@ fn a_lost_image_mount_is_mounted_again() {
     // Unmounted, mount point left behind.
     sudo(&["umount", &point]);
     assert_eq!(
-        ok(&openpod(&sb, &["run", "--rm", &image, "cat", "/hello"])),
+        ok(&podbag(&sb, &["run", "--rm", &image, "cat", "/hello"])),
         "hi"
     );
     assert_eq!(erofs_mounts(&sb), vec![point.clone()]);
@@ -492,7 +492,7 @@ fn a_lost_image_mount_is_mounted_again() {
     sudo(&["umount", &point]);
     sudo(&["rm", "-rf", &sb.runtime().join("images").to_string_lossy()]);
     assert_eq!(
-        ok(&openpod(&sb, &["run", "--rm", &image, "cat", "/hello"])),
+        ok(&podbag(&sb, &["run", "--rm", &image, "cat", "/hello"])),
         "hi"
     );
     assert_eq!(erofs_mounts(&sb), vec![point]);
@@ -506,10 +506,10 @@ fn removing_an_image_unmounts_it() {
     let reg = FakeRegistry::start(false);
     let image = push(&reg, "x", vec![vec![file("hello", b"hi\n", 0o644, 0)]]);
     let sb = Sandbox::new();
-    ok(&openpod(&sb, &["run", "--rm", &image, "true"]));
+    ok(&podbag(&sb, &["run", "--rm", &image, "true"]));
     assert_eq!(erofs_mounts(&sb).len(), 1);
     let dir = image_dir(&sb);
-    ok(&openpod(&sb, &["rmi", &image]));
+    ok(&podbag(&sb, &["rmi", &image]));
     assert_eq!(erofs_mounts(&sb), Vec::<String>::new());
     assert!(!exists(&dir));
     assert_eq!(list(&sb.runtime().join("images")), Vec::<String>::new());
@@ -523,10 +523,10 @@ fn check_image_leaves_no_mounts() {
     let reg = FakeRegistry::start(false);
     let image = push(&reg, "k", vec![vec![file("hello", b"hi\n", 0o644, 0)]]);
     let sb = Sandbox::new();
-    ok(&openpod(&sb, &["pull", &image]));
+    ok(&podbag(&sb, &["pull", &image]));
     assert_composefs(&sb);
     let before = mounts_under(sb.tmp.path());
-    ok(&openpod(&sb, &["check-image", &image]));
+    ok(&podbag(&sb, &["check-image", &image]));
     assert_eq!(mounts_under(sb.tmp.path()), before);
     assert_eq!(list(&sb.data().join("store/tmp")), Vec::<String>::new());
 }
@@ -545,8 +545,8 @@ fn a_container_starts_again_after_its_image_mount_is_gone() {
         vec![vec![file("note", b"still here\n", 0o644, 0)]],
     );
     let sb = Sandbox::new();
-    ok(&openpod(&sb, &["pull", &image]));
-    ok(&openpod(
+    ok(&podbag(&sb, &["pull", &image]));
+    ok(&podbag(
         &sb,
         &["run", "--name", "c", &image, "cat", "/note"],
     ));
@@ -568,6 +568,6 @@ fn a_container_starts_again_after_its_image_mount_is_gone() {
                 .success();
         assert!(gone, "cannot take the image mount down: {m}");
     }
-    assert_eq!(ok(&openpod(&sb, &["start", "-a", "c"])), "still here");
-    ok(&openpod(&sb, &["rm", "c"]));
+    assert_eq!(ok(&podbag(&sb, &["start", "-a", "c"])), "still here");
+    ok(&podbag(&sb, &["rm", "c"]));
 }

@@ -1,5 +1,5 @@
 #![cfg(unix)]
-use openpod::{ErrorKind, helper};
+use podbag::{ErrorKind, helper};
 use std::process::Stdio;
 use std::sync::OnceLock;
 
@@ -10,9 +10,9 @@ fn setup() {
         let tmp = tempfile::tempdir().unwrap();
         // SAFETY: every test sets the same values once, before any test reads them.
         unsafe {
-            std::env::set_var("OPENPOD_BIN", env!("CARGO_BIN_EXE_openpod"));
-            std::env::set_var("OPENPOD_DATA_DIR", tmp.path().join("data"));
-            std::env::set_var("OPENPOD_RUNTIME_DIR", tmp.path().join("run"));
+            std::env::set_var("PODBAG_BIN", env!("CARGO_BIN_EXE_podbag"));
+            std::env::set_var("PODBAG_DATA_DIR", tmp.path().join("data"));
+            std::env::set_var("PODBAG_RUNTIME_DIR", tmp.path().join("run"));
         }
         tmp
     });
@@ -40,7 +40,7 @@ fn shim_reports_a_missing_container() {
 #[test]
 fn shim_rejects_an_invalid_id_without_deleting_anything() {
     setup();
-    let data = openpod::paths::dirs().unwrap().data;
+    let data = podbag::paths::dirs().unwrap().data;
     let keep = data.join("keep");
     std::fs::create_dir_all(&keep).unwrap();
     // "containers/.." is the data directory itself.
@@ -61,13 +61,13 @@ fn shim_rejects_an_invalid_id_without_deleting_anything() {
 #[cfg(not(target_os = "linux"))]
 #[test]
 fn shim_reports_unsupported_and_removes_the_container_directory() {
-    use openpod::{paths, spec::ContainerSpec, state};
+    use podbag::{paths, spec::ContainerSpec, state};
     setup();
     let dirs = paths::dirs().unwrap();
     let spec = ContainerSpec {
         labels: Default::default(),
         id: "f".repeat(64),
-        rootfs: openpod::spec::Rootfs::Dir { path: "/".into() },
+        rootfs: podbag::spec::Rootfs::Dir { path: "/".into() },
         command: vec!["true".into()],
         env: vec![],
         workdir: None,
@@ -84,7 +84,7 @@ fn shim_reports_unsupported_and_removes_the_container_directory() {
         cgroup: Default::default(),
         security: Default::default(),
         mounts: Vec::new(),
-        network: openpod::network::NetworkMode::Host,
+        network: podbag::network::NetworkMode::Host,
         publish: Vec::new(),
         aliases: Vec::new(),
         restart: Default::default(),
@@ -112,7 +112,7 @@ fn shim_reports_unsupported_and_removes_the_container_directory() {
 #[test]
 fn a_helper_that_dies_silently_is_an_internal_error() {
     setup();
-    // `openpod --version` writes nothing to fd 3 and exits.
+    // `podbag --version` writes nothing to fd 3 and exits.
     let e = helper::spawn_with_args(
         &["--version"],
         Stdio::null(),
@@ -126,6 +126,6 @@ fn a_helper_that_dies_silently_is_an_internal_error() {
     assert_eq!(e.kind, ErrorKind::Internal);
     assert_eq!(
         e.what,
-        "the openpod helper exited without reporting a status"
+        "the podbag helper exited without reporting a status"
     );
 }

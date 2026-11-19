@@ -1,4 +1,4 @@
-//! EROFS images for composefs (design 6.3.2 and 6.3.3): an image's directory tree with
+//! EROFS images for composefs: an image's directory tree with
 //! owners, modes and xattrs, but no file contents. Every regular file with content carries
 //! overlayfs's metacopy and redirect xattrs, which name its object; overlayfs, with the
 //! object store as a data-only layer, reads the contents from there.

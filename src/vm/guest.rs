@@ -1,8 +1,8 @@
-//! PID 1 of the macOS VM: `/init` in its initramfs is openpod itself.
+//! PID 1 of the macOS VM: `/init` in its initramfs is podbag itself.
 //!
 //! The kernel runs it as `/init __vm-init` (the command line ends in `-- __vm-init`): only
-//! then is openpod an init. It mounts the kernel's file systems, takes the clock from the
-//! Mac (the kernel command line's `openpod.time=`), writes the DNS servers the kernel's
+//! then is podbag an init. It mounts the kernel's file systems, takes the clock from the
+//! Mac (the kernel command line's `podbag.time=`), writes the DNS servers the kernel's
 //! DHCP found, mounts the data disk and the Mac's `/Users`, starts the agent
 //! (`__vm-agent`, again whenever it ends), and then reaps orphans until it is told to power
 //! off (SIGTERM, or the agent's `__vm-poweroff`). When a mount fails, the agent answers
@@ -12,28 +12,28 @@ use crate::{Error, Result};
 use rustix::mount::{MountFlags, mount};
 use std::path::Path;
 
-/// Where openpod keeps its data in the VM: the data disk.
-pub const DATA_DIR: &str = "/var/lib/openpod";
+/// Where podbag keeps its data in the VM: the data disk.
+pub const DATA_DIR: &str = "/var/lib/podbag";
 
 pub fn vm_init_main() -> ! {
     // Containers need pivot_root, which the initramfs's own root refuses: the first
     // run moves everything to a tmpfs, makes that the root, and runs /init again.
-    if std::env::var_os("OPENPOD_INIT_STAGE").is_none() {
+    if std::env::var_os("PODBAG_INIT_STAGE").is_none() {
         let e = leave_rootfs();
-        eprintln!("openpod: cannot leave the initramfs root: {e}");
+        eprintln!("podbag: cannot leave the initramfs root: {e}");
     }
     let started = std::time::Instant::now();
-    eprintln!("openpod: VM init");
+    eprintln!("podbag: VM init");
     let problems = setup();
-    eprintln!("openpod: VM set up in {} ms", started.elapsed().as_millis());
+    eprintln!("podbag: VM set up in {} ms", started.elapsed().as_millis());
     if !problems.is_empty() {
         let why: Vec<String> = problems.iter().map(|e| e.to_string()).collect();
         for w in &why {
-            eprintln!("openpod: {w}");
+            eprintln!("podbag: {w}");
         }
         // The agent answers every command with this: data must not land in memory.
         if let Err(e) = std::fs::write(super::agent::BROKEN, why.join("\n")) {
-            eprintln!("openpod: cannot write {}: {e}", super::agent::BROKEN);
+            eprintln!("podbag: cannot write {}: {e}", super::agent::BROKEN);
         }
     }
     raise_limits();
@@ -44,18 +44,18 @@ pub fn vm_init_main() -> ! {
     reap_until_poweroff(&signals, start_agent())
 }
 
-/// The agent; openpod is /init here, and its helpers find it through OPENPOD_BIN.
+/// The agent; podbag is /init here, and its helpers find it through PODBAG_BIN.
 fn start_agent() -> Option<libc::pid_t> {
     match std::process::Command::new("/init")
         .arg("__vm-agent")
-        .env("OPENPOD_BIN", "/init")
+        .env("PODBAG_BIN", "/init")
         // The Docker API is served in the agent: its containers get the VM's budget too.
         .env(super::agent::VM_BUDGET.0, super::agent::VM_BUDGET.1)
         .spawn()
     {
         Ok(child) => Some(child.id() as libc::pid_t),
         Err(e) => {
-            eprintln!("openpod: cannot start the VM agent: {e}");
+            eprintln!("podbag: cannot start the VM agent: {e}");
             None
         }
     }
@@ -71,12 +71,12 @@ fn raise_limits() {
     // SAFETY: setrlimit with a valid rlimit.
     if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &files) } != 0 {
         eprintln!(
-            "openpod: cannot raise the open file limit: {}",
+            "podbag: cannot raise the open file limit: {}",
             std::io::Error::last_os_error()
         );
     }
     if let Err(e) = std::fs::write("/proc/sys/vm/max_map_count", "262144") {
-        eprintln!("openpod: cannot set vm.max_map_count: {e}");
+        eprintln!("podbag: cannot set vm.max_map_count: {e}");
     }
 }
 
@@ -117,7 +117,7 @@ fn leave_rootfs() -> std::io::Error {
         use std::os::unix::process::CommandExt;
         Err(std::process::Command::new("/init")
             .arg(super::proto::INIT_ARG)
-            .env("OPENPOD_INIT_STAGE", "2")
+            .env("PODBAG_INIT_STAGE", "2")
             .exec())
     };
     match step() {
@@ -162,7 +162,7 @@ fn fail(what: &str, e: impl Into<std::io::Error>) -> Error {
     Error::io(
         format!("cannot set up the VM: {what}"),
         &e.into(),
-        "see the VM's console log (`openpod vm logs`)",
+        "see the VM's console log (`podbag vm logs`)",
     )
 }
 
@@ -234,11 +234,11 @@ fn setup() -> Vec<Error> {
     if let Some(time) = clock_from(&cmdline) {
         set_clock(time);
     }
-    let _ = rustix::system::sethostname(b"openpod");
+    let _ = rustix::system::sethostname(b"podbag");
     loopback_up();
     let pnp = std::fs::read_to_string("/proc/net/pnp").unwrap_or_default();
     if let Err(e) = std::fs::write("/etc/resolv.conf", resolv_conf(&pnp)) {
-        eprintln!("openpod: cannot write /etc/resolv.conf: {e}");
+        eprintln!("podbag: cannot write /etc/resolv.conf: {e}");
     }
     // The empty inode tables are left as they are: zeroing them would fill the Mac's
     // sparse disk file.
@@ -257,7 +257,7 @@ fn setup() -> Vec<Error> {
                     Error::io(
                         "cannot mount the VM's data disk",
                         &e.into(),
-                        "the disk image may be damaged: move ~/.openpod/disk.img away to \
+                        "the disk image may be damaged: move ~/.podbag/disk.img away to \
                          start with an empty one (its images, containers and volumes are lost)",
                     )
                 })
@@ -282,15 +282,15 @@ fn loopback_up() {
         Ok(())
     };
     if let Err(e) = up() {
-        eprintln!("openpod: cannot bring up lo: {e}");
+        eprintln!("podbag: cannot bring up lo: {e}");
     }
 }
 
-/// `openpod.time=<seconds>.<nanoseconds>` from the kernel command line.
+/// `podbag.time=<seconds>.<nanoseconds>` from the kernel command line.
 pub fn clock_from(cmdline: &str) -> Option<(u64, u32)> {
     let value = cmdline
         .split_whitespace()
-        .find_map(|w| w.strip_prefix("openpod.time="))?;
+        .find_map(|w| w.strip_prefix("podbag.time="))?;
     let (secs, nanos) = value.split_once('.').unwrap_or((value, "0"));
     Some((
         secs.parse().ok()?,
@@ -353,7 +353,7 @@ fn reap_until_poweroff(signals: &[i32], mut agent: Option<libc::pid_t>) -> ! {
                 break;
             }
             if Some(pid) == agent {
-                eprintln!("openpod: the VM agent ended (status {status:#x}); starting it again");
+                eprintln!("podbag: the VM agent ended (status {status:#x}); starting it again");
                 std::thread::sleep(std::time::Duration::from_secs(1));
                 agent = start_agent();
             }
@@ -391,7 +391,7 @@ pub fn power_off() -> ! {
         libc::reboot(libc::LINUX_REBOOT_CMD_POWER_OFF);
     }
     eprintln!(
-        "openpod: cannot power off: {}",
+        "podbag: cannot power off: {}",
         std::io::Error::last_os_error()
     );
     loop {
@@ -405,11 +405,11 @@ mod tests {
 
     #[test]
     fn the_clock_comes_from_the_command_line() {
-        let cmdline = "console=hvc0 ip=dhcp openpod.time=1700000000.250000000 rw";
+        let cmdline = "console=hvc0 ip=dhcp podbag.time=1700000000.250000000 rw";
         assert_eq!(clock_from(cmdline), Some((1_700_000_000, 250_000_000)));
-        assert_eq!(clock_from("openpod.time=12"), Some((12, 0)));
+        assert_eq!(clock_from("podbag.time=12"), Some((12, 0)));
         assert_eq!(clock_from("console=hvc0"), None);
-        assert_eq!(clock_from("openpod.time=x.1"), None);
+        assert_eq!(clock_from("podbag.time=x.1"), None);
     }
 
     #[test]

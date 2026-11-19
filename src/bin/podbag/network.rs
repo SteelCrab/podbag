@@ -2,7 +2,7 @@
 
 use crate::args::NetworkCmd;
 use crate::image::report;
-use openpod::network::Network;
+use podbag::network::Network;
 
 pub fn run(cmd: NetworkCmd) -> i32 {
     match cmd {
@@ -10,7 +10,7 @@ pub fn run(cmd: NetworkCmd) -> i32 {
             subnet,
             labels,
             name,
-        } => match openpod::network::parse_labels(&labels)
+        } => match podbag::network::parse_labels(&labels)
             .and_then(|labels| Network::create_with(&name, subnet.as_deref(), labels))
         {
             Ok(n) => {
@@ -60,7 +60,7 @@ pub fn run(cmd: NetworkCmd) -> i32 {
             aliases,
             network,
             container,
-        } => match openpod::ContainerHandle::get(&container)
+        } => match podbag::ContainerHandle::get(&container)
             .and_then(|h| h.connect(&network, &aliases))
         {
             Ok(()) => 0,
@@ -68,7 +68,7 @@ pub fn run(cmd: NetworkCmd) -> i32 {
         },
         #[cfg(unix)]
         NetworkCmd::Disconnect { network, container } => {
-            match openpod::ContainerHandle::get(&container).and_then(|h| h.disconnect(&network)) {
+            match podbag::ContainerHandle::get(&container).and_then(|h| h.disconnect(&network)) {
                 Ok(()) => 0,
                 Err(e) => report(&e),
             }

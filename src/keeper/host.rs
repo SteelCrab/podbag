@@ -141,11 +141,11 @@ fn os_error(what: &str, e: std::io::Error) -> Error {
     Error::io(
         format!("cannot {what} the keeper"),
         &e,
-        "check the openpod runtime directory",
+        "check the podbag runtime directory",
     )
 }
 
-/// `openpod __keeper <runtime dir>`: become the keeper of this runtime directory, unless
+/// `podbag __keeper <runtime dir>`: become the keeper of this runtime directory, unless
 /// one runs already. Reports `Started` (with PID 0 when another keeper has the lock) once
 /// clients can connect. Returns the process exit code.
 pub fn keeper_main(runtime: &str) -> i32 {
@@ -163,7 +163,7 @@ pub fn keeper_main(runtime: &str) -> i32 {
                 "it was asked for {runtime}, but this environment's runtime directory is {}",
                 dirs.runtime.display()
             ),
-            "start it with the same OPENPOD_RUNTIME_DIR",
+            "start it with the same PODBAG_RUNTIME_DIR",
         ));
     }
     let (lock, listener, socket_path, socket_inode) = match claim(&dirs) {
@@ -227,7 +227,7 @@ fn claim(dirs: &Dirs) -> crate::Result<Option<(File, UnixListener, PathBuf, u64)
                 "the runtime directory {} belongs to another user, or others can write to it",
                 dirs.runtime.display()
             ),
-            "make it private (`chmod 700`), or set OPENPOD_RUNTIME_DIR to a private directory",
+            "make it private (`chmod 700`), or set PODBAG_RUNTIME_DIR to a private directory",
         ));
     }
     let lock = std::fs::OpenOptions::new()
@@ -684,7 +684,7 @@ impl Keeper {
         }
         // After an upgrade the old keeper would start new containers with its old code.
         if build != self.build {
-            return refuse(&conn, "the keeper runs another build of openpod");
+            return refuse(&conn, "the keeper runs another build of podbag");
         }
         // The container wants a scope of its own for its limits, and this keeper has no
         // cgroup to make one in: the client's own shim gets a scope.
@@ -1187,7 +1187,7 @@ fn starter(
     // first, so that none is overwritten before it is copied; then everything that is
     // the keeper's (its socket, other containers' descriptors) is closed.
     unsafe {
-        libc::prctl(libc::PR_SET_NAME, c"openpod-shim".as_ptr());
+        libc::prctl(libc::PR_SET_NAME, c"podbag-shim".as_ptr());
         let mut high = [-1; 5];
         let all = fds
             .into_iter()
@@ -1223,7 +1223,7 @@ fn starter(
 fn finisher(kept: Kept, relaunch: crate::restart::Relaunch) -> ! {
     crate::signals::restore_default(&[libc::SIGCHLD, libc::SIGTERM, libc::SIGHUP, libc::SIGINT]);
     // SAFETY: prctl with a valid name.
-    unsafe { libc::prctl(libc::PR_SET_NAME, c"openpod-finish".as_ptr()) };
+    unsafe { libc::prctl(libc::PR_SET_NAME, c"podbag-finish".as_ptr()) };
     let env = super::handover::saved_env(&kept.dirs, &kept.id);
     if !env.is_empty() {
         apply_env(env);

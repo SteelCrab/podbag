@@ -1,4 +1,4 @@
-//! The Docker Engine API service (design 6.14): `openpod system service`.
+//! The Docker Engine API service: `podbag system service`.
 //!
 //! One thread per connection, no async runtime. The service keeps nothing of its own:
 //! every request is a library call on state files and locks, so the CLI and the API can be
@@ -40,8 +40,8 @@ pub struct ServeOptions {
     pub activated: Option<OwnedFd>,
 }
 
-/// `<runtime>/docker.sock`: `$XDG_RUNTIME_DIR/openpod/docker.sock` rootless,
-/// `/run/openpod/docker.sock` as root.
+/// `<runtime>/docker.sock`: `$XDG_RUNTIME_DIR/podbag/docker.sock` rootless,
+/// `/run/podbag/docker.sock` as root.
 pub fn default_socket(dirs: &Dirs) -> PathBuf {
     dirs.runtime.join("docker.sock")
 }
@@ -79,17 +79,17 @@ pub fn units(socket: &Path, exe: &Path, rootless: bool) -> String {
         ("/etc/systemd/system", "sudo systemctl", "multi-user.target")
     };
     format!(
-        "# {dir}/openpod.socket\n\
-         [Unit]\nDescription=openpod Docker API socket\n\n\
+        "# {dir}/podbag.socket\n\
+         [Unit]\nDescription=podbag Docker API socket\n\n\
          [Socket]\nListenStream={socket}\nSocketMode={mode}\n\n\
          [Install]\nWantedBy=sockets.target\n\n\
-         # {dir}/openpod.service\n\
-         [Unit]\nDescription=openpod Docker API (exits when idle)\nRequires=openpod.socket\nAfter=openpod.socket\n\n\
+         # {dir}/podbag.service\n\
+         [Unit]\nDescription=podbag Docker API (exits when idle)\nRequires=podbag.socket\nAfter=podbag.socket\n\n\
          [Service]\nExecStart={exe} system service\n\
          # Containers started through the service keep running when it stops.\n\
          KillMode=process\n\n\
          [Install]\nWantedBy={target}\n\n\
-         # Then:\n#   {ctl} daemon-reload && {ctl} enable --now openpod.socket\n\
+         # Then:\n#   {ctl} daemon-reload && {ctl} enable --now podbag.socket\n\
          #   export DOCKER_HOST=unix://{socket}\n",
         socket = socket.display(),
         exe = exe.display(),
@@ -222,7 +222,7 @@ fn bind(path: &Path) -> Result<UnixListener> {
         if !meta.file_type().is_socket() {
             return Err(Error::new(
                 ErrorKind::InvalidInput,
-                "cannot start the openpod API service",
+                "cannot start the podbag API service",
                 format!("{} exists and is not a socket", path.display()),
                 "remove it, or give another socket with --socket",
             ));
@@ -230,7 +230,7 @@ fn bind(path: &Path) -> Result<UnixListener> {
         if UnixStream::connect(path).is_ok() {
             return Err(Error::new(
                 ErrorKind::InvalidInput,
-                "cannot start the openpod API service",
+                "cannot start the podbag API service",
                 format!("another service already listens on {}", path.display()),
                 "use that service, stop it, or give another socket with --socket",
             ));

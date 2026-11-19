@@ -1,7 +1,7 @@
-//! How the library starts the openpod helper process and learns whether it started.
+//! How the library starts the podbag helper process and learns whether it started.
 
 //!
-//! The helper is the `openpod` program run with a hidden subcommand. It gets the write end
+//! The helper is the `podbag` program run with a hidden subcommand. It gets the write end
 //! of a pipe as file descriptor 3, writes one JSON line there, and closes it.
 
 use crate::{Error, ErrorKind, Result};
@@ -19,7 +19,7 @@ pub const STATUS_FD: i32 = 3;
 /// Where [`spawn_with_fd`] puts its extra descriptor.
 pub const EXTRA_FD: i32 = 4;
 
-const HELPER_NAME: &str = "openpod";
+const HELPER_NAME: &str = "podbag";
 
 /// The one line a helper writes on [`STATUS_FD`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,13 +40,13 @@ pub enum StatusMessage {
 /// Find the helper program for the current process.
 pub fn locate_helper() -> Result<PathBuf> {
     locate_helper_with(
-        std::env::var("OPENPOD_BIN").ok(),
+        std::env::var("PODBAG_BIN").ok(),
         std::env::current_exe().ok(),
         std::env::var("PATH").ok(),
     )
 }
 
-/// Find the helper: `OPENPOD_BIN`, the current program if it is openpod, an openpod next to
+/// Find the helper: `PODBAG_BIN`, the current program if it is podbag, a podbag next to
 /// the current program, then `PATH`.
 pub fn locate_helper_with(
     env_bin: Option<String>,
@@ -56,9 +56,9 @@ pub fn locate_helper_with(
     let not_found = |why: String| {
         Error::new(
             ErrorKind::MissingRequirement,
-            "cannot find the openpod helper program",
+            "cannot find the podbag helper program",
             why,
-            "install openpod in PATH, or set OPENPOD_BIN to the path of the openpod program",
+            "install podbag in PATH, or set PODBAG_BIN to the path of the podbag program",
         )
     };
 
@@ -68,7 +68,7 @@ pub fn locate_helper_with(
             Ok(bin)
         } else {
             Err(not_found(format!(
-                "OPENPOD_BIN is set to {}, which does not exist",
+                "PODBAG_BIN is set to {}, which does not exist",
                 bin.display()
             )))
         };
@@ -97,7 +97,7 @@ pub fn locate_helper_with(
     }
 
     Err(not_found(
-        "openpod is not next to this program and not in PATH".to_string(),
+        "podbag is not next to this program and not in PATH".to_string(),
     ))
 }
 
@@ -152,7 +152,7 @@ impl Io {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Scope {
     pub systemd_run: PathBuf,
-    /// The slice that holds the scope, such as `openpod.slice`.
+    /// The slice that holds the scope, such as `podbag.slice`.
     pub slice: String,
     /// The scope's unit name; systemd picks one when `None`.
     pub unit: Option<String>,
@@ -281,7 +281,7 @@ fn spawn(
     let helper = locate_helper()?;
     let fail = |e: std::io::Error| {
         Error::io(
-            "cannot start the openpod helper",
+            "cannot start the podbag helper",
             &e,
             format!("check that {} can be executed", helper.display()),
         )
@@ -580,7 +580,7 @@ impl HelperChild {
                 serde_json::from_str::<StatusMessage>(line.trim_end()).map_err(|e| {
                     Error::new(
                         ErrorKind::Internal,
-                        "the openpod helper sent an unreadable status",
+                        "the podbag helper sent an unreadable status",
                         format!("{e}: {line:?}"),
                         "report this bug",
                     )
@@ -598,7 +598,7 @@ impl HelperChild {
                 }
                 return Err(Error::new(
                     ErrorKind::Internal,
-                    "the openpod helper exited without reporting a status",
+                    "the podbag helper exited without reporting a status",
                     format!("helper {status}"),
                     "run the same command again; if it keeps failing, report this bug",
                 ));
@@ -611,13 +611,13 @@ impl HelperChild {
 fn unexpected_status() -> Error {
     Error::new(
         ErrorKind::Internal,
-        "the openpod helper sent an unexpected status",
+        "the podbag helper sent an unexpected status",
         "a container helper reported a job result, or the other way round",
         "report this bug",
     )
 }
 
-/// Run a store job in `openpod __store '<json>'` and return its output.
+/// Run a store job in `podbag __store '<json>'` and return its output.
 /// With `show_progress`, the helper writes progress lines to this process's stderr.
 pub fn run_store_op(
     op: &crate::store::ops::StoreOp,
@@ -833,10 +833,10 @@ mod tests {
     #[test]
     fn locate_prefers_the_environment_variable() {
         let tmp = tempfile::tempdir().unwrap();
-        let bin = touch(tmp.path(), "custom-openpod");
+        let bin = touch(tmp.path(), "custom-podbag");
         let found = locate_helper_with(
             Some(bin.display().to_string()),
-            Some(touch(tmp.path(), "openpod")),
+            Some(touch(tmp.path(), "podbag")),
             None,
         )
         .unwrap();
@@ -847,8 +847,8 @@ mod tests {
     fn locate_fails_when_the_environment_variable_points_nowhere() {
         let tmp = tempfile::tempdir().unwrap();
         let e = locate_helper_with(
-            Some("/no/such/openpod".into()),
-            Some(touch(tmp.path(), "openpod")),
+            Some("/no/such/podbag".into()),
+            Some(touch(tmp.path(), "podbag")),
             None,
         )
         .unwrap_err();
@@ -856,9 +856,9 @@ mod tests {
     }
 
     #[test]
-    fn locate_uses_the_current_executable_when_it_is_openpod() {
+    fn locate_uses_the_current_executable_when_it_is_podbag() {
         let tmp = tempfile::tempdir().unwrap();
-        let exe = touch(tmp.path(), "openpod");
+        let exe = touch(tmp.path(), "podbag");
         assert_eq!(
             locate_helper_with(None, Some(exe.clone()), None).unwrap(),
             exe
@@ -869,7 +869,7 @@ mod tests {
     fn locate_finds_a_sibling_then_path() {
         let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         let app = touch(a.path(), "my-app");
-        let in_path = touch(b.path(), "openpod");
+        let in_path = touch(b.path(), "podbag");
         assert_eq!(
             locate_helper_with(
                 None,
@@ -879,7 +879,7 @@ mod tests {
             .unwrap(),
             in_path
         );
-        let sibling = touch(a.path(), "openpod");
+        let sibling = touch(a.path(), "podbag");
         assert_eq!(
             locate_helper_with(None, Some(app), Some(b.path().display().to_string())).unwrap(),
             sibling
@@ -890,8 +890,8 @@ mod tests {
     fn locate_explains_how_to_fix_a_missing_helper() {
         let e = locate_helper_with(None, None, Some("/nonexistent".into())).unwrap_err();
         assert_eq!(e.kind, ErrorKind::MissingRequirement);
-        assert_eq!(e.what, "cannot find the openpod helper program");
-        assert!(e.next.contains("OPENPOD_BIN"));
+        assert_eq!(e.what, "cannot find the podbag helper program");
+        assert!(e.next.contains("PODBAG_BIN"));
     }
 }
 
@@ -903,11 +903,11 @@ mod done_tests {
     fn scope_command_line() {
         let s = Scope {
             systemd_run: "/usr/bin/systemd-run".into(),
-            slice: "openpod.slice".into(),
-            unit: Some("openpod-abc".into()),
+            slice: "podbag.slice".into(),
+            unit: Some("podbag-abc".into()),
             delegate: true,
         };
-        let (prog, args) = scope_command(&s, Path::new("/bin/openpod"), &["__shim", "abc"]);
+        let (prog, args) = scope_command(&s, Path::new("/bin/podbag"), &["__shim", "abc"]);
         assert_eq!(prog, std::path::PathBuf::from("/usr/bin/systemd-run"));
         assert_eq!(
             args,
@@ -918,10 +918,10 @@ mod done_tests {
                 "--collect",
                 "-p",
                 "Delegate=yes",
-                "--slice=openpod.slice",
-                "--unit=openpod-abc",
+                "--slice=podbag.slice",
+                "--unit=podbag-abc",
                 "--",
-                "/bin/openpod",
+                "/bin/podbag",
                 "__shim",
                 "abc"
             ]
@@ -931,7 +931,7 @@ mod done_tests {
             delegate: false,
             ..s
         };
-        let (_, args) = scope_command(&plain, Path::new("/bin/openpod"), &["__exec"]);
+        let (_, args) = scope_command(&plain, Path::new("/bin/podbag"), &["__exec"]);
         assert_eq!(
             args,
             [
@@ -939,9 +939,9 @@ mod done_tests {
                 "--scope",
                 "--quiet",
                 "--collect",
-                "--slice=openpod.slice",
+                "--slice=podbag.slice",
                 "--",
-                "/bin/openpod",
+                "/bin/podbag",
                 "__exec"
             ]
         );

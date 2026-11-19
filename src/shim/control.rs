@@ -39,7 +39,7 @@ fn socket_dir(dirs: &Dirs, id: &str) -> PathBuf {
 }
 
 /// Call `f` with a path to the socket in `dir` that fits in a socket address. A long
-/// runtime directory (`/run/user/1000/openpod/containers/<64 hex>/shim.sock` is 108 bytes)
+/// runtime directory (`/run/user/1000/podbag/containers/<64 hex>/shim.sock` is 108 bytes)
 /// is reached through an open descriptor: `/proc/self/fd/<n>/shim.sock`.
 fn with_socket_path<T>(
     dir: &Path,
@@ -136,7 +136,7 @@ pub fn not_running(id: &str) -> Error {
         ErrorKind::InvalidInput,
         format!("container {} is not running", crate::id::short_id(id)),
         "its process has ended",
-        "start a new container, or run `openpod ps -a` to see its state",
+        "start a new container, or run `podbag ps -a` to see its state",
     )
 }
 

@@ -143,7 +143,7 @@ pub fn check_networks(
             if !aliases.is_empty() {
                 return invalid(
                     "network aliases are only for user-defined networks".to_string(),
-                    "create a network with `openpod network create` and use it",
+                    "create a network with `podbag network create` and use it",
                 );
             }
             return Ok(());
@@ -184,7 +184,7 @@ pub fn check_networks(
             return invalid(
                 "network aliases are only for user-defined networks; the default network gives no names"
                     .to_string(),
-                "create a network with `openpod network create` and use it",
+                "create a network with `podbag network create` and use it",
             );
         }
         for alias in aliases {
@@ -250,7 +250,7 @@ pub fn parse_security_opt(s: &str) -> Result<SecurityOpt> {
         ("no-new-privileges", Some(_)) => Err(bad("no-new-privileges takes true or false")),
         ("seccomp", Some("unconfined")) => Ok(SecurityOpt::SeccompUnconfined),
         ("seccomp", _) => Err(bad("custom seccomp profiles are not supported")),
-        _ => Err(bad("openpod does not know this option")),
+        _ => Err(bad("podbag does not know this option")),
     }
 }
 
@@ -294,8 +294,8 @@ impl ContainerSpec {
             && paths.iter().any(|p| p.contains(',') || p.contains(':'))
         {
             return invalid(
-                "the openpod data directory path contains ',' or ':', which overlayfs cannot use",
-                "set OPENPOD_DATA_DIR to a path without them",
+                "the podbag data directory path contains ',' or ':', which overlayfs cannot use",
+                "set PODBAG_DATA_DIR to a path without them",
             );
         }
         crate::caps::effective(&self.security.cap_add, &self.security.cap_drop)?;

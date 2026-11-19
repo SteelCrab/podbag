@@ -1,4 +1,4 @@
-//! Mounting composefs images (design 6.3.3): an image's EROFS metadata, and overlayfs with
+//! Mounting composefs images: an image's EROFS metadata, and overlayfs with
 //! the object store as its data-only layer.
 //!
 //! Containers share one EROFS mount per image on the host (`mount_shared`); each gets its
@@ -94,7 +94,7 @@ fn mount_error(step: &str, e: impl Into<std::io::Error>) -> Error {
         ErrorKind::Runtime,
         format!("cannot {step}"),
         e.to_string(),
-        "run `openpod check`; set image_mount = \"hardlink\" in config.toml to avoid composefs",
+        "run `podbag check`; set image_mount = \"hardlink\" in config.toml to avoid composefs",
     )
 }
 
@@ -139,7 +139,7 @@ pub fn with_mounted<T: Send>(
             Error::io(
                 format!("cannot create {}", dir(name).display()),
                 &e,
-                "check the permissions of the openpod data directory",
+                "check the permissions of the podbag data directory",
             )
         })?;
     }
@@ -190,7 +190,7 @@ pub fn probe(scratch: &Path) -> std::result::Result<(), String> {
 fn probe_in(scratch: &Path) -> std::result::Result<(), String> {
     use crate::store::layer::{Entry, EntryKind};
     use std::io::Write;
-    const CONTENT: &[u8] = b"openpod composefs probe\n";
+    const CONTENT: &[u8] = b"podbag composefs probe\n";
     let failed = |what: &str, e: &dyn std::fmt::Display| format!("{what}: {e}");
     let objects = scratch.join("objects");
     let key = {
@@ -268,7 +268,7 @@ pub fn mount_shared(image: &Path, target: &Path) -> Result<()> {
         Error::io(
             what,
             &e,
-            "check the permissions of the openpod runtime directory",
+            "check the permissions of the podbag runtime directory",
         )
     };
     let parent = target.parent().expect("a mount point has a parent");

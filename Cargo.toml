@@ -1,5 +1,5 @@
 [package]
-name = "openpod"
+name = "podbag"
 version = "0.1.0"
 edition = "2024"
 description = "Daemonless, rootless container engine in a single static binary"
@@ -8,14 +8,14 @@ description = "Daemonless, rootless container engine in a single static binary"
 path = "src/lib.rs"
 
 [[bin]]
-name = "openpod"
-path = "src/bin/openpod/main.rs"
+name = "podbag"
+path = "src/bin/podbag/main.rs"
 required-features = ["cli"]
 
 [features]
 default = ["cli"]
 cli = ["dep:clap"]
-# macOS: the binary carries the VM's guest files from target/vm (or OPENPOD_GUEST_DIR),
+# macOS: the binary carries the VM's guest files from target/vm (or PODBAG_GUEST_DIR),
 # built first with `dev/vm.sh run dev/macos/build-guest.sh`.
 embed-guest = []
 

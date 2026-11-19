@@ -52,7 +52,7 @@ pub(super) fn files(
             Error::io(
                 format!("cannot write {}", path.display()),
                 &e,
-                "check that the openpod data directory is writable",
+                "check that the podbag data directory is writable",
             )
         })?;
         mounts.push(Mount {
@@ -127,9 +127,9 @@ pub(super) fn join_session(dirs: &Dirs, spec: &ContainerSpec) -> Result<u32> {
     // Inside the session's user namespace this process's user ID reads 0, which would
     // make helpers it starts pick root's directories: fix them to the ones in use.
     for (var, dir) in [
-        ("OPENPOD_DATA_DIR", &dirs.data),
-        ("OPENPOD_RUNTIME_DIR", &dirs.runtime),
-        ("OPENPOD_CONFIG_DIR", &dirs.config),
+        ("PODBAG_DATA_DIR", &dirs.data),
+        ("PODBAG_RUNTIME_DIR", &dirs.runtime),
+        ("PODBAG_CONFIG_DIR", &dirs.config),
     ] {
         // SAFETY: the shim is single-threaded here (it is about to join a user namespace,
         // which requires that).
@@ -188,7 +188,7 @@ pub(super) fn announce(dirs: &Dirs, spec: &ContainerSpec) {
 pub(super) fn detach(dirs: &Dirs, spec: &ContainerSpec, session: bool) {
     for network in spec.bridge_networks() {
         if let Err(e) = crate::network::release(dirs, network, &spec.id) {
-            eprintln!("openpod: {e}");
+            eprintln!("podbag: {e}");
         }
         crate::network::refresh_hosts(dirs, network);
     }

@@ -1,4 +1,4 @@
-//! Errors returned by openpod.
+//! Errors returned by podbag.
 //!
 //! Every error says what failed, why, and what to do next.
 
@@ -11,9 +11,9 @@ use std::fmt;
 pub enum ErrorKind {
     /// The feature does not work on this operating system or kernel.
     Unsupported,
-    /// The caller passed a value openpod cannot use.
+    /// The caller passed a value podbag cannot use.
     InvalidInput,
-    /// A program, file or setting that openpod needs is missing.
+    /// A program, file or setting that podbag needs is missing.
     MissingRequirement,
     /// A container, image or path does not exist.
     NotFound,
@@ -26,11 +26,11 @@ pub enum ErrorKind {
     CommandNotExecutable,
     /// An operating system call failed.
     Runtime,
-    /// A bug or an unexpected state in openpod.
+    /// A bug or an unexpected state in podbag.
     Internal,
 }
 
-/// An openpod error.
+/// A podbag error.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Error {
     pub kind: ErrorKind,
@@ -71,10 +71,10 @@ impl Error {
             ErrorKind::Unsupported,
             "cannot run containers on this operating system",
             format!(
-                "openpod runs containers only on Linux; this is {}",
+                "podbag runs containers only on Linux; this is {}",
                 std::env::consts::OS
             ),
-            "run openpod on Linux",
+            "run podbag on Linux",
         )
     }
 

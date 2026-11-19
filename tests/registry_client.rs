@@ -1,10 +1,10 @@
 #![cfg(unix)]
 mod common;
 use common::registry::{FakeRegistry, TarEntry, TestImage, layer, sha256};
-use openpod::ErrorKind;
-use openpod::image::manifest::Descriptor;
-use openpod::image::reference::Reference;
-use openpod::image::registry::Registry;
+use podbag::ErrorKind;
+use podbag::image::manifest::Descriptor;
+use podbag::image::reference::Reference;
+use podbag::image::registry::Registry;
 use std::io::Read;
 
 fn small_image(text: &str) -> TestImage {

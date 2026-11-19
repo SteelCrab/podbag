@@ -1,5 +1,5 @@
-//! Restart policies (design 6.14, M8b). There is no resident process: whoever cleans up
-//! an ended container (the keeper's finisher, or its shim) starts `openpod __restart <id>`,
+//! Restart policies. There is no resident process: whoever cleans up
+//! an ended container (the keeper's finisher, or its shim) starts `podbag __restart <id>`,
 //! which waits, looks at the container again and starts it.
 //!
 //! Beside the container's settings, two small files in its directory: `restart.json`
@@ -21,7 +21,7 @@ pub enum RestartPolicy {
     No,
     /// Whatever its exit code.
     Always,
-    /// The same as `Always` in openpod: there is no daemon that starts containers again
+    /// The same as `Always` in podbag: there is no daemon that starts containers again
     /// when the machine starts.
     UnlessStopped,
     /// After a non-zero exit code, at most `max` times (0: no limit).
@@ -147,7 +147,7 @@ pub fn write_record(dirs: &Dirs, id: &str, record: &Record) -> Result<()> {
                     crate::id::short_id(id)
                 ),
                 &e,
-                "check that the openpod data directory is writable",
+                "check that the podbag data directory is writable",
             )
         })
 }
@@ -193,7 +193,7 @@ pub(crate) fn after_exit(dirs: &Dirs, spec: &crate::spec::ContainerSpec, code: i
         return;
     }
     if let Err(e) = spawn(&spec.id, how) {
-        eprintln!("openpod: cannot restart container {}: {e}", spec.name);
+        eprintln!("podbag: cannot restart container {}: {e}", spec.name);
     }
 }
 
@@ -267,7 +267,7 @@ fn user_manager_args(id: &str, exe: &str, env: &[(String, String)]) -> Vec<Strin
     .map(String::from)
     .to_vec();
     args.push(format!(
-        "--unit=openpod-restart-{}-{}",
+        "--unit=podbag-restart-{}-{}",
         crate::id::short_id(id),
         std::process::id()
     ));
@@ -276,7 +276,7 @@ fn user_manager_args(id: &str, exe: &str, env: &[(String, String)]) -> Vec<Strin
     args
 }
 
-/// `openpod __restart <id>`: wait, look at the container again, and start it while its
+/// `podbag __restart <id>`: wait, look at the container again, and start it while its
 /// policy still wants it. Ends at once when the container was removed, started, or
 /// stopped by the user meanwhile.
 pub fn restart_main(id: &str) -> i32 {
@@ -494,13 +494,13 @@ mod tests {
     fn the_restarter_leaves_the_new_container_alive() {
         // A transient service's processes are killed when its main process ends; the
         // container that the restarter started stays in it without cgroup v2 scopes.
-        let args = user_manager_args("ab".repeat(32).as_str(), "/bin/openpod", &[]);
+        let args = user_manager_args("ab".repeat(32).as_str(), "/bin/podbag", &[]);
         assert!(
             args.iter().any(|a| a == "--property=KillMode=process"),
             "{args:?}"
         );
         assert!(args.ends_with(&[
-            "/bin/openpod".to_string(),
+            "/bin/podbag".to_string(),
             "__restart".to_string(),
             "ab".repeat(32)
         ]));

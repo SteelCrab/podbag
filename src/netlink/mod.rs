@@ -1,5 +1,5 @@
 //! netlink messages, built here on any OS and sent on Linux: links, addresses and routes
-//! (rtnetlink) and the nftables rules openpod needs. No `ip` or `nft` program is used.
+//! (rtnetlink) and the nftables rules podbag needs. No `ip` or `nft` program is used.
 
 pub mod nft;
 pub mod route;
@@ -191,13 +191,13 @@ mod kernel_tests {
             id: "0".repeat(12),
             subnet: "10.76.3.0/24".into(),
             gateway: "10.76.3.1".into(),
-            bridge: "opd-again".into(),
+            bridge: "pbg-again".into(),
             created: 0,
             labels: Default::default(),
         };
         // The table's lines in a fixed order: chains are listed in the order they were made.
         let listed = || {
-            let mut lines: Vec<String> = run("nft list table ip openpod")
+            let mut lines: Vec<String> = run("nft list table ip podbag")
                 .lines()
                 .map(|l| l.trim().to_string())
                 .filter(|l| !l.is_empty())
@@ -210,7 +210,7 @@ mod kernel_tests {
         assert!(
             rules
                 .iter()
-                .any(|l| l.contains("oifname != \"opd-again\" masquerade")),
+                .any(|l| l.contains("oifname != \"pbg-again\" masquerade")),
             "{rules:?}"
         );
         // The second container of a network finds everything in place: no transaction
@@ -221,26 +221,24 @@ mod kernel_tests {
         assert_eq!(listed(), rules);
         // Chains that somebody emptied get their rules again: a chain that is there says
         // nothing about its rules.
-        run("nft flush chain ip openpod fwd-opd-again");
+        run("nft flush chain ip podbag fwd-pbg-again");
         assert_ne!(listed(), rules);
         crate::linux::net::prepare_bridge(&net).unwrap();
         assert_eq!(listed(), rules, "an emptied chain stayed empty");
         // Rules that are not this version's (written by hand, or by another version of
-        // openpod) are replaced, even when their number is right.
-        run("nft flush chain ip openpod post-opd-again; \
-             nft add rule ip openpod post-opd-again ip saddr 10.76.3.0/24 oifname != opd-again masquerade");
+        // podbag) are replaced, even when their number is right.
+        run("nft flush chain ip podbag post-pbg-again; \
+             nft add rule ip podbag post-pbg-again ip saddr 10.76.3.0/24 oifname != pbg-again masquerade");
         assert_ne!(listed(), rules);
         crate::linux::net::prepare_bridge(&net).unwrap();
         assert_eq!(listed(), rules, "a rule of another version stayed");
         // Rules that somebody removed (a firewall reload) come back with the next start.
-        run(
-            "nft flush chain ip openpod post-opd-again; nft delete chain ip openpod post-opd-again",
-        );
-        assert!(!listed().iter().any(|l| l.contains("post-opd-again")));
+        run("nft flush chain ip podbag post-pbg-again; nft delete chain ip podbag post-pbg-again");
+        assert!(!listed().iter().any(|l| l.contains("post-pbg-again")));
         crate::linux::net::prepare_bridge(&net).unwrap();
         assert_eq!(listed(), rules);
         // And all of them, when the whole table is gone.
-        run("nft delete table ip openpod");
+        run("nft delete table ip podbag");
         crate::linux::net::prepare_bridge(&net).unwrap();
         assert_eq!(listed(), rules);
         // The same bridge with another subnet (a bridge is named after its subnet, so
@@ -255,7 +253,7 @@ mod kernel_tests {
         let now = listed();
         assert!(
             now.iter()
-                .any(|l| l.contains("ip saddr 10.76.4.0/24 oifname != \"opd-again\" masquerade")),
+                .any(|l| l.contains("ip saddr 10.76.4.0/24 oifname != \"pbg-again\" masquerade")),
             "the rules stayed those of the other subnet: {now:?}"
         );
         assert_eq!(now.iter().filter(|l| l.contains("masquerade")).count(), 1);
@@ -269,14 +267,14 @@ mod kernel_tests {
     #[ignore = "needs root in a new network namespace"]
     fn kernel_accepts_the_nat_chain() {
         let mut s = Socket::open(libc::NETLINK_NETFILTER).unwrap();
-        let (bytes, last) = nft::masquerade_batch(s.next_seq(), [10, 77, 1, 0], 24, "opd-1");
+        let (bytes, last) = nft::masquerade_batch(s.next_seq(), [10, 77, 1, 0], 24, "pbg-1");
         s.request_raw(&bytes, last).unwrap();
         // Repeating keeps one rule.
-        let (bytes, last) = nft::masquerade_batch(s.next_seq() + 10, [10, 77, 1, 0], 24, "opd-1");
+        let (bytes, last) = nft::masquerade_batch(s.next_seq() + 10, [10, 77, 1, 0], 24, "pbg-1");
         s.request_raw(&bytes, last).unwrap();
-        let rules = run("nft list table ip openpod");
+        let rules = run("nft list table ip podbag");
         assert!(
-            rules.contains("ip saddr 10.77.1.0/24 oifname != \"opd-1\" masquerade"),
+            rules.contains("ip saddr 10.77.1.0/24 oifname != \"pbg-1\" masquerade"),
             "{rules}"
         );
         assert_eq!(rules.matches("masquerade").count(), 1, "{rules}");
@@ -288,17 +286,17 @@ mod kernel_tests {
             rules.contains("type filter hook forward priority filter"),
             "{rules}"
         );
-        let inbound = "oifname \"opd-1\" iifname != \"opd-1\" ct state";
+        let inbound = "oifname \"pbg-1\" iifname != \"pbg-1\" ct state";
         assert!(rules.contains(inbound) && rules.contains("drop"), "{rules}");
         assert!(
-            rules.contains("iifname \"opd-1\" ip daddr 169.254.1.3 drop"),
+            rules.contains("iifname \"pbg-1\" ip daddr 169.254.1.3 drop"),
             "{rules}"
         );
-        let (bytes, last) = nft::remove_masquerade_batch(s.next_seq() + 20, "opd-1");
+        let (bytes, last) = nft::remove_masquerade_batch(s.next_seq() + 20, "pbg-1");
         s.request_raw(&bytes, last).unwrap();
-        let left = run("nft list table ip openpod");
+        let left = run("nft list table ip podbag");
         assert!(
-            !left.contains("post-opd-1") && !left.contains("fwd-opd-1"),
+            !left.contains("post-pbg-1") && !left.contains("fwd-pbg-1"),
             "{left}"
         );
     }

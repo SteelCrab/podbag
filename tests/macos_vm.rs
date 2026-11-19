@@ -1,16 +1,16 @@
 #![cfg(target_os = "macos")]
-//! openpod on the Mac: commands run in the Linux VM it starts and stops itself. Needs the
+//! podbag on the Mac: commands run in the Linux VM it starts and stops itself. Needs the
 //! guest (`dev/vm.sh run dev/macos/build-guest.sh`) and runs only with
-//! OPENPOD_TEST_MACOS_VM=1 (it boots a VM). Each test has a home of its own, so its own VM.
+//! PODBAG_TEST_MACOS_VM=1 (it boots a VM). Each test has a home of its own, so its own VM.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 fn enabled() -> bool {
-    let on = std::env::var("OPENPOD_TEST_MACOS_VM").as_deref() == Ok("1");
+    let on = std::env::var("PODBAG_TEST_MACOS_VM").as_deref() == Ok("1");
     if !on {
-        eprintln!("OPENPOD_TEST_MACOS_VM is not 1: skipped");
+        eprintln!("PODBAG_TEST_MACOS_VM is not 1: skipped");
     }
     on
 }
@@ -19,20 +19,20 @@ fn repo() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-/// The guest files (OPENPOD_TEST_GUEST: another build's, to compare with).
+/// The guest files (PODBAG_TEST_GUEST: another build's, to compare with).
 fn guest() -> PathBuf {
-    std::env::var_os("OPENPOD_TEST_GUEST").map_or_else(|| repo().join("target/vm"), PathBuf::from)
+    std::env::var_os("PODBAG_TEST_GUEST").map_or_else(|| repo().join("target/vm"), PathBuf::from)
 }
 
 /// The binary, signed with the virtualization entitlement, once for all tests (codesign
 /// replaces the file: two at once trip over each other).
-fn openpod_bin() -> PathBuf {
+fn podbag_bin() -> PathBuf {
     static SIGNED: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     SIGNED
         .get_or_init(|| {
-            // OPENPOD_TEST_BIN: another build, to compare with (an older one fails).
-            let bin = std::env::var_os("OPENPOD_TEST_BIN").map_or_else(
-                || PathBuf::from(env!("CARGO_BIN_EXE_openpod")),
+            // PODBAG_TEST_BIN: another build, to compare with (an older one fails).
+            let bin = std::env::var_os("PODBAG_TEST_BIN").map_or_else(
+                || PathBuf::from(env!("CARGO_BIN_EXE_podbag")),
                 PathBuf::from,
             );
             let signed = Command::new(repo().join("dev/macos/sign.sh"))
@@ -98,7 +98,7 @@ fn seed_disk() -> PathBuf {
     .clone()
 }
 
-/// A Mac home of its own (`OPENPOD_MAC_HOME`): its own VM, disk and sockets. The VM is
+/// A Mac home of its own (`PODBAG_MAC_HOME`): its own VM, disk and sockets. The VM is
 /// stopped on drop.
 struct Mac {
     home: Home,
@@ -149,13 +149,13 @@ impl Mac {
         for b in name.bytes() {
             hash = (hash ^ u32::from(b)).wrapping_mul(0x0100_0193);
         }
-        let path = PathBuf::from(format!("/tmp/opm-{hash:08x}"));
-        let bin = openpod_bin();
+        let path = PathBuf::from(format!("/tmp/pbm-{hash:08x}"));
+        let bin = podbag_bin();
         if path.exists() {
             // Left by a run that was cut short: its VM would have the same address.
             let _ = Command::new(&bin)
                 .args(["vm", "stop"])
-                .env("OPENPOD_MAC_HOME", &path)
+                .env("PODBAG_MAC_HOME", &path)
                 .output();
             let _ = std::fs::remove_dir_all(&path);
         }
@@ -170,10 +170,10 @@ impl Mac {
     fn cmd(&self, args: &[&str]) -> Command {
         let mut c = Command::new(&self.bin);
         c.args(args)
-            .env("OPENPOD_MAC_HOME", self.home.path())
-            .env("OPENPOD_VM_GUEST", guest())
-            .env("OPENPOD_VM_MEMORY", "1024")
-            .env("OPENPOD_VM_IDLE", self.idle.to_string());
+            .env("PODBAG_MAC_HOME", self.home.path())
+            .env("PODBAG_VM_GUEST", guest())
+            .env("PODBAG_VM_MEMORY", "1024")
+            .env("PODBAG_VM_IDLE", self.idle.to_string());
         c
     }
 
@@ -186,7 +186,7 @@ impl Mac {
         assert_eq!(
             out.status.code(),
             Some(0),
-            "openpod {args:?}: {}{}",
+            "podbag {args:?}: {}{}",
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
@@ -328,8 +328,8 @@ fn an_unsigned_binary_says_how_to_sign_it() {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    let copy = dir.path().join("openpod");
-    std::fs::copy(env!("CARGO_BIN_EXE_openpod"), &copy).unwrap();
+    let copy = dir.path().join("podbag");
+    std::fs::copy(env!("CARGO_BIN_EXE_podbag"), &copy).unwrap();
     // Strip the signature the linker gave it, then sign without the entitlement.
     let _ = Command::new("codesign")
         .args(["--remove-signature"])
@@ -348,8 +348,8 @@ fn an_unsigned_binary_says_how_to_sign_it() {
     let spawn = || {
         Command::new(&copy)
             .args(["run", "--rm", "alpine:3.22", "true"])
-            .env("OPENPOD_MAC_HOME", home.path())
-            .env("OPENPOD_VM_GUEST", guest())
+            .env("PODBAG_MAC_HOME", home.path())
+            .env("PODBAG_VM_GUEST", guest())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -371,13 +371,13 @@ fn an_unsigned_binary_says_how_to_sign_it() {
     // Arguments are checked here, without a VM.
     let bad = Command::new(&copy)
         .args(["ps", "--no-such-option"])
-        .env("OPENPOD_MAC_HOME", home.path())
+        .env("PODBAG_MAC_HOME", home.path())
         .output()
         .unwrap();
     assert_eq!(bad.status.code(), Some(2));
 }
 
-/// Run `openpod args` under a new terminal of `rows`×`cols`; returns the master side.
+/// Run `podbag args` under a new terminal of `rows`×`cols`; returns the master side.
 fn under_terminal(
     mac: &Mac,
     args: &[&str],
@@ -928,7 +928,7 @@ fn commands_while_the_vm_stops_all_succeed() {
         .append(true)
         .open(mac.home.path().join("run/host.log"))
         .unwrap()
-        .write_all(b"openpod: an old error\n")
+        .write_all(b"podbag: an old error\n")
         .unwrap();
     // A container's PID 1 ignores SIGTERM: the VM takes its five seconds to stop.
     mac.ok(&["run", "-d", "alpine:3.22", "sleep", "1000"]);
@@ -956,11 +956,11 @@ fn mac_settings_stay_on_the_mac() {
     }
     let mac = Mac::new(60);
     // Paths and programs of the Mac mean nothing in the VM: the VM's store and its
-    // openpod are used.
+    // podbag are used.
     let ran = mac
         .cmd(&["run", "--rm", "alpine:3.22", "true"])
-        .env("OPENPOD_DATA_DIR", "/tmp/opm-elsewhere")
-        .env("OPENPOD_BIN", "/nonexistent/openpod")
+        .env("PODBAG_DATA_DIR", "/tmp/pbm-elsewhere")
+        .env("PODBAG_BIN", "/nonexistent/podbag")
         .stdin(Stdio::null())
         .output()
         .unwrap();
@@ -996,7 +996,7 @@ fn agent_request(mac: &Mac, argv: &[&str]) {
     use std::io::{Read, Write};
     let mut s = std::os::unix::net::UnixStream::connect(mac.sock()).unwrap();
     s.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
-    let req = openpod::vm::proto::CliRequest {
+    let req = podbag::vm::proto::CliRequest {
         argv: argv.iter().map(|a| a.to_string()).collect(),
         env: Vec::new(),
         cwd: "/".into(),
@@ -1334,7 +1334,7 @@ fn compose_up_and_down() {
         "{}",
         String::from_utf8_lossy(&up.stderr)
     );
-    // In openpod's VM (not some other Docker).
+    // In podbag's VM (not some other Docker).
     assert!(mac.ok(&["ps"]).contains("mac2t"));
     // The client finds the web service by its name, on the project's network; the page
     // comes from the Mac's directory.
@@ -1715,7 +1715,7 @@ fn published_ports_reach_the_macs_localhost() {
         assert!(Instant::now() < deadline, "port 18080 stayed open");
         std::thread::sleep(Duration::from_millis(200));
     }
-    // openpod's own -p too.
+    // podbag's own -p too.
     let mut args = vec![
         "run",
         "-d",
@@ -2067,7 +2067,7 @@ fn a_container_bigger_than_the_vm_is_killed() {
                     b[::4096] = b'x' * len(b[::4096])\n    \
                     chunks.append(b)\n\
                 print('all of it fit')";
-    // From openpod's CLI and from the docker CLI (the agent's Docker API).
+    // From podbag's CLI and from the docker CLI (the agent's Docker API).
     for mut command in [
         mac.cmd(&["run", "--rm", "python:3.13-alpine", "python3", "-c", grow]),
         mac.docker(&["run", "--rm", "python:3.13-alpine", "python3", "-c", grow]),
@@ -2221,7 +2221,7 @@ fn a_big_vm_keeps_no_unused_bounce_buffers() {
     // The first command starts the VM: 8 GiB, the others' size in docs/benchmarks.md.
     let out = mac
         .cmd(&["run", "--rm", "--privileged", "alpine:3.22", "dmesg"])
-        .env("OPENPOD_VM_MEMORY", "8192")
+        .env("PODBAG_VM_MEMORY", "8192")
         .output()
         .unwrap();
     assert!(

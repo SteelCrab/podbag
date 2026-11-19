@@ -1,5 +1,5 @@
 //! The keeper: one process per runtime directory that starts containers for clients and
-//! watches the detached ones, so that a container needs no process of its own (design 6.15).
+//! watches the detached ones, so that a container needs no process of its own.
 
 #[cfg(target_os = "linux")]
 pub mod cgroups;
@@ -28,13 +28,13 @@ pub fn under_keeper() -> bool {
     UNDER_KEEPER.load(Ordering::Relaxed)
 }
 
-/// Whether containers start through the keeper: the `keeper` setting, or `OPENPOD_KEEPER`.
+/// Whether containers start through the keeper: the `keeper` setting, or `PODBAG_KEEPER`.
 /// Unreadable settings count as "no": the shim path reports them.
 pub fn enabled(dirs: &crate::paths::Dirs) -> bool {
     crate::config::load(dirs).is_ok_and(|c| c.keeper)
 }
 
-/// Variables a starter or a finisher needs besides the `OPENPOD_` ones: where the user's
+/// Variables a starter or a finisher needs besides the `PODBAG_` ones: where the user's
 /// directories and programs are, and how to reach the user's service manager.
 #[cfg(target_os = "linux")]
 const KEPT: [&str; 8] = [
@@ -48,13 +48,13 @@ const KEPT: [&str; 8] = [
     "DBUS_SESSION_BUS_ADDRESS",
 ];
 
-/// This process's settings for openpod: what a starter or a finisher runs with. The rest
+/// This process's settings for podbag: what a starter or a finisher runs with. The rest
 /// of the environment (tokens, credentials) stays with its owner.
 #[cfg(target_os = "linux")]
 pub(crate) fn settings() -> Vec<(String, String)> {
     std::env::vars_os()
         .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
-        .filter(|(k, _)| k.starts_with("OPENPOD_") || KEPT.contains(&k.as_str()))
+        .filter(|(k, _)| k.starts_with("PODBAG_") || KEPT.contains(&k.as_str()))
         .collect()
 }
 
@@ -98,7 +98,7 @@ pub(crate) fn private_dir(dir: &std::path::Path) -> bool {
     }
 }
 
-/// What tells one build of openpod from another: the program file. The keeper serves only
+/// What tells one build of podbag from another: the program file. The keeper serves only
 /// clients whose helper program is the file it runs from itself: after an upgrade, new
 /// containers must not be started by the old program's code.
 #[cfg(target_os = "linux")]
@@ -238,7 +238,7 @@ mod tests {
         assert!(s.iter().any(|(k, _)| k == "PATH"));
         assert!(
             s.iter()
-                .all(|(k, _)| k.starts_with("OPENPOD_") || KEPT.contains(&k.as_str()))
+                .all(|(k, _)| k.starts_with("PODBAG_") || KEPT.contains(&k.as_str()))
         );
     }
 }

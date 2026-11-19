@@ -19,7 +19,7 @@ fn failed(why: impl std::fmt::Display) -> Error {
         ErrorKind::Runtime,
         "cannot give the container to the keeper",
         why.to_string(),
-        "run the command again; `OPENPOD_KEEPER=0` starts containers without the keeper",
+        "run the command again; `PODBAG_KEEPER=0` starts containers without the keeper",
     )
 }
 

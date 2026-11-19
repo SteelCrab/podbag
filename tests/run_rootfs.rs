@@ -84,7 +84,7 @@ fn command_not_found_exits_127_with_a_three_part_message() {
     assert_eq!(out.status.code(), Some(127));
     let err = stderr(&out);
     assert!(
-        err.starts_with("openpod: cannot execute /no/such/program\n"),
+        err.starts_with("podbag: cannot execute /no/such/program\n"),
         "{err}"
     );
     assert!(
@@ -119,13 +119,13 @@ fn a_file_that_cannot_be_executed_exits_126() {
 fn missing_rootfs_exits_125() {
     let sb = Sandbox::new();
     let out = sb
-        .openpod()
+        .podbag()
         .args(["run", "--rootfs", "/does/not/exist", "true"])
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(125));
     assert!(
-        stderr(&out).starts_with("openpod: cannot use root filesystem /does/not/exist\n"),
+        stderr(&out).starts_with("podbag: cannot use root filesystem /does/not/exist\n"),
         "{}",
         stderr(&out)
     );
@@ -136,7 +136,7 @@ fn relative_rootfs_path_works() {
     let rootfs = std::path::PathBuf::from(rootfs());
     let sb = Sandbox::new();
     let out = sb
-        .openpod()
+        .podbag()
         .current_dir(rootfs.parent().unwrap())
         .args([
             "run",
@@ -194,7 +194,7 @@ fn a_glibc_program_in_a_musl_root_is_explained() {
     assert_eq!(out.status.code(), Some(127), "{}", stderr(&out));
     let err = stderr(&out);
     assert!(
-        err.starts_with("openpod: cannot execute /opt/t/app\n"),
+        err.starts_with("podbag: cannot execute /opt/t/app\n"),
         "{err}"
     );
     assert!(err.contains("glibc") && err.contains("ld-linux"), "{err}");
@@ -229,7 +229,7 @@ fn running_a_fifo_fails_without_hanging() {
     let mount = format!("{}:/opt/t", dir.path().display());
     let sb = Sandbox::new();
     let mut child = sb
-        .openpod()
+        .podbag()
         .args([
             "run",
             "--rm",

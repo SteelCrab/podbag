@@ -6,8 +6,8 @@ use common::*;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-fn openpod(sb: &Sandbox, args: &[&str]) -> std::process::Output {
-    sb.openpod().args(args).output().unwrap()
+fn podbag(sb: &Sandbox, args: &[&str]) -> std::process::Output {
+    sb.podbag().args(args).output().unwrap()
 }
 
 fn ok(out: &std::process::Output) -> String {
@@ -22,11 +22,11 @@ fn start(sb: &Sandbox, name: &str, options: &[&str], command: &[&str]) {
     let rootfs = rootfs();
     args.extend_from_slice(&["--rootfs", &rootfs]);
     args.extend_from_slice(command);
-    ok(&openpod(sb, &args));
+    ok(&podbag(sb, &args));
 }
 
 fn inspect(sb: &Sandbox, c: &str) -> serde_json::Value {
-    serde_json::from_str(&ok(&openpod(sb, &["inspect", c]))).unwrap()
+    serde_json::from_str(&ok(&podbag(sb, &["inspect", c]))).unwrap()
 }
 
 /// The cgroup path of a running container (an ended one's state no longer names a cgroup
@@ -72,7 +72,7 @@ fn wait_gone(path: &str, secs: u64) {
 
 /// The container's `ps -a` line.
 fn ps_line(sb: &Sandbox, name: &str) -> String {
-    ok(&openpod(sb, &["ps", "-a"]))
+    ok(&podbag(sb, &["ps", "-a"]))
         .lines()
         .find(|l| l.split_whitespace().last() == Some(name))
         .unwrap_or_default()
@@ -141,7 +141,7 @@ fn memory_limit_kills_with_a_reason() {
         line.contains("Exited (137, out of memory: container limit)"),
         "{line}"
     );
-    ok(&openpod(&sb, &["rm", "hungry"]));
+    ok(&podbag(&sb, &["rm", "hungry"]));
 }
 
 #[test]
@@ -164,7 +164,7 @@ fn cgroup_is_removed_after_exit() {
     // The state names no cgroup that is gone (a later check would remove the next run's,
     // which gets the same path).
     assert!(info["state"]["cgroup"].is_null(), "{info}");
-    ok(&openpod(&sb, &["rm", "brief"]));
+    ok(&podbag(&sb, &["rm", "brief"]));
 }
 
 #[test]
@@ -186,7 +186,7 @@ fn killed_shim_leaves_no_cgroup() {
     );
     wait_exited(&sb, "orphan", 10);
     wait_gone(path, 3);
-    ok(&openpod(&sb, &["rm", "orphan"]));
+    ok(&podbag(&sb, &["rm", "orphan"]));
 }
 
 #[test]
@@ -194,7 +194,7 @@ fn limits_without_systemd_are_an_error() {
     if root_mode() {
         return;
     }
-    let sb = Sandbox::with_env("OPENPOD_SYSTEMD_RUN", "/nonexistent");
+    let sb = Sandbox::with_env("PODBAG_SYSTEMD_RUN", "/nonexistent");
     let out = sb.run_with(&["--memory", "32m"], &["true"]);
     assert_eq!(out.status.code(), Some(125), "{}", stderr(&out));
     assert!(stderr(&out).contains("systemd"), "{}", stderr(&out));
@@ -205,7 +205,7 @@ fn runs_without_systemd_with_a_warning() {
     if root_mode() {
         return;
     }
-    let sb = Sandbox::with_env("OPENPOD_SYSTEMD_RUN", "/nonexistent");
+    let sb = Sandbox::with_env("PODBAG_SYSTEMD_RUN", "/nonexistent");
     let out = sb.run(&["echo", "hi"]);
     assert_eq!(ok(&out), "hi");
     assert!(stderr(&out).contains("warning"), "{}", stderr(&out));
@@ -214,10 +214,10 @@ fn runs_without_systemd_with_a_warning() {
 /// A cgroup parent of its own and a 64 MiB budget, so the small budget does not touch
 /// other tests.
 fn budget_sandbox(tag: &str) -> (Sandbox, String) {
-    let parent = format!("openpod{tag}{}", std::process::id());
-    let mut sb = Sandbox::with_env("OPENPOD_CGROUP_PARENT", &parent);
+    let parent = format!("podbag{tag}{}", std::process::id());
+    let mut sb = Sandbox::with_env("PODBAG_CGROUP_PARENT", &parent);
     sb.env
-        .push(("OPENPOD_MEMORY_BUDGET".to_string(), "64MiB".to_string()));
+        .push(("PODBAG_MEMORY_BUDGET".to_string(), "64MiB".to_string()));
     (sb, parent)
 }
 
@@ -268,7 +268,7 @@ fn budget_is_written_to_the_parent() {
         read("memory.high"),
         format!("{}\n", page_aligned((64u64 << 20) * 9 / 10))
     );
-    ok(&openpod(&sb, &["rm", "-f", "b"]));
+    ok(&podbag(&sb, &["rm", "-f", "b"]));
     remove_parent(&dir, &parent);
 }
 
@@ -309,7 +309,7 @@ fn budget_exceeded_kills_one_container_with_a_reason() {
         ps_line(&sb, name)
     );
     let dir = parent_dir(&a_cgroup, &parent);
-    ok(&openpod(&sb, &["rm", "-f", "a", "b"]));
+    ok(&podbag(&sb, &["rm", "-f", "a", "b"]));
     remove_parent(&dir, &parent);
 }
 
@@ -321,7 +321,7 @@ fn exec_runs_in_the_container_cgroup() {
     let exec = |cmd: &[&str]| {
         let mut args = vec!["exec", "x"];
         args.extend_from_slice(cmd);
-        ok(&openpod(&sb, &args))
+        ok(&podbag(&sb, &args))
     };
     assert_eq!(exec(&["cat", "/proc/self/cgroup"]), "0::/");
     // sleep, the shell, and cat (the trailing `:` keeps the shell from exec-ing cat).
@@ -329,7 +329,7 @@ fn exec_runs_in_the_container_cgroup() {
         .parse()
         .unwrap();
     assert!(current >= 3, "pids.current = {current}");
-    ok(&openpod(&sb, &["rm", "-f", "x"]));
+    ok(&podbag(&sb, &["rm", "-f", "x"]));
 }
 
 #[test]
@@ -338,7 +338,7 @@ fn exec_child_does_not_leave_the_cgroup_behind() {
     start(&sb, "y", &["--memory", "64m"], &["sleep", "2"]);
     let path = running_cgroup(&sb, "y", 10);
     let mut exec = sb
-        .openpod()
+        .podbag()
         .args(["exec", "y", "sleep", "30"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -351,11 +351,11 @@ fn exec_child_does_not_leave_the_cgroup_behind() {
         assert!(Instant::now() < deadline, "exec outlived its container");
         std::thread::sleep(Duration::from_millis(50));
     }
-    ok(&openpod(&sb, &["rm", "y"]));
+    ok(&podbag(&sb, &["rm", "y"]));
 }
 
 // A cgroup that was still busy when the shim died is removed by a later command
-// (design 6.12: the next state check retries the cleanup).
+// (The next state check retries the cleanup.)
 #[test]
 fn busy_cgroup_is_removed_by_a_later_command() {
     if !root_mode() {
@@ -389,7 +389,7 @@ fn busy_cgroup_is_removed_by_a_later_command() {
     assert!(Path::new(&path).exists(), "the group should still be busy");
     holder.kill().unwrap();
     holder.wait().unwrap();
-    ok(&openpod(&sb, &["ps", "-a"]));
+    ok(&podbag(&sb, &["ps", "-a"]));
     assert!(!Path::new(&path).exists(), "{path} was left behind");
-    ok(&openpod(&sb, &["rm", "busy"]));
+    ok(&podbag(&sb, &["rm", "busy"]));
 }

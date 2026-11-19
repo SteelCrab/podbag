@@ -9,7 +9,7 @@ use std::net::Ipv4Addr;
 
 /// The network a container gets without `--network`.
 pub const DEFAULT: &str = "bridge";
-const DEFAULT_BRIDGE: &str = "openpod0";
+const DEFAULT_BRIDGE: &str = "podbag0";
 const DEFAULT_SUBNET: (Ipv4Addr, u8) = (Ipv4Addr::new(10, 77, 0, 0), 16);
 /// User networks get `10.78.<n>.0/24`: outside the default network, so routes never overlap.
 const AUTO_BASE: [u8; 2] = [10, 78];
@@ -74,7 +74,7 @@ pub fn parse_network_arg(s: &str) -> Result<NetworkMode> {
         "none" => Ok(NetworkMode::None),
         _ if s.contains(':') => Err(invalid(
             format!("network mode {s:?} is not supported"),
-            "openpod connects to bridge, host, none or a network name",
+            "podbag connects to bridge, host, none or a network name",
             "use one of those",
         )),
         name => {
@@ -306,15 +306,15 @@ fn parse_routes(text: &str) -> Vec<(Ipv4Addr, u8)> {
         .skip(1)
         .filter_map(|line| {
             let f: Vec<&str> = line.split_whitespace().collect();
-            // openpod's own bridges: their subnets are networks, checked as such.
+            // podbag's own bridges: their subnets are networks, checked as such.
             let iface = *f.first()?;
-            if iface == DEFAULT_BRIDGE || iface.starts_with("opd-") {
+            if iface == DEFAULT_BRIDGE || iface.starts_with("pbg-") {
                 return None;
             }
             let dest = u32::from_str_radix(f.get(1)?, 16).ok()?;
             let mask = u32::from_str_radix(f.get(7)?, 16).ok()?;
             // The address bytes, in network order, printed as a little-endian number
-            // (both CPUs openpod builds for are little-endian).
+            // (both CPUs podbag builds for are little-endian).
             (mask != 0).then(|| (Ipv4Addr::from(dest.to_le_bytes()), mask.count_ones() as u8))
         })
         .collect()
@@ -418,7 +418,7 @@ fn store_error(path: &std::path::Path, e: std::io::Error) -> Error {
     Error::io(
         format!("cannot use {}", path.display()),
         &e,
-        "check the permissions of the openpod data directory",
+        "check the permissions of the podbag data directory",
     )
 }
 
@@ -447,7 +447,7 @@ fn read_record(dirs: &Dirs, name: &str) -> Result<Option<Record>> {
                 ErrorKind::Internal,
                 format!("cannot read network {name}"),
                 format!("{} is damaged: {e}", path.display()),
-                "remove the network with `openpod network rm`",
+                "remove the network with `podbag network rm`",
             )
         }),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -471,7 +471,7 @@ fn not_found(name: &str) -> Error {
         ErrorKind::NotFound,
         format!("no such network: {name}"),
         "it does not exist",
-        "run `openpod network ls`, or create it with `openpod network create`",
+        "run `podbag network ls`, or create it with `podbag network create`",
     )
 }
 
@@ -483,7 +483,7 @@ fn default_record(dirs: &Dirs, host_routes: &[(Ipv4Addr, u8)]) -> Result<Record>
             ErrorKind::InvalidInput,
             "cannot set up the default network",
             format!("its subnet {subnet} overlaps the host route {a}/{p}"),
-            "set default_subnet in config.toml (or OPENPOD_DEFAULT_SUBNET) to a free subnet",
+            "set default_subnet in config.toml (or PODBAG_DEFAULT_SUBNET) to a free subnet",
         ));
     }
     Ok(Record {
@@ -492,12 +492,12 @@ fn default_record(dirs: &Dirs, host_routes: &[(Ipv4Addr, u8)]) -> Result<Record>
             id: sha_id(DEFAULT),
             subnet: format!("{addr}/{prefix}"),
             gateway: Ipv4Addr::from(u32::from(addr) + 1).to_string(),
-            // openpod0 for the usual subnet; another subnet gets a bridge of its own, so
+            // podbag0 for the usual subnet; another subnet gets a bridge of its own, so
             // data directories with different default subnets can share a root host.
             bridge: if (addr, prefix) == DEFAULT_SUBNET {
                 DEFAULT_BRIDGE.to_string()
             } else {
-                format!("opd-{}", &sha_id(&subnet)[..8])
+                format!("pbg-{}", &sha_id(&subnet)[..8])
             },
             created: crate::state::now(),
             labels: Labels::new(),
@@ -586,7 +586,7 @@ pub(crate) fn create_labeled_in(
             ErrorKind::Conflict,
             format!("cannot create network {name}"),
             "a network with that name exists",
-            "choose another name, or remove it with `openpod network rm`",
+            "choose another name, or remove it with `podbag network rm`",
         ));
     }
     // The default network counts even before its first use.
@@ -629,7 +629,7 @@ pub(crate) fn create_labeled_in(
         name: name.to_string(),
         // Named after the subnet: rootless, a removed network's bridge stays in the session,
         // and a new network on the same subnet must reuse it, not add a second route.
-        bridge: format!("opd-{}", &sha_id(&format!("{}/{}", cidr.0, cidr.1))[..8]),
+        bridge: format!("pbg-{}", &sha_id(&format!("{}/{}", cidr.0, cidr.1))[..8]),
         id,
         subnet: format!("{}/{}", cidr.0, cidr.1),
         gateway: Ipv4Addr::from(u32::from(cidr.0) + 1).to_string(),
@@ -685,7 +685,7 @@ pub(crate) fn remove_in(dirs: &Dirs, name: &str) -> Result<Network> {
             ErrorKind::Conflict,
             format!("cannot remove network {name}"),
             format!("it is used by container {}", users.join(", ")),
-            "remove those containers first (`openpod rm`)",
+            "remove those containers first (`podbag rm`)",
         ));
     }
     let path = record_path(dirs, name);
@@ -1198,7 +1198,7 @@ mod tests {
         let b = ensure_default(&dirs).unwrap();
         assert_eq!(a, b);
         assert_eq!(a.name, "bridge");
-        assert_eq!(a.bridge, "openpod0");
+        assert_eq!(a.bridge, "podbag0");
         assert_eq!(a.subnet, "10.77.0.0/16");
         assert_eq!(a.gateway, "10.77.0.1");
     }
@@ -1212,7 +1212,7 @@ mod tests {
         let app = create_in(&dirs, "app", None, &routes).unwrap();
         assert_eq!(app.subnet, "10.78.1.0/24", "10.78.0.0/24 is a host route");
         assert_eq!(app.gateway, "10.78.1.1");
-        assert!(app.bridge.starts_with("opd-") && app.bridge.len() <= 15);
+        assert!(app.bridge.starts_with("pbg-") && app.bridge.len() <= 15);
         assert_eq!(app.id.len(), 12);
         let db = create_in(&dirs, "db", None, &routes).unwrap();
         assert_eq!(db.subnet, "10.78.2.0/24");
@@ -1266,8 +1266,8 @@ mod tests {
     #[test]
     fn own_bridges_are_not_host_routes() {
         let text = "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n\
-                    openpod0\t00004D0A\t00000000\t0001\t0\t0\t0\t0000FFFF\t0\t0\t0\n\
-                    opd-1a2b3c4d\t00004E0A\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0\n\
+                    podbag0\t00004D0A\t00000000\t0001\t0\t0\t0\t0000FFFF\t0\t0\t0\n\
+                    pbg-1a2b3c4d\t00004E0A\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0\n\
                     eth0\t0005A8C0\t00000000\t0001\t0\t0\t200\t00FFFFFF\t0\t0\t0\n";
         assert_eq!(parse_routes(text), [(Ipv4Addr::new(192, 168, 5, 0), 24)]);
     }

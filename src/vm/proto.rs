@@ -6,22 +6,22 @@ use std::io::{Read, Write};
 
 /// The CLI executor.
 pub const CLI_PORT: u32 = 2;
-/// The Docker Engine API (`openpod system service`).
+/// The Docker Engine API (`podbag system service`).
 pub const API_PORT: u32 = 2375;
 /// The forwarder of published ports: a first line `TCP <port>`, answered `OK` once the
 /// VM's `127.0.0.1:<port>` is connected (or `ERR …`), then bytes both ways.
 pub const FORWARD_PORT: u32 = 3;
 
 /// The argument the kernel passes the VM's /init (after `--` on its command line): only
-/// with it is openpod the VM's init.
+/// with it is podbag the VM's init.
 pub const INIT_ARG: &str = "__vm-init";
 
-/// A command to run in the VM: `openpod <argv…>`.
+/// A command to run in the VM: `podbag <argv…>`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CliRequest {
-    /// The arguments after `openpod`.
+    /// The arguments after `podbag`.
     pub argv: Vec<String>,
-    /// Environment the command sees (only `OPENPOD_*` variables are sent).
+    /// Environment the command sees (only `PODBAG_*` variables are sent).
     pub env: Vec<(String, String)>,
     /// The working directory: a Mac path, the same in the VM under /Users.
     pub cwd: String,
@@ -173,7 +173,7 @@ mod tests {
     fn requests_round_trip_as_one_line() {
         let req = CliRequest {
             argv: vec!["run".into(), "--rm".into(), "alpine".into()],
-            env: vec![("OPENPOD_KEEPER".into(), "0".into())],
+            env: vec![("PODBAG_KEEPER".into(), "0".into())],
             cwd: "/Users/someone/project".into(),
             tty: true,
             rows: 24,

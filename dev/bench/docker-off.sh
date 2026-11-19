@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Stop Docker and undo what it did to the host's network: its firewall (iptables FORWARD
-# policy DROP) and its bridge block openpod's root bridge networks. Dev VM only.
+# policy DROP) and its bridge block podbag's root bridge networks. Dev VM only.
 set -uo pipefail
 sudo systemctl stop docker.service docker.socket containerd.service >/dev/null 2>&1
 sudo iptables -P FORWARD ACCEPT 2>/dev/null

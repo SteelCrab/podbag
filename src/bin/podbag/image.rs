@@ -1,12 +1,12 @@
 //! `pull`, `images`, `load`, `save`, `rmi` and `system`.
 
 use crate::args::SystemCmd;
-use openpod::image::human_size;
-use openpod::{Error, ErrorKind, Image};
+use podbag::image::human_size;
+use podbag::{Error, ErrorKind, Image};
 
 /// Print an error the CLI way and return its exit code.
 pub fn report(e: &Error) -> i32 {
-    eprintln!("openpod: {e}");
+    eprintln!("podbag: {e}");
     e.exit_code()
 }
 
@@ -129,7 +129,7 @@ pub fn rmi(names: &[String]) -> i32 {
 
 pub fn system(cmd: SystemCmd) -> i32 {
     match cmd {
-        SystemCmd::Df => match openpod::disk_usage() {
+        SystemCmd::Df => match podbag::disk_usage() {
             Ok(u) => {
                 let rows = [
                     ["Images".to_string(), u.images.to_string(), "-".to_string()],
@@ -154,7 +154,7 @@ pub fn system(cmd: SystemCmd) -> i32 {
             ErrorKind::Unsupported,
             "cannot serve the Docker API on this operating system",
             "the service needs Unix sockets and Linux containers",
-            "run openpod on Linux",
+            "run podbag on Linux",
         )),
         SystemCmd::Prune { force: false } => report(&Error::new(
             ErrorKind::InvalidInput,
@@ -162,7 +162,7 @@ pub fn system(cmd: SystemCmd) -> i32 {
             "prune deletes every image that no container uses",
             "add -f to confirm",
         )),
-        SystemCmd::Prune { force: true } => match openpod::prune() {
+        SystemCmd::Prune { force: true } => match podbag::prune() {
             Ok(r) => {
                 println!(
                     "Deleted {} images, reclaimed {}",

@@ -90,7 +90,7 @@ fn docker_rmi_of_an_image_in_use_is_a_conflict() {
     ok(&docker_out(&sb, &service, &["pull", &image]));
     // A container made by the CLI uses it.
     ok(&sb
-        .openpod()
+        .podbag()
         .args(["create", "--name", "user", &image])
         .output()
         .unwrap());

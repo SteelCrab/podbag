@@ -1,4 +1,4 @@
-//! `openpod __archive <id> '<json>'`: a container's files for `docker cp`.
+//! `podbag __archive <id> '<json>'`: a container's files for `docker cp`.
 //!
 //! In a running container the helper joins its user namespace (rootless) and mount
 //! namespace and makes the container's root its own. In one that does not run, it holds
@@ -51,7 +51,7 @@ pub fn archive_main(id: &str, json: &str) -> i32 {
         Ok(()) => 0,
         // After `done` the report goes nowhere: the exit code and the log tell.
         Err(e) => {
-            eprintln!("openpod: {e}");
+            eprintln!("podbag: {e}");
             status.fail(e)
         }
     }

@@ -369,21 +369,21 @@ mod tests {
         let none = Limits::default();
         let run = Some(PathBuf::from("/usr/bin/systemd-run"));
         assert_eq!(
-            rootless_placement(run.clone(), true, true, &some, "openpod").unwrap(),
+            rootless_placement(run.clone(), true, true, &some, "podbag").unwrap(),
             (
                 Placement::Scope {
-                    slice: "openpod.slice".into()
+                    slice: "podbag.slice".into()
                 },
                 None
             )
         );
-        let (p, warning) = rootless_placement(None, true, true, &none, "openpod").unwrap();
+        let (p, warning) = rootless_placement(None, true, true, &none, "podbag").unwrap();
         assert_eq!(p, Placement::None);
         assert!(warning.unwrap().contains("systemd"));
-        let e = rootless_placement(None, true, true, &some, "openpod").unwrap_err();
+        let e = rootless_placement(None, true, true, &some, "podbag").unwrap_err();
         assert_eq!(e.kind, ErrorKind::MissingRequirement);
-        assert!(rootless_placement(run.clone(), false, true, &some, "openpod").is_err());
-        assert!(rootless_placement(run, true, false, &some, "openpod").is_err());
+        assert!(rootless_placement(run.clone(), false, true, &some, "podbag").is_err());
+        assert!(rootless_placement(run, true, false, &some, "podbag").is_err());
     }
 
     #[test]

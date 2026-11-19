@@ -30,7 +30,7 @@ pub enum Request {
         /// `attached` or `detached`.
         mode: String,
         keep_on_failure: bool,
-        /// The caller's settings for openpod (`keeper::settings`): the starter runs with
+        /// The caller's settings for podbag (`keeper::settings`): the starter runs with
         /// them, like a shim the caller would have started itself.
         env: Vec<(String, String)>,
         /// The build of the caller's helper program (`keeper::build_of`). A keeper of

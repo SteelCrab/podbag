@@ -1,4 +1,4 @@
-//! How images are mounted (design 4.5.1 and 6.3.3): composefs when openpod runs as root
+//! How images are mounted: composefs when podbag runs as root
 //! and the kernel passes the probe, hard-link trees otherwise.
 
 use crate::config::ImageMount;
@@ -9,7 +9,7 @@ use std::path::Path;
 const CACHE: &str = "mount-method.json";
 
 /// A failed probe is tried again after this many seconds: the failure may have been
-/// passing (a busy loop device, a full disk) or a bug a newer openpod fixed.
+/// passing (a busy loop device, a full disk) or a bug a newer podbag fixed.
 const RETRY_AFTER: u64 = 86400;
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]

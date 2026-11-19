@@ -1,7 +1,7 @@
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "openpod", version, about)]
+#[command(name = "podbag", version, about)]
 pub struct Cli {
     #[command(subcommand)]
     pub cmd: Cmd,
@@ -38,9 +38,9 @@ pub enum Cmd {
     Images,
     /// Find programs in an image that cannot run (wrong C library or CPU)
     CheckImage { image: String },
-    /// Check that this system can run openpod containers
+    /// Check that this system can run podbag containers
     Check {
-        /// Print the AppArmor profile that lets openpod use user namespaces
+        /// Print the AppArmor profile that lets podbag use user namespaces
         #[arg(long)]
         apparmor_profile: bool,
     },
@@ -135,7 +135,7 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: SystemCmd,
     },
-    /// The keeper of a runtime directory (design 6.15)
+    /// The keeper of a runtime directory
     #[command(name = "__keeper", hide = true)]
     Keeper { runtime: String },
     #[command(name = "__shim", hide = true)]
@@ -238,7 +238,7 @@ pub enum SystemCmd {
     /// Point the CLI at it with DOCKER_HOST=unix://<socket>. Containers do not depend on
     /// the service; it ends after --timeout seconds without a connection.
     Service {
-        /// The socket (default: docker.sock in the openpod runtime directory)
+        /// The socket (default: docker.sock in the podbag runtime directory)
         #[arg(long)]
         socket: Option<std::path::PathBuf>,
         /// End after this many seconds without a connection (0: never)
@@ -382,7 +382,7 @@ pub struct RunArgs {
 /// A signal by name (`TERM`, `SIGTERM`) or number.
 #[cfg(unix)]
 pub fn parse_signal(s: &str) -> Option<i32> {
-    openpod::signals::parse(s)
+    podbag::signals::parse(s)
 }
 
 /// Parse a `-e` value like `docker run`: `NAME=VALUE`, or `NAME` to copy the caller's value.

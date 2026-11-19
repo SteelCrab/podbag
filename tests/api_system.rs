@@ -88,7 +88,7 @@ fn unknown_endpoints_get_404_and_unsupported_get_501() {
     let out = docker_out(&sb, &service, &["top", "abc"]);
     assert_ne!(out.status.code(), Some(0));
     assert!(
-        stderr(&out).contains("not supported by openpod"),
+        stderr(&out).contains("not supported by podbag"),
         "{}",
         stderr(&out)
     );

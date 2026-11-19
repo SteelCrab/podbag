@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# One measurement session in the openpod-dev VM: every tool with run.sh, openpod without
-# the keeper and with hard links (for the notes), then scale.sh for openpod, openpod as
+# One measurement session in the podbag-dev VM: every tool with run.sh, podbag without
+# the keeper and with hard links (for the notes), then scale.sh for podbag, podbag as
 # root and Kiri: one round that is not counted, then three (a figure is the median of its
 # rounds). Nothing else may run in the VM meanwhile (no build, no tests).
 #
@@ -38,26 +38,26 @@ run() { # $1 what, the rest: the command; its output goes to <dir>/<what>.out an
 }
 
 if [ "${BENCH_ONLY:-}" != scale ]; then
-  for tool in openpod openpod-root kiri podman docker; do
+  for tool in podbag podbag-root kiri podman docker; do
     run "$tool" "$out" "$here/run.sh" "$tool" "$out"
   done
-  for tool in openpod openpod-root; do
-    run "$tool" "$out-nokeeper" env OPENPOD_KEEPER=0 "$here/run.sh" "$tool" "$out-nokeeper"
+  for tool in podbag podbag-root; do
+    run "$tool" "$out-nokeeper" env PODBAG_KEEPER=0 "$here/run.sh" "$tool" "$out-nokeeper"
   done
-  run openpod-root "$out-hardlink" env OPENPOD_IMAGE_MOUNT=hardlink "$here/run.sh" openpod-root "$out-hardlink"
+  run podbag-root "$out-hardlink" env PODBAG_IMAGE_MOUNT=hardlink "$here/run.sh" podbag-root "$out-hardlink"
 fi
 # One run of 300 containers differs from the next (a `ps` on a cold cache most): every
 # tool in each round, and of each figure the median.
 #
 # The first runs after a boot hold much more than later ones, for whichever tool runs
-# first (as the first tool after a restart of the VM: 269 MiB for rootless openpod, 292 MiB
+# first (as the first tool after a restart of the VM: 269 MiB for rootless podbag, 292 MiB
 # for Kiri; after some runs 172 and 187 MiB): the kernel keeps slab memory that those runs
 # make it allocate, and later runs use it again. So a round that is not counted comes
 # first, and every tool is measured in the same state.
 rounds="${BENCH_SCALE_ROUNDS:-3}"
 rm -f "$out"/scale-*.env "$out"/scale-*.round* "$out"/scale-*.warmup
 for round in 0 $(seq "$rounds"); do
-  for tool in openpod openpod-root kiri; do
+  for tool in podbag podbag-root kiri; do
     run "scale-$tool" "$out" "$here/scale.sh" "$tool" "$out"
     [ -f "$out/scale-$tool.env" ] || continue
     if [ "$round" -eq 0 ]; then
@@ -67,7 +67,7 @@ for round in 0 $(seq "$rounds"); do
     fi
   done
 done
-for tool in openpod openpod-root kiri; do
+for tool in podbag podbag-root kiri; do
   ls "$out"/scale-"$tool".round* >/dev/null 2>&1 || continue
   awk -F= '
     { if (!($1 in n)) order[++keys] = $1; v[$1, ++n[$1]] = $2 }

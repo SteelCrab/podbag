@@ -1,5 +1,5 @@
 #![cfg(target_os = "linux")]
-//! The keeper (design 6.15): one process per runtime directory starts containers for the
+//! The keeper: one process per runtime directory starts containers for the
 //! CLI and watches the detached ones.
 
 mod common;
@@ -11,9 +11,9 @@ use std::time::{Duration, Instant};
 /// A sandbox whose containers go through the keeper, which leaves `linger_ms` after its
 /// last container.
 fn kept(linger_ms: u32) -> Sandbox {
-    let mut sb = Sandbox::with_env("OPENPOD_KEEPER", "1");
+    let mut sb = Sandbox::with_env("PODBAG_KEEPER", "1");
     sb.env
-        .push(("OPENPOD_KEEPER_LINGER_MS".into(), linger_ms.to_string()));
+        .push(("PODBAG_KEEPER_LINGER_MS".into(), linger_ms.to_string()));
     sb
 }
 
@@ -33,8 +33,8 @@ fn wait_for(limit: Duration, mut ok: impl FnMut() -> bool) -> bool {
     false
 }
 
-/// (keepers, shims) of this sandbox: processes named `openpod` that run `__keeper` for its
-/// runtime directory, and `openpod-shim` or `openpod __shim` processes of its containers.
+/// (keepers, shims) of this sandbox: processes named `podbag` that run `__keeper` for its
+/// runtime directory, and `podbag-shim` or `podbag __shim` processes of its containers.
 fn processes(sb: &Sandbox) -> (usize, usize) {
     let out = Command::new("ps")
         .args(["-eo", "comm=,args="])
@@ -45,11 +45,11 @@ fn processes(sb: &Sandbox) -> (usize, usize) {
     let mine: Vec<&str> = text.lines().filter(|l| l.contains(&runtime)).collect();
     let keepers = mine
         .iter()
-        .filter(|l| l.split_whitespace().next() == Some("openpod") && l.contains("__keeper"))
+        .filter(|l| l.split_whitespace().next() == Some("podbag") && l.contains("__keeper"))
         .count();
     let shims = mine
         .iter()
-        .filter(|l| l.split_whitespace().next() == Some("openpod-shim"))
+        .filter(|l| l.split_whitespace().next() == Some("podbag-shim"))
         .count();
     (keepers, shims)
 }
@@ -63,7 +63,7 @@ fn a_foreground_run_goes_through_the_keeper() {
     assert_eq!(stderr(&out).trim(), "err");
     // While a foreground container runs: one keeper, and its starter serves as the shim.
     let mut long = sb
-        .openpod()
+        .podbag()
         .args(["run", "--rm", "--rootfs", &rootfs(), "sleep", "300"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -76,11 +76,11 @@ fn a_foreground_run_goes_through_the_keeper() {
         processes(&sb)
     );
     // The starter shows before the container counts as running.
-    let running = || stdout(&sb.openpod().args(["ps", "-q"]).output().unwrap());
+    let running = || stdout(&sb.podbag().args(["ps", "-q"]).output().unwrap());
     assert!(wait_for(Duration::from_secs(10), || !running().is_empty()));
     // It removes itself when it ends (--rm): end it.
     ok(&sb
-        .openpod()
+        .podbag()
         .args(["kill", running().trim()])
         .output()
         .unwrap());
@@ -91,7 +91,7 @@ fn a_foreground_run_goes_through_the_keeper() {
 fn stdin_reaches_a_kept_foreground_container() {
     let sb = kept(300);
     let mut child = sb
-        .openpod()
+        .podbag()
         .args(["run", "-i", "--rm", "--rootfs", &rootfs(), "cat"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -106,23 +106,23 @@ fn stdin_reaches_a_kept_foreground_container() {
 #[test]
 fn a_terminal_works_through_the_keeper() {
     let sb = kept(300);
-    let openpod = if root_mode() {
+    let podbag = if root_mode() {
         format!(
-            "sudo -n env OPENPOD_KEEPER=1 OPENPOD_KEEPER_LINGER_MS=300 OPENPOD_DATA_DIR={} OPENPOD_RUNTIME_DIR={} {}",
+            "sudo -n env PODBAG_KEEPER=1 PODBAG_KEEPER_LINGER_MS=300 PODBAG_DATA_DIR={} PODBAG_RUNTIME_DIR={} {}",
             sb.data().display(),
             sb.runtime().display(),
             BIN
         )
     } else {
         format!(
-            "env OPENPOD_KEEPER=1 OPENPOD_KEEPER_LINGER_MS=300 OPENPOD_DATA_DIR={} OPENPOD_RUNTIME_DIR={} {}",
+            "env PODBAG_KEEPER=1 PODBAG_KEEPER_LINGER_MS=300 PODBAG_DATA_DIR={} PODBAG_RUNTIME_DIR={} {}",
             sb.data().display(),
             sb.runtime().display(),
             BIN
         )
     };
     let line = format!(
-        "{openpod} run -it --rm --rootfs {} sh -c 'stty size; echo tty-ok'",
+        "{podbag} run -it --rm --rootfs {} sh -c 'stty size; echo tty-ok'",
         rootfs()
     );
     let mut child = Command::new("script")
@@ -152,7 +152,7 @@ fn signals_reach_a_kept_foreground_container() {
     // A shell with a handler: as PID 1 it gets only the signals it handles.
     let script = "trap 'exit 0' TERM; echo ready; while true; do sleep 0.1; done";
     let mut child = sb
-        .openpod()
+        .podbag()
         .args(["run", "--rm", "--rootfs", &rootfs(), "sh", "-c", script])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -163,7 +163,7 @@ fn signals_reach_a_kept_foreground_container() {
     let mut ready = [0u8; 6];
     out.read_exact(&mut ready).unwrap();
     assert_eq!(&ready, b"ready\n");
-    // In root mode the child is sudo, which passes the signal on to openpod.
+    // In root mode the child is sudo, which passes the signal on to podbag.
     // SAFETY: a signal to our own child.
     unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
     let status = child.wait().unwrap();
@@ -230,7 +230,7 @@ fn a_start_that_meets_a_leaving_keeper_still_runs() {
 
 #[test]
 fn the_keeper_is_used_when_nothing_says_otherwise() {
-    if std::env::var("OPENPOD_TEST_KEEPER").as_deref() == Ok("0") {
+    if std::env::var("PODBAG_TEST_KEEPER").as_deref() == Ok("0") {
         return; // this run of the suite turns the keeper off
     }
     let sb = Sandbox::new();
@@ -253,9 +253,9 @@ fn the_keeper_is_used_when_nothing_says_otherwise() {
 
 #[test]
 fn without_the_switch_there_is_no_keeper() {
-    let sb = Sandbox::with_env("OPENPOD_KEEPER", "0");
+    let sb = Sandbox::with_env("PODBAG_KEEPER", "0");
     let mut long = sb
-        .openpod()
+        .podbag()
         .args(["run", "--rm", "--rootfs", &rootfs(), "sleep", "300"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -263,19 +263,19 @@ fn without_the_switch_there_is_no_keeper() {
         .spawn()
         .unwrap();
     assert!(wait_for(Duration::from_secs(10), || {
-        !stdout(&sb.openpod().args(["ps", "-q"]).output().unwrap()).is_empty()
+        !stdout(&sb.podbag().args(["ps", "-q"]).output().unwrap()).is_empty()
     }));
     assert_eq!(processes(&sb).0, 0, "a keeper appeared");
-    let ids = ok(&sb.openpod().args(["ps", "-q"]).output().unwrap());
-    ok(&sb.openpod().args(["kill", ids.trim()]).output().unwrap());
+    let ids = ok(&sb.podbag().args(["ps", "-q"]).output().unwrap());
+    ok(&sb.podbag().args(["kill", ids.trim()]).output().unwrap());
     let _ = long.wait();
 }
 
 // ---- Detached containers: watched by the keeper, no process of their own (Task 2) ----
 
-/// `openpod inspect <name>` as JSON.
+/// `podbag inspect <name>` as JSON.
 fn inspect(sb: &Sandbox, name: &str) -> serde_json::Value {
-    let out = sb.openpod().args(["inspect", name]).output().unwrap();
+    let out = sb.podbag().args(["inspect", name]).output().unwrap();
     serde_json::from_slice(&out.stdout).unwrap_or(serde_json::Value::Null)
 }
 
@@ -295,7 +295,7 @@ fn exited_with(sb: &Sandbox, name: &str, limit: Duration) -> Option<i64> {
 }
 
 fn op(sb: &Sandbox, args: &[&str]) -> String {
-    ok(&sb.openpod().args(args).output().unwrap())
+    ok(&sb.podbag().args(args).output().unwrap())
 }
 
 fn detached(sb: &Sandbox, name: &str, script: &str) {
@@ -316,7 +316,7 @@ fn detached(sb: &Sandbox, name: &str, script: &str) {
 }
 
 fn logs(sb: &Sandbox, name: &str) -> (String, String) {
-    let out = sb.openpod().args(["logs", name]).output().unwrap();
+    let out = sb.podbag().args(["logs", name]).output().unwrap();
     (stdout(&out), stderr(&out))
 }
 
@@ -351,7 +351,7 @@ fn logs_stop_kill_work_on_kept_containers() {
         .0
         .contains("got-usr1")));
     std::thread::scope(|scope| {
-        let follower = scope.spawn(|| sb.openpod().args(["logs", "-f", "lg"]).output().unwrap());
+        let follower = scope.spawn(|| sb.podbag().args(["logs", "-f", "lg"]).output().unwrap());
         std::thread::sleep(Duration::from_millis(300));
         op(&sb, &["stop", "-t", "5", "lg"]);
         let followed = follower.join().unwrap();
@@ -515,7 +515,7 @@ fn an_attached_container_does_not_keep_others_locks() {
     // A foreground container starts after b was adopted: its starter is a fork of a keeper
     // that holds b's lock.
     let mut front = sb
-        .openpod()
+        .podbag()
         .args([
             "run",
             "--rm",
@@ -568,7 +568,7 @@ fn keeper_pid(sb: &Sandbox) -> Option<i32> {
     String::from_utf8_lossy(&out.stdout).lines().find_map(|l| {
         let mut f = l.split_whitespace();
         let pid = f.next()?.parse().ok()?;
-        (f.next()? == "openpod" && l.contains("__keeper") && l.contains(&runtime)).then_some(pid)
+        (f.next()? == "podbag" && l.contains("__keeper") && l.contains(&runtime)).then_some(pid)
     })
 }
 
@@ -655,7 +655,7 @@ fn a_quick_restart_gets_its_network_again() {
     detached(&sb, "n", "sleep 300");
     for round in 0..10 {
         op(&sb, &["stop", "-t", "1", "n"]);
-        let out = sb.openpod().args(["start", "n"]).output().unwrap();
+        let out = sb.podbag().args(["start", "n"]).output().unwrap();
         assert_eq!(
             out.status.code(),
             Some(0),
@@ -746,7 +746,7 @@ fn no_scope_per_container() {
     let scope = parent.parent().unwrap();
     assert!(scope.extension().is_some_and(|e| e == "scope"), "{scope:?}");
     assert!(
-        !one.to_string_lossy().contains("openpod-"),
+        !one.to_string_lossy().contains("podbag-"),
         "a scope of its own: {one:?}"
     );
     op(&sb, &["rm", "-f", "one", "two"]);
@@ -763,13 +763,11 @@ fn the_budget_stays_on_the_slice() {
         return; // as root the budget sits on the parent group, as before (tests/limits.rs)
     }
     // A parent of its own: the budget must not reach other tests' containers.
-    let parent = format!("openpodkeptbudget{}", std::process::id());
+    let parent = format!("podbagkeptbudget{}", std::process::id());
     let slice_name = format!("{parent}.slice");
     let mut sb = kept(300);
-    sb.env
-        .push(("OPENPOD_CGROUP_PARENT".into(), parent.clone()));
-    sb.env
-        .push(("OPENPOD_MEMORY_BUDGET".into(), "64MiB".into()));
+    sb.env.push(("PODBAG_CGROUP_PARENT".into(), parent.clone()));
+    sb.env.push(("PODBAG_MEMORY_BUDGET".into(), "64MiB".into()));
     detached(&sb, "b", "sleep 300");
     let group = cgroup_of(&sb, "b");
     let slice = group
@@ -847,7 +845,7 @@ fn id_map_helpers_run_side_by_side() {
     }
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
     sb.env.push(("PATH".into(), path));
-    sb.env.push(("OPENPOD_KEEPER".into(), "0".into()));
+    sb.env.push(("PODBAG_KEEPER".into(), "0".into()));
     ok(&sb.run_with(&["--network", "none"], &["true"]));
     let lines = std::fs::read_to_string(&trace).unwrap_or_default();
     let lines: Vec<&str> = lines.lines().collect();
@@ -864,7 +862,7 @@ fn own_shims(id: &str) -> usize {
         .unwrap();
     String::from_utf8_lossy(&out.stdout)
         .lines()
-        .filter(|l| l.split_whitespace().next() == Some("openpod"))
+        .filter(|l| l.split_whitespace().next() == Some("podbag"))
         .filter(|l| l.contains("__shim") && l.contains(id))
         .count()
 }
@@ -894,7 +892,7 @@ fn time_a_run(sb: &Sandbox) -> Duration {
 fn a_killed_keeper_ends_a_foreground_container() {
     let sb = kept(300);
     let mut run = sb
-        .openpod()
+        .podbag()
         .args(["run", "--rm", "--rootfs", &rootfs(), "sleep", "300"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -902,7 +900,7 @@ fn a_killed_keeper_ends_a_foreground_container() {
         .spawn()
         .unwrap();
     assert!(wait_for(Duration::from_secs(10), || {
-        !stdout(&sb.openpod().args(["ps", "-q"]).output().unwrap()).is_empty()
+        !stdout(&sb.podbag().args(["ps", "-q"]).output().unwrap()).is_empty()
     }));
     let id = op(&sb, &["ps", "-q"]);
     let init = inspect(&sb, id.trim())["state"]["pid"].as_u64().unwrap();
@@ -940,16 +938,16 @@ fn another_build_does_not_use_this_keeper() {
     detached(&sb, "old", "sleep 300");
     assert!(wait_for(Duration::from_secs(5), || processes(&sb) == (1, 0)));
     // The same program in another file: another build, as far as the keeper can tell.
-    // (Below the target directory, where the VM's AppArmor profile allows openpod.)
+    // (Below the target directory, where the VM's AppArmor profile allows podbag.)
     let dir = std::path::Path::new(BIN)
         .parent()
         .unwrap()
         .join(format!("keeper-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let copy = dir.join("openpod");
+    let copy = dir.join("podbag");
     std::fs::copy(BIN, &copy).unwrap();
     let out = sb
-        .openpod_bin(copy.to_str().unwrap())
+        .podbag_bin(copy.to_str().unwrap())
         .args([
             "run",
             "-d",
@@ -1033,7 +1031,7 @@ fn a_request_without_an_end_is_cut_off() {
 #[test]
 fn a_runtime_directory_of_others_gets_no_keeper() {
     let sb = kept(300);
-    // Made by the test user and writable by everybody: for openpod as root it belongs to
+    // Made by the test user and writable by everybody: for podbag as root it belongs to
     // another user; without root, others could put their own socket there.
     std::fs::create_dir_all(sb.runtime()).unwrap();
     {
@@ -1061,7 +1059,7 @@ fn the_keeper_gets_only_the_settings_it_needs() {
     sb.env
         .push(("MY_SECRET_TOKEN".into(), "do-not-pass-on".into()));
     let mut run = sb
-        .openpod()
+        .podbag()
         .args(["run", "--rm", "--rootfs", &rootfs(), "sleep", "300"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -1087,7 +1085,7 @@ fn the_keeper_gets_only_the_settings_it_needs() {
     for pid in &pids {
         let environ = std::fs::read(format!("/proc/{pid}/environ")).unwrap_or_default();
         let environ = String::from_utf8_lossy(&environ).to_string();
-        readable += usize::from(environ.contains("OPENPOD_RUNTIME_DIR="));
+        readable += usize::from(environ.contains("PODBAG_RUNTIME_DIR="));
         assert!(
             !environ.contains("MY_SECRET_TOKEN"),
             "{pid} holds the secret"
@@ -1109,7 +1107,7 @@ fn the_root_keeper_has_a_group_of_its_own() {
     let group = std::fs::read_to_string(format!("/proc/{pid}/cgroup")).unwrap();
     // Not the group of whoever happened to start the first container (this test's
     // session): that one may be stopped while other callers' containers run.
-    assert_eq!(group.trim(), "0::/openpod.keeper");
+    assert_eq!(group.trim(), "0::/podbag.keeper");
     op(&sb, &["rm", "-f", "a"]);
 }
 
@@ -1122,12 +1120,12 @@ fn a_keeper_without_cgroups_leaves_limits_to_a_shim() {
     let mut first = kept(10_000);
     first
         .env
-        .push(("OPENPOD_SYSTEMD_RUN".into(), "/nonexistent".into()));
+        .push(("PODBAG_SYSTEMD_RUN".into(), "/nonexistent".into()));
     detached(&first, "plain", "sleep 300");
     assert!(wait_for(Duration::from_secs(5), || processes(&first).0 == 1));
     // A second client of the same directories has one, and asks for a limit.
-    let mut cmd = first.openpod();
-    cmd.env_remove("OPENPOD_SYSTEMD_RUN").args([
+    let mut cmd = first.podbag();
+    cmd.env_remove("PODBAG_SYSTEMD_RUN").args([
         "run",
         "-d",
         "--name",

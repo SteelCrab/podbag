@@ -1,4 +1,4 @@
-//! The `openpod __shim <id>` helper: it creates one container and serves it until it
+//! The `podbag __shim <id>` helper: it creates one container and serves it until it
 //! ends: output to the log (and to the caller when attached), the control socket, signals.
 
 pub mod control;
@@ -63,7 +63,7 @@ pub fn shim_main(id: &str, mode: Option<crate::helper::ShimMode>, keep_on_failur
                 crate::ErrorKind::Conflict,
                 format!("cannot start container {}", spec.name),
                 "it was stopped by the user",
-                "start it with `openpod start`",
+                "start it with `podbag start`",
             ));
         }
         let outcome = supervise::run(&spec, &dirs, &mut status, &_lock);
@@ -91,7 +91,7 @@ pub fn shim_main(id: &str, mode: Option<crate::helper::ShimMode>, keep_on_failur
 pub fn remove_container(dirs: &paths::Dirs, spec: &crate::spec::ContainerSpec) {
     let anonymous = crate::volume::anonymous_volumes(&spec.mounts);
     if let Err(e) = crate::volume::remove_anonymous(dirs, &spec.id, anonymous) {
-        eprintln!("openpod: {e}");
+        eprintln!("podbag: {e}");
     }
     let dir = dirs.container_dir(&spec.id);
     // Most containers leave only this user's files: they go without a user namespace
@@ -109,7 +109,7 @@ pub fn remove_container(dirs: &paths::Dirs, spec: &crate::spec::ContainerSpec) {
         })
     });
     if let Err(e) = removed {
-        eprintln!("openpod: {e}");
+        eprintln!("podbag: {e}");
     }
 }
 

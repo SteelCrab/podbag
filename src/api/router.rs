@@ -5,7 +5,7 @@ use crate::paths::Dirs;
 use crate::{Error, ErrorKind};
 use std::os::unix::net::UnixStream;
 
-/// The API version openpod speaks. Clients negotiate down to it.
+/// The API version podbag speaks. Clients negotiate down to it.
 pub const API_VERSION: &str = "1.47";
 /// The oldest version a client may ask for.
 pub const MIN_API_VERSION: &str = "1.24";
@@ -162,10 +162,10 @@ pub fn route(req: &Request, ctx: &Ctx) -> Reply {
         (_, ["exec", rest @ ..]) => {
             super::exec::route(req, ctx, rest).unwrap_or_else(|| message(404, "page not found"))
         }
-        (_, ["commit"]) => not_supported("commit", "build images with buildx (later milestone)"),
+        (_, ["commit"]) => not_supported("commit", "build images with buildx"),
         (_, ["build", ..]) => not_supported(
             "the classic builder (POST /build)",
-            "use buildx with the docker-container driver (later milestone)",
+            "use buildx with the docker-container driver",
         ),
         (
             _,
@@ -175,7 +175,7 @@ pub fn route(req: &Request, ctx: &Ctx) -> Reply {
             | ["tasks", ..]
             | ["secrets", ..]
             | ["configs", ..],
-        ) => not_supported("swarm", "openpod runs containers on one host"),
+        ) => not_supported("swarm", "podbag runs containers on one host"),
         (_, ["plugins", ..]) => not_supported(
             "plugins",
             "use the built-in local volumes and bridge networks",
@@ -189,7 +189,7 @@ pub fn message(status: u16, text: impl Into<String>) -> Reply {
     Reply::Json(status, serde_json::json!({ "message": text.into() }))
 }
 
-/// An openpod error as an HTTP reply.
+/// A podbag error as an HTTP reply.
 pub fn reply_error(e: &Error) -> Reply {
     let status = match e.kind {
         ErrorKind::NotFound => 404,
@@ -201,14 +201,14 @@ pub fn reply_error(e: &Error) -> Reply {
     message(status, error_text(e))
 }
 
-/// An openpod error in one line: what failed, why, and what to do.
+/// A podbag error in one line: what failed, why, and what to do.
 pub fn error_text(e: &Error) -> String {
     format!("{}: {} ({})", e.what, e.why, e.next)
 }
 
-/// Refuse filters openpod does not apply. Docker answers an unknown key with 400;
+/// Refuse filters podbag does not apply. Docker answers an unknown key with 400;
 /// ignoring it would select everything, and `docker rm $(docker ps -aq --filter volume=x)`
-/// would remove every container. Keys Docker has and openpod lacks answer 501.
+/// would remove every container. Keys Docker has and podbag lacks answer 501.
 pub fn check_filters(
     filters: &std::collections::BTreeMap<String, Vec<String>>,
     supported: &[&str],
@@ -249,11 +249,11 @@ pub fn labels_match(
         && !values("label!").iter().any(|w| label_matches(w, labels))
 }
 
-/// 501: a Docker feature openpod does not have, and what to do instead.
+/// 501: a Docker feature podbag does not have, and what to do instead.
 pub fn not_supported(what: &str, instead: &str) -> Reply {
     message(
         501,
-        format!("{what} is not supported by openpod ({instead})"),
+        format!("{what} is not supported by podbag ({instead})"),
     )
 }
 
