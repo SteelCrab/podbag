@@ -666,10 +666,10 @@ mod tests {
     fn resize_messages_may_come_split_or_together() {
         let (all, used) = sizes(br#"{"Width":80,"Height":24}{"Width":100,"Height":40}"#);
         assert_eq!(all, [(24, 80), (40, 100)]);
-        assert_eq!(used, 50);
+        assert_eq!(used, 49);
         let (part, used) = sizes(br#"{"Width":80,"Height":24}{"Wid"#);
         assert_eq!(part, [(24, 80)]);
-        assert_eq!(used, 25);
+        assert_eq!(used, 24);
     }
 
     #[test]

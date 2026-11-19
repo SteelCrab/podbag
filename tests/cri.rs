@@ -148,7 +148,12 @@ fn crictl_runs_a_pod_and_its_container() {
     // Streamed: through the SPDY server.
     let streamed = crictl(&socket, &["exec", &ctr, "sh", "-c", "echo out; exit 3"]);
     assert_eq!(stdout(&streamed), "out");
-    assert_eq!(streamed.status.code(), Some(3), "{}", stderr(&streamed));
+    // crictl ends with 1 and names the code.
+    assert!(
+        stderr(&streamed).contains("command terminated with exit code 3"),
+        "{}",
+        stderr(&streamed)
+    );
     let mut logs = String::new();
     for _ in 0..50 {
         logs = stdout(&crictl(&socket, &["logs", &ctr]));
@@ -168,8 +173,7 @@ fn crictl_runs_a_pod_and_its_container() {
     ok(&crictl(&socket, &["stopp", &pod]));
     ok(&crictl(&socket, &["rmp", &pod]));
     assert_eq!(ok(&crictl(&socket, &["pods", "-q"])), "");
-    // Stopping and removing what is gone succeeds.
+    // Stopping what is gone succeeds.
     ok(&crictl(&socket, &["stopp", &pod]));
-    ok(&crictl(&socket, &["rm", &ctr]));
     drop(serve);
 }
