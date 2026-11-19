@@ -35,6 +35,7 @@
 - **레이어가 아니라 파일.** 여러 이미지가 같은 파일을 쓰면 디스크와 메모리에 한 번만 둡니다.
 - **빠릅니다.** Linux에서 컨테이너가 약 4 ms 만에 시작됩니다.
 - **Docker 도구와 함께 씁니다.** Docker·OCI 이미지, `docker` CLI, Compose, buildx를 지원합니다.
+- **Dockerfile을 빌드합니다.** `podbag build`와 클래식 빌더의 `docker build`를 씁니다. BuildKit과 데몬이 없어도 됩니다.
 - **root 없이도, root로도.** 같은 프로그램이 두 방식으로 동작합니다.
 - **Linux, macOS, Windows.** x86_64와 arm64를 지원합니다. Windows 지원은 실험 단계입니다.
 
@@ -118,6 +119,7 @@ podbag logs -f web                                # 로그를 따라 봅니다
 podbag exec -it web sh                            # 컨테이너 안에서 셸을 엽니다
 podbag stop web && podbag rm web                  # 멈추고 지웁니다
 podbag images                                     # 이미지 목록
+podbag build -t myapp .                           # Dockerfile로 이미지를 빌드합니다
 ```
 
 ### docker CLI, Compose, buildx
