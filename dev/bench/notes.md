@@ -105,18 +105,26 @@ measured, openpod holds less than Kiri.
 loses ("Memory on the Mac" is what Activity Monitor shows for the tool's processes). Kiri
 boots its VM only for the first container and lets it sleep a minute after the last one, so
 with no containers it costs only its daemon (7–12 MiB), and 50 containers took 0.32 GiB.
-OrbStack keeps its VM running and gives memory back while idle (1.16 GiB with 50 containers,
-0.8 GiB six minutes after). Docker Desktop's Resource Saver stops its VM five minutes after
-the last container: the memory comes back, but the next `run` waits 1.5 s for the VM. 3.4 GiB
-of Docker Desktop's figure is the heap of its backend process, which compresses well: the
+openpod does the same with a VM of its own: it powers the VM off a minute after the last
+container and leaves a standby process of under 2 MiB, the least of all six minutes after.
+With 50 containers it took 199 MiB at its default size (2 GiB) and 359 MiB at the others'
+8 GiB:
+the guest kernel's bookkeeping grows with the VM's memory (64 bytes for every 4 KiB page,
+128 MiB at 8 GiB). Its "just started" row has the VM on, as the script's own requests 30 s
+earlier woke it. While the VM runs it keeps what its containers used (200 and 360 MiB 30 s
+after they were removed); the memory comes back when the VM powers off. OrbStack keeps its
+VM running and gives memory back while idle (1.16 GiB with 50 containers, 0.8 GiB six
+minutes after). Docker Desktop's Resource Saver stops its VM five minutes after the last
+container: the memory comes back, but the next `run` waits 1.5 s for the VM. 3.4 GiB of
+Docker Desktop's figure is the heap of its backend process, which compresses well: the
 Mac's used memory (active, wired and compressed pages) rose by 1.6 GiB when it started.
-Colima's and Podman's VMs keep what they once used (1.5 and 2.3 GiB). openpod has no macOS
-app yet: in lima's Ubuntu VM it takes 1.8 GiB, nearly all of it the Ubuntu system, while 50
-containers add only 16 MiB (0.3 MiB each, the least of all); openpod's own macOS VM (design
-7) is meant to start small and give memory back, as Kiri and OrbStack do. Starting from the
-Mac: Kiri 11.8 ms; openpod 14.8 ms, of which 5.7 ms is ssh into the VM; Colima 74 ms,
-OrbStack 90 ms, Docker Desktop 97 ms and Podman 99 ms, each through its CLI and the socket
-forwarding into its VM.
+Colima's and Podman's VMs keep what they once used (1.5 and 2.3 GiB). Starting from the
+Mac through the docker CLI: Kiri 11.8 ms; openpod 14.4–15.0 ms, about 9 ms of which is the
+docker CLI's own start; Colima 74 ms, OrbStack 90 ms, Docker Desktop 97 ms, and Podman
+99 ms through its own CLI. Through its own CLI openpod starts one in 7.3–8.0 ms. After six
+minutes without containers the first `run` took 0.60–0.64 s with openpod (its VM boots),
+0.30 s with Kiri, 0.19–0.23 s with Podman, Colima and OrbStack (whose VMs kept running),
+and 1.5 s with Docker Desktop.
 
 **Caveats.** The Linux tables come from one VM on a laptop, all tools one after another in
 one session (`dev/bench/session.sh`), with nothing else running in the VM; lima's guest

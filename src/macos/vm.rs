@@ -82,14 +82,17 @@ fn configuration(spec: &VmSpec) -> Result<Retained<VZVirtualMachineConfiguration
         config.setCPUCount(spec.cpus);
         config.setMemorySize(spec.memory);
 
-        // Writes the guest flushes reach the Mac's disk (F_FULLFSYNC): ext4's journal
-        // relies on it when the Mac loses power or the host is killed.
+        // Writes the guest flushes are fsync'd on the Mac (as lima does): they outlive a
+        // killed host or VM, as ext4's journal needs; a power cut may lose what the drive's
+        // own cache held. F_FULLFSYNC (`Full`) cost 5–7 ms a flush, and creating
+        // and removing a container flush several times: `docker run --rm` took 24 ms in
+        // the API instead of 4.
         let disk = VZDiskImageStorageDeviceAttachment::initWithURL_readOnly_cachingMode_synchronizationMode_error(
             VZDiskImageStorageDeviceAttachment::alloc(),
             &url(&spec.disk),
             false,
             VZDiskImageCachingMode::Cached,
-            VZDiskImageSynchronizationMode::Full,
+            VZDiskImageSynchronizationMode::Fsync,
         )
         .map_err(|e| format!("the data disk: {}", e.localizedDescription()))?;
         let block = VZVirtioBlockDeviceConfiguration::initWithAttachment(

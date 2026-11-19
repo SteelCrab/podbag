@@ -272,19 +272,27 @@ daemon's built-in BuildKit) is not available.
 
 ## macOS
 
-On a Mac, openpod runs containers in a small Linux VM of its own (Virtualization.framework,
-Linux 6.18). The first command starts it (about one second); it powers off 60 seconds
-after the last connection ends while no container runs or waits to restart
-(`OPENPOD_VM_IDLE`, seconds), so nothing runs while no container does. A command that comes
-while the VM stops waits for the next one. A running VM answers `openpod run --rm alpine
-true` in about 30 ms.
+On a Mac (Apple silicon), openpod runs containers in a small Linux VM of its own
+(Virtualization.framework, Linux 6.18). The first command starts it (about half a second);
+it powers off 60 seconds after the last connection ends while no container runs or waits
+to restart (`OPENPOD_VM_IDLE`, seconds), so nothing runs while no container does. A command
+that comes while the VM stops waits for the next one. A running VM answers `openpod run
+--rm --network none alpine true` in about 8 ms and the same `docker run` in about 15 ms
+(9 ms of which is the docker CLI starting); docs/benchmarks.md compares it with the other
+tools.
 
 ```sh
-dev/vm.sh run dev/macos/build-guest.sh     # the guest: kernel, initramfs, empty data disk
-cargo build && dev/macos/sign.sh           # VMs need the virtualization entitlement
-target/debug/openpod run --rm -it alpine sh
-target/debug/openpod vm status             # also: vm start, vm stop, vm logs
+dev/vm.sh run dev/macos/build-guest.sh            # the guest: kernel, initramfs, empty data disk
+cargo build --release --features embed-guest      # the binary carries the guest (12 MB)
+dev/macos/sign.sh target/release/openpod          # VMs need the virtualization entitlement
+target/release/openpod run --rm -it alpine sh
+target/release/openpod vm status                  # also: vm start, vm stop, vm logs
 ```
+
+A binary built with `embed-guest` writes its guest once to `~/.openpod/vm/<id>/` (a new
+build of the guest gets a new directory); without it, openpod reads `target/vm` beside its
+build directory, or the directory `OPENPOD_VM_GUEST` names. Images must be for arm64: there
+is no Rosetta in the VM yet.
 
 Commands run in the VM: the Mac's `openpod` passes them on with their output, exit code,
 signals and terminal size, as a local one would run. Only commands that read input
@@ -298,8 +306,12 @@ subnet pass to the VM; paths and programs stay the Mac's. Containers cannot reac
 agent (vsock is closed to them). Images, containers and volumes stay on a sparse 64 GiB
 disk, `~/.openpod/disk.img`, between VM runs; `openpod vm stop` and a logout power the VM
 off cleanly, and when the disk cannot be mounted, commands say so instead of using memory.
-The VM uses 2 GiB of memory (`OPENPOD_VM_MEMORY`, MiB); containers get 1048576 open files
-and `vm.max_map_count` 262144, like Docker Desktop's.
+The VM uses 2 GiB of memory (`OPENPOD_VM_MEMORY`, MiB) and the Mac's CPUs up to 8
+(`OPENPOD_VM_CPUS`); containers get 1048576 open files and `vm.max_map_count` 262144, like
+Docker Desktop's. The VM's size is the containers' memory budget: in the VM, openpod sets
+none of its own (`OPENPOD_MEMORY_BUDGET` given on the Mac still applies to `openpod`
+commands). A container that needs more memory than the VM has is ended with exit code 137
+within seconds, and the VM goes on; openpod's agent in the VM is never the one ended.
 
 The docker CLI, Compose and buildx use openpod through its Docker API socket:
 
@@ -311,8 +323,8 @@ docker buildx create --use --driver docker-container
 docker buildx build --load -t app .
 ```
 
-The socket stays while the VM is off: a standby of about 8 MiB waits on it, and the first
-request starts the VM. It appears with the first openpod command (`openpod vm start`) and
+The socket stays while the VM is off: a standby process (under 2 MiB of the Mac's memory)
+waits on it, and the first request starts the VM. It appears with the first openpod command (`openpod vm start`) and
 goes with `openpod vm stop`. Bind mounts must come from under `/Users` (`mounts denied`
 otherwise); named volumes live in the VM. Each docker request after a pause brings the
 VM's clock to the Mac's.
@@ -331,7 +343,9 @@ container. While it runs, the VM keeps every page it has used, file cache includ
 its size (`OPENPOD_VM_MEMORY`, 2048 MiB by default). Virtualization.framework's memory
 balloon does not change that on macOS 27.2: when the guest gave it 1.3 GiB, the Mac counted
 about 620 MiB more reusable pages, but the VM process's footprint (what Activity Monitor
-shows) stayed the same.
+shows) stayed the same. The data disk's writes that the VM flushes are synced to the Mac's
+disk with fsync, not F_FULLFSYNC (as lima does): they outlive a crash of the VM, but a power
+cut can lose what the drive's cache held, and the disk may then need to be moved away.
 
 ## Requirements
 

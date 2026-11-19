@@ -13,7 +13,10 @@ removed only if its own labels say so; a test image is removed only if this scri
 it, and an unclear answer about an image stops the run. Colima runs in a profile of its
 own (`openpod-bench`), so the user's default profile is left as it is.
 
-usage: dev/bench/mac.py docker-desktop|orbstack|kiri|podman|colima|openpod [results-dir]
+usage: dev/bench/mac.py docker-desktop|orbstack|kiri|podman|colima|openpod-mac|openpod-mac-default|openpod [results-dir]
+openpod-mac runs openpod's own VM (target/release/openpod, signed, and the guest in
+target/vm) in a home of its own (~/.openpod-bench) at the others' size; openpod-mac-default
+at openpod's default size; openpod is the older measurement in lima's VM.
 Results go to <results-dir>/<tool>.env as key=value lines (default: bench-results/mac in
 the repository); dev/bench/report.sh turns them into the macOS table of docs/benchmarks.md.
 """
@@ -38,6 +41,8 @@ IDLE_WAIT = int(os.environ.get("BENCH_IDLE_WAIT", "360"))
 KIRI = "/Applications/Kiri.app/Contents/MacOS/kiri"
 OPENPOD = "/home/pista.guest/openpod-target/aarch64-unknown-linux-musl/release/openpod"
 LIMA_SSH = ["ssh", "-F", f"{HOME}/.lima/openpod-dev/ssh.config", "lima-openpod-dev", "--"]
+OPENPOD_MAC = f"{REPO}/target/release/openpod"
+OPENPOD_HOME = os.environ.get("BENCH_OPENPOD_HOME", f"{HOME}/.openpod-bench")
 
 
 def docker_at(sock):
@@ -124,6 +129,43 @@ TOOLS = {
 }
 
 
+def openpod_mac(title, size):
+    """openpod's own VM on this Mac, in a home of its own; `size` sets the VM's size."""
+    return dict(
+        title=title,
+        cli=docker_at(f"{OPENPOD_HOME}/run/docker.sock"),
+        up="openpod-mac",
+        down="openpod-mac",
+        # The guest the release binary carries (built with --features embed-guest).
+        env=dict(size, OPENPOD_MAC_HOME=OPENPOD_HOME),
+        procs=[r"openpod __vm-(host|standby)"],
+        # Only the host or standby of this home (another openpod may run on the Mac).
+        own_files=[f"{OPENPOD_HOME}/"],
+        vm_files=[f"{OPENPOD_HOME}/"],
+        labels=False,
+    )
+
+
+TOOLS["openpod-mac"] = openpod_mac("openpod", {"OPENPOD_VM_CPUS": "10", "OPENPOD_VM_MEMORY": "8192"})
+TOOLS["openpod-mac-default"] = openpod_mac("openpod, default size", {})
+
+
+def openpod_env(tool):
+    env = {k: v for k, v in os.environ.items() if k != "OPENPOD_VM_GUEST"}
+    return dict(env, **tool["env"])
+
+
+def openpod_cmd(tool, *args):
+    return subprocess.run(
+        [OPENPOD_MAC, *args],
+        env=openpod_env(tool),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=300,
+    )
+
+
 def sh(cmd, check=True, quiet=True, timeout=600):
     r = subprocess.run(
         cmd,
@@ -175,6 +217,10 @@ def tool_pids(tool):
     own, vms = [], vm_pids(tool)
     for pid, uid, command in processes():
         if pid == os.getpid() or not any(re.search(p, command) for p in tool["procs"]):
+            continue
+        if "own_files" in tool and not any(
+            f.startswith(p) for f in open_files(pid) for p in tool["own_files"]
+        ):
             continue
         own.append((pid, uid))
         if any(re.search(p, command) for p in tool.get("vm_procs", [])):
@@ -232,6 +278,10 @@ def up(name, tool):
         kiri_daemon = subprocess.Popen(
             [KIRI, "daemon"], stdout=logf, stderr=logf, env=env, start_new_session=True
         )
+    elif tool["up"] == "openpod-mac":
+        r = openpod_cmd(tool, "vm", "start")
+        if r.returncode != 0:
+            raise SystemExit(f"openpod vm start failed: {r.stderr}")
     else:
         for cmd in tool["up"]:
             sh(cmd, quiet=True, timeout=900)
@@ -253,14 +303,16 @@ def down(name, tool):
             except subprocess.TimeoutExpired:
                 os.killpg(kiri_daemon.pid, signal.SIGKILL)
             kiri_daemon = None
+    elif tool["down"] == "openpod-mac":
+        openpod_cmd(tool, "vm", "stop")
     else:
         for cmd in tool["down"]:
             sh(cmd, check=False, timeout=600)
 
 
-def run_ms(cmd):
+def run_ms(cmd, env=None):
     t0 = time.perf_counter()
-    r = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    r = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, env=env)
     ms = (time.perf_counter() - t0) * 1000
     if r.returncode != 0:
         raise SystemExit(f"failed: {' '.join(cmd)}\n{r.stderr}")
@@ -351,6 +403,8 @@ def version(name, tool):
         return sh(["colima", "version"]).stdout.splitlines()[0]
     if name == "openpod":
         return sh(tool["cli"] + ["--version"]).stdout.strip()
+    if tool["up"] == "openpod-mac":
+        return openpod_cmd(tool, "--version").stdout.strip()
     return f"{tool['title']} {app_version(tool['app'])}"
 
 
@@ -361,7 +415,13 @@ def main():
     tool = TOOLS[name]
     out = sys.argv[2] if len(sys.argv) > 2 else f"{REPO}/bench-results/mac"
     os.makedirs(out, exist_ok=True)
-    results = {"tool": name, "title": tool["title"], "runs": RUNS, "count": COUNT}
+    results = {
+        "tool": name,
+        "title": tool["title"],
+        "runs": RUNS,
+        "count": COUNT,
+        "date": time.strftime("%Y-%m-%d"),
+    }
 
     if sh(tool["cli"] + ["ps"], check=False, timeout=60).returncode == 0:
         raise SystemExit(
@@ -390,6 +450,13 @@ def main():
         times = [run_ms(cmd) for _ in range(RUNS + 3)][3:]
         results["start_median_ms"] = round(statistics.median(times), 1)
         results["start_p90_ms"] = round(pct(times, 90), 1)
+        if tool["up"] == "openpod-mac":
+            # Its own CLI too, as Podman's start is timed through Podman's.
+            own = [OPENPOD_MAC, "run", "--rm", "--network", "none", ALPINE, "true"]
+            env = openpod_env(tool)
+            times = [run_ms(own, env) for _ in range(RUNS + 3)][3:]
+            results["own_start_median_ms"] = round(statistics.median(times), 1)
+            results["own_start_p90_ms"] = round(pct(times, 90), 1)
 
         log(f"memory: {COUNT} containers")
         for _ in range(COUNT):

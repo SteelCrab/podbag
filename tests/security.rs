@@ -511,3 +511,53 @@ fn privileged_gets_no_host_devices_and_keeps_kernel_settings_apart() {
         );
     }
 }
+
+/// `cmd` runs with an OOM score adjustment of 300 (raising it needs no privilege).
+fn with_oom_score_300(mut cmd: std::process::Command) -> std::process::Output {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: only open, write and close between fork and exec; no allocation.
+    unsafe {
+        cmd.pre_exec(|| {
+            let fd = libc::open(c"/proc/self/oom_score_adj".as_ptr(), libc::O_WRONLY);
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let written = libc::write(fd, b"300".as_ptr().cast(), 3);
+            libc::close(fd);
+            if written == 3 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
+    }
+    cmd.output().unwrap()
+}
+
+#[test]
+fn a_container_gets_an_oom_score_adj_of_0_like_docker() {
+    // A child inherits the value: in the macOS VM the agent keeps -1000, so that the
+    // kernel never ends it when memory runs out; its containers must not be spared too.
+    let sb = Sandbox::new();
+    let rootfs = rootfs();
+    let mut run = sb.openpod();
+    run.args([
+        "run",
+        "--rm",
+        "--rootfs",
+        &rootfs,
+        "cat",
+        "/proc/self/oom_score_adj",
+    ]);
+    assert_eq!(ok(&with_oom_score_300(run)).trim(), "0");
+    let mut start = sb.openpod();
+    start.args([
+        "run", "-d", "--name", "adj", "--rootfs", &rootfs, "sleep", "100",
+    ]);
+    ok(&with_oom_score_300(start));
+    let mut exec = sb.openpod();
+    exec.args(["exec", "adj", "cat", "/proc/self/oom_score_adj"]);
+    let out = with_oom_score_300(exec);
+    let _ = sb.openpod().args(["rm", "-f", "adj"]).output();
+    assert_eq!(ok(&out).trim(), "0");
+}

@@ -1149,3 +1149,83 @@ fn links_a_running_container_plants_stay_inside_it() {
     }
     s.ok(&["rm", "-f", "l"]);
 }
+
+/// Read an answer's head, to its empty line.
+fn read_head(s: &mut std::os::unix::net::UnixStream) {
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        assert_eq!(s.read(&mut byte).unwrap(), 1, "{head:?}");
+        head.push(byte[0]);
+    }
+}
+
+/// One request on a connection of its own; the whole answer.
+fn http(socket: &Path, method: &str, path: &str, body: &str) -> String {
+    let mut s = std::os::unix::net::UnixStream::connect(socket).unwrap();
+    write!(
+        s,
+        "{method} {path} HTTP/1.1\r\nHost: d\r\nContent-Type: application/json\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+    .unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).unwrap();
+    out
+}
+
+#[test]
+fn a_removal_is_answered_as_soon_as_it_happens() {
+    if root_mode() {
+        return; // the test user cannot connect to root's socket; the code is the same
+    }
+    // The docker CLI asks to hear of a --rm container's removal before it starts it, and
+    // starts it when that answer's headers arrive: the answer must follow the removal at
+    // once, not at the next look at the container's state.
+    let s = setup();
+    let create = format!(
+        r#"{{"Image":"{}","Cmd":["true"],"HostConfig":{{"NetworkMode":"none","AutoRemove":true}}}}"#,
+        s.image
+    );
+    let mut best = Duration::MAX;
+    for _ in 0..3 {
+        let created = http(&s.service.socket, "POST", "/containers/create", &create);
+        let id = created
+            .split("\"Id\":\"")
+            .nth(1)
+            .and_then(|r| r.split('"').next())
+            .unwrap_or_else(|| panic!("{created}"))
+            .to_string();
+        // As the docker CLI does: attach, ask for the removal, then start.
+        let mut attach = std::os::unix::net::UnixStream::connect(&s.service.socket).unwrap();
+        write!(
+            attach,
+            "POST /containers/{id}/attach?stream=1&stdout=1&stderr=1 HTTP/1.1\r\nHost: d\r\n\
+             Upgrade: tcp\r\nConnection: Upgrade\r\nContent-Length: 0\r\n\r\n"
+        )
+        .unwrap();
+        read_head(&mut attach);
+        let mut wait = std::os::unix::net::UnixStream::connect(&s.service.socket).unwrap();
+        write!(
+            wait,
+            "POST /containers/{id}/wait?condition=removed HTTP/1.1\r\nHost: d\r\n\
+             Content-Length: 0\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        read_head(&mut wait);
+        let started = std::time::Instant::now();
+        let start = http(
+            &s.service.socket,
+            "POST",
+            &format!("/containers/{id}/start"),
+            "",
+        );
+        assert!(start.starts_with("HTTP/1.1 204"), "{start}");
+        let mut rest = String::new();
+        wait.read_to_string(&mut rest).unwrap();
+        assert!(rest.contains("\"StatusCode\":0"), "{rest}");
+        best = best.min(started.elapsed());
+    }
+    assert!(best < Duration::from_millis(40), "best of 3: {best:?}");
+}

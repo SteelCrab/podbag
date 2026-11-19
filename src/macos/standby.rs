@@ -5,7 +5,7 @@
 //! off, and the standby holds no VM. SIGTERM, SIGINT or SIGHUP (`openpod vm stop`, a
 //! logout) end it.
 
-use super::host::{Inherited, paths, remove_files};
+use super::host::{Inherited, paths, remove_files, write_whole};
 
 pub fn standby_main() -> i32 {
     let Some(fds) = Inherited::from_env() else {
@@ -19,9 +19,10 @@ pub fn standby_main() -> i32 {
             return 1;
         }
     };
-    // `openpod vm stop` signals the process in the pid file.
-    let _ = std::fs::write(&p.pid, std::process::id().to_string());
-    let _ = std::fs::write(&p.state, "standby");
+    // `openpod vm stop` signals the process in the pid file, and a standby whatever state it
+    // finds: the state first, so that this pid never shows with the host's old state.
+    write_whole(&p.state, "standby");
+    write_whole(&p.pid, &std::process::id().to_string());
     // Signals as bytes on a pipe, watched with the sockets.
     let mut pipe = [0; 2];
     // SAFETY: pipe fills two descriptors; both are made close-on-exec.
@@ -59,14 +60,39 @@ pub fn standby_main() -> i32 {
         }
         if watch[0].revents != 0 || watch[1].revents != 0 {
             // Not while the host that started it still ends: an exec next to an ending
-            // parent has hung in macOS's kernel (2 s at most).
+            // parent has hung in macOS's kernel (2 s at most). A host that had ended
+            // before this process looked left it to launchd (pid 1): nothing to wait for.
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
             // SAFETY: getppid has no arguments.
-            while unsafe { libc::getppid() } == parent && std::time::Instant::now() < deadline {
-                std::thread::sleep(std::time::Duration::from_millis(10));
+            while parent != 1
+                && unsafe { libc::getppid() } == parent
+                && std::time::Instant::now() < deadline
+            {
+                // A stop asked meanwhile ends the standby: the exec would lose it.
+                let mut stop = libc::pollfd {
+                    fd: pipe[0],
+                    events: libc::POLLIN,
+                    revents: 0,
+                };
+                // SAFETY: one pollfd on the stack.
+                if unsafe { libc::poll(&mut stop, 1, 10) } > 0 {
+                    remove_files(&p);
+                    return 0;
+                }
             }
             // Held across exec (a child keeps the mask) for the host's own signal thread.
             crate::signals::block(&signals);
+            // One that came just before the block is in the pipe, which the exec closes.
+            let mut stop = libc::pollfd {
+                fd: pipe[0],
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: one pollfd on the stack.
+            if unsafe { libc::poll(&mut stop, 1, 0) } > 0 {
+                remove_files(&p);
+                return 0;
+            }
             let e = fds.exec("__vm-host");
             eprintln!("openpod: cannot start the VM host again: {e}");
             remove_files(&p);

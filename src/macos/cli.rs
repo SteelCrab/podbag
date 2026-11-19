@@ -205,25 +205,21 @@ fn stop() -> Result<(), String> {
             .ok()
             .and_then(|s| pid_from(&s))
     };
-    if named(&p).is_none() {
-        // A host without a pid file: asked on its socket.
-        if let Ok(mut s) = UnixStream::connect(&p.vm_sock) {
-            let _ = s.write_all(b"STOP\n");
-            let _ = s.read_to_end(&mut Vec::new());
-        }
-        return Ok(());
-    }
     // The host, and the standby it may start meanwhile, end; a host that a command starts
     // meanwhile (it never begins as a standby) is left alone. Powering off takes 30
     // seconds at most.
     let deadline = Instant::now() + Duration::from_secs(40);
+    let unnamed = Instant::now();
     let mut signalled: Vec<libc::pid_t> = Vec::new();
     loop {
         if lock_is_free(&p.lock) {
             return Ok(());
         }
+        // The pid first, then the state: the host and its standby write the state first, so
+        // a new pid is never seen with an older state.
+        let pid = named(&p);
         let standby = std::fs::read_to_string(&p.state).is_ok_and(|s| s.trim() == "standby");
-        match named(&p) {
+        match pid {
             Some(pid) if signalled.contains(&pid) => {}
             Some(pid) if signalled.is_empty() || standby => {
                 // SAFETY: a signal to the VM host or its standby: it holds the lock, so the
@@ -231,7 +227,17 @@ fn stop() -> Result<(), String> {
                 unsafe { libc::kill(pid, libc::SIGTERM) };
                 signalled.push(pid);
             }
-            _ => return Ok(()),
+            Some(_) => return Ok(()),
+            // Between a host that ended and the standby it started, which names itself in a
+            // moment. A host that never names itself is asked on its socket.
+            None if signalled.is_empty() && unnamed.elapsed() > Duration::from_secs(1) => {
+                if let Ok(mut s) = UnixStream::connect(&p.vm_sock) {
+                    let _ = s.write_all(b"STOP\n");
+                    let _ = s.read_to_end(&mut Vec::new());
+                }
+                return Ok(());
+            }
+            None => {}
         }
         if Instant::now() >= deadline {
             return Err("the VM host did not stop within 40 seconds".into());

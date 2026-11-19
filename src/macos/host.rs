@@ -65,19 +65,46 @@ pub fn paths() -> Result<Paths, String> {
     })
 }
 
-/// Where the guest files are: `OPENPOD_VM_GUEST`, then `vm/` beside the program's
-/// directory (`target/vm` for a build in the repository), then `~/.openpod/vm`.
+/// Where the guest files are: `OPENPOD_VM_GUEST`, then the guest this binary carries
+/// (written to `~/.openpod/vm/<id>/`), then `vm/` beside the program's directory
+/// (`target/vm` for a build in the repository), then `~/.openpod/vm`.
 fn guest_dir(home: &Path) -> PathBuf {
-    if let Some(dir) = std::env::var_os("OPENPOD_VM_GUEST") {
-        return PathBuf::from(dir);
-    }
     let beside = std::env::current_exe()
         .ok()
-        .and_then(|exe| exe.parent()?.parent().map(|d| d.join("vm")));
-    match beside {
-        Some(dir) if dir.join("Image").exists() => dir,
-        _ => home.join("vm"),
-    }
+        .and_then(|exe| exe.parent()?.parent().map(|d| d.join("vm")))
+        .filter(|dir| dir.join("Image").exists());
+    choose_guest(
+        std::env::var_os("OPENPOD_VM_GUEST").map(PathBuf::from),
+        || {
+            let carried = super::embedded::EMBEDDED?;
+            let root = home.join("vm");
+            match super::embedded::extract(&carried, &root) {
+                Ok(dir) => Some(dir),
+                Err(e) => {
+                    eprintln!(
+                        "openpod: cannot write the VM's files to {}: {e}",
+                        root.display()
+                    );
+                    None
+                }
+            }
+        },
+        beside,
+        home,
+    )
+}
+
+/// The first of: the setting, the carried guest, the one beside the program, `home/vm`.
+fn choose_guest(
+    setting: Option<PathBuf>,
+    carried: impl FnOnce() -> Option<PathBuf>,
+    beside: Option<PathBuf>,
+    home: &Path,
+) -> PathBuf {
+    setting
+        .or_else(carried)
+        .or(beside)
+        .unwrap_or_else(|| home.join("vm"))
 }
 
 /// `run/`, made the user's alone (also when it was there before).
@@ -224,6 +251,16 @@ fn remove_sockets(p: &Paths) {
 
 /// The run directory's files of a host that ends; the pid file last (`openpod vm stop`
 /// waits for it to go).
+/// Write `text` to `path` whole: through a file of this process, renamed over it, so that
+/// a reader (`vm stop`, `vm status`) sees the old content or the new, never an empty file.
+pub fn write_whole(path: &Path, text: &str) {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let tmp = path.with_file_name(format!(".{name}.{}", std::process::id()));
+    if std::fs::write(&tmp, text).is_err() || std::fs::rename(&tmp, path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
 pub fn remove_files(p: &Paths) {
     remove_sockets(p);
     let _ = std::fs::remove_file(&p.state);
@@ -257,7 +294,7 @@ fn run() -> Result<(), String> {
                 // Another host runs (or starts, or stops): the CLI waits for it.
                 return Ok(());
             }
-            let _ = std::fs::write(&p.pid, std::process::id().to_string());
+            write_whole(&p.pid, &std::process::id().to_string());
             lock
         }
     };
@@ -333,8 +370,10 @@ fn serve_vm(p: &Paths, lock: &std::fs::File, inherited: Option<&Inherited>) -> R
     for f in ["Image", "initramfs.gz"] {
         if !p.guest.join(f).exists() {
             return Err(format!(
-                "the VM's {f} is missing in {}: build the guest with \
-                 `dev/vm.sh run dev/macos/build-guest.sh`",
+                "the VM's {f} is missing in {}: use a build of openpod that carries its \
+                 guest (`cargo build --release --features embed-guest` after \
+                 `dev/vm.sh run dev/macos/build-guest.sh` in openpod's repository), or set \
+                 OPENPOD_VM_GUEST to a directory with Image, initramfs.gz and disk.zst",
                 p.guest.display()
             ));
         }
@@ -348,13 +387,19 @@ fn serve_vm(p: &Paths, lock: &std::fs::File, inherited: Option<&Inherited>) -> R
         initrd: p.guest.join("initramfs.gz"),
         disk: p.disk.clone(),
         console: p.console.clone(),
-        cpus: std::thread::available_parallelism()
-            .map_or(2, |n| n.get())
-            .min(8),
+        cpus: vm_cpus(
+            std::env::var("OPENPOD_VM_CPUS")
+                .ok()
+                .and_then(|v| v.trim().parse().ok()),
+            std::thread::available_parallelism().map_or(2, |n| n.get()),
+        ),
         memory: env_number("OPENPOD_VM_MEMORY", 2048) << 20,
-        // After `--`: the argument of /init, which makes openpod the VM's init.
+        // After `--`: the argument of /init, which makes openpod the VM's init. The kernel
+        // sizes its bounce buffers for the VM's whole memory (64 MB at 8 GiB, written at
+        // boot, so the Mac holds them), and nothing uses them: virtio here does not go
+        // through the DMA API.
         cmdline: format!(
-            "console=hvc0 ip=dhcp loglevel=4 panic=-1 openpod.time={}.{:09} -- {}",
+            "console=hvc0 ip=dhcp loglevel=4 panic=-1 swiotlb=2048 openpod.time={}.{:09} -- {}",
             now.as_secs(),
             now.subsec_nanos(),
             crate::vm::proto::INIT_ARG
@@ -369,7 +414,7 @@ fn serve_vm(p: &Paths, lock: &std::fs::File, inherited: Option<&Inherited>) -> R
         return Err(e);
     }
     note("started");
-    let _ = std::fs::write(&p.state, "running");
+    write_whole(&p.state, "running");
     // wait_ready's request set the VM's clock.
     let clock = Arc::new(Mutex::new((std::time::SystemTime::now(), Instant::now())));
     let (api, proxy) = match inherited {
@@ -465,9 +510,10 @@ fn serve_vm(p: &Paths, lock: &std::fs::File, inherited: Option<&Inherited>) -> R
         .spawn("__vm-standby")
         .map_err(|e| format!("cannot start the standby: {e}"))?;
     // Written here too, before the last look at a stop: a `vm stop` from now on finds
-    // the standby (and signals it), never this ending process.
-    let _ = std::fs::write(&p.pid, standby.id().to_string());
-    let _ = std::fs::write(&p.state, "standby");
+    // the standby (and signals it), never this ending process. The state first: a pid is
+    // never seen with an older state (`vm stop` reads the pid, then the state).
+    write_whole(&p.state, "standby");
+    write_whole(&p.pid, &standby.id().to_string());
     // A stop that came while it started ends it too.
     if woken.try_recv().is_ok() {
         // SAFETY: a signal to our own child.
@@ -536,6 +582,15 @@ fn make_disk(p: &Paths) -> Result<(), String> {
     std::fs::rename(&part, &p.disk).map_err(|e| err(&p.disk, e))
 }
 
+/// The VM's CPUs: `OPENPOD_VM_CPUS` when set (1 to the Mac's count), else the Mac's count
+/// up to 8.
+fn vm_cpus(setting: Option<u64>, mac: usize) -> usize {
+    match setting {
+        Some(n) => (n as usize).clamp(1, mac.max(1)),
+        None => mac.clamp(1, 8),
+    }
+}
+
 fn env_number(name: &str, default: u64) -> u64 {
     std::env::var(name)
         .ok()
@@ -554,7 +609,7 @@ fn start_error(why: String) -> String {
     }
 }
 
-/// How long a started VM may take to answer. It boots in about a second; when the Mac's
+/// How long a started VM may take to answer. It boots in about a third of a second; when the Mac's
 /// DHCP server had no address left, the kernel waited 80 to 90 seconds for one.
 const BOOT_TIME: Duration = Duration::from_secs(120);
 
@@ -567,8 +622,10 @@ fn wait_ready(vm: &Vm, p: &Paths) -> Result<(), String> {
             Ok((_, said)) => {
                 return Err(said.trim().trim_start_matches("openpod: ").to_string());
             }
+            // The agent listens about 200 ms after the kernel starts: look often, as a
+            // client waits for this (a failed vsock connect costs little).
             Err(_) if started.elapsed() < BOOT_TIME => {
-                std::thread::sleep(Duration::from_millis(50));
+                std::thread::sleep(Duration::from_millis(5));
             }
             Err(_) => {
                 return Err(format!(
@@ -957,6 +1014,36 @@ fn power_off(vm: &Vm) {
 mod tests {
     use super::*;
     use std::time::SystemTime;
+
+    #[test]
+    fn the_guest_comes_from_the_setting_then_the_binary_then_beside_it_then_home() {
+        let home = Path::new("/h");
+        let set = Some(PathBuf::from("/set"));
+        let beside = Some(PathBuf::from("/beside"));
+        let carried = || Some(PathBuf::from("/carried"));
+        assert_eq!(
+            choose_guest(set, carried, beside.clone(), home),
+            Path::new("/set")
+        );
+        assert_eq!(
+            choose_guest(None, carried, beside.clone(), home),
+            Path::new("/carried")
+        );
+        assert_eq!(
+            choose_guest(None, || None, beside, home),
+            Path::new("/beside")
+        );
+        assert_eq!(choose_guest(None, || None, None, home), Path::new("/h/vm"));
+    }
+
+    #[test]
+    fn the_vm_gets_the_macs_cpus_up_to_8_unless_set() {
+        assert_eq!(vm_cpus(None, 10), 8);
+        assert_eq!(vm_cpus(None, 4), 4);
+        assert_eq!(vm_cpus(Some(10), 10), 10);
+        assert_eq!(vm_cpus(Some(64), 10), 10);
+        assert_eq!(vm_cpus(Some(0), 10), 1);
+    }
 
     #[test]
     fn the_clock_is_due_after_ten_seconds_or_a_sleep() {

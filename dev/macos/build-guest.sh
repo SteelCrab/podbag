@@ -1,6 +1,6 @@
 #!/bin/bash
 # Build the openpod VM guest for macOS (run inside the lima VM: `dev/vm.sh run dev/macos/build-guest.sh`).
-# Writes target/vm/{Image, initramfs.gz, disk.zst} in the repository.
+# Writes target/vm/{Image, Image.zst, initramfs.gz, disk.zst} in the repository.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 repo=$(pwd)
@@ -43,6 +43,8 @@ done)
 [ -z "$missing" ] || { echo "kernel options not set:"; echo "$missing"; exit 1; }
 make -s -j"$(nproc)" Image
 cp arch/arm64/boot/Image "$out/Image"
+# What a release build of openpod carries (`--features embed-guest`).
+zstd -q -19 -T0 -f "$out/Image" -o "$out/Image.zst"
 
 # The static openpod for the guest.
 target=aarch64-unknown-linux-musl

@@ -9,6 +9,7 @@ use crate::{Error, Result};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
@@ -32,6 +33,12 @@ fn run() -> Result<()> {
     // run here must get theirs as a local command does (Ctrl+C ends `logs -f`), and the
     // agent itself must end on SIGTERM when the VM powers off.
     crate::signals::unblock_all();
+    // An OOM kill never takes the agent: every session and the Docker API go through it.
+    // Containers set their own score back to 0 (`linux::security`), and the commands run
+    // here get 0 too (`command`).
+    if let Err(e) = std::fs::write("/proc/self/oom_score_adj", "-1000") {
+        eprintln!("openpod: cannot protect the VM agent from OOM kills: {e}");
+    }
     let api = listen(API_PORT)?;
     let cli = listen(CLI_PORT)?;
     let forwarder = listen(FORWARD_PORT)?;
@@ -43,6 +50,7 @@ fn run() -> Result<()> {
     crate::helper::helpers_in_own_group();
     crate::helper::raise_descriptor_limit();
     std::thread::spawn(keep_lease);
+    std::thread::spawn(guard_memory);
     eprintln!("openpod: VM agent listens");
     std::thread::spawn(move || {
         accept_each(&api, |stream| {
@@ -307,6 +315,170 @@ fn restart_pending() -> bool {
     })
 }
 
+/// The thrashing guard: the VM has no swap, so when memory is gone the kernel may evict and
+/// read back the code of running processes for minutes instead of ending one. When all
+/// tasks have been stalled on memory for 300 ms of a second (PSI), memory is gone, and
+/// neither the kernel's OOM killer nor a container's own limit explains it, this ends the
+/// process the kernel's OOM killer would choose, then waits for it to go before it looks
+/// again. (The kernel's
+/// own guard, the multi-gen LRU's min_ttl_ms, called the OOM killer again before the first
+/// victim's memory came back, and took a second process.)
+fn guard_memory() {
+    let psi = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/proc/pressure/memory")
+        .and_then(|mut f| f.write_all(b"full 300000 1000000\0").map(|()| f));
+    let psi = match psi {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("openpod: no thrashing guard (memory pressure): {e}");
+            return;
+        }
+    };
+    let read = |path: &str| std::fs::read_to_string(path).unwrap_or_default();
+    let cgroups = Path::new("/sys/fs/cgroup");
+    let mut kills = oom_kills(&read("/proc/vmstat"));
+    let mut limits = limit_events_in(cgroups);
+    loop {
+        let mut fd = libc::pollfd {
+            fd: std::os::fd::AsRawFd::as_raw_fd(&psi),
+            events: libc::POLLPRI,
+            revents: 0,
+        };
+        // SAFETY: one pollfd on the stack.
+        if unsafe { libc::poll(&mut fd, 1, -1) } < 0 {
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return;
+        }
+        if fd.revents & libc::POLLERR != 0 {
+            return;
+        }
+        let (kills_now, limits_now) = (oom_kills(&read("/proc/vmstat")), limit_events_in(cgroups));
+        let act = guard_should_act(
+            &read("/proc/meminfo"),
+            (kills, kills_now),
+            (limits, limits_now),
+        );
+        (kills, limits) = (kills_now, limits_now);
+        if !act {
+            continue;
+        }
+        let Some(pid) = oom_choice_in(Path::new("/proc")) else {
+            continue;
+        };
+        // This thread stalls too: look again just before, as the kernel may have ended a
+        // process (whose oom_score reads 0 as it exits) or memory come back meanwhile.
+        if !guard_should_act(
+            &read("/proc/meminfo"),
+            (kills, oom_kills(&read("/proc/vmstat"))),
+            (0, 0),
+        ) {
+            continue;
+        }
+        eprintln!("openpod: the VM ran out of memory: ending process {pid}");
+        // SAFETY: kill with a pid read from /proc; the worst case is a pid reused meanwhile.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        let gone = Instant::now() + Duration::from_secs(10);
+        while Path::new(&format!("/proc/{pid}")).exists() && Instant::now() < gone {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // Its memory comes back as it exits: look again after a second.
+        std::thread::sleep(Duration::from_secs(1));
+        (kills, limits) = (oom_kills(&read("/proc/vmstat")), limit_events_in(cgroups));
+    }
+}
+
+/// Whether the guard ends a process now: memory is gone, the kernel ended no process since
+/// the last look (`kills`: then, now; its victim's memory is on its way back), and no
+/// container reached its own memory limit (`limits`: then, now; the kernel deals with that
+/// cgroup alone, as on any Linux host).
+fn guard_should_act(meminfo: &str, kills: (u64, u64), limits: (u64, u64)) -> bool {
+    kills.0 == kills.1 && limits.0 == limits.1 && memory_is_gone(meminfo)
+}
+
+/// The kernel's count of OOM kills (`oom_kill` in /proc/vmstat).
+fn oom_kills(vmstat: &str) -> u64 {
+    vmstat
+        .lines()
+        .find_map(|l| l.strip_prefix("oom_kill "))
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+/// How often the cgroups under `root` reached their memory.high or memory.max.
+fn limit_events_in(root: &Path) -> u64 {
+    let mut sum = 0;
+    let mut dirs = vec![root.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        if let Ok(events) = std::fs::read_to_string(dir.join("memory.events")) {
+            for line in events.lines() {
+                let mut field = line.split_whitespace();
+                if let (Some("high" | "max"), Some(n)) = (field.next(), field.next()) {
+                    sum += n.parse::<u64>().unwrap_or(0);
+                }
+            }
+        }
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            dirs.extend(
+                entries
+                    .flatten()
+                    .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+                    .map(|e| e.path()),
+            );
+        }
+    }
+    sum
+}
+
+/// Out of memory, not merely busy: what the kernel could still free (MemAvailable) is under
+/// 5% of the VM.
+fn memory_is_gone(meminfo: &str) -> bool {
+    let field = |name: &str| -> Option<u64> {
+        meminfo
+            .lines()
+            .find_map(|l| l.strip_prefix(name))?
+            .split_whitespace()
+            .next()?
+            .parse()
+            .ok()
+    };
+    match (field("MemTotal:"), field("MemAvailable:")) {
+        (Some(total), Some(available)) => available * 20 < total,
+        _ => false,
+    }
+}
+
+/// The process the kernel's OOM killer would choose: the highest `oom_score` among those it
+/// may end (not PID 1, not `oom_score_adj` -1000, not a kernel thread's 0).
+fn oom_choice_in(proc: &Path) -> Option<i32> {
+    let read = |pid: i32, file: &str| -> Option<i64> {
+        std::fs::read_to_string(proc.join(pid.to_string()).join(file))
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    };
+    std::fs::read_dir(proc)
+        .ok()?
+        .flatten()
+        .filter_map(|e| e.file_name().to_str()?.parse::<i32>().ok())
+        .filter(|&pid| pid != 1)
+        .filter_map(|pid| Some((read(pid, "oom_score")?, read(pid, "oom_score_adj")?, pid)))
+        .filter(|&(score, adj, _)| adj != -1000 && score > 0)
+        .max_by_key(|&(score, _, _)| score)
+        .map(|(_, _, pid)| pid)
+}
+
+/// In the VM, its size is the containers' memory budget: they may use all of it, and the
+/// thrashing guard ([`guard_memory`]) ends one that wants more. openpod's usual
+/// budget, half the memory, would hold a container at a cgroup limit of half the VM, where
+/// it evicts its own code for minutes instead of being killed. A budget set on the Mac
+/// (`OPENPOD_MEMORY_BUDGET`, forwarded to commands) still applies.
+pub const VM_BUDGET: (&str, &str) = ("OPENPOD_MEMORY_BUDGET", "0");
+
 fn command(req: &CliRequest) -> std::process::Command {
     let mut cmd = std::process::Command::new("/init");
     cmd.args(&req.argv)
@@ -316,9 +488,22 @@ fn command(req: &CliRequest) -> std::process::Command {
             "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         )
         .env("HOME", "/root")
+        .env(VM_BUDGET.0, VM_BUDGET.1)
         .envs(req.env.iter().map(|(k, v)| (k, v)))
         // Last: openpod is /init here, whatever the Mac sent.
         .env("OPENPOD_BIN", "/init");
+    // A command is the user's work, not the agent's: it may be ended when memory runs out.
+    // SAFETY: only open, write and close between fork and exec; no allocation.
+    unsafe {
+        std::os::unix::process::CommandExt::pre_exec(&mut cmd, || {
+            let fd = libc::open(c"/proc/self/oom_score_adj".as_ptr(), libc::O_WRONLY);
+            if fd >= 0 {
+                libc::write(fd, b"0".as_ptr().cast(), 1);
+                libc::close(fd);
+            }
+            Ok(())
+        });
+    }
     let cwd = std::path::Path::new(&req.cwd);
     cmd.current_dir(if cwd.is_dir() {
         cwd
@@ -617,4 +802,100 @@ fn pump(
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(env: &[(&str, &str)]) -> CliRequest {
+        CliRequest {
+            argv: vec!["ps".into()],
+            env: env
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            cwd: "/".into(),
+            tty: false,
+            rows: 0,
+            cols: 0,
+            time: (0, 0),
+        }
+    }
+
+    fn budget(cmd: &std::process::Command) -> Option<String> {
+        cmd.get_envs()
+            .find(|(k, _)| *k == "OPENPOD_MEMORY_BUDGET")
+            .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+    }
+
+    #[test]
+    fn the_thrashing_guard_waits_out_the_kernels_own_kill_and_a_containers_limit() {
+        let gone = "MemTotal: 1000000 kB\nMemAvailable: 40000 kB\n";
+        let room = "MemTotal: 1000000 kB\nMemAvailable: 400000 kB\n";
+        assert!(guard_should_act(gone, (7, 7), (3, 3)));
+        assert!(!guard_should_act(room, (7, 7), (3, 3)));
+        // The kernel ended a process since the last look: its memory is on its way back.
+        assert!(!guard_should_act(gone, (7, 8), (3, 3)));
+        // A container hit its own memory limit: the kernel deals with that cgroup alone.
+        assert!(!guard_should_act(gone, (7, 7), (3, 5)));
+    }
+
+    #[test]
+    fn the_thrashing_guard_reads_the_counters() {
+        assert_eq!(oom_kills("pgfault 12\noom_kill 4\npgmajfault 1\n"), 4);
+        assert_eq!(oom_kills("nothing"), 0);
+        let root = tempfile::tempdir().unwrap();
+        let events = |dir: &str, high: u64, max: u64| {
+            let d = root.path().join(dir);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(
+                d.join("memory.events"),
+                format!("low 9\nhigh {high}\nmax {max}\noom 9\noom_kill 9\n"),
+            )
+            .unwrap();
+        };
+        events("openpod", 0, 0);
+        events("openpod/a", 2, 1);
+        events("openpod/b", 0, 3);
+        assert_eq!(limit_events_in(root.path()), 6);
+    }
+
+    #[test]
+    fn the_thrashing_guard_acts_only_when_memory_is_gone() {
+        let meminfo = |available: u64| {
+            format!("MemTotal: 1000000 kB\nMemFree: 1000 kB\nMemAvailable: {available} kB\n")
+        };
+        assert!(memory_is_gone(&meminfo(40_000)));
+        // A page cache in use leaves much that the kernel could free: only busy.
+        assert!(!memory_is_gone(&meminfo(400_000)));
+        assert!(!memory_is_gone("nothing to read"));
+    }
+
+    #[test]
+    fn the_thrashing_guard_chooses_as_the_oom_killer_does() {
+        let proc = tempfile::tempdir().unwrap();
+        let process = |pid: &str, score: i64, adj: i64| {
+            let dir = proc.path().join(pid);
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::write(dir.join("oom_score"), format!("{score}\n")).unwrap();
+            std::fs::write(dir.join("oom_score_adj"), format!("{adj}\n")).unwrap();
+        };
+        process("1", 900, 0); // init: never
+        process("50", 950, -1000); // the agent: never
+        process("60", 500, 0);
+        process("70", 700, 0); // the biggest it may end
+        process("80", 0, 0); // a kernel thread
+        std::fs::create_dir(proc.path().join("self")).unwrap();
+        assert_eq!(oom_choice_in(proc.path()), Some(70));
+        std::fs::remove_dir_all(proc.path().join("70")).unwrap();
+        assert_eq!(oom_choice_in(proc.path()), Some(60));
+    }
+
+    #[test]
+    fn a_command_in_the_vm_has_no_budget_but_the_one_the_mac_sends() {
+        assert_eq!(budget(&command(&request(&[]))).as_deref(), Some("0"));
+        let sent = request(&[("OPENPOD_MEMORY_BUDGET", "50%")]);
+        assert_eq!(budget(&command(&sent)).as_deref(), Some("50%"));
+    }
 }

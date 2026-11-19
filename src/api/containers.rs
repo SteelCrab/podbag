@@ -509,6 +509,8 @@ fn wait_until(
     let mut last_exit = None;
     let mut ran = false;
     loop {
+        // Read before looking: a change made while this looks wakes the wait below.
+        let seen = registry.changes();
         // A start by this service records the code even when --rm removes the
         // container before anyone could read it.
         let ours = registry.exit_after(id, generation);
@@ -563,7 +565,9 @@ fn wait_until(
         if client_left() {
             return None;
         }
-        std::thread::sleep(Duration::from_millis(50));
+        // A start, end or removal by this service wakes it at once; what others do (the
+        // CLI, a restart) shows at the next look.
+        registry.wait_for_change(seen, Duration::from_millis(50));
     }
 }
 

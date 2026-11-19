@@ -49,6 +49,8 @@ fn start_agent() -> Option<libc::pid_t> {
     match std::process::Command::new("/init")
         .arg("__vm-agent")
         .env("OPENPOD_BIN", "/init")
+        // The Docker API is served in the agent: its containers get the VM's budget too.
+        .env(super::agent::VM_BUDGET.0, super::agent::VM_BUDGET.1)
         .spawn()
     {
         Ok(child) => Some(child.id() as libc::pid_t),

@@ -2052,3 +2052,248 @@ fn disk_space_goes_back_without_a_restart() {
         std::thread::sleep(Duration::from_millis(500));
     }
 }
+
+#[test]
+fn a_container_bigger_than_the_vm_is_killed() {
+    if !enabled() {
+        return;
+    }
+    let mac = Mac::new(60);
+    mac.ok(&["ps"]);
+    // 64 MiB at a time, every page touched, up to 2 GiB: twice the tests' 1 GiB VM.
+    let grow = "chunks = []\n\
+                for i in range(32):\n    \
+                    b = bytearray(64 << 20)\n    \
+                    b[::4096] = b'x' * len(b[::4096])\n    \
+                    chunks.append(b)\n\
+                print('all of it fit')";
+    // From openpod's CLI and from the docker CLI (the agent's Docker API).
+    for mut command in [
+        mac.cmd(&["run", "--rm", "python:3.13-alpine", "python3", "-c", grow]),
+        mac.docker(&["run", "--rm", "python:3.13-alpine", "python3", "-c", grow]),
+    ] {
+        killed_within_a_minute(&mac, &mut command);
+    }
+}
+
+/// Runs a container that wants more memory than the VM has: it must end with 137 (an OOM
+/// kill) within 60 s, and the VM must keep answering.
+fn killed_within_a_minute(mac: &Mac, command: &mut Command) {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            // Dropping the Mac stops the VM, busy or not.
+            panic!("neither killed nor done within 60 s: the VM thrashes");
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(
+        status.code(),
+        Some(137),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // The VM keeps answering.
+    let asked = Instant::now();
+    mac.ok(&["ps"]);
+    assert!(
+        asked.elapsed() < Duration::from_secs(10),
+        "ps took {:?}",
+        asked.elapsed()
+    );
+}
+
+#[test]
+fn a_standby_wakes_without_waiting() {
+    if !enabled() {
+        return;
+    }
+    let mac = Mac::new(2);
+    mac.ok(&["ps"]);
+    mac.wait_until_stopped();
+    // The host that started the standby is long gone by the time a client comes.
+    std::thread::sleep(Duration::from_secs(1));
+    let asked = Instant::now();
+    mac.ok(&["ps"]);
+    assert!(
+        asked.elapsed() < Duration::from_secs(2),
+        "woke in {:?}",
+        asked.elapsed()
+    );
+}
+
+#[test]
+fn a_container_runs_in_milliseconds_through_the_docker_api() {
+    if !enabled() {
+        return;
+    }
+    let mac = Mac::new(60);
+    mac.ok(&["ps"]);
+    let best = (0..6)
+        .map(|_| api_run_rm(&mac.docker_sock()))
+        .skip(1)
+        .min()
+        .unwrap();
+    assert!(best < Duration::from_millis(12), "best of 5: {best:?}");
+}
+
+/// `docker run --rm --network none alpine:3.22 true` as the docker CLI does it, without the
+/// CLI's own start: create, attach, wait for the removal, start. Returns how long it took.
+fn api_run_rm(sock: &Path) -> Duration {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+    fn request(sock: &Path, method: &str, path: &str, body: &str) -> String {
+        let mut s = UnixStream::connect(sock).unwrap();
+        write!(
+            s,
+            "{method} {path} HTTP/1.1\r\nHost: d\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        let mut out = String::new();
+        s.read_to_string(&mut out).unwrap();
+        out
+    }
+    fn head(s: &mut UnixStream) {
+        let mut h = Vec::new();
+        let mut b = [0u8; 1];
+        while !h.ends_with(b"\r\n\r\n") {
+            assert_eq!(s.read(&mut b).unwrap(), 1, "{h:?}");
+            h.push(b[0]);
+        }
+    }
+    let started = Instant::now();
+    let created = request(
+        sock,
+        "POST",
+        "/containers/create",
+        r#"{"Image":"alpine:3.22","Cmd":["true"],"HostConfig":{"NetworkMode":"none","AutoRemove":true}}"#,
+    );
+    let id = created
+        .split("\"Id\":\"")
+        .nth(1)
+        .and_then(|r| r.split('"').next())
+        .unwrap_or_else(|| panic!("{created}"))
+        .to_string();
+    let mut attach = UnixStream::connect(sock).unwrap();
+    write!(
+        attach,
+        "POST /containers/{id}/attach?stream=1&stdout=1&stderr=1 HTTP/1.1\r\nHost: d\r\n\
+         Upgrade: tcp\r\nConnection: Upgrade\r\nContent-Length: 0\r\n\r\n"
+    )
+    .unwrap();
+    head(&mut attach);
+    let mut wait = UnixStream::connect(sock).unwrap();
+    write!(
+        wait,
+        "POST /containers/{id}/wait?condition=removed HTTP/1.1\r\nHost: d\r\n\
+         Content-Length: 0\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    head(&mut wait);
+    let start = request(sock, "POST", &format!("/containers/{id}/start"), "");
+    assert!(start.starts_with("HTTP/1.1 204"), "{start}");
+    let mut rest = String::new();
+    wait.read_to_string(&mut rest).unwrap();
+    assert!(rest.contains("\"StatusCode\":0"), "{rest}");
+    started.elapsed()
+}
+
+#[test]
+fn a_big_vm_keeps_no_unused_bounce_buffers() {
+    if !enabled() {
+        return;
+    }
+    let mac = Mac::new(60);
+    // The first command starts the VM: 8 GiB, the others' size in docs/benchmarks.md.
+    let out = mac
+        .cmd(&["run", "--rm", "--privileged", "alpine:3.22", "dmesg"])
+        .env("OPENPOD_VM_MEMORY", "8192")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let log = String::from_utf8_lossy(&out.stdout);
+    let line = |what: &str| {
+        log.lines()
+            .find(|l| l.contains(what))
+            .unwrap_or_else(|| panic!("no {what:?} in dmesg"))
+            .to_string()
+    };
+    // Bounce buffers nothing uses (virtio here bypasses the DMA API): a few MB, not 64.
+    let tlb = line("software IO TLB: mapped");
+    let mb: u64 = tlb
+        .rsplit('(')
+        .next()
+        .and_then(|s| s.strip_suffix("MB)"))
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| panic!("{tlb}"));
+    assert!(mb <= 8, "{tlb}");
+}
+
+#[test]
+fn vm_stop_after_a_failed_start_leaves_nothing_running() {
+    if !enabled() || !have_docker() {
+        return;
+    }
+    let mac = Mac::new(2);
+    let disk = mac.home.path().join("disk.img");
+    for attempt in 1..=4 {
+        // A good disk: a VM runs and goes, and its standby waits.
+        let _ = std::fs::remove_file(&disk);
+        assert!(
+            Command::new("cp")
+                .arg("-c")
+                .arg(seed_disk())
+                .arg(&disk)
+                .status()
+                .unwrap()
+                .success()
+        );
+        mac.ok(&["ps"]);
+        mac.wait_until_stopped();
+        // The disk breaks: the standby's host fails, answers, and starts another standby.
+        use std::os::unix::fs::FileExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&disk)
+            .unwrap()
+            .write_all_at(&[0u8; 4096], 1024)
+            .unwrap();
+        let out = mac.docker(&["ps"]).output().unwrap();
+        assert_ne!(out.status.code(), Some(0), "attempt {attempt}");
+        mac.ok(&["vm", "stop"]);
+        if let Some(pid) = mac.host_pid() {
+            let run = mac.home.path().join("run");
+            let read = |f: &str| std::fs::read_to_string(run.join(f)).unwrap_or_default();
+            let ps = Command::new("ps")
+                .args(["-o", "pid,ppid,lstart,command", "-p", &pid.to_string()])
+                .output()
+                .unwrap();
+            panic!(
+                "attempt {attempt}: a host or standby still runs after vm stop:\n{}\
+                 pid file: {:?}, state: {:?}\nhost.log:\n{}",
+                String::from_utf8_lossy(&ps.stdout),
+                read("host.pid"),
+                read("state"),
+                read("host.log")
+            );
+        }
+    }
+}

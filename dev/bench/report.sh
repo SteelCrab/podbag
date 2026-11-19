@@ -75,7 +75,7 @@ version() { get "$1" version; }
 count="$(get openpod count)"
 runs="$(get openpod runs)"
 mac="$repo/bench-results/mac"
-mac_tools=(docker-desktop orbstack kiri podman colima openpod)
+mac_tools=(docker-desktop orbstack kiri podman colima openpod-mac openpod-mac-default)
 {
   echo "# Benchmarks"
   echo
@@ -158,6 +158,7 @@ mac_tools=(docker-desktop orbstack kiri podman colima openpod)
     m_vm() { echo "$(m "$1" vm_cpus) CPUs, $(mem_h "$(m "$1" vm_mem_kb)")"; }
     m_start() { echo "$(m "$1" start_median_ms) / $(m "$1" start_p90_ms)"; }
     m_wake() { m "$1" wake_ms; }
+    m_own() { local v; v="$(m "$1" own_start_median_ms)"; if [ -n "$v" ]; then echo "$v / $(m "$1" own_start_p90_ms)"; else echo "—"; fi; }
     m_idle() { mem_h "$(m "$1" mem_idle_kb)"; }
     m_busy() { mem_h "$(m "$1" mem_busy_kb)"; }
     m_after30() { mem_h "$(m "$1" mem_after30_kb)"; }
@@ -172,7 +173,15 @@ mac_tools=(docker-desktop orbstack kiri podman colima openpod)
     echo
     echo "Measured with \`dev/bench/mac.py\` from the Mac: $(sed -n 's/^chip=//p' "$mac/mac.env"),"
     echo "$(sed -n 's/^cpus=//p' "$mac/mac.env") CPUs, $(awk -v k="$(sed -n 's/^mem_kb=//p' "$mac/mac.env")" 'BEGIN{printf "%.0f GiB", k/1048576}'),"
-    echo "macOS $(sed -n 's/^macos=//p' "$mac/mac.env"), $(sed -n 's/^date=//p' "$mac/mac.env"). One tool ran at a time; the others were stopped."
+    # Each column's date; results from before the date was recorded per tool carry mac.env's.
+    m_date() { local d; d="$(m "$1" date)"; echo "${d:-$(sed -n 's/^date=//p' "$mac/mac.env")}"; }
+    od="$(m_date openpod-mac)"; kd="$(m_date kiri)"
+    if [ "$od" = "$kd" ]; then
+      echo "macOS $(sed -n 's/^macos=//p' "$mac/mac.env"), $od. One tool ran at a time; the others were stopped."
+    else
+      echo "macOS $(sed -n 's/^macos=//p' "$mac/mac.env"). The other tools on $kd, one at a time with the others stopped;"
+      echo "openpod on $od, while Docker Desktop's app (its VM stopped) and the lima VM openpod is developed in ran."
+    fi
     echo
     header="| |"
     rule="|---|"
@@ -185,6 +194,7 @@ mac_tools=(docker-desktop orbstack kiri podman colima openpod)
     mrow "Version" m_version
     mrow "VM size" m_vm
     mrow "Start: \`run --rm --network none alpine true\`, median / p90 (ms, $mruns runs)" m_start
+    mrow "… through openpod's own CLI (\`openpod run\`), median / p90 (ms)" m_own
     mrow "First \`run\` after 6 minutes without containers (ms)" m_wake
     mrow "Memory on the Mac (the tool's processes, VM included): just started" m_idle
     mrow "… with $mcount sleeping containers" m_busy
@@ -196,17 +206,20 @@ mac_tools=(docker-desktop orbstack kiri podman colima openpod)
     echo "- Every VM was set to 10 CPUs and 8 GiB, Docker Desktop's default here (the script"
     echo "  cannot change Docker Desktop's settings); OrbStack's VM reports more than the 8 GiB"
     echo "  it was limited to. The size is an upper limit: the memory rows show what each VM"
-    echo "  takes from the Mac."
-    echo "- Docker Desktop, OrbStack, Kiri and Colima were driven by the same docker CLI through"
-    echo "  their sockets, Podman by its own CLI. openpod has no macOS front end yet (design 7):"
-    echo "  it runs in lima's Ubuntu VM and its CLI is reached over ssh, which alone takes"
-    echo "  $(m openpod transport_ms) ms of each start; its memory is mostly that Ubuntu system."
+    echo "  takes from the Mac. openpod is shown at that size and at its own default (the"
+    echo "  Mac's CPUs up to 8, 2 GiB): what its VM holds grows with the size, as the guest"
+    echo "  kernel sets up its bookkeeping for all of the VM's memory when it boots."
+    echo "- Docker Desktop, OrbStack, Kiri, Colima and openpod were driven by the same docker"
+    echo "  CLI through their sockets, Podman by its own CLI. openpod runs a VM of its own"
+    echo "  (Virtualization.framework, Linux 6.18 with openpod as its init); it powers the VM"
+    echo "  off 60 s after the last container and leaves a small standby process, which starts"
+    echo "  the VM again for the next client."
     echo "- \"Memory on the Mac\" is the sum of macOS physical footprint (\`footprint\`) of the"
     echo "  tool's app, helpers and VM process; root helpers by resident size. Other VMs on the Mac"
     echo "  are not counted (another project's VM ran during the measurements)."
-    echo "- Containers on the default network; the script removes only the containers it labels,"
-    echo "  so Docker Desktop's existing images and containers stayed. For that reason disk use is"
-    echo "  compared in the Linux table only."
+    echo "- Containers on the default network; the script removes only the containers it labels"
+    echo "  (openpod's are in a home of its own), so Docker Desktop's existing images and"
+    echo "  containers stayed. For that reason disk use is compared in the Linux table only."
   fi
   # The many-containers run: a column for each tool that was measured.
   scale_tools=()

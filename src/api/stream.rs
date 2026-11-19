@@ -6,7 +6,8 @@ use std::io::{Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::time::Duration;
 
 /// A frame of Docker's multiplexed stream: an 8-byte header (stream 1 stdout, 2 stderr;
 /// big-endian length), then the bytes.
@@ -52,6 +53,10 @@ pub struct Attachments {
     waiting: Mutex<HashMap<String, Vec<Attachment>>>,
     exits: Mutex<HashMap<String, (u64, Exit)>>,
     counter: AtomicU64,
+    /// Counts the starts that began, ended or failed: a client waiting for a container
+    /// wakes at once (a `--rm` container is removed before its start ends).
+    changes: Mutex<u64>,
+    changed: Condvar,
 }
 
 impl Attachments {
@@ -124,23 +129,54 @@ impl Attachments {
         let generation = self.next();
         self.lock_exits()
             .insert(id.to_string(), (generation, Exit::Running));
+        self.bump();
         generation
     }
 
     /// The start `generation` of `id` ended with `code`.
     pub fn finish(&self, id: &str, generation: u64, code: i32) {
-        let mut exits = self.lock_exits();
-        if exits.get(id).is_some_and(|(g, _)| *g == generation) {
-            exits.insert(id.to_string(), (generation, Exit::Code(code)));
+        {
+            let mut exits = self.lock_exits();
+            if exits.get(id).is_some_and(|(g, _)| *g == generation) {
+                exits.insert(id.to_string(), (generation, Exit::Code(code)));
+            }
         }
+        self.bump();
     }
 
     /// The start `generation` of `id` failed: it never ran.
     pub fn abandon(&self, id: &str, generation: u64) {
-        let mut exits = self.lock_exits();
-        if exits.get(id).is_some_and(|(g, _)| *g == generation) {
-            exits.remove(id);
+        {
+            let mut exits = self.lock_exits();
+            if exits.get(id).is_some_and(|(g, _)| *g == generation) {
+                exits.remove(id);
+            }
         }
+        self.bump();
+    }
+
+    fn lock_changes(&self) -> std::sync::MutexGuard<'_, u64> {
+        self.changes.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn bump(&self) {
+        *self.lock_changes() += 1;
+        self.changed.notify_all();
+    }
+
+    /// The count of changes, for [`Self::wait_for_change`]: read it before looking.
+    pub fn changes(&self) -> u64 {
+        *self.lock_changes()
+    }
+
+    /// Wait until the count passes `seen`, or `limit` passes. Returns the count.
+    pub fn wait_for_change(&self, seen: u64, limit: Duration) -> u64 {
+        let guard = self.lock_changes();
+        let (guard, _) = self
+            .changed
+            .wait_timeout_while(guard, limit, |n| *n == seen)
+            .unwrap_or_else(|p| p.into_inner());
+        *guard
     }
 
     /// The newest generation of `id` (0: none), for [`Self::exit_after`].
@@ -347,6 +383,31 @@ pub fn copy_out(mut from: impl Read, stream_id: u8, tty: bool, sinks: &[Sink]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_waiter_wakes_as_soon_as_a_start_ends() {
+        let a = Arc::new(Attachments::default());
+        let generation = a.begin("c");
+        let seen = a.changes();
+        let ender = {
+            let a = a.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(20));
+                a.finish("c", generation, 0);
+            })
+        };
+        let asked = std::time::Instant::now();
+        assert!(a.wait_for_change(seen, Duration::from_secs(5)) > seen);
+        assert!(
+            asked.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            asked.elapsed()
+        );
+        ender.join().unwrap();
+        // Nothing new: the wait ends at its limit.
+        let seen = a.changes();
+        assert_eq!(a.wait_for_change(seen, Duration::from_millis(10)), seen);
+    }
 
     #[test]
     fn frames_have_docker_headers() {

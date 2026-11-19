@@ -5,10 +5,22 @@ use super::init::os_error;
 use crate::spec::Security;
 use crate::{Error, ErrorKind, Result};
 
+/// A container's processes get an OOM score adjustment of 0, as with Docker, whatever the
+/// process that started them has: in the macOS VM the agent keeps -1000 so that an OOM kill
+/// never takes it, and a child inherits the value. Raising it needs no privilege; a failure
+/// leaves the inherited value, which is 0 outside the VM.
+fn reset_oom_score() {
+    let path = "/proc/self/oom_score_adj";
+    if std::fs::read_to_string(path).is_ok_and(|v| v.trim() != "0") {
+        let _ = std::fs::write(path, "0");
+    }
+}
+
 /// Shrink the capability bounding set to the container's set, turn on no_new_privs when
 /// asked, and install the seccomp filter unless it is off. Runs as root of the container,
 /// which holds CAP_SETPCAP and CAP_SYS_ADMIN (seccomp needs one of that or no_new_privs).
 pub(super) fn apply(sec: &Security) -> Result<()> {
+    reset_oom_score();
     // Privileged: every capability the kernel has, whatever else was asked.
     let keep = if sec.privileged {
         u64::MAX

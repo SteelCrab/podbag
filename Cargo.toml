@@ -15,6 +15,9 @@ required-features = ["cli"]
 [features]
 default = ["cli"]
 cli = ["dep:clap"]
+# macOS: the binary carries the VM's guest files from target/vm (or OPENPOD_GUEST_DIR),
+# built first with `dev/vm.sh run dev/macos/build-guest.sh`.
+embed-guest = []
 
 [dependencies]
 clap = { version = "4", features = ["derive"], optional = true }
