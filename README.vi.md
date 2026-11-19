@@ -1,3 +1,5 @@
+<img src="docs/images/logo.png" alt="podbag" width="120" align="right">
+
 # podbag
 
 Một container engine không có daemon, chỉ gồm một tệp nhị phân tĩnh.
@@ -34,6 +36,14 @@ Image được lưu theo từng tệp: tệp mà nhiều image dùng chung chỉ
 - **Dùng được với công cụ của Docker.** Image Docker và OCI, CLI `docker`, Compose và buildx.
 - **Có hoặc không có root.** Cùng một chương trình chạy được theo cả hai cách.
 - **Linux, macOS và Windows.** x86_64 và arm64. Hỗ trợ Windows đang ở giai đoạn thử nghiệm.
+
+### Lớp và tệp
+
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/storage-dark.svg"><img alt="So sánh lớp và tệp: khi lưu theo lớp, cùng các tệp jar được build lại vào lớp mới sẽ bị lưu thêm lần nữa; khi lưu theo tệp, các jar mà hai image dùng chung chỉ được lưu một lần và cả hai image cùng trỏ tới." src="docs/images/storage-light.svg"></picture>
+
+- Kho lưu theo lớp (Docker, Podman, Kiri) lưu nguyên từng lớp. Khi image được build lại, cùng các tệp đó đi vào một lớp mới, được lưu lại và cache lại lần nữa.
+- podbag lưu mỗi tệp một lần. Một image là danh sách đường dẫn trỏ tới các tệp đó.
+- Với 8 dịch vụ Spring ở 2 bản phát hành: 902 MiB đĩa so với 2.970 MiB của Docker, và 324 MiB page cache so với 982 MiB.
 
 ## Cài đặt
 

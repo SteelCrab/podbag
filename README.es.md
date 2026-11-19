@@ -1,3 +1,5 @@
+<img src="docs/images/logo.png" alt="podbag" width="120" align="right">
+
 # podbag
 
 Un motor de contenedores sin daemon, en un solo binario estático.
@@ -34,6 +36,14 @@ Guarda las imágenes archivo por archivo: un archivo que comparten muchas imáge
 - **Funciona con las herramientas de Docker.** Imágenes Docker y OCI, el CLI `docker`, Compose y buildx.
 - **Con o sin root.** El mismo programa funciona de las dos formas.
 - **Linux, macOS y Windows.** x86_64 y arm64. El soporte de Windows es experimental.
+
+### Capas y archivos
+
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/storage-dark.svg"><img alt="Capas frente a archivos: con capas, los mismos jar reconstruidos en una capa nueva se guardan otra vez; con archivos, los jar que comparten dos imágenes se guardan una vez y ambas imágenes apuntan a ellos." src="docs/images/storage-light.svg"></picture>
+
+- Los almacenes por capas (Docker, Podman, Kiri) guardan cada capa entera. Si una imagen se vuelve a construir, los mismos archivos entran en una capa nueva y se guardan y se cachean otra vez.
+- podbag guarda cada archivo una sola vez. Una imagen es una lista de rutas que apuntan a esos archivos.
+- Con 8 servicios Spring en 2 versiones: 902 MiB de disco frente a 2.970 MiB de Docker, y 324 MiB de caché de páginas frente a 982 MiB.
 
 ## Instalación
 

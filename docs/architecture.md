@@ -47,6 +47,8 @@ Mac. The numbers come from [benchmarks.md](benchmarks.md) and
 
 ## Image storage: layers and files
 
+<picture><source media="(prefers-color-scheme: dark)" srcset="images/storage-dark.svg"><img alt="Layers against files: as layers, the same jars rebuilt into a new layer are stored again; as files, the jars that two images share are kept once and both images point to them." src="images/storage-light.svg"></picture>
+
 ### Layers
 
 - An image is a list of layers. A layer is a tar archive of the files it adds or changes.

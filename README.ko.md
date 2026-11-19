@@ -1,3 +1,5 @@
+<img src="docs/images/logo.png" alt="podbag" width="120" align="right">
+
 # podbag
 
 데몬 없는 컨테이너 엔진입니다. 정적 바이너리 하나로 동작합니다.
@@ -34,6 +36,14 @@
 - **Docker 도구와 함께 씁니다.** Docker·OCI 이미지, `docker` CLI, Compose, buildx를 지원합니다.
 - **root 없이도, root로도.** 같은 프로그램이 두 방식으로 동작합니다.
 - **Linux, macOS, Windows.** x86_64와 arm64를 지원합니다. Windows 지원은 실험 단계입니다.
+
+### 레이어와 파일
+
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/storage-dark.svg"><img alt="레이어와 파일 비교: 레이어 방식에서는 다시 빌드한 같은 jar가 새 레이어에 또 저장됩니다. 파일 방식에서는 두 이미지가 공유하는 jar를 한 번만 저장하고, 두 이미지가 함께 가리킵니다." src="docs/images/storage-light.svg"></picture>
+
+- 레이어 방식(Docker, Podman, Kiri)은 레이어를 통째로 저장합니다. 이미지를 다시 빌드하면 같은 파일이 새 레이어에 들어가 다시 저장되고, 메모리에도 다시 올라갑니다.
+- podbag은 파일 하나하나를 한 번만 저장합니다. 이미지는 그 파일들을 가리키는 경로 목록입니다.
+- Spring 서비스 8개, 릴리스 2개 기준: 디스크 902 MiB(Docker 2,970 MiB), 페이지 캐시 324 MiB(Docker 982 MiB).
 
 ## 설치
 

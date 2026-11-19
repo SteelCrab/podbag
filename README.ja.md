@@ -1,3 +1,5 @@
+<img src="docs/images/logo.png" alt="podbag" width="120" align="right">
+
 # podbag
 
 デーモンのないコンテナエンジンです。静的バイナリ1つで動きます。
@@ -34,6 +36,14 @@
 - **Docker のツールと一緒に使えます。** Docker・OCI イメージ、`docker` CLI、Compose、buildx に対応しています。
 - **root なしでも、root でも。** 同じプログラムが両方の方式で動きます。
 - **Linux、macOS、Windows。** x86_64 と arm64 に対応しています。Windows 対応は実験段階です。
+
+### レイヤーとファイル
+
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/storage-dark.svg"><img alt="レイヤーとファイルの比較: レイヤー方式では、作り直した同じ jar が新しいレイヤーにもう一度保存されます。ファイル方式では、2つのイメージが共有する jar を1回だけ保存し、両方のイメージがそれを指します。" src="docs/images/storage-light.svg"></picture>
+
+- レイヤー方式（Docker、Podman、Kiri）はレイヤーを丸ごと保存します。イメージを作り直すと、同じファイルが新しいレイヤーに入り、もう一度保存され、メモリにも再び読み込まれます。
+- podbag はファイルを1つずつ、1回だけ保存します。イメージは、それらのファイルを指すパスの一覧です。
+- Spring サービス8個・2リリースの場合: ディスク 902 MiB（Docker は 2,970 MiB）、ページキャッシュ 324 MiB（Docker は 982 MiB）。
 
 ## インストール
 

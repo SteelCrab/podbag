@@ -5,6 +5,7 @@ headless Chrome takes of the same SVG (needs Google Chrome and ffmpeg).
 
 usage: python3 dev/docs/intro.py [--video]
 """
+import base64
 import subprocess
 import sys
 import tempfile
@@ -60,11 +61,14 @@ def svg():
          "<title>podbag intro</title>",
          f'<rect width="{W}" height="{H}" rx="14" fill="{BG}"/>']
 
-    # 1. The name.
+    # 1. The icon and the name.
+    logo = base64.b64encode((REPO / "docs/images/logo-small.png").read_bytes()).decode()
     o.append("<g opacity=\"0\">" + fade(0, 4.5))
-    o.append(text(W / 2, 200, "podbag", 72, weight=800, anchor="middle"))
-    o.append(text(W / 2, 248, "A container engine with no daemon,", 22, MUTED, anchor="middle"))
-    o.append(text(W / 2, 278, "in one static binary.", 22, MUTED, anchor="middle"))
+    o.append(f'<image x="{W / 2 - 60}" y="40" width="120" height="120" '
+             f'href="data:image/png;base64,{logo}"/>')
+    o.append(text(W / 2, 236, "podbag", 64, weight=800, anchor="middle"))
+    o.append(text(W / 2, 282, "A container engine with no daemon,", 22, MUTED, anchor="middle"))
+    o.append(text(W / 2, 312, "in one static binary.", 22, MUTED, anchor="middle"))
     o.append("</g>")
 
     # 2. A terminal: run a container, and nothing is left running.

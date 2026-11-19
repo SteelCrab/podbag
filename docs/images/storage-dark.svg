@@ -1,0 +1,92 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="470" viewBox="0 0 760 470" role="img" aria-label="Layers against files: as layers, the same jars rebuilt into a new layer are stored again; as files, the jars that two images share are kept once and both images point to them" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+<title>Two images stored as layers, and as files</title>
+<rect width="760" height="470" rx="10" fill="#1a1a19"/>
+<text x="24.0" y="38.0" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" fill="#f0efec" font-weight="700" text-anchor="start">Layers</text>
+<text x="24.0" y="57.0" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" fill="#c3c2b7" text-anchor="start">Docker, Podman, Kiri, OrbStack, Colima</text>
+<text x="24.0" y="86.0" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" fill="#f0efec" font-weight="600" text-anchor="start">image A (release n)</text>
+<rect x="24.0" y="94.0" width="344.0" height="30.0" rx="7" fill="#242422" stroke="#45453f"/>
+<text x="36.0" y="113.0" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" fill="#c3c2b7" text-anchor="start">base</text>
+<rect x="84.0" y="98.0" width="42.0" height="22.0" rx="5" fill="#2e2e2b" stroke="#45453f"/>
+<text x="105.0" y="113.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" fill="#f0efec" text-anchor="middle">libc</text>
+<rect x="132.0" y="98.0" width="56.0" height="22.0" rx="5" fill="#2e2e2b" stroke="#45453f"/>
+<text x="160.0" y="113.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" fill="#f0efec" text-anchor="middle">JRE 16</text>
+<rect x="24.0" y="130.0" width="344.0" height="30.0" rx="7" fill="#242422" stroke="#45453f"/>
+<text x="36.0" y="149.0" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" fill="#c3c2b7" text-anchor="start">jars</text>
+<rect x="84.0" y="134.0" width="119.0" height="22.0" rx="5" fill="#2e2e2b" stroke="#45453f"/>
+<text x="143.5" y="149.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" fill="#f0efec" text-anchor="middle">spring-core.jar</text>
+<rect x="209.0" y="134.0" width="91.0" height="22.0" rx="5" fill="#2e2e2b" stroke="#45453f"/>
+<text x="254.5" y="149.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" fill="#f0efec" text-anchor="middle">jackson.jar</text>
+<rect x="306.0" y="134.0" width="21.0" height="22.0" rx="5" fill="#2e2e2b" stroke="#45453f"/>
+<text x="316.5" y="149.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" fill="#f0efec" text-anchor="middle">…</text>
+<rect x="24.0" y="166.0" width="344.0" height="30.0" rx="7" fill="#242422" stroke="#45453f"/>
+<text x="36.0" y="185.0" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" fill="#c3c2b7" text-anchor="start">app</text>
+<rect x="84.0" y="170.0" width="49.0" height="22.0" rx="5" fill="#2e2e2b" stroke="#45453f"/>
+<text x="108.5" y="185.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" fill="#f0efec" text-anchor="middle">app A</text>
+<text x="24.0" y="222.0" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" fill="#f0efec" font-weight="600" text-anchor="start">image B (release n+1)</text>
+<rect x="24.0" y="230.0" width="344.0" height="30.0" rx="7" fill="#242422" stroke="#45453f"/>
+<text x="36.0" y="249.0" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" fill="#c3c2b7" text-anchor="start">base</text>
+<rect x="84.0" y="234.0" width="49.0" height="22.0" rx="5" fill="#2e2e2b" stroke="#45453f"/>
+<text x="108.5" y="249.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" fill="#f0efec" text-anchor="middle">libc&#x27;</text>
+<rect x="139.0" y="234.0" width="56.0" height="22.0" rx="5" fill="#2e2e2b" stroke="#45453f"/>
+<text x="167.0" y="249.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" fill="#f0efec" text-anchor="middle">JRE 21</text>
+<rect x="24.0" y="266.0" width="344.0" height="30.0" rx="7" fill="#242422" stroke="#45453f"/>
+<text x="36.0" y="285.0" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" fill="#c3c2b7" text-anchor="start">jars</text>
+<rect x="84.0" y="270.0" width="119.0" height="22.0" rx="5" fill="#2e2e2b" stroke="#3987e5"/>
+<text x="143.5" y="285.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" fill="#3987e5" text-anchor="middle">spring-core.jar</text>
+<rect x="209.0" y="270.0" width="91.0" height="22.0" rx="5" fill="#2e2e2b" stroke="#3987e5"/>
+<text x="254.5" y="285.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" fill="#3987e5" text-anchor="middle">jackson.jar</text>
+<rect x="306.0" y="270.0" width="21.0" height="22.0" rx="5" fill="#2e2e2b" stroke="#3987e5"/>
+<text x="316.5" y="285.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" fill="#3987e5" text-anchor="middle">…</text>
+<rect x="24.0" y="302.0" width="344.0" height="30.0" rx="7" fill="#242422" stroke="#45453f"/>
+<text x="36.0" y="321.0" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" fill="#c3c2b7" text-anchor="start">app</text>
+<rect x="84.0" y="306.0" width="49.0" height="22.0" rx="5" fill="#2e2e2b" stroke="#45453f"/>
+<text x="108.5" y="321.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" fill="#f0efec" text-anchor="middle">app B</text>
+<text x="24.0" y="352.0" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" fill="#3987e5" font-weight="600" text-anchor="start">↑ the same jars again: stored, and cached, twice</text>
+<text x="24.0" y="400.0" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" fill="#f0efec" text-anchor="start">Each layer is stored whole. Built again, the same</text>
+<text x="24.0" y="417.0" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" fill="#f0efec" text-anchor="start">jars are a new layer: stored, and cached, again.</text>
+<text x="392.0" y="38.0" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" fill="#f0efec" font-weight="700" text-anchor="start">Files</text>
+<text x="392.0" y="57.0" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" fill="#c3c2b7" text-anchor="start">podbag</text>
+<rect x="392.0" y="72.0" width="156.0" height="44.0" rx="7" fill="#242422" stroke="#45453f"/>
+<text x="404.0" y="90.0" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" fill="#f0efec" font-weight="600" text-anchor="start">image A</text>
+<text x="404.0" y="107.0" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" fill="#c3c2b7" text-anchor="start">release n</text>
+<rect x="580.0" y="72.0" width="156.0" height="44.0" rx="7" fill="#242422" stroke="#45453f"/>
+<text x="592.0" y="90.0" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12.5" fill="#f0efec" font-weight="600" text-anchor="start">image B</text>
+<text x="592.0" y="107.0" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11" fill="#c3c2b7" text-anchor="start">release n+1</text>
+<rect x="392.0" y="150.0" width="344.0" height="226.0" rx="7" fill="none" stroke="#45453f" stroke-dasharray="4 3"/>
+<text x="726.0" y="368.0" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" fill="#c3c2b7" text-anchor="end">file store: each file once</text>
+<rect x="436.0" y="164.0" width="256.0" height="56.0" rx="7" fill="#242422" stroke="#3987e5"/>
+<text x="446.0" y="181.0" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" fill="#3987e5" font-weight="600" text-anchor="start">in both images: kept once</text>
+<rect x="444.0" y="190.0" width="119.0" height="22.0" rx="5" fill="#3987e5" stroke="#3987e5"/>
+<text x="503.5" y="205.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" fill="#ffffff" text-anchor="middle">spring-core.jar</text>
+<rect x="569.0" y="190.0" width="91.0" height="22.0" rx="5" fill="#3987e5" stroke="#3987e5"/>
+<text x="614.5" y="205.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" fill="#ffffff" text-anchor="middle">jackson.jar</text>
+<rect x="666.0" y="190.0" width="21.0" height="22.0" rx="5" fill="#3987e5" stroke="#3987e5"/>
+<text x="676.5" y="205.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" fill="#ffffff" text-anchor="middle">…</text>
+<rect x="400.0" y="244.0" width="160.0" height="88.0" rx="7" fill="#242422" stroke="#45453f"/>
+<text x="410.0" y="261.0" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" fill="#c3c2b7" text-anchor="start">only in A</text>
+<rect x="408.0" y="270.0" width="42.0" height="22.0" rx="5" fill="#2e2e2b" stroke="#45453f"/>
+<text x="429.0" y="285.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" fill="#f0efec" text-anchor="middle">libc</text>
+<rect x="456.0" y="270.0" width="56.0" height="22.0" rx="5" fill="#2e2e2b" stroke="#45453f"/>
+<text x="484.0" y="285.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" fill="#f0efec" text-anchor="middle">JRE 16</text>
+<rect x="408.0" y="298.0" width="49.0" height="22.0" rx="5" fill="#2e2e2b" stroke="#45453f"/>
+<text x="432.5" y="313.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" fill="#f0efec" text-anchor="middle">app A</text>
+<rect x="568.0" y="244.0" width="160.0" height="88.0" rx="7" fill="#242422" stroke="#45453f"/>
+<text x="578.0" y="261.0" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" fill="#c3c2b7" text-anchor="start">only in B</text>
+<rect x="576.0" y="270.0" width="49.0" height="22.0" rx="5" fill="#2e2e2b" stroke="#45453f"/>
+<text x="600.5" y="285.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" fill="#f0efec" text-anchor="middle">libc&#x27;</text>
+<rect x="631.0" y="270.0" width="56.0" height="22.0" rx="5" fill="#2e2e2b" stroke="#45453f"/>
+<text x="659.0" y="285.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" fill="#f0efec" text-anchor="middle">JRE 21</text>
+<rect x="576.0" y="298.0" width="49.0" height="22.0" rx="5" fill="#2e2e2b" stroke="#45453f"/>
+<text x="600.5" y="313.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11" fill="#f0efec" text-anchor="middle">app B</text>
+<line x1="462" y1="116" x2="512" y2="157" stroke="#898781" stroke-width="1.5"/>
+<polygon points="512.0,164.0 503.6,160.8 508.4,155.7" fill="#898781"/>
+<line x1="650" y1="116" x2="616" y2="157" stroke="#898781" stroke-width="1.5"/>
+<polygon points="616.0,164.0 617.9,155.2 623.7,159.3" fill="#898781"/>
+<line x1="414" y1="116" x2="422" y2="237" stroke="#898781" stroke-width="1.5"/>
+<polygon points="422.0,244.0 418.0,235.9 425.0,235.5" fill="#898781"/>
+<line x1="714" y1="116" x2="708" y2="237" stroke="#898781" stroke-width="1.5"/>
+<polygon points="708.0,244.0 704.9,235.6 711.9,235.9" fill="#898781"/>
+<text x="392.0" y="400.0" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" fill="#f0efec" text-anchor="start">Each file is stored once. Images point to the</text>
+<text x="392.0" y="417.0" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" fill="#f0efec" text-anchor="start">files they use; a shared file is cached once.</text>
+<text x="380.0" y="452.0" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="12" fill="#c3c2b7" text-anchor="middle">8 Spring services in 2 releases: 902 MiB on disk with podbag, 2,970 MiB with Docker.</text>
+</svg>

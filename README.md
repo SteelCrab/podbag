@@ -1,3 +1,5 @@
+<img src="docs/images/logo.png" alt="podbag" width="120" align="right">
+
 # podbag
 
 A container engine with no daemon, in one static binary.
@@ -34,6 +36,14 @@ It stores images file by file: a file that many images share is kept once.
 - **Works with Docker tools.** Docker and OCI images, the `docker` CLI, Compose and buildx.
 - **With or without root.** The same program works both ways.
 - **Linux, macOS and Windows.** x86_64 and arm64. Windows support is experimental.
+
+### Layers and files
+
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/storage-dark.svg"><img alt="Layers against files: as layers, the same jars rebuilt into a new layer are stored again; as files, the jars that two images share are kept once and both images point to them." src="docs/images/storage-light.svg"></picture>
+
+- Layer stores (Docker, Podman, Kiri) keep each layer whole. When an image is built again, the same files go into a new layer, and are stored and cached again.
+- podbag keeps each file once. An image is a list of paths that point to the files.
+- For 8 Spring services in 2 releases: 902 MiB on disk against Docker's 2,970 MiB, and 324 MiB of page cache against 982 MiB.
 
 ## Install
 

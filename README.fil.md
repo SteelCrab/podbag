@@ -1,3 +1,5 @@
+<img src="docs/images/logo.png" alt="podbag" width="120" align="right">
+
 # podbag
 
 Isang container engine na walang daemon, sa iisang static binary.
@@ -34,6 +36,14 @@ Iniimbak nito ang mga image nang file-by-file: ang file na ginagamit ng maraming
 - **Gumagana sa mga tool ng Docker.** Mga Docker at OCI image, ang `docker` CLI, Compose at buildx.
 - **May root man o wala.** Iisang programa ang gumagana sa dalawang paraan.
 - **Linux, macOS at Windows.** x86_64 at arm64. Eksperimental pa ang suporta sa Windows.
+
+### Mga layer at mga file
+
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/storage-dark.svg"><img alt="Mga layer laban sa mga file: bilang mga layer, iniimbak ulit ang parehong mga jar na binuo muli sa bagong layer; bilang mga file, isang beses lang iniimbak ang mga jar na ginagamit ng dalawang image, at tumuturo rito ang dalawang image." src="docs/images/storage-light.svg"></picture>
+
+- Iniimbak nang buo ng mga layer store (Docker, Podman, Kiri) ang bawat layer. Kapag binuo muli ang isang image, napupunta sa bagong layer ang parehong mga file, at iniimbak at kina-cache ulit ang mga ito.
+- Iniimbak ng podbag ang bawat file nang isang beses. Ang image ay listahan ng mga path na tumuturo sa mga file.
+- Para sa 8 Spring service sa 2 release: 902 MiB sa disk laban sa 2,970 MiB ng Docker, at 324 MiB na page cache laban sa 982 MiB.
 
 ## Pag-install
 

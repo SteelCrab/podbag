@@ -6,8 +6,10 @@
 <title>podbag — a container engine with no daemon</title>
 <meta name="description" content="podbag is a container engine with no daemon, in one static binary. It stores images file by file. Linux, macOS and Windows.">
 <meta property="og:title" content="podbag">
+<meta property="og:image" content="https://steelcrab.github.io/podbag/images/logo.png">
 <meta property="og:description" content="A container engine with no daemon, in one static binary, that stores images file by file.">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%232a78d6'/%3E%3Ctext x='32' y='44' font-family='Helvetica,Arial,sans-serif' font-size='34' font-weight='700' fill='white' text-anchor='middle'%3Epb%3C/text%3E%3C/svg%3E">
+<link rel="icon" type="image/png" href="favicon.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
 <style>
 :root {
   color-scheme: light;
@@ -53,7 +55,7 @@ header {
   border-bottom: 1px solid var(--line);
 }
 nav { display: flex; align-items: center; gap: 18px; height: 56px; }
-nav .brand { font-weight: 800; font-size: 20px; color: var(--ink); text-decoration: none; margin-right: auto; }
+nav .brand { display: flex; align-items: center; gap: 8px; font-weight: 800; font-size: 20px; color: var(--ink); text-decoration: none; margin-right: auto; }
 nav a { color: var(--ink-2); text-decoration: none; font-size: 15px; }
 nav a:hover { color: var(--ink); }
 @media (max-width: 640px) { nav .optional { display: none; } }
@@ -61,6 +63,7 @@ nav a:hover { color: var(--ink); }
 .hero h1 { font-size: clamp(34px, 6vw, 52px); line-height: 1.1; margin: 0 0 14px; letter-spacing: -0.02em; }
 .hero p { font-size: 19px; color: var(--ink-2); margin: 0 auto 28px; max-width: 640px; }
 .hero img { width: 100%; max-width: 800px; height: auto; border-radius: 14px; display: block; margin: 0 auto 28px; }
+.hero img.logo { width: 112px; height: 112px; border-radius: 0; margin: 0 auto 12px; }
 .cta { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; margin-bottom: 8px; }
 .button {
   display: inline-block; padding: 10px 18px; border-radius: 8px; font-weight: 600;
@@ -107,7 +110,7 @@ footer p { margin: 6px 0; }
 <header>
   <div class="wrap">
     <nav aria-label="Main">
-      <a class="brand" href="#">podbag</a>
+      <a class="brand" href="#"><img src="images/logo-small.png" alt="" width="28" height="28">podbag</a>
       <a href="#features" class="optional">Features</a>
       <a href="#install">Install</a>
       <a href="#benchmarks" class="optional">Benchmarks</a>
@@ -120,6 +123,7 @@ footer p { margin: 6px 0; }
 
 <main class="wrap">
   <div class="hero">
+    <img class="logo" src="images/logo.png" alt="podbag logo" width="112" height="112">
     <h1>A container engine with no daemon</h1>
     <p>One static binary. It runs Docker and OCI images, and stores them file by file: a file that many images share is kept once.</p>
     <img src="images/intro.svg" alt="podbag intro: a container starts in about 4 ms on Linux and nothing runs once it ends; images stored file by file take 902 MiB of disk against Docker's 2,970 MiB; Linux, macOS and Windows" width="800" height="450">
@@ -141,6 +145,13 @@ footer p { margin: 6px 0; }
       <div class="card"><b>With or without root</b><span>The same program works both ways.</span></div>
       <div class="card"><b>Linux, macOS, Windows</b><span>x86_64 and arm64. Windows support is experimental.</span></div>
     </div>
+    <h3>Layers and files</h3>
+    <div class="diagram"><picture><source media="(prefers-color-scheme: dark)" srcset="images/storage-dark.svg"><img src="images/storage-light.svg" alt="Layers against files: as layers, the same jars rebuilt into a new layer are stored again; as files, the jars that two images share are kept once and both images point to them." loading="lazy"></picture></div>
+    <ul>
+      <li>Layer stores (Docker, Podman, Kiri) keep each layer whole. When an image is built again, the same files go into a new layer, and are stored and cached again.</li>
+      <li>podbag keeps each file once. An image is a list of paths that point to the files.</li>
+      <li>For 8 Spring services in 2 releases: 902 MiB on disk against Docker&#39;s 2,970 MiB, and 324 MiB of page cache against 982 MiB.</li>
+    </ul>
   </section>
 
   <section id="install">

@@ -1,3 +1,5 @@
+<img src="docs/images/logo.png" alt="podbag" width="120" align="right">
+
 # podbag
 
 没有守护进程的容器引擎，只是一个静态二进制文件。
@@ -34,6 +36,14 @@
 - **兼容 Docker 工具。** 支持 Docker 和 OCI 镜像、`docker` CLI、Compose 和 buildx。
 - **有无 root 都可以。** 同一个程序两种方式都能用。
 - **Linux、macOS 和 Windows。** 支持 x86_64 和 arm64。Windows 支持处于实验阶段。
+
+### 层与文件
+
+<picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/storage-dark.svg"><img alt="层与文件对比：按层存储时，重新构建的同样的 jar 会在新层里再保存一次；按文件存储时，两个镜像共用的 jar 只保存一份，两个镜像都指向它。" src="docs/images/storage-light.svg"></picture>
+
+- 按层存储（Docker、Podman、Kiri）会完整保存每一层。镜像重新构建后，同样的文件进入新层，会再保存一次，也会再读入内存一次。
+- podbag 每个文件只保存一份。镜像是指向这些文件的路径列表。
+- 以 8 个 Spring 服务、2 个版本为例：磁盘 902 MiB（Docker 为 2,970 MiB），页缓存 324 MiB（Docker 为 982 MiB）。
 
 ## 安装
 
