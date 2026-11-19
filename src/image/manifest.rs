@@ -9,6 +9,10 @@ pub const OCI_INDEX: &str = "application/vnd.oci.image.index.v1+json";
 pub const DOCKER_LIST: &str = "application/vnd.docker.distribution.manifest.list.v2+json";
 pub const OCI_MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json";
 pub const DOCKER_MANIFEST: &str = "application/vnd.docker.distribution.manifest.v2+json";
+pub const OCI_CONFIG: &str = "application/vnd.oci.image.config.v1+json";
+pub const DOCKER_CONFIG: &str = "application/vnd.docker.container.image.v1+json";
+pub const OCI_LAYER_GZIP: &str = "application/vnd.oci.image.layer.v1.tar+gzip";
+pub const DOCKER_LAYER_GZIP: &str = "application/vnd.docker.image.rootfs.diff.tar.gzip";
 
 /// The Accept header for manifest requests.
 pub const ACCEPT: &str = "application/vnd.oci.image.index.v1+json, \
