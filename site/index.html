@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>podbag — a container engine with no daemon</title>
+<meta name="description" content="podbag is a container engine with no daemon, in one static binary. It stores images file by file. Linux, macOS and Windows.">
+<meta property="og:title" content="podbag">
+<meta property="og:description" content="A container engine with no daemon, in one static binary, that stores images file by file.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%232a78d6'/%3E%3Ctext x='32' y='44' font-family='Helvetica,Arial,sans-serif' font-size='34' font-weight='700' fill='white' text-anchor='middle'%3Epb%3C/text%3E%3C/svg%3E">
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7;
+  --surface: #ffffff;
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+  --muted: #898781;
+  --line: #e1e0d9;
+  --accent: #2a78d6;
+  --accent-ink: #ffffff;
+  --code-bg: #f2f1ed;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --ink: #f0efec;
+    --ink-2: #c3c2b7;
+    --muted: #898781;
+    --line: #2c2c2a;
+    --accent: #3987e5;
+    --accent-ink: #ffffff;
+    --code-bg: #242422;
+  }
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--ink);
+  font: 16px/1.6 ui-sans-serif, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+}
+a { color: var(--accent); }
+.wrap { max-width: 960px; margin: 0 auto; padding: 0 16px; }
+header {
+  position: sticky; top: 0; z-index: 10;
+  background: color-mix(in srgb, var(--page) 88%, transparent);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--line);
+}
+nav { display: flex; align-items: center; gap: 18px; height: 56px; }
+nav .brand { font-weight: 800; font-size: 20px; color: var(--ink); text-decoration: none; margin-right: auto; }
+nav a { color: var(--ink-2); text-decoration: none; font-size: 15px; }
+nav a:hover { color: var(--ink); }
+@media (max-width: 640px) { nav .optional { display: none; } }
+.hero { padding: 56px 0 24px; text-align: center; }
+.hero h1 { font-size: clamp(34px, 6vw, 52px); line-height: 1.1; margin: 0 0 14px; letter-spacing: -0.02em; }
+.hero p { font-size: 19px; color: var(--ink-2); margin: 0 auto 28px; max-width: 640px; }
+.hero img { width: 100%; max-width: 800px; height: auto; border-radius: 14px; display: block; margin: 0 auto 28px; }
+.cta { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; margin-bottom: 8px; }
+.button {
+  display: inline-block; padding: 10px 18px; border-radius: 8px; font-weight: 600;
+  text-decoration: none; border: 1px solid var(--line); color: var(--ink); background: var(--surface);
+}
+.button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+section { padding: 40px 0; border-top: 1px solid var(--line); }
+section h2 { font-size: 28px; margin: 0 0 18px; letter-spacing: -0.01em; }
+section h3 { font-size: 18px; margin: 26px 0 10px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; }
+.card b { display: block; margin-bottom: 4px; }
+.card span { color: var(--ink-2); font-size: 15px; }
+.code {
+  position: relative; background: var(--code-bg); border-radius: 10px; margin: 10px 0 14px;
+}
+.code pre {
+  margin: 0; padding: 14px 16px; overflow-x: auto;
+  font: 14px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.code button {
+  position: absolute; top: 8px; right: 8px; font: 13px ui-sans-serif, -apple-system, "Segoe UI", sans-serif;
+  border: 1px solid var(--line); background: var(--surface); color: var(--ink-2);
+  border-radius: 6px; padding: 3px 9px; cursor: pointer;
+}
+ul { padding-left: 20px; }
+li { margin: 4px 0; }
+.table-wrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 15px; background: var(--surface); }
+th, td { border: 1px solid var(--line); padding: 8px 10px; text-align: left; vertical-align: top; }
+th { background: var(--code-bg); font-weight: 600; }
+td:first-child { color: var(--ink-2); }
+code { font: 0.92em ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: var(--code-bg); padding: 1px 5px; border-radius: 5px; }
+pre code { background: none; padding: 0; }
+.charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); gap: 14px; }
+@media (max-width: 640px) { .charts { grid-template-columns: 1fr; } }
+.charts img, .diagram img { width: 100%; height: auto; display: block; border-radius: 10px; }
+.note { color: var(--ink-2); font-size: 15px; }
+footer { border-top: 1px solid var(--line); padding: 28px 0 48px; color: var(--ink-2); font-size: 15px; }
+footer p { margin: 6px 0; }
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <nav aria-label="Main">
+      <a class="brand" href="#">podbag</a>
+      <a href="#features" class="optional">Features</a>
+      <a href="#install">Install</a>
+      <a href="#benchmarks" class="optional">Benchmarks</a>
+      <a href="#compare" class="optional">Compare</a>
+      <a href="#docs">Docs</a>
+      <a href="https://github.com/SteelCrab/podbag">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="hero">
+    <h1>A container engine with no daemon</h1>
+    <p>One static binary. It runs Docker and OCI images, and stores them file by file: a file that many images share is kept once.</p>
+    <img src="images/intro.svg" alt="podbag intro: a container starts in about 4 ms on Linux and nothing runs once it ends; images stored file by file take 902 MiB of disk against Docker's 2,970 MiB; Linux, macOS and Windows" width="800" height="450">
+    <div class="cta">
+      <a class="button primary" href="#install">Install</a>
+      <a class="button" href="https://github.com/SteelCrab/podbag/releases/latest">Download v0.1.0</a>
+      <a class="button" href="https://github.com/SteelCrab/podbag">View on GitHub</a>
+    </div>
+  </div>
+
+  <section id="features">
+    <h2>Features</h2>
+    <div class="grid">
+      <div class="card"><b>No daemon</b><span>When no container runs, nothing runs.</span></div>
+      <div class="card"><b>One static binary</b><span>About 4 MB on Linux.</span></div>
+      <div class="card"><b>Files, not layers</b><span>A file that many images share is stored once and cached once.</span></div>
+      <div class="card"><b>Fast</b><span>A container starts in about 4 ms on Linux.</span></div>
+      <div class="card"><b>Works with Docker tools</b><span>Docker and OCI images, the <code>docker</code> CLI, Compose and buildx.</span></div>
+      <div class="card"><b>With or without root</b><span>The same program works both ways.</span></div>
+      <div class="card"><b>Linux, macOS, Windows</b><span>x86_64 and arm64. Windows support is experimental.</span></div>
+    </div>
+  </section>
+
+  <section id="install">
+    <h2>Install</h2>
+    <h3>Install script (Linux and macOS)</h3>
+    <div class="code"><pre><code>curl -fsSL https://raw.githubusercontent.com/SteelCrab/podbag/main/install.sh | sh</code></pre><button type="button">Copy</button></div>
+    <ul>
+      <li>Downloads the file for your system and checks its SHA-256 sum.</li>
+      <li>Installs it in <code>/usr/local/bin</code>, with <code>sudo</code> when needed.</li>
+      <li>On Ubuntu 24.04 and later, adds the AppArmor profile that rootless containers need.</li>
+    </ul>
+
+    <h3>Download</h3>
+    <p>Get a file from the <a href="https://github.com/SteelCrab/podbag/releases/latest">latest release</a>, and check it with <code>SHA256SUMS</code>.</p>
+    <div class="table-wrap">
+      <table>
+        <tr><th>System</th><th>File</th></tr>
+        <tr><td>Linux, x86_64</td><td><code>podbag-x86_64-linux</code></td></tr>
+        <tr><td>Linux, arm64</td><td><code>podbag-aarch64-linux</code></td></tr>
+        <tr><td>macOS, Apple silicon</td><td><code>podbag-aarch64-macos</code></td></tr>
+        <tr><td>Windows, x86_64 (experimental)</td><td><code>podbag-x86_64-windows.exe</code></td></tr>
+        <tr><td>Windows, arm64 (experimental)</td><td><code>podbag-aarch64-windows.exe</code></td></tr>
+      </table>
+    </div>
+    <p class="note">Windows needs WSL 2. Run <code>wsl --install</code> once.</p>
+
+    <h3>Cargo (Linux)</h3>
+    <div class="code"><pre><code>cargo install podbag</code></pre><button type="button">Copy</button></div>
+
+    <h3>Build from source</h3>
+    <p>See <a href="https://github.com/SteelCrab/podbag/blob/main/docs/build.md">docs/build.md</a> for Linux, macOS and Windows.</p>
+  </section>
+
+  <section id="use">
+    <h2>Use</h2>
+    <div class="code"><pre><code>podbag run --rm alpine echo hello                 # pull the image if needed, run, remove
+podbag run -d --name web -p 8080:80 nginx:alpine  # run in the background
+podbag ps                                         # list containers
+podbag logs -f web                                # follow the logs
+podbag exec -it web sh                            # open a shell in the container
+podbag stop web &amp;&amp; podbag rm web                  # stop and remove</code></pre><button type="button">Copy</button></div>
+    <h3>With the docker CLI, Compose and buildx</h3>
+    <div class="code"><pre><code>podbag system service &amp;      # Linux (on macOS: podbag vm start)
+export DOCKER_HOST=unix://$XDG_RUNTIME_DIR/podbag/docker.sock
+docker compose up -d</code></pre><button type="button">Copy</button></div>
+  </section>
+
+  <section id="benchmarks">
+    <h2>Benchmarks</h2>
+    <div class="charts">
+      <picture><source media="(prefers-color-scheme: dark)" srcset="images/start-dark.svg"><img src="images/start-light.svg" alt="Start a container, median ms: podbag rootless 4.1, podbag root 4.4, Kiri 9.1, Podman 46.4, Docker 73.8" loading="lazy"></picture>
+      <picture><source media="(prefers-color-scheme: dark)" srcset="images/memory-dark.svg"><img src="images/memory-light.svg" alt="Memory for 100 containers, MiB: podbag root 105, Kiri 109, podbag rootless 117, Podman 203, Docker 562" loading="lazy"></picture>
+      <picture><source media="(prefers-color-scheme: dark)" srcset="images/disk-dark.svg"><img src="images/disk-light.svg" alt="Disk for 8 Spring services in 2 releases, MiB: podbag root 902, podbag rootless 944, Podman 1783, Kiri 2960, Docker 2970" loading="lazy"></picture>
+      <picture><source media="(prefers-color-scheme: dark)" srcset="images/cache-dark.svg"><img src="images/cache-light.svg" alt="Page cache of 16 Spring services, MiB: podbag rootless 324, podbag root 333, Kiri 960, Podman 975, Docker 982" loading="lazy"></picture>
+    </div>
+    <p class="note">Medians on one Linux VM (4 CPUs, 3.8 GiB, arm64) with podbag 0.1.0, Podman 5.7.0, Docker 29.1.3 and Kiri 0.2.1. All numbers: <a href="https://github.com/SteelCrab/podbag/blob/main/docs/benchmarks.md">benchmarks</a> and the <a href="https://github.com/SteelCrab/podbag/blob/main/docs/benchmarks-msa.md">Spring microservices benchmark</a>.</p>
+  </section>
+
+  <section id="compare">
+    <h2>Compared with other tools</h2>
+    <div class="table-wrap">
+      <table>
+        <tr><th></th><th>podbag</th><th>Docker</th><th>OrbStack</th><th>Colima</th><th>Kiri</th></tr>
+        <tr><td>Runs on</td><td>Linux, macOS, Windows¹</td><td>Linux; macOS and Windows with Docker Desktop</td><td>macOS</td><td>macOS, Linux</td><td>Linux, macOS, Windows</td></tr>
+        <tr><td>Runs in the background</td><td>nothing once the last container ends (Mac: a 2 MiB standby)</td><td><code>dockerd</code>, <code>containerd</code>, a shim per container</td><td>a Linux VM with Docker Engine</td><td>a Lima VM with Docker or containerd</td><td>a daemon; on macOS and Windows a small VM</td></tr>
+        <tr><td>Image storage</td><td>files, each kept once</td><td>layers</td><td>layers</td><td>layers</td><td>layers, unpacked when first used</td></tr>
+        <tr><td>Mac: <code>docker run</code> start, median²</td><td>14.4 ms</td><td>97.4 ms</td><td>90.4 ms</td><td>73.6 ms</td><td>11.8 ms</td></tr>
+        <tr><td>Mac: memory 6 minutes after the last container²</td><td>1.7 MiB</td><td>950 MiB</td><td>795 MiB</td><td>1.54 GiB</td><td>12 MiB</td></tr>
+        <tr><td>License</td><td>Apache-2.0</td><td>Apache-2.0; Docker Desktop is paid for larger companies</td><td>proprietary</td><td>MIT</td><td>Apache-2.0</td></tr>
+      </table>
+    </div>
+    <p class="note">¹ Experimental. ² Measured on one Mac, with Docker Desktop for Docker.</p>
+    <div class="diagram">
+      <picture><source media="(prefers-color-scheme: dark)" srcset="images/architecture-dark.svg"><img src="images/architecture-light.svg" alt="Docker Engine: the docker CLI talks to dockerd, which talks to containerd, which starts a shim per container; images are layers. podbag: the command creates each container itself, a keeper per user watches them while they run; images are files, each kept once." loading="lazy"></picture>
+    </div>
+  </section>
+
+  <section id="docs">
+    <h2>Documentation</h2>
+    <ul>
+      <li><a href="https://github.com/SteelCrab/podbag/blob/main/docs/usage.md">Usage</a>: commands, volumes, networks, limits, Docker API, macOS, Windows.</li>
+      <li><a href="https://github.com/SteelCrab/podbag/blob/main/docs/architecture.md">Architecture</a>: how podbag differs from Docker, and where it is still behind.</li>
+      <li><a href="https://github.com/SteelCrab/podbag/blob/main/docs/build.md">Build from source</a>: Linux, macOS, Windows.</li>
+      <li><a href="https://github.com/SteelCrab/podbag/blob/main/CONTRIBUTING.md">Contributing</a>: tests, pull requests, translations.</li>
+    </ul>
+    <p class="note">README in other languages:
+      <a href="https://github.com/SteelCrab/podbag/blob/main/README.ko.md" hreflang="ko">한국어</a> ·
+      <a href="https://github.com/SteelCrab/podbag/blob/main/README.ja.md" hreflang="ja">日本語</a> ·
+      <a href="https://github.com/SteelCrab/podbag/blob/main/README.zh-CN.md" hreflang="zh-CN">简体中文</a> ·
+      <a href="https://github.com/SteelCrab/podbag/blob/main/README.fil.md" hreflang="fil">Filipino</a> ·
+      <a href="https://github.com/SteelCrab/podbag/blob/main/README.es.md" hreflang="es">Español</a> ·
+      <a href="https://github.com/SteelCrab/podbag/blob/main/README.vi.md" hreflang="vi">Tiếng Việt</a>
+    </p>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <p>podbag is open source under the <a href="https://github.com/SteelCrab/podbag/blob/main/LICENSE">Apache License 2.0</a>.</p>
+    <p><a href="https://github.com/SteelCrab/podbag">GitHub</a> · <a href="https://github.com/SteelCrab/podbag/releases">Releases</a> · <a href="https://crates.io/crates/podbag">crates.io</a> · <a href="https://github.com/SteelCrab/podbag/issues">Issues</a></p>
+  </div>
+</footer>
+
+<script>
+for (const box of document.querySelectorAll(".code")) {
+  const button = box.querySelector("button");
+  button.addEventListener("click", async () => {
+    const text = box.querySelector("code").innerText.replace(/\s+#.*$/gm, "");
+    try {
+      await navigator.clipboard.writeText(text);
+      button.textContent = "Copied";
+    } catch {
+      button.textContent = "Select and copy";
+    }
+    setTimeout(() => { button.textContent = "Copy"; }, 1500);
+  });
+}
+</script>
+</body>
+</html>
