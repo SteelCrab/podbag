@@ -35,6 +35,8 @@ It stores images file by file: a file that many images share is kept once.
 - **Files, not layers.** A file that many images share is stored once and cached once.
 - **Fast.** A container starts in about 4 ms on Linux.
 - **Works with Docker tools.** Docker and OCI images, the `docker` CLI, Compose and buildx.
+- **Builds Dockerfiles.** `podbag build`, and `docker build` with the classic builder,
+  without BuildKit or a daemon.
 - **With or without root.** The same program works both ways.
 - **Linux, macOS and Windows.** x86_64 and arm64. Windows support is experimental.
 
@@ -120,6 +122,7 @@ podbag logs -f web                                # follow the logs
 podbag exec -it web sh                            # open a shell in the container
 podbag stop web && podbag rm web                  # stop and remove
 podbag images                                     # list images
+podbag build -t myapp .                           # build an image from a Dockerfile
 ```
 
 ### docker CLI, Compose and buildx
