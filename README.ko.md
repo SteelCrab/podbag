@@ -13,7 +13,7 @@
 
 [English](README.md) · **한국어** · [日本語](README.ja.md) · [简体中文](README.zh-CN.md) · [Filipino](README.fil.md) · [Español](README.es.md) · [Tiếng Việt](README.vi.md)
 
-<img src="docs/images/intro.svg" alt="podbag 소개: Linux에서 컨테이너가 약 4 ms 만에 시작되고, 끝나면 아무것도 돌지 않습니다. 파일 단위로 저장해서 디스크를 902 MiB만 씁니다(Docker는 2,970 MiB). Linux, macOS, Windows를 지원합니다." width="800">
+<img src="docs/images/intro.svg" alt="podbag 소개 영상. 다른 엔진은 데몬이 계속 실행되지만, podbag은 컨테이너가 실행될 때만 동작하고 쉴 때는 아무것도 실행하지 않습니다. 다른 엔진은 레이어로, podbag은 파일로 저장하며 파일마다 한 번만 저장합니다: Spring 서비스 8개, 릴리스 2개에서 디스크 902 MiB(2,970 MiB 대신), 페이지 캐시 324 MiB(982 MiB 대신). 컨테이너는 4.1 ms 만에 시작해 Docker(73.8 ms)보다 18배 빠릅니다. Linux, macOS, Windows. podbag.dev." width="800">
 
 <sub>같은 소개를 영상으로도 볼 수 있습니다(영문): [intro.mp4](docs/media/intro.mp4).</sub>
 
@@ -131,6 +131,10 @@ docker compose up -d
 - 모든 명령과 옵션: [docs/usage.md](docs/usage.md) (영문).
 
 ## 벤치마크
+
+<img src="docs/images/perf.svg" alt="podbag과 Docker, Podman, Kiri 비교(Linux VM 한 대): 컨테이너 시작 4.1 ms(Docker 73.8 ms), 컨테이너 100개의 메모리 105 MiB(Docker 562 MiB), 컨테이너가 없을 때 실행 중인 것 없음(Docker 203 MiB), Spring 서비스 8개·릴리스 2개의 디스크 902 MiB(Docker 2,970 MiB), 페이지 캐시 324 MiB(Docker 982 MiB)." width="800">
+
+<sub>같은 비교를 영상으로 (영어): [perf.mp4](docs/media/perf.mp4).</sub>
 
 <table>
 <tr>

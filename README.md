@@ -13,7 +13,7 @@ It stores images file by file: a file that many images share is kept once.
 
 **English** · [한국어](README.ko.md) · [日本語](README.ja.md) · [简体中文](README.zh-CN.md) · [Filipino](README.fil.md) · [Español](README.es.md) · [Tiếng Việt](README.vi.md)
 
-<img src="docs/images/intro.svg" alt="podbag intro: a container starts in about 4 ms on Linux and nothing runs once it ends; images stored file by file take 902 MiB of disk against Docker's 2,970 MiB; Linux, macOS and Windows" width="800">
+<img src="docs/images/intro.svg" alt="podbag intro. Other engines keep daemons running; podbag runs only while containers run, and nothing at rest. Others store layers; podbag stores files, each once: 902 MiB of disk instead of 2,970 MiB for 8 Spring services in 2 releases, and 324 MiB of page cache instead of 982 MiB. A container starts in 4.1 ms, 18 times faster than Docker's 73.8 ms. Linux, macOS and Windows; podbag.dev." width="800">
 
 <sub>The same intro as a video: [intro.mp4](docs/media/intro.mp4).</sub>
 
@@ -133,6 +133,10 @@ docker compose up -d
 - All commands and options: [docs/usage.md](docs/usage.md).
 
 ## Benchmarks
+
+<img src="docs/images/perf.svg" alt="How podbag compares with Docker, Podman and Kiri on one Linux VM: a container starts in 4.1 ms (Docker 73.8 ms); 100 containers hold 105 MiB (Docker 562 MiB); nothing runs with no containers (Docker 203 MiB); 8 Spring services in 2 releases take 902 MiB of disk (Docker 2,970 MiB) and 324 MiB of page cache (Docker 982 MiB)." width="800">
+
+<sub>The same comparison as a video: [perf.mp4](docs/media/perf.mp4).</sub>
 
 <table>
 <tr>

@@ -13,7 +13,7 @@ Iniimbak nito ang mga image nang file-by-file: ang file na ginagamit ng maraming
 
 [English](README.md) · [한국어](README.ko.md) · [日本語](README.ja.md) · [简体中文](README.zh-CN.md) · **Filipino** · [Español](README.es.md) · [Tiếng Việt](README.vi.md)
 
-<img src="docs/images/intro.svg" alt="Intro ng podbag: sa Linux, nagsisimula ang isang container sa mga 4 ms at walang tumatakbo pagkatapos nito; dahil file-by-file ang imbakan, 902 MiB lang ang disk (sa Docker, 2,970 MiB); Linux, macOS at Windows." width="800">
+<img src="docs/images/intro.svg" alt="Intro video ng podbag. Laging tumatakbo ang mga daemon ng ibang engine; tumatakbo lang ang podbag habang may container, at walang tumatakbo kapag nakapahinga. Mga layer ang iniimbak ng iba; mga file ang iniimbak ng podbag, bawat isa nang isang beses: 902 MiB na disk sa halip na 2,970 MiB para sa 8 Spring service sa 2 release, at 324 MiB na page cache sa halip na 982 MiB. Nagsisimula ang container sa 4.1 ms, 18 beses na mas mabilis kaysa sa 73.8 ms ng Docker. Linux, macOS at Windows; podbag.dev." width="800">
 
 <sub>Ang parehong intro bilang video (Ingles): [intro.mp4](docs/media/intro.mp4).</sub>
 
@@ -131,6 +131,10 @@ docker compose up -d
 - Lahat ng command at option: [docs/usage.md](docs/usage.md) (Ingles).
 
 ## Mga benchmark
+
+<img src="docs/images/perf.svg" alt="Paghahambing ng podbag sa Docker, Podman at Kiri sa isang Linux VM: nagsisimula ang container sa 4.1 ms (Docker 73.8 ms); 105 MiB para sa 100 container (Docker 562 MiB); walang tumatakbo kapag walang container (Docker 203 MiB); 902 MiB na disk para sa 8 Spring service sa 2 release (Docker 2,970 MiB) at 324 MiB na page cache (Docker 982 MiB)." width="800">
+
+<sub>Ang parehong paghahambing bilang video (sa English): [perf.mp4](docs/media/perf.mp4).</sub>
 
 <table>
 <tr>

@@ -13,7 +13,7 @@
 
 [English](README.md) · [한국어](README.ko.md) · **日本語** · [简体中文](README.zh-CN.md) · [Filipino](README.fil.md) · [Español](README.es.md) · [Tiếng Việt](README.vi.md)
 
-<img src="docs/images/intro.svg" alt="podbag の紹介: Linux ではコンテナが約 4 ms で起動し、終わると何も動いていません。ファイル単位の保存で、ディスクは 902 MiB です（Docker は 2,970 MiB）。Linux、macOS、Windows に対応しています。" width="800">
+<img src="docs/images/intro.svg" alt="podbag の紹介動画。ほかのエンジンはデーモンが動き続けますが、podbag はコンテナが動いている間だけ動き、休んでいるときは何も動きません。ほかのエンジンはレイヤーで、podbag はファイルで保存し、ファイルを1回だけ保存します: Spring サービス8個・2リリースで、ディスク 902 MiB（2,970 MiB の代わりに）、ページキャッシュ 324 MiB（982 MiB の代わりに）。コンテナは 4.1 ms で起動し、Docker（73.8 ms）より18倍速いです。Linux、macOS、Windows。podbag.dev。" width="800">
 
 <sub>同じ紹介を動画でも見られます（英語）: [intro.mp4](docs/media/intro.mp4).</sub>
 
@@ -131,6 +131,10 @@ docker compose up -d
 - すべてのコマンドとオプション: [docs/usage.md](docs/usage.md)（英語）。
 
 ## ベンチマーク
+
+<img src="docs/images/perf.svg" alt="podbag と Docker、Podman、Kiri の比較（Linux VM 1台）: コンテナの起動 4.1 ms（Docker 73.8 ms）、コンテナ100個のメモリ 105 MiB（Docker 562 MiB）、コンテナがないときに動くものはなし（Docker 203 MiB）、Spring サービス8個・2リリースのディスク 902 MiB（Docker 2,970 MiB）、ページキャッシュ 324 MiB（Docker 982 MiB）。" width="800">
+
+<sub>同じ比較を動画で（英語）: [perf.mp4](docs/media/perf.mp4).</sub>
 
 <table>
 <tr>

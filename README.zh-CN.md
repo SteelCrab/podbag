@@ -13,7 +13,7 @@
 
 [English](README.md) · [한국어](README.ko.md) · [日本語](README.ja.md) · **简体中文** · [Filipino](README.fil.md) · [Español](README.es.md) · [Tiếng Việt](README.vi.md)
 
-<img src="docs/images/intro.svg" alt="podbag 简介：在 Linux 上容器约 4 毫秒启动，结束后什么都不运行；按文件存储，磁盘只占 902 MiB（Docker 为 2,970 MiB）；支持 Linux、macOS 和 Windows。" width="800">
+<img src="docs/images/intro.svg" alt="podbag 介绍视频。其他引擎的守护进程一直在运行；podbag 只在容器运行时工作，空闲时什么也不运行。其他引擎按层存储，podbag 按文件存储，每个文件只存一份：8 个 Spring 服务、2 个版本占用磁盘 902 MiB（而不是 2,970 MiB），页缓存 324 MiB（而不是 982 MiB）。容器 4.1 毫秒启动，比 Docker（73.8 毫秒）快 18 倍。支持 Linux、macOS 和 Windows。podbag.dev。" width="800">
 
 <sub>同样的介绍也有视频版（英文）: [intro.mp4](docs/media/intro.mp4).</sub>
 
@@ -131,6 +131,10 @@ docker compose up -d
 - 所有命令和选项：[docs/usage.md](docs/usage.md)（英文）。
 
 ## 基准测试
+
+<img src="docs/images/perf.svg" alt="podbag 与 Docker、Podman、Kiri 的比较（一台 Linux 虚拟机）：启动容器 4.1 毫秒（Docker 73.8 毫秒）；100 个容器的内存 105 MiB（Docker 562 MiB）；没有容器时不运行任何进程（Docker 203 MiB）；8 个 Spring 服务、2 个版本的磁盘 902 MiB（Docker 2,970 MiB），页缓存 324 MiB（Docker 982 MiB）。" width="800">
+
+<sub>同样的比较，视频版（英文）: [perf.mp4](docs/media/perf.mp4).</sub>
 
 <table>
 <tr>

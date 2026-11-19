@@ -122,8 +122,8 @@
   "cell_proprietary": "propietario",
   "compare_note": "¹ Experimental. ² Medido en un Mac, con Docker Desktop para Docker.",
   "arch_alt": "Docker Engine: la CLI docker habla con dockerd, que habla con containerd, que arranca un shim por contenedor; las imágenes son capas. podbag: el comando crea cada contenedor por sí mismo y un keeper por usuario los vigila mientras se ejecutan; las imágenes son archivos, cada uno guardado una vez.",
-  "intro_title": "La introducción, en 26 segundos (en inglés)",
-  "intro_alt": "Introducción a podbag: un contenedor arranca en unos 4 ms en Linux y no queda nada en marcha al terminar; las imágenes guardadas archivo por archivo ocupan 902 MiB de disco frente a 2.970 MiB de Docker; Linux, macOS y Windows.",
+  "intro_title": "La introducción, en 30 segundos (en inglés)",
+  "intro_alt": "Vídeo de introducción a podbag. Otros motores mantienen demonios en marcha; podbag solo funciona mientras hay contenedores y, en reposo, no ejecuta nada. Otros guardan capas; podbag guarda archivos, cada uno una vez: 902 MiB de disco en lugar de 2.970 MiB para 8 servicios Spring en 2 versiones, y 324 MiB de caché de páginas en lugar de 982 MiB. Un contenedor arranca en 4,1 ms, 18 veces más rápido que los 73,8 ms de Docker. Linux, macOS y Windows; podbag.dev.",
   "docs_title": "Documentación",
   "doc_usage": "<a href=\"https://github.com/SteelCrab/podbag/blob/main/docs/usage.md\">Uso</a>: comandos, volúmenes, redes, límites, API de Docker, macOS, Windows.",
   "doc_arch": "<a href=\"https://github.com/SteelCrab/podbag/blob/main/docs/architecture.md\">Arquitectura</a>: en qué se diferencia podbag de Docker y en qué todavía se queda atrás.",
@@ -133,5 +133,8 @@
   "footer_license": "podbag es código abierto bajo la <a href=\"https://github.com/SteelCrab/podbag/blob/main/LICENSE\">Licencia Apache 2.0</a>.",
   "footer_releases": "Versiones",
   "footer_issues": "Incidencias",
-  "footer_langs": "Este sitio en otros idiomas:"
+  "footer_langs": "Este sitio en otros idiomas:",
+  "perf_alt": "Comparación de podbag con Docker, Podman y Kiri en una VM Linux: un contenedor arranca en 4,1 ms (Docker 73,8 ms); 100 contenedores ocupan 105 MiB (Docker 562 MiB); sin contenedores no queda nada en marcha (Docker 203 MiB); 8 servicios Spring en 2 versiones ocupan 902 MiB de disco (Docker 2.970 MiB) y 324 MiB de caché de páginas (Docker 982 MiB).",
+  "perf_video": "La misma comparación en vídeo (en inglés)",
+  "intro_video": "La misma introducción en vídeo (en inglés)"
 }

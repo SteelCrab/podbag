@@ -6,6 +6,7 @@ on:
     paths:
       - "site/**"
       - "docs/images/**"
+      - "docs/media/**"
       - "dev/docs/site.py"
       - "dev/docs/storage.py"
       - "Cargo.toml"

@@ -122,8 +122,8 @@
   "cell_proprietary": "proprietary",
   "compare_note": "¹ Experimental. ² Measured on one Mac, with Docker Desktop for Docker.",
   "arch_alt": "Docker Engine: the docker CLI talks to dockerd, which talks to containerd, which starts a shim per container; images are layers. podbag: the command creates each container itself, a keeper per user watches them while they run; images are files, each kept once.",
-  "intro_title": "The intro, in 26 seconds",
-  "intro_alt": "podbag intro: a container starts in about 4 ms on Linux and nothing runs once it ends; images stored file by file take 902 MiB of disk against Docker's 2,970 MiB; Linux, macOS and Windows.",
+  "intro_title": "The intro, in 30 seconds",
+  "intro_alt": "podbag intro. Other engines keep daemons running; podbag runs only while containers run, and nothing at rest. Others store layers; podbag stores files, each once: 902 MiB of disk instead of 2,970 MiB for 8 Spring services in 2 releases, and 324 MiB of page cache instead of 982 MiB. A container starts in 4.1 ms, 18 times faster than Docker's 73.8 ms. Linux, macOS and Windows; podbag.dev.",
   "docs_title": "Documentation",
   "doc_usage": "<a href=\"https://github.com/SteelCrab/podbag/blob/main/docs/usage.md\">Usage</a>: commands, volumes, networks, limits, Docker API, macOS, Windows.",
   "doc_arch": "<a href=\"https://github.com/SteelCrab/podbag/blob/main/docs/architecture.md\">Architecture</a>: how podbag differs from Docker, and where it is still behind.",
@@ -133,5 +133,8 @@
   "footer_license": "podbag is open source under the <a href=\"https://github.com/SteelCrab/podbag/blob/main/LICENSE\">Apache License 2.0</a>.",
   "footer_releases": "Releases",
   "footer_issues": "Issues",
-  "footer_langs": "This site in other languages:"
+  "footer_langs": "This site in other languages:",
+  "perf_alt": "How podbag compares with Docker, Podman and Kiri on one Linux VM: a container starts in 4.1 ms (Docker 73.8 ms); 100 containers hold 105 MiB (Docker 562 MiB); nothing runs with no containers (Docker 203 MiB); 8 Spring services in 2 releases take 902 MiB of disk (Docker 2,970 MiB) and 324 MiB of page cache (Docker 982 MiB).",
+  "perf_video": "The same comparison as a video",
+  "intro_video": "The same intro as a video"
 }

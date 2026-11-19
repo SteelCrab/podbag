@@ -122,8 +122,8 @@
   "cell_proprietary": "độc quyền",
   "compare_note": "¹ Thử nghiệm. ² Đo trên một máy Mac, Docker dùng Docker Desktop.",
   "arch_alt": "Docker Engine: CLI docker nói chuyện với dockerd, dockerd nói chuyện với containerd, containerd khởi động một shim cho mỗi container; image là các lớp. podbag: lệnh tự tạo từng container, mỗi người dùng có một keeper theo dõi chúng khi chạy; image là các tệp, mỗi tệp lưu một lần.",
-  "intro_title": "Giới thiệu trong 26 giây (bằng tiếng Anh)",
-  "intro_alt": "Giới thiệu podbag: container khởi động trong khoảng 4 ms trên Linux và không còn gì chạy khi kết thúc; image lưu theo từng tệp chiếm 902 MiB đĩa so với 2.970 MiB của Docker; Linux, macOS và Windows.",
+  "intro_title": "Giới thiệu trong 30 giây (bằng tiếng Anh)",
+  "intro_alt": "Video giới thiệu podbag. Các công cụ khác luôn chạy daemon; podbag chỉ chạy khi có container, và không chạy gì khi nghỉ. Các công cụ khác lưu theo lớp; podbag lưu theo tệp, mỗi tệp một lần: 902 MiB đĩa thay vì 2.970 MiB cho 8 dịch vụ Spring ở 2 bản phát hành, và 324 MiB page cache thay vì 982 MiB. Container khởi động trong 4,1 ms, nhanh hơn 18 lần so với 73,8 ms của Docker. Linux, macOS và Windows; podbag.dev.",
   "docs_title": "Tài liệu",
   "doc_usage": "<a href=\"https://github.com/SteelCrab/podbag/blob/main/docs/usage.md\">Sử dụng</a>: lệnh, volume, mạng, giới hạn, Docker API, macOS, Windows.",
   "doc_arch": "<a href=\"https://github.com/SteelCrab/podbag/blob/main/docs/architecture.md\">Kiến trúc</a>: podbag khác Docker thế nào, và còn thiếu ở đâu.",
@@ -133,5 +133,8 @@
   "footer_license": "podbag là mã nguồn mở theo <a href=\"https://github.com/SteelCrab/podbag/blob/main/LICENSE\">Giấy phép Apache 2.0</a>.",
   "footer_releases": "Bản phát hành",
   "footer_issues": "Vấn đề",
-  "footer_langs": "Trang này bằng ngôn ngữ khác:"
+  "footer_langs": "Trang này bằng ngôn ngữ khác:",
+  "perf_alt": "So sánh podbag với Docker, Podman và Kiri trên một VM Linux: container khởi động trong 4,1 ms (Docker 73,8 ms); 100 container chiếm 105 MiB (Docker 562 MiB); không có gì chạy khi không có container (Docker 203 MiB); 8 dịch vụ Spring ở 2 bản phát hành chiếm 902 MiB đĩa (Docker 2.970 MiB) và 324 MiB page cache (Docker 982 MiB).",
+  "perf_video": "Cùng phép so sánh dưới dạng video (tiếng Anh)",
+  "intro_video": "Cùng phần giới thiệu dưới dạng video (tiếng Anh)"
 }

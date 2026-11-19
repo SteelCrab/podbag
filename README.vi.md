@@ -13,7 +13,7 @@ Image được lưu theo từng tệp: tệp mà nhiều image dùng chung chỉ
 
 [English](README.md) · [한국어](README.ko.md) · [日本語](README.ja.md) · [简体中文](README.zh-CN.md) · [Filipino](README.fil.md) · [Español](README.es.md) · **Tiếng Việt**
 
-<img src="docs/images/intro.svg" alt="Giới thiệu podbag: trên Linux, container khởi động trong khoảng 4 ms và không còn gì chạy sau khi nó kết thúc; nhờ lưu theo từng tệp, đĩa chỉ dùng 902 MiB so với 2.970 MiB của Docker; Linux, macOS và Windows." width="800">
+<img src="docs/images/intro.svg" alt="Video giới thiệu podbag. Các công cụ khác luôn chạy daemon; podbag chỉ chạy khi có container, và không chạy gì khi nghỉ. Các công cụ khác lưu theo lớp; podbag lưu theo tệp, mỗi tệp một lần: 902 MiB đĩa thay vì 2.970 MiB cho 8 dịch vụ Spring ở 2 bản phát hành, và 324 MiB page cache thay vì 982 MiB. Container khởi động trong 4,1 ms, nhanh hơn 18 lần so với 73,8 ms của Docker. Linux, macOS và Windows; podbag.dev." width="800">
 
 <sub>Phần giới thiệu này cũng có dạng video (tiếng Anh): [intro.mp4](docs/media/intro.mp4).</sub>
 
@@ -131,6 +131,10 @@ docker compose up -d
 - Tất cả lệnh và tùy chọn: [docs/usage.md](docs/usage.md) (tiếng Anh).
 
 ## Đo hiệu năng
+
+<img src="docs/images/perf.svg" alt="So sánh podbag với Docker, Podman và Kiri trên một VM Linux: container khởi động trong 4,1 ms (Docker 73,8 ms); 100 container chiếm 105 MiB (Docker 562 MiB); không có gì chạy khi không có container (Docker 203 MiB); 8 dịch vụ Spring ở 2 bản phát hành chiếm 902 MiB đĩa (Docker 2.970 MiB) và 324 MiB page cache (Docker 982 MiB)." width="800">
+
+<sub>Cùng phép so sánh dưới dạng video (tiếng Anh): [perf.mp4](docs/media/perf.mp4).</sub>
 
 <table>
 <tr>

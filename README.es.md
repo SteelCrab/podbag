@@ -13,7 +13,7 @@ Guarda las imágenes archivo por archivo: un archivo que comparten muchas imáge
 
 [English](README.md) · [한국어](README.ko.md) · [日本語](README.ja.md) · [简体中文](README.zh-CN.md) · [Filipino](README.fil.md) · **Español** · [Tiếng Việt](README.vi.md)
 
-<img src="docs/images/intro.svg" alt="Introducción a podbag: en Linux un contenedor arranca en unos 4 ms y, al terminar, no queda nada en ejecución; al guardar archivo por archivo, ocupa 902 MiB de disco frente a 2.970 MiB de Docker; Linux, macOS y Windows." width="800">
+<img src="docs/images/intro.svg" alt="Vídeo de introducción a podbag. Otros motores mantienen demonios en marcha; podbag solo funciona mientras hay contenedores y, en reposo, no ejecuta nada. Otros guardan capas; podbag guarda archivos, cada uno una vez: 902 MiB de disco en lugar de 2.970 MiB para 8 servicios Spring en 2 versiones, y 324 MiB de caché de páginas en lugar de 982 MiB. Un contenedor arranca en 4,1 ms, 18 veces más rápido que los 73,8 ms de Docker. Linux, macOS y Windows; podbag.dev." width="800">
 
 <sub>La misma introducción en vídeo (en inglés): [intro.mp4](docs/media/intro.mp4).</sub>
 
@@ -131,6 +131,10 @@ docker compose up -d
 - Todos los comandos y opciones: [docs/usage.md](docs/usage.md) (en inglés).
 
 ## Rendimiento
+
+<img src="docs/images/perf.svg" alt="Comparación de podbag con Docker, Podman y Kiri en una VM Linux: un contenedor arranca en 4,1 ms (Docker 73,8 ms); 100 contenedores ocupan 105 MiB (Docker 562 MiB); sin contenedores no queda nada en marcha (Docker 203 MiB); 8 servicios Spring en 2 versiones ocupan 902 MiB de disco (Docker 2.970 MiB) y 324 MiB de caché de páginas (Docker 982 MiB)." width="800">
+
+<sub>La misma comparación en vídeo (en inglés): [perf.mp4](docs/media/perf.mp4).</sub>
 
 <table>
 <tr>

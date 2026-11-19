@@ -122,8 +122,8 @@
   "cell_proprietary": "독점 소프트웨어",
   "compare_note": "¹ 실험 기능. ² Mac 한 대에서 측정했습니다. Docker는 Docker Desktop으로 측정했습니다.",
   "arch_alt": "Docker Engine: docker CLI가 dockerd에 요청하고, dockerd가 containerd에 요청하고, containerd가 컨테이너마다 shim을 시작합니다. 이미지는 레이어입니다. podbag: 명령이 컨테이너를 직접 만들고, 사용자마다 keeper 하나가 실행 중인 컨테이너를 지켜봅니다. 이미지는 파일이며, 파일마다 한 번만 저장합니다.",
-  "intro_title": "26초 소개 영상 (영어)",
-  "intro_alt": "podbag 소개: Linux에서 컨테이너가 약 4 ms 만에 시작하고, 끝나면 아무것도 실행되지 않습니다. 파일 단위로 저장한 이미지는 디스크 902 MiB(Docker 2,970 MiB)를 씁니다. Linux, macOS, Windows.",
+  "intro_title": "30초 소개 영상 (영어)",
+  "intro_alt": "podbag 소개 영상. 다른 엔진은 데몬이 계속 실행되지만, podbag은 컨테이너가 실행될 때만 동작하고 쉴 때는 아무것도 실행하지 않습니다. 다른 엔진은 레이어로, podbag은 파일로 저장하며 파일마다 한 번만 저장합니다: Spring 서비스 8개, 릴리스 2개에서 디스크 902 MiB(2,970 MiB 대신), 페이지 캐시 324 MiB(982 MiB 대신). 컨테이너는 4.1 ms 만에 시작해 Docker(73.8 ms)보다 18배 빠릅니다. Linux, macOS, Windows. podbag.dev.",
   "docs_title": "문서",
   "doc_usage": "<a href=\"https://github.com/SteelCrab/podbag/blob/main/docs/usage.md\">사용법</a>: 명령, 볼륨, 네트워크, 제한, Docker API, macOS, Windows.",
   "doc_arch": "<a href=\"https://github.com/SteelCrab/podbag/blob/main/docs/architecture.md\">구조</a>: podbag이 Docker와 어떻게 다른지, 아직 부족한 점은 무엇인지.",
@@ -133,5 +133,8 @@
   "footer_license": "podbag은 <a href=\"https://github.com/SteelCrab/podbag/blob/main/LICENSE\">Apache License 2.0</a>을 따르는 오픈 소스입니다.",
   "footer_releases": "릴리스",
   "footer_issues": "이슈",
-  "footer_langs": "다른 언어로 보기:"
+  "footer_langs": "다른 언어로 보기:",
+  "perf_alt": "podbag과 Docker, Podman, Kiri 비교(Linux VM 한 대): 컨테이너 시작 4.1 ms(Docker 73.8 ms), 컨테이너 100개의 메모리 105 MiB(Docker 562 MiB), 컨테이너가 없을 때 실행 중인 것 없음(Docker 203 MiB), Spring 서비스 8개·릴리스 2개의 디스크 902 MiB(Docker 2,970 MiB), 페이지 캐시 324 MiB(Docker 982 MiB).",
+  "perf_video": "같은 비교를 영상으로 (영어)",
+  "intro_video": "같은 소개를 영상으로 (영어)"
 }

@@ -1,170 +1,211 @@
 #!/usr/bin/env python3
-"""The README's intro: docs/images/intro.svg, an animation that plays in the page
-(SMIL, 26 s, looping). With --video, also docs/media/intro.mp4, from frames that
-headless Chrome takes of the same SVG (needs Google Chrome and ffmpeg).
+"""The README's intro: docs/images/intro.svg, a 30-second animation (CSS, looping) of how
+podbag differs from other container engines. With --video, also docs/media/intro.mp4 (needs
+Google Chrome, Node.js 22 and ffmpeg).
 
 usage: python3 dev/docs/intro.py [--video]
 """
-import base64
-import subprocess
 import sys
-import tempfile
-from html import escape
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[2]
-W, H, T = 800, 450, 26.0
-SANS = "ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif"
-MONO = "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
-BG, PANEL, INK, MUTED, ACCENT, GRAY = "#101114", "#1b1c20", "#f0efec", "#9a998f", "#3987e5", "#5b5a55"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from motion import (DARK as C, FILL_BOX_CENTRE, FILL_BOX_LEFT, MONO, REPO, Motion,  # noqa: E402
+                    icon_ram, icon_stopwatch, logo, render_video, svg_doc, text)
+
+W, H, T = 800, 450, 30.0
 
 
-def k(*pairs):
-    """keyTimes and values from (seconds, value) pairs, for a T-long loop."""
-    times = ";".join(f"{s / T:.4f}" for s, _ in pairs)
-    values = ";".join(str(v) for _, v in pairs)
-    return times, values
+def chip_width(name):
+    return len(name) * 7.2 + 16
 
 
-def fade(start, end, ramp=0.5):
-    """Visible from start to end, with fades; hidden for the rest of the loop."""
-    pairs = [(0, 0), (start, 0), (start + ramp, 1), (end - ramp, 1), (end, 0), (T, 0)]
-    if start == 0:
-        pairs = [(0, 0), (ramp, 1), (end - ramp, 1), (end, 0), (T, 0)]
-    times, values = k(*pairs)
-    return (f'<animate attributeName="opacity" dur="{T}s" repeatCount="indefinite" '
-            f'keyTimes="{times}" values="{values}"/>')
+def build():
+    m = Motion(T)
+    o = []
 
+    def chip(x, y, name, kind="plain", cls=None):
+        w = chip_width(name)
+        fill, stroke, ink = {"shared": (C["accent"], C["accent"], "#ffffff"),
+                             "again": (C["again"], C["again"], "#1a1a19"),
+                             "plain": (C["panel"], C["line"], C["ink"])}[kind]
+        c = f' class="{cls}"' if cls else ""
+        o.append(f'<g{c}><rect x="{x:.1f}" y="{y}" width="{w:.1f}" height="24" rx="6" fill="{fill}" '
+                 f'stroke="{stroke}"/>' + text(x + w / 2, y + 16.5, name, 12, ink, None, "middle",
+                                                font=MONO) + "</g>")
+        return w
 
-def appear(at, end):
-    times, values = k((0, 0), (at, 0), (at + 0.15, 1), (end, 1), (end + 0.01, 0), (T, 0))
-    return (f'<animate attributeName="opacity" dur="{T}s" repeatCount="indefinite" '
-            f'keyTimes="{times}" values="{values}"/>')
+    def pill(x, y, name, note, cls, beat=False):
+        dot = f'<circle{" class=\"beat\"" if beat else ""} cx="{x + 18}" cy="{y + 17}" r="5" fill="{C["accent"]}"/>'
+        o.append(f'<g class="{cls}"><rect x="{x}" y="{y}" width="290" height="34" rx="9" '
+                 f'fill="{C["panel2"]}"/>{dot}' + text(x + 32, y + 22, name, 14, C["ink"], None,
+                                                        font=MONO)
+                 + text(x + 278, y + 22, note, 12, C["muted"], None, "end") + "</g>")
 
+    def bars(rows, t0, t1, top, unit, decimals):
+        for i, (label, value, mine, g0, g1) in enumerate(rows):
+            y = 150 + i * 62
+            o.append(text(190, y + 21, label, 17, C["ink"] if mine else C["muted"],
+                          700 if mine else None, "end", cls=m.rise(t0 + 0.4, t1)))
+            width = max(5.0, 470 * value / top)
+            o.append(f'<rect class="{m.grow(g0, g1, t1)}" x="204" y="{y}" width="{width:.1f}" '
+                     f'height="30" rx="6" fill="{C["accent"] if mine else C["gray"]}" '
+                     f'style="{FILL_BOX_LEFT}"/>')
+            o.append(text(204 + width + 12, y + 21, f"{value:,.{decimals}f} {unit}", 17,
+                          C["ink"], 700 if mine else None, cls=m.rise(g1 - 0.2, t1, dy=0)))
 
-def grow(attr, start, end, full):
-    times, values = k((0, 0), (start, 0), (end, full), (T, full))
-    return (f'<animate attributeName="{attr}" dur="{T}s" repeatCount="indefinite" '
-            f'keyTimes="{times}" values="{values}"/>')
-
-
-def text(x, y, s, size, color=INK, weight=None, anchor="start", font=SANS, extra=""):
-    w = f' font-weight="{weight}"' if weight else ""
-    return (f'<text x="{x}" y="{y}" font-family="{font}" font-size="{size}" fill="{color}"'
-            f'{w} text-anchor="{anchor}"{extra}>{escape(s)}</text>')
-
-
-def svg():
-    o = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" '
-         f'viewBox="0 0 {W} {H}" role="img" aria-label="podbag: a container engine with no '
-         f'daemon, in one static binary, that stores images file by file">',
-         "<title>podbag intro</title>",
-         f'<rect width="{W}" height="{H}" rx="14" fill="{BG}"/>']
-
-    # 1. The icon and the name.
-    logo = base64.b64encode((REPO / "docs/images/logo-small.png").read_bytes()).decode()
-    o.append("<g opacity=\"0\">" + fade(0, 4.5))
-    o.append(f'<image x="{W / 2 - 60}" y="40" width="120" height="120" '
-             f'href="data:image/png;base64,{logo}"/>')
-    o.append(text(W / 2, 236, "podbag", 64, weight=800, anchor="middle"))
-    o.append(text(W / 2, 282, "A container engine with no daemon,", 22, MUTED, anchor="middle"))
-    o.append(text(W / 2, 312, "in one static binary.", 22, MUTED, anchor="middle"))
+    # 1. Who we are.
+    t1 = 3.8
+    o.append(f'<g class="{m.window(0.05, t1)}" opacity="0">')
+    o.append(logo(352, 40, 96, cls=m.drop(0.15, t1)))
+    o.append(text(400, 206, "podbag", 68, C["ink"], 800, "middle", cls=m.rise(0.6, t1)))
+    o.append(text(400, 248, "A container engine that works differently", 22, C["muted"], None,
+                  "middle", cls=m.rise(1.0, t1)))
+    words = ["no daemon", "files, not layers", "one static binary"]
+    widths = [len(w) * 8.6 + 32 for w in words]
+    x = 400 - (sum(widths) + 12 * (len(words) - 1)) / 2
+    for i, (word, w) in enumerate(zip(words, widths)):
+        o.append(f'<g class="{m.rise(1.5 + i * 0.2, t1)}"><rect x="{x:.1f}" y="284" width="{w:.1f}" '
+                 f'height="34" rx="17" fill="{C["panel2"]}" stroke="{C["line"]}"/>'
+                 + text(x + w / 2, 306, word, 15, C["ink"], 600, "middle") + "</g>")
+        x += w + 12
     o.append("</g>")
 
-    # 2. A terminal: run a container, and nothing is left running.
-    o.append("<g opacity=\"0\">" + fade(4.5, 12))
-    o.append(f'<rect x="60" y="50" width="680" height="280" rx="10" fill="{PANEL}"/>')
-    for i, c in enumerate(["#ec6a5e", "#f4bf4f", "#61c554"]):
-        o.append(f'<circle cx="{84 + i * 20}" cy="72" r="6" fill="{c}"/>')
-    lines = [
-        (5.0, 6.4, 120, "$ podbag run --rm alpine echo hello", INK),
-        (6.7, None, 152, "hello", INK),
-        (7.4, 8.6, 196, "$ sleep 15; pgrep -l podbag", INK),
-        (8.9, None, 228, "# nothing: no daemon stays running", MUTED),
-    ]
-    for n, (start, typed_end, y, s, color) in enumerate(lines):
-        if typed_end:
-            width = len(s) * 11.5 + 12
-            o.append(f'<clipPath id="type{n}"><rect x="84" y="{y - 22}" height="32" width="0">'
-                     + grow("width", start, typed_end, width) + "</rect></clipPath>")
-            o.append(text(88, y, s, 19, color, font=MONO, extra=f' clip-path="url(#type{n})"'))
-        else:
-            o.append("<g opacity=\"0\">" + appear(start, 11.99)
-                     + text(88, y, s, 19, color, font=MONO) + "</g>")
-    o.append("<g opacity=\"0\">" + appear(9.3, 11.99))
-    o.append(text(W / 2, 382, "A container starts in about 4 ms on Linux.", 22, weight=600, anchor="middle"))
-    o.append(text(W / 2, 414, "Seconds after the last one ends, nothing runs.", 18, MUTED, anchor="middle"))
-    o.append("</g></g>")
-
-    # 3. Storage: files, each kept once.
-    o.append("<g opacity=\"0\">" + fade(12, 18.5))
-    o.append(text(W / 2, 74, "Images are stored file by file", 30, weight=700, anchor="middle"))
-    o.append(text(W / 2, 106, "8 Spring services in 2 releases", 17, MUTED, anchor="middle"))
-    rows = [
-        (160, "Disk", [("podbag", 902, ACCENT), ("Docker", 2970, GRAY)], "MiB"),
-        (290, "Page cache to start them", [("podbag", 324, ACCENT), ("Docker", 982, GRAY)], "MiB"),
-    ]
-    for y, label, bars, unit in rows:
-        o.append(text(110, y, label, 18, weight=600))
-        top = max(v for _, v, _ in bars)
-        for i, (name, value, color) in enumerate(bars):
-            by = y + 16 + i * 38
-            full = value / top * 470
-            o.append(text(190, by + 20, name, 16, MUTED, anchor="end"))
-            o.append(f'<rect x="204" y="{by + 4}" height="22" rx="4" fill="{color}" width="0">'
-                     + grow("width", 12.7, 13.9, round(full, 1)) + "</rect>")
-            o.append("<g opacity=\"0\">" + appear(14.0, 18.49)
-                     + text(214 + full, by + 21, f"{value:,} {unit}", 16) + "</g>")
+    # 2. No daemon.
+    t0, t1 = 3.8, 10.0
+    o.append(f'<g class="{m.window(t0, t1)}" opacity="0">')
+    o.append(text(400, 56, "Other engines keep daemons running", 26, C["ink"], 800, "middle",
+                  cls=m.rise(4.0, 6.9)))
+    o.append(text(400, 56, "podbag runs only while containers run", 26, C["ink"], 800, "middle",
+                  cls=m.rise(6.9, 9.9)))
+    for x, title, sub in [(60, "Docker Engine", "a client and two daemons"),
+                          (410, "podbag", "one program, no daemon")]:
+        o.append(f'<rect x="{x}" y="84" width="330" height="324" rx="16" fill="{C["panel"]}" '
+                 f'stroke="{C["line"]}"/>')
+        o.append(text(x + 20, 116, title, 18, C["ink"], 700))
+        o.append(text(x + 20, 138, sub, 13, C["muted"]))
+    pill(80, 156, "dockerd", "always on", m.rise(4.3, 9.9), beat=True)
+    pill(80, 196, "containerd", "always on", m.rise(4.5, 9.9), beat=True)
+    for i, name in enumerate(["web", "api", "db"]):
+        pill(80, 236 + i * 40, "containerd-shim", name, m.rise(5.4 + i * 0.15, 8.2))
+    o.append(f'<g class="{m.windows((4.0, 5.3), (8.9, 9.9))}"><rect x="430" y="156" width="290" '
+             f'height="160" rx="10" fill="none" stroke="{C["line"]}" stroke-dasharray="6 5"/>'
+             + text(575, 242, "nothing running", 16, C["muted"], None, "middle") + "</g>")
+    pill(430, 156, "keeper", "about 2 MiB", m.rise(5.3, 8.9))
+    for x in (80, 430):
+        cx = x
+        for i, name in enumerate(["web", "api", "db"]):
+            cx += chip(cx, 362, name, cls=m.rise(5.4 + i * 0.15, 8.2)) + 8
+    o.append(text(80, 392, "At rest: 4 processes, 203 MiB", 16, C["again"], 700,
+                  cls=m.rise(8.4, 9.9)))
+    o.append(text(430, 392, "At rest: nothing runs", 16, C["once"], 700, cls=m.rise(8.9, 9.9)))
     o.append("</g>")
 
-    # 4. Where it runs.
-    o.append("<g opacity=\"0\">" + fade(18.5, 23))
-    o.append(text(W / 2, 170, "Linux · macOS · Windows", 40, weight=700, anchor="middle"))
-    o.append(text(W / 2, 214, "x86_64 and arm64 · Windows through WSL 2 (experimental)", 18,
-                  MUTED, anchor="middle"))
-    o.append(text(W / 2, 290, "Works with the docker CLI, Compose and buildx", 22,
-                  anchor="middle"))
+    # 3. Files, not layers.
+    t0, t1 = 10.0, 16.4
+    o.append(f'<g class="{m.window(t0, t1)}" opacity="0">')
+    o.append(text(400, 56, "Others store layers. podbag stores files.", 26, C["ink"], 800,
+                  "middle", cls=m.rise(10.1, t1)))
+    o.append(text(60, 100, "Layers: Docker, Podman, Kiri", 15, C["muted"], 600))
+    o.append(text(420, 100, "Files: podbag", 15, C["muted"], 600))
+    for y, label, names, kinds, start in [
+            (114, "A", ["spring.jar", "jackson.jar", "orders.jar"], ["shared", "shared", "plain"], 10.5),
+            (164, "B", ["spring.jar", "jackson.jar", "payments.jar"], ["again", "again", "plain"], 11.2)]:
+        cls = m.rise(start, t1)
+        o.append(f'<g class="{cls}"><rect x="60" y="{y}" width="330" height="40" rx="9" '
+                 f'fill="{C["panel2"]}"/>' + text(78, y + 26, label, 14, C["muted"], 700) + "</g>")
+        x = 100
+        for name, kind in zip(names, kinds):
+            x += chip(x, y + 8, name, kind, cls=cls) + 6
+    o.append(text(60, 236, "the same jars, stored again", 15, C["again"], 700,
+                  cls=m.rise(11.8, t1)))
+    o.append(f'<rect x="420" y="114" width="320" height="90" rx="10" fill="none" '
+             f'stroke="{C["line"]}" stroke-dasharray="6 5"/>')
+    slots = {}
+    x = 438
+    for i, (name, kind) in enumerate([("spring.jar", "shared"), ("jackson.jar", "shared"),
+                                      ("orders.jar", "plain")]):
+        slots[name] = (x, 128)
+        x += chip(x, 128, name, kind, cls=m.rise(10.6 + i * 0.12, t1)) + 8
+    slots["payments.jar"] = (438, 164)
+    chip(438, 164, "payments.jar", "plain", cls=m.rise(11.4, t1))
+    # Image B's copies of the shared jars fly over from the left and merge with the ones here.
+    source_x = {"spring.jar": 100, "jackson.jar": 100 + chip_width("spring.jar") + 6}
+    for name in ("spring.jar", "jackson.jar"):
+        sx, sy = slots[name]
+        chip(sx, sy, name, "shared", cls=m.move(source_x[name] - sx, 172 - sy, 11.6, 12.3, 12.6))
+        o.append(f'<rect class="{m.frames([(0, "opacity:0"), (12.3, "opacity:0"), (12.45, "opacity:1"), (13.0, "opacity:0"), (T, "opacity:0")])}" '
+                 f'x="{sx - 3:.1f}" y="{sy - 3}" width="{chip_width(name) + 6:.1f}" height="30" rx="8" '
+                 f'fill="none" stroke="{C["once"]}" stroke-width="2.5"/>')
+    o.append(text(420, 236, "each file once", 15, C["once"], 700, cls=m.rise(12.6, t1)))
+    o.append(text(400, 322, "−70% disk", 54, C["accent"], 800, "middle", cls=m.pop(13.2, t1),
+                  style=FILL_BOX_CENTRE))
+    o.append(text(400, 360, "8 Spring services in 2 releases: 902 MiB instead of 2,970 MiB", 16,
+                  C["muted"], None, "middle", cls=m.rise(13.6, t1)))
     o.append("</g>")
 
-    # 5. Where to get it.
-    o.append("<g opacity=\"0\">" + fade(23, T))
-    o.append(text(W / 2, 200, "github.com/SteelCrab/podbag", 34, weight=700, anchor="middle"))
-    o.append(text(W / 2, 246, "Apache-2.0 · v0.1.0", 20, MUTED, anchor="middle"))
+    # 4. Stored once, cached once.
+    t0, t1 = 16.4, 21.8
+    o.append(f'<g class="{m.window(t0, t1)}" opacity="0">')
+    o.append(icon_ram(56, 46, 52, C["accent"], cls=m.pop(16.5, t1), style=FILL_BOX_CENTRE))
+    o.append(text(126, 76, "Files stored once are cached once", 26, C["ink"], 800,
+                  cls=m.rise(16.6, t1)))
+    o.append(text(126, 102, "Memory read to start 16 Spring services (page cache)", 15, C["muted"],
+                  cls=m.rise(16.8, t1)))
+    bars([("Docker", 982, False, 17.3, 18.4), ("podbag", 324, True, 17.5, 18.4)], t0, t1, 982,
+         "MiB", 0)
+    o.append(text(400, 330, "−67% memory", 54, C["accent"], 800, "middle", cls=m.pop(18.9, t1),
+                  style=FILL_BOX_CENTRE))
+    o.append(text(400, 368, "Containers that read the same file share one copy in memory.", 16,
+                  C["muted"], None, "middle", cls=m.rise(19.3, t1)))
     o.append("</g>")
 
-    o.append("</svg>")
-    return "\n".join(o) + "\n"
+    # 5. Fast.
+    t0, t1 = 21.8, 26.2
+    o.append(f'<g class="{m.window(t0, t1)}" opacity="0">')
+    o.append(icon_stopwatch(56, 46, 52, C["accent"], hand_cls=m.spin(22.2, 24.2, 2),
+                            cls=m.pop(21.9, t1), style=FILL_BOX_CENTRE))
+    o.append(text(126, 76, "And it starts fast", 26, C["ink"], 800, cls=m.rise(22.0, t1)))
+    o.append(text(126, 102, "Start a container: median of 100 runs on Linux", 15, C["muted"],
+                  cls=m.rise(22.2, t1)))
+    bars([("Docker", 73.8, False, 22.6, 23.9), ("podbag", 4.1, True, 22.6, 22.75)], t0, t1, 73.8,
+         "ms", 1)
+    o.append(text(400, 330, "18× faster start", 54, C["accent"], 800, "middle",
+                  cls=m.pop(24.1, t1), style=FILL_BOX_CENTRE))
+    o.append(text(400, 368, "One static binary. No daemon to ask. No shim to start.", 16,
+                  C["muted"], None, "middle", cls=m.rise(24.4, t1)))
+    o.append("</g>")
 
+    # 6. Get it: the last scene, which stays when motion is off.
+    t0 = 26.2
+    o.append(f'<g class="{m.window(t0, T)}">')
+    o.append(logo(368, 40, 64, cls=m.drop(26.3, T)))
+    o.append(text(400, 158, "podbag", 50, C["ink"], 800, "middle", cls=m.rise(26.6, T)))
+    o.append(text(400, 192, "Linux · macOS · Windows · x86_64 and arm64", 17, C["muted"], None,
+                  "middle", cls=m.rise(26.9, T)))
+    cmd = "curl -fsSL https://raw.githubusercontent.com/SteelCrab/podbag/main/install.sh | sh"
+    o.append(f'<g class="{m.rise(27.2, T)}"><rect x="70" y="222" width="660" height="48" rx="10" '
+             f'fill="{C["panel2"]}" stroke="{C["line"]}"/>'
+             + text(90, 251, "$ " + cmd, 11.6, C["ink"], None, font=MONO) + "</g>")
+    o.append(text(400, 330, "podbag.dev", 30, C["accent"], 800, "middle", cls=m.rise(27.5, T)))
+    o.append(text(400, 362, "Apache-2.0 · github.com/SteelCrab/podbag", 15, C["muted"], None,
+                  "middle", cls=m.rise(27.8, T)))
+    o.append("</g>")
 
-def video(svg_text, out):
-    chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-    fps = 12
-    with tempfile.TemporaryDirectory() as d:
-        page = Path(d) / "intro.html"
-        page.write_text(
-            "<!doctype html><html><body style=\"margin:0;background:#101114\">"
-            + svg_text
-            + "<script>const s=document.querySelector('svg');s.pauseAnimations();"
-              "s.setCurrentTime(parseFloat(location.hash.slice(1)));</script></body></html>")
-        frames = int(T * fps)
-        for i in range(frames):
-            subprocess.run([chrome, "--headless=new", "--disable-gpu", "--hide-scrollbars",
-                            f"--window-size={W},{H}", "--force-device-scale-factor=1.6",
-                            f"--screenshot={d}/f{i:04d}.png", f"file://{page}#{i / fps:.3f}"],
-                           check=True, capture_output=True)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-framerate", str(fps), "-i",
-                        f"{d}/f%04d.png", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf",
-                        "22", "-movflags", "+faststart", str(out)], check=True)
+    label = ("podbag intro. Other engines keep daemons running; podbag runs only while containers "
+             "run, and nothing at rest. Others store layers; podbag stores files, each once: 902 "
+             "MiB of disk instead of 2,970 MiB for 8 Spring services in 2 releases, and 324 MiB "
+             "of page cache instead of 982 MiB. A container starts in 4.1 ms, 18 times faster "
+             "than Docker's 73.8 ms. Linux, macOS and Windows; podbag.dev.")
+    return svg_doc(W, H, m, o, label, "podbag: a container engine that works differently", C["bg"])
 
 
 def main():
-    text_svg = svg()
-    (REPO / "docs/images/intro.svg").write_text(text_svg)
-    print("wrote docs/images/intro.svg")
+    svg = build()
+    out = REPO / "docs/images/intro.svg"
+    out.write_text(svg)
+    print("wrote", out)
     if "--video" in sys.argv:
-        video(text_svg, REPO / "docs/media/intro.mp4")
-        print("wrote docs/media/intro.mp4")
+        render_video(svg, REPO / "docs/media/intro.mp4", W, H, T)
 
 
 if __name__ == "__main__":

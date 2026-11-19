@@ -125,6 +125,9 @@ def main():
     for picture in sorted((REPO / "docs/images").iterdir()):
         if picture.suffix in (".svg", ".png"):
             shutil.copy(picture, out / "images" / picture.name)
+    (out / "media").mkdir()
+    for video in sorted((REPO / "docs/media").glob("*.mp4")):
+        shutil.copy(video, out / "media" / video.name)
 
     template = (SITE / "page.html").read_text()
     english = json.loads((SITE / "i18n/en.json").read_text())
