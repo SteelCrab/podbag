@@ -34,7 +34,7 @@ Image được lưu theo từng tệp: tệp mà nhiều image dùng chung chỉ
 - **Một tệp nhị phân tĩnh.** Khoảng 4 MB trên Linux.
 - **Theo tệp, không theo lớp.** Tệp mà nhiều image dùng chung chỉ được lưu và cache một lần.
 - **Nhanh.** Trên Linux, container khởi động trong khoảng 4 ms.
-- **Dùng được với công cụ của Docker.** Image Docker và OCI, CLI `docker`, Compose và buildx.
+- **Dùng được với công cụ của Docker.** Image Docker và OCI, CLI `docker`, Compose, buildx và swarm stack trên một node.
 - **Có hoặc không có root.** Cùng một chương trình chạy được theo cả hai cách.
 - **Linux, macOS và Windows.** x86_64 và arm64. Hỗ trợ Windows đang ở giai đoạn thử nghiệm.
 

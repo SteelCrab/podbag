@@ -34,7 +34,7 @@ Iniimbak nito ang mga image nang file-by-file: ang file na ginagamit ng maraming
 - **Iisang static binary.** Mga 4 MB sa Linux.
 - **Mga file, hindi mga layer.** Ang file na ginagamit ng maraming image ay iniimbak at kina-cache nang isang beses lang.
 - **Mabilis.** Nagsisimula ang isang container sa mga 4 ms sa Linux.
-- **Gumagana sa mga tool ng Docker.** Mga Docker at OCI image, ang `docker` CLI, Compose at buildx.
+- **Gumagana sa mga tool ng Docker.** Mga Docker at OCI image, ang `docker` CLI, Compose, buildx, at mga swarm stack sa iisang node.
 - **May root man o wala.** Iisang programa ang gumagana sa dalawang paraan.
 - **Linux, macOS at Windows.** x86_64 at arm64. Eksperimental pa ang suporta sa Windows.
 

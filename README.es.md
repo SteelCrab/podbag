@@ -34,7 +34,7 @@ Guarda las imágenes archivo por archivo: un archivo que comparten muchas imáge
 - **Un solo binario estático.** Unos 4 MB en Linux.
 - **Archivos, no capas.** Un archivo que comparten muchas imágenes se guarda y se cachea una sola vez.
 - **Rápido.** Un contenedor arranca en unos 4 ms en Linux.
-- **Funciona con las herramientas de Docker.** Imágenes Docker y OCI, el CLI `docker`, Compose y buildx.
+- **Funciona con las herramientas de Docker.** Imágenes Docker y OCI, el CLI `docker`, Compose, buildx y stacks de swarm en un solo nodo.
 - **Con o sin root.** El mismo programa funciona de las dos formas.
 - **Linux, macOS y Windows.** x86_64 y arm64. El soporte de Windows es experimental.
 
