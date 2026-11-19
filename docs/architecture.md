@@ -123,5 +123,6 @@ base, with the same jars:
 - **docker run on a Mac.** 14.4 ms (Kiri: 11.8 ms).
 - **Kubernetes.** There is no CRI, so Kubernetes cannot use podbag as a node's runtime.
 - **Docker API.** No classic builder (use buildx), `commit`, `export`, `diff`, `top`,
-  `stats`, `pause`, `rename`, `update`, `push`, `search`, swarm or plugins.
+  `stats`, `pause`, `rename`, `update`, `push`, `search` or plugins. Swarm mode runs on
+  one node only.
 - **Windows.** Not yet tried on a Windows machine.
