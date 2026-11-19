@@ -35,6 +35,7 @@ Iniimbak nito ang mga image nang file-by-file: ang file na ginagamit ng maraming
 - **Mga file, hindi mga layer.** Ang file na ginagamit ng maraming image ay iniimbak at kina-cache nang isang beses lang.
 - **Mabilis.** Nagsisimula ang isang container sa mga 4 ms sa Linux.
 - **Gumagana sa mga tool ng Docker.** Mga Docker at OCI image, ang `docker` CLI, Compose at buildx.
+- **Kubernetes.** Ang `podbag cri serve` ang container runtime ng isang node, para sa kubelet o k3s.
 - **May root man o wala.** Iisang programa ang gumagana sa dalawang paraan.
 - **Linux, macOS at Windows.** x86_64 at arm64. Eksperimental pa ang suporta sa Windows.
 

@@ -35,6 +35,7 @@ Image được lưu theo từng tệp: tệp mà nhiều image dùng chung chỉ
 - **Theo tệp, không theo lớp.** Tệp mà nhiều image dùng chung chỉ được lưu và cache một lần.
 - **Nhanh.** Trên Linux, container khởi động trong khoảng 4 ms.
 - **Dùng được với công cụ của Docker.** Image Docker và OCI, CLI `docker`, Compose và buildx.
+- **Kubernetes.** `podbag cri serve` là container runtime của một node, cho kubelet hoặc k3s.
 - **Có hoặc không có root.** Cùng một chương trình chạy được theo cả hai cách.
 - **Linux, macOS và Windows.** x86_64 và arm64. Hỗ trợ Windows đang ở giai đoạn thử nghiệm.
 

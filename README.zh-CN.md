@@ -35,6 +35,7 @@
 - **按文件，而不是按层。** 多个镜像共用的文件，在磁盘和内存中只保存一份。
 - **快。** 在 Linux 上，容器约 4 毫秒启动。
 - **兼容 Docker 工具。** 支持 Docker 和 OCI 镜像、`docker` CLI、Compose 和 buildx。
+- **Kubernetes。** `podbag cri serve` 可以作为节点的容器运行时，供 kubelet 或 k3s 使用。
 - **有无 root 都可以。** 同一个程序两种方式都能用。
 - **Linux、macOS 和 Windows。** 支持 x86_64 和 arm64。Windows 支持处于实验阶段。
 
