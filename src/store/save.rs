@@ -83,7 +83,12 @@ impl Store {
     }
 
     /// One layer as a tar, from its entries and the objects that hold its files.
-    fn write_layer(&self, index: &LayerIndex, mtime: u64, out: &mut dyn Write) -> Result<()> {
+    pub(super) fn write_layer(
+        &self,
+        index: &LayerIndex,
+        mtime: u64,
+        out: &mut dyn Write,
+    ) -> Result<()> {
         let mut b = tar::Builder::new(out);
         for e in &index.entries {
             let mut h = tar::Header::new_gnu();
