@@ -174,6 +174,11 @@ pub fn vm_command(args: &[String]) -> i32 {
     }
 }
 
+/// `podbag vm status`: `running` or `stopped`. It does not connect, so it wakes no VM.
+pub fn vm_status() -> Result<&'static str, String> {
+    paths().map(|p| status(&p))
+}
+
 /// `running` or `stopped`, from the host's state file and its lock: without connecting,
 /// since a connection keeps the VM up.
 fn status(p: &Paths) -> &'static str {
