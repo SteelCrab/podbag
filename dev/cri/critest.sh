@@ -29,10 +29,9 @@ EOF
 pid=$!
 cleanup() {
   crictl --config /dev/null -r "unix://$sock" rmp -fa >/dev/null 2>&1 || true
-  kill $pid 2>/dev/null
+  kill $pid 2>/dev/null || true
   wait $pid 2>/dev/null || true
   ip link del pbgcrit0 2>/dev/null || true
-  cp "$dir/serve.log" /tmp/pbg-critest-serve.log 2>/dev/null || true
   rm -rf "$dir"
 }
 trap cleanup EXIT

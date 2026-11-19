@@ -39,8 +39,8 @@ EOF
 pid=$!
 cleanup() {
   c rmp -fa >/dev/null 2>&1 || true
-  kill $pid 2>/dev/null
-  wait $pid 2>/dev/null
+  kill $pid 2>/dev/null || true
+  wait $pid 2>/dev/null || true
   ip link del pbgcri0 2>/dev/null || true
   echo "--- serve log"
   cat "$dir/serve.log"

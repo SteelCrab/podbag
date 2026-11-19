@@ -10,7 +10,7 @@ sock=$dir/cri.sock
 mkdir "$dir/net.d"
 "$podbag" cri serve --socket "$sock" --cni-conf-dir "$dir/net.d" >"$dir/serve.log" 2>&1 &
 pid=$!
-trap 'kill $pid 2>/dev/null; wait $pid 2>/dev/null; rm -rf "$dir"' EXIT
+trap 'kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true; rm -rf "$dir"' EXIT
 i=0
 while [ ! -S "$sock" ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
 
