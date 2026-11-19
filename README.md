@@ -120,6 +120,8 @@ podbag logs -f web                                # follow the logs
 podbag exec -it web sh                            # open a shell in the container
 podbag stop web && podbag rm web                  # stop and remove
 podbag images                                     # list images
+podbag login ghcr.io                              # log in to a registry (shared with docker login)
+podbag push ghcr.io/me/app:1                      # send an image to a registry
 ```
 
 ### docker CLI, Compose and buildx
