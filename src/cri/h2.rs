@@ -45,8 +45,11 @@ const MAX_FRAME: usize = 16_384;
 const TABLE_SIZE: usize = 4096;
 /// A request body larger than this is refused (the kubelet sends at most a few MiB).
 pub const MAX_BODY: usize = 16 << 20;
-/// Our receive window per stream, announced in SETTINGS; we hand credit back as data comes.
+/// Our receive window per stream, announced in SETTINGS, and for the whole connection; we
+/// hand credit back as data comes.
 const RECV_WINDOW: u32 = 1 << 20;
+/// Every window's size before SETTINGS or WINDOW_UPDATE change it.
+const DEFAULT_WINDOW: u32 = 65_535;
 /// Header blocks larger than this end the connection.
 const MAX_HEADER_BLOCK: usize = 256 << 10;
 
@@ -240,9 +243,9 @@ pub fn serve(stream: UnixStream, handler: Arc<dyn Handler>) -> io::Result<()> {
     let conn = Arc::new(Shared {
         writer: Mutex::new(stream),
         flow: Mutex::new(Flow {
-            connection: 65_535,
+            connection: DEFAULT_WINDOW as i64,
             streams: HashMap::new(),
-            initial: 65_535,
+            initial: DEFAULT_WINDOW as i64,
             max_frame: MAX_FRAME,
             reset: HashSet::new(),
             closed: false,
@@ -281,6 +284,14 @@ fn read_loop(
         settings.extend_from_slice(&value.to_be_bytes());
     }
     conn.send(SETTINGS, 0, 0, &settings)?;
+    // SETTINGS sets only each stream's window; the connection's starts at 65,535 octets.
+    // Raise it to the same size, or the client stops for good once that much has come.
+    conn.send(
+        WINDOW_UPDATE,
+        0,
+        0,
+        &(RECV_WINDOW - DEFAULT_WINDOW).to_be_bytes(),
+    )?;
 
     let mut decoder = Decoder::new(TABLE_SIZE);
     let mut incoming: HashMap<u32, Incoming> = HashMap::new();
@@ -737,5 +748,47 @@ pub(crate) mod tests {
             c.frame(WINDOW_UPDATE, 0, 5, &10u32.to_be_bytes());
         }
         assert_eq!(got, vec![b'z'; 25]);
+    }
+
+    struct Quiet;
+    impl Handler for Quiet {
+        fn handle(&self, _request: Request, response: &mut Response) {
+            response.headers(&[(":status", "200")], false).unwrap();
+            response.trailers(&[("grpc-status", "0")]).unwrap();
+        }
+    }
+
+    #[test]
+    fn hands_back_the_connection_window() {
+        // A client may send only 65,535 octets on the connection until the server gives
+        // credit for stream 0. 40 requests of 4 KiB, keeping to that window, all get answers.
+        let mut c = Client::connect(Arc::new(Quiet));
+        let body = vec![b'q'; 4096];
+        let mut window = DEFAULT_WINDOW as i64;
+        let mut answered = 0;
+        let read = |c: &mut Client, window: &mut i64, answered: &mut i32| {
+            let mut head = [0u8; 9];
+            c.sock.read_exact(&mut head).unwrap();
+            let len = u32::from_be_bytes([0, head[0], head[1], head[2]]) as usize;
+            let mut payload = vec![0u8; len];
+            c.sock.read_exact(&mut payload).unwrap();
+            let id = u32::from_be_bytes([head[5], head[6], head[7], head[8]]);
+            if head[3] == WINDOW_UPDATE && id == 0 {
+                *window += u32::from_be_bytes(payload[..4].try_into().unwrap()) as i64;
+            }
+            if head[3] == HEADERS && head[4] & END_STREAM != 0 {
+                *answered += 1;
+            }
+        };
+        for i in 0..40u32 {
+            while window < body.len() as i64 {
+                read(&mut c, &mut window, &mut answered);
+            }
+            c.request(1 + 2 * i, "/x/Quiet", &body);
+            window -= body.len() as i64;
+        }
+        while answered < 40 {
+            read(&mut c, &mut window, &mut answered);
+        }
     }
 }
