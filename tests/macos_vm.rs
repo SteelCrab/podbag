@@ -1986,3 +1986,69 @@ fn published_ports_answer_on_ipv6_localhost_too() {
         .unwrap();
     assert_eq!(String::from_utf8_lossy(&got.stdout), "six\n");
 }
+
+#[test]
+fn disk_space_goes_back_without_a_restart() {
+    if !enabled() {
+        return;
+    }
+    let mac = Mac::new(60);
+    mac.ok(&["ps"]);
+    // What the Mac has given the sparse disk file, in MiB.
+    let allocated = || {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(mac.home.path().join("disk.img"))
+            .unwrap()
+            .blocks()
+            * 512
+            >> 20
+    };
+    let base = allocated();
+    let back_within = |what: &str| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while allocated() > base + 100 {
+            assert!(
+                Instant::now() < deadline,
+                "{what}: {} MiB, was {base}",
+                allocated()
+            );
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    };
+    // A container's 500 MB, gone with it.
+    mac.ok(&[
+        "run",
+        "--rm",
+        "alpine:3.22",
+        "sh",
+        "-c",
+        "dd if=/dev/urandom of=/big bs=1M count=500 2>/dev/null && sync",
+    ]);
+    assert!(allocated() > base + 400, "written: {} MiB", allocated());
+    back_within("after the container");
+    // A volume's 300 MB, gone with it.
+    mac.ok(&[
+        "run",
+        "--rm",
+        "-v",
+        "scratch:/s",
+        "alpine:3.22",
+        "sh",
+        "-c",
+        "dd if=/dev/urandom of=/s/big bs=1M count=300 2>/dev/null && sync",
+    ]);
+    mac.ok(&["volume", "rm", "scratch"]);
+    back_within("after the volume");
+    // An image's layers, gone with it (a seed image: no pull).
+    let held = allocated();
+    mac.ok(&["rmi", "mirror.gcr.io/moby/buildkit:buildx-stable-1"]);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while allocated() + 30 > held {
+        assert!(
+            Instant::now() < deadline,
+            "after rmi: {} MiB, was {held}",
+            allocated()
+        );
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}

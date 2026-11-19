@@ -322,8 +322,16 @@ Published ports (`-p 8080:80`, from `docker` or `openpod`) answer on the Mac's
 published them ends, and close with their container. TCP only for now: a UDP port is
 named in `~/.openpod/run/host.log` as not forwarded, and so is a port another program
 holds on the Mac. The VM renews its DHCP lease (the Mac's lasts an hour), so it keeps its
-address however long it runs. Still to come: memory and disk space given back while the VM
-runs.
+address however long it runs.
+
+Disk space comes back while the VM runs: what deleted images, containers and volumes held
+is given back to the Mac within seconds (the data disk discards, and the Mac's sparse
+`disk.img` shrinks). Memory comes back when the VM powers off, 60 seconds after its last
+container. While it runs, the VM keeps every page it has used, file cache included, up to
+its size (`OPENPOD_VM_MEMORY`, 2048 MiB by default). Virtualization.framework's memory
+balloon does not change that on macOS 27.2: when the guest gave it 1.3 GiB, the Mac counted
+about 620 MiB more reusable pages, but the VM process's footprint (what Activity Monitor
+shows) stayed the same.
 
 ## Requirements
 
