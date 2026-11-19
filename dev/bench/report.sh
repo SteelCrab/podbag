@@ -79,11 +79,21 @@ mac_tools=(docker-desktop orbstack kiri podman colima podbag-mac podbag-mac-defa
 {
   echo "# Benchmarks"
   echo
-  echo "Two comparisons, written by \`dev/bench/report.sh\`: container engines on one Linux host"
-  echo "(no VM; the same kernel for all), and the tools Mac users run, each with its own Linux VM."
-  echo "Numbers compare only within one table: each table was measured in one session."
-  echo "A node of Spring microservices in two releases, layers against files, is in"
-  echo "[benchmarks-msa.md](benchmarks-msa.md)."
+  cat <<'EOF'
+- Two comparisons:
+  - container engines on one Linux host (no VM; the same kernel for all),
+  - the tools Mac users run, each with its own Linux VM.
+- Numbers compare only within one table: each table was measured in one session.
+- A node of Spring microservices in two releases: [benchmarks-msa.md](benchmarks-msa.md).
+- `dev/bench/report.sh` writes this page.
+
+## Contents
+
+- [Linux host, no VM](#linux-host-no-vm)
+- [macOS, each tool with its own VM](#macos-each-tool-with-its-own-vm)
+- [300 containers on one network](#300-containers-on-one-network)
+- [Reading the numbers](#reading-the-numbers)
+EOF
   echo
   echo "## Linux host, no VM"
   echo

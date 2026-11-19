@@ -2,47 +2,71 @@
 
 Thank you for helping. Bug reports, fixes and new features are all welcome.
 
+## Contents
+
+- [Report a problem](#report-a-problem)
+- [Build](#build)
+- [Test](#test)
+- [Pull requests](#pull-requests)
+- [Translations](#translations)
+- [License](#license)
+
 ## Report a problem
 
-Open an issue with the command you ran, what you expected, what happened, and the output
-of `podbag --version` and `podbag check`.
+Open an issue. Include:
 
-## Build and test
+- the command you ran,
+- what you expected, and what happened,
+- the output of `podbag --version` and `podbag check`.
+
+## Build
 
 ```sh
-cargo build    # the CLI and the library
+cargo build    # the program and the library
+```
+
+- Release builds for Linux, macOS and Windows: [docs/build.md](docs/build.md).
+
+## Test
+
+### On any system
+
+```sh
 cargo test     # unit tests; tests that need Linux are skipped elsewhere
 ```
+
+### Linux tests from a Mac
 
 podbag uses Linux kernel features, so most tests run on Linux. On a Mac,
 [lima](https://lima-vm.io) runs them in a VM:
 
 ```sh
 dev/vm.sh up           # create and set up the podbag-dev VM (once)
-dev/vm.sh test         # cargo test in the VM, rootless
+dev/vm.sh test         # cargo test in the VM, without root
 dev/vm.sh test-root    # cargo test in the VM, as root
 dev/vm.sh static       # the static release binary, and a check of its size
 ```
 
-`PODBAG_TEST_NETWORK=1` adds the tests that pull images or use the network.
-`PODBAG_TEST_MACOS_VM=1 cargo test --test macos_vm` tests the macOS VM.
+### More tests
 
-Release builds:
-
-- Linux, a static binary (needs `musl-tools`):
-  `CC_x86_64_unknown_linux_musl=musl-gcc cargo build --release --target x86_64-unknown-linux-musl`
-  (or `aarch64` for arm64).
-- macOS: `dev/vm.sh run dev/macos/build-guest.sh`, then
-  `cargo build --release --features embed-guest`, then `dev/macos/sign.sh target/release/podbag`.
-- Windows: build the static Linux binary for the same CPU first, then
-  `PODBAG_LINUX_BIN=<that file> cargo build --release --features embed-linux`.
+- `PODBAG_TEST_NETWORK=1` adds the tests that pull images or use the network.
+- `PODBAG_TEST_MACOS_VM=1 cargo test --test macos_vm` tests the macOS VM.
 
 ## Pull requests
 
 - One change per pull request, with tests for new behavior.
-- Run `cargo fmt`; leave no compiler warnings; `cargo test` must pass. CI checks Linux,
-  macOS and Windows.
-- Commit messages are one line: `type: what changed`, with `feat`, `fix`, `docs`, `test`,
-  `refactor` or `chore`.
+- Run `cargo fmt`.
+- Leave no compiler warnings.
+- `cargo test` must pass. CI checks Linux, macOS and Windows.
+- Commit messages are one line: `type: what changed`. Types: `feat`, `fix`, `docs`,
+  `test`, `refactor`, `chore`.
+
+## Translations
+
+- `README.md` is the source. `README.<language>.md` files follow it.
+- When you change `README.md`, say so in the pull request, so that the translations can
+  follow.
+
+## License
 
 By contributing, you agree that your work is licensed under the Apache License 2.0.

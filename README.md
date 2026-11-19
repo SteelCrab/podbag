@@ -1,65 +1,117 @@
 # podbag
 
-A container engine with no daemon, in one static binary. It runs Docker and OCI images,
-rootless or as root, and stores them file by file: a file that many images share is kept
-on disk, and read into memory, once.
+A container engine with no daemon, in one static binary.
+It stores images file by file: a file that many images share is kept once.
 
 [![CI](https://github.com/SteelCrab/podbag/actions/workflows/ci.yml/badge.svg)](https://github.com/SteelCrab/podbag/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/SteelCrab/podbag)](https://github.com/SteelCrab/podbag/releases/latest)
+[![crates.io](https://img.shields.io/crates/v/podbag)](https://crates.io/crates/podbag)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+
+**English** · [한국어](README.ko.md) · [日本語](README.ja.md) · [简体中文](README.zh-CN.md) · [Filipino](README.fil.md) · [Español](README.es.md) · [Tiếng Việt](README.vi.md)
 
 <img src="docs/images/intro.svg" alt="podbag intro: a container starts in about 4 ms on Linux and nothing runs once it ends; images stored file by file take 902 MiB of disk against Docker's 2,970 MiB; Linux, macOS and Windows" width="800">
 
 <sub>The same intro as a video: [intro.mp4](docs/media/intro.mp4).</sub>
 
-- **Linux** (x86_64, arm64): runs containers itself. With no container, nothing runs.
-- **macOS** (Apple silicon): starts a small Linux VM of its own when it is needed.
-- **Windows** (x86_64, arm64): runs in a WSL 2 distribution of its own. *Experimental.*
-- Works with the `docker` CLI, Docker Compose and buildx through its Docker API.
+## Contents
+
+- [Features](#features)
+- [Install](#install)
+- [Use](#use)
+- [Benchmarks](#benchmarks)
+- [Compared with other tools](#compared-with-other-tools)
+- [Documentation](#documentation)
+- [Contributing](#contributing)
+- [License](#license)
+
+## Features
+
+- **No daemon.** When no container runs, nothing runs.
+- **One static binary.** About 4 MB on Linux.
+- **Files, not layers.** A file that many images share is stored once and cached once.
+- **Fast.** A container starts in about 4 ms on Linux.
+- **Works with Docker tools.** Docker and OCI images, the `docker` CLI, Compose and buildx.
+- **With or without root.** The same program works both ways.
+- **Linux, macOS and Windows.** x86_64 and arm64. Windows support is experimental.
 
 ## Install
 
-Linux:
+### Install script (Linux and macOS)
 
 ```sh
-curl -fsSLo podbag https://github.com/SteelCrab/podbag/releases/latest/download/podbag-$(uname -m)-linux
-sudo install -m 0755 podbag /usr/local/bin/podbag
-podbag check    # what this system still needs, and how to add it
+curl -fsSL https://raw.githubusercontent.com/SteelCrab/podbag/main/install.sh | sh
 ```
 
-Without root, podbag needs `newuidmap` (package `uidmap`), `pasta` (package `passt`) for
-networks, and on Ubuntu 24.04 or later an AppArmor profile. `podbag check` says which.
+- Downloads the file for your system and checks its SHA-256 sum.
+- Installs it in `/usr/local/bin`, with `sudo` when needed.
+- On Ubuntu 24.04 and later, adds the AppArmor profile that rootless containers need.
+- Settings: `PODBAG_VERSION=v0.1.0`, `PODBAG_INSTALL_DIR=$HOME/.local/bin`,
+  `PODBAG_SKIP_APPARMOR=1`.
 
-macOS (Apple silicon):
+### Download
 
-```sh
-curl -fsSLo podbag https://github.com/SteelCrab/podbag/releases/latest/download/podbag-aarch64-macos
-sudo mkdir -p /usr/local/bin && sudo install -m 0755 podbag /usr/local/bin/podbag
-```
+Get a file from the [latest release](https://github.com/SteelCrab/podbag/releases/latest).
+Check it with `SHA256SUMS`.
 
-Windows (experimental, needs WSL 2: `wsl --install`):
+| System | File |
+|---|---|
+| Linux, x86_64 | `podbag-x86_64-linux` |
+| Linux, arm64 | `podbag-aarch64-linux` |
+| macOS, Apple silicon | `podbag-aarch64-macos` |
+| Windows, x86_64 (experimental) | `podbag-x86_64-windows.exe` |
+| Windows, arm64 (experimental) | `podbag-aarch64-windows.exe` |
+
+Windows needs WSL 2 (run `wsl --install` once):
 
 ```powershell
 curl.exe -fsSLo podbag.exe https://github.com/SteelCrab/podbag/releases/latest/download/podbag-x86_64-windows.exe
 .\podbag.exe run --rm alpine echo hello
 ```
 
-On arm64, download `podbag-aarch64-windows.exe`. Each release lists the SHA-256 sums of its
-files.
+### Cargo
+
+```sh
+cargo install podbag
+```
+
+- For Linux. On macOS and Windows, use the release files: they carry the VM and the
+  Linux engine.
+
+### Build from source
+
+- See [docs/build.md](docs/build.md) for Linux, macOS and Windows.
+
+### Requirements and AppArmor (Linux)
+
+- Linux 5.12 or later, with cgroup v2.
+- Without root, podbag also needs:
+  - `newuidmap` (package `uidmap`),
+  - `pasta` (package `passt`) for networks,
+  - an AppArmor profile on Ubuntu 24.04 and later. The install script adds it. By hand:
+
+    ```sh
+    podbag check --apparmor-profile | sudo tee /etc/apparmor.d/podbag >/dev/null
+    sudo apparmor_parser -r /etc/apparmor.d/podbag
+    ```
+
+- `podbag check` lists what your system still needs, and how to add it.
 
 ## Use
 
+### Basic commands
+
 ```sh
-podbag run --rm alpine echo hello                 # pulls the image if needed
-podbag run -d --name web -p 8080:80 nginx:alpine  # in the background
-podbag ps
-podbag logs -f web
-podbag exec -it web sh
-podbag stop web && podbag rm web
-podbag images
+podbag run --rm alpine echo hello                 # pull the image if needed, run, remove
+podbag run -d --name web -p 8080:80 nginx:alpine  # run in the background
+podbag ps                                         # list containers
+podbag logs -f web                                # follow the logs
+podbag exec -it web sh                            # open a shell in the container
+podbag stop web && podbag rm web                  # stop and remove
+podbag images                                     # list images
 ```
 
-The `docker` CLI, Compose and buildx work through podbag's Docker API:
+### docker CLI, Compose and buildx
 
 ```sh
 podbag system service &      # Linux (on macOS: podbag vm start)
@@ -67,8 +119,7 @@ export DOCKER_HOST=unix://$XDG_RUNTIME_DIR/podbag/docker.sock   # macOS: unix://
 docker compose up -d
 ```
 
-Volumes, networks, limits, and the details for macOS and Windows:
-[docs/usage.md](docs/usage.md).
+- All commands and options: [docs/usage.md](docs/usage.md).
 
 ## Benchmarks
 
@@ -83,9 +134,10 @@ Volumes, networks, limits, and the details for macOS and Windows:
 </tr>
 </table>
 
-Medians on one Linux VM (4 CPUs, 3.8 GiB, arm64) with podbag 0.1.0, Podman 5.7.0,
-Docker 29.1.3 and Kiri 0.2.1. How each was measured, and every number:
-[docs/benchmarks.md](docs/benchmarks.md) and [docs/benchmarks-msa.md](docs/benchmarks-msa.md).
+- Medians on one Linux VM: 4 CPUs, 3.8 GiB, arm64.
+- Versions: podbag 0.1.0, Podman 5.7.0, Docker 29.1.3, Kiri 0.2.1.
+- All numbers and how they were measured: [docs/benchmarks.md](docs/benchmarks.md) and
+  [docs/benchmarks-msa.md](docs/benchmarks-msa.md).
 
 ## Compared with other tools
 
@@ -98,16 +150,24 @@ Docker 29.1.3 and Kiri 0.2.1. How each was measured, and every number:
 | Mac: memory 6 minutes after the last container² | 1.7 MiB | 950 MiB | 795 MiB | 1.54 GiB | 12 MiB |
 | License | Apache-2.0 | Apache-2.0; Docker Desktop is paid for larger companies | proprietary | MIT | Apache-2.0 |
 
-¹ Experimental. ² Measured on one Mac with Docker Desktop for Docker:
+¹ Experimental. ² Measured on one Mac, with Docker Desktop for Docker:
 [docs/benchmarks.md](docs/benchmarks.md).
 
 <picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/architecture-dark.svg"><img alt="Docker Engine: the docker CLI talks to dockerd, which talks to containerd, which starts a shim per container; images are layers. podbag: the command creates each container itself, a keeper per user watches them while they run; images are files, each kept once." src="docs/images/architecture-light.svg"></picture>
 
-How the parts fit, and where podbag is still behind: [docs/architecture.md](docs/architecture.md).
+- How the parts fit, and where podbag is still behind: [docs/architecture.md](docs/architecture.md).
+
+## Documentation
+
+- [Usage](docs/usage.md): commands, volumes, networks, limits, Docker API, macOS, Windows.
+- [Architecture](docs/architecture.md): how podbag differs from Docker.
+- [Build from source](docs/build.md): Linux, macOS, Windows.
+- [Benchmarks](docs/benchmarks.md) and the [Spring microservices benchmark](docs/benchmarks-msa.md).
 
 ## Contributing
 
-Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
+- Issues and pull requests are welcome.
+- See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

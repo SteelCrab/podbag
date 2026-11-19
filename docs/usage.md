@@ -1,321 +1,404 @@
 # Using podbag
 
-The [README](../README.md) shows how to install podbag. This page lists what it can do.
+The [README](../README.md) shows how to install podbag. This page shows what it can do.
+
+## Contents
+
+- [Commands](#commands)
+- [How containers run](#how-containers-run)
+- [Images](#images)
+- [Checks](#checks)
+- [Volumes](#volumes)
+- [Limits and security](#limits-and-security)
+- [Networks](#networks)
+- [Docker API](#docker-api)
+- [macOS](#macos)
+- [Windows (experimental)](#windows-experimental)
+- [Requirements on Linux](#requirements-on-linux)
+- [AppArmor](#apparmor)
 
 ## Commands
 
 ```sh
-podbag run alpine echo hello            # pulls the image if needed; the container stays
-podbag run --rm -it alpine sh           # interactive shell, removed on exit
-podbag run -d --name web nginx:alpine   # in the background
-podbag run -d --restart on-failure:3 myjob   # started again when it fails (no, always, …)
-podbag run -m 512m --cpus 1.5 --pids-limit 200 alpine sh   # resource limits
-podbag run -v ./src:/work:ro -v pgdata:/var/lib/pg --tmpfs /run alpine sh   # volumes
+podbag run alpine echo hello                 # pull the image if needed; the container stays
+podbag run --rm -it alpine sh                # an interactive shell, removed when it ends
+podbag run -d --name web nginx:alpine        # in the background
+podbag run -d --restart on-failure:3 myjob   # start again when it fails
+podbag run -m 512m --cpus 1.5 --pids-limit 200 alpine sh                  # limits
+podbag run -v ./src:/work:ro -v pgdata:/var/lib/pg --tmpfs /run alpine sh # volumes
 podbag volume create|ls|rm|inspect
-podbag network create app                                    # networks
+podbag network create app                    # a network
 podbag run -d --name db --network app alpine sleep 1d
 podbag run -d --name api --network app -p 8080:80 nginx:alpine
-podbag exec api ping -c1 db                                  # by name
+podbag exec api ping -c1 db                  # containers find each other by name
 podbag ps -a
 podbag logs -f web
 podbag exec -it web sh
 podbag stop web && podbag rm web
 podbag pull alpine | podbag images | podbag rmi alpine
-podbag save -o app.tar myapp:1 && podbag load -i app.tar     # image archives
-podbag run --rm --privileged alpine mount -t tmpfs none /mnt   # every capability (rootless: in its user namespace)
+podbag save -o app.tar myapp:1 && podbag load -i app.tar   # image archives
+podbag run --rm --privileged alpine mount -t tmpfs none /mnt
 podbag system df | podbag system prune -f
-podbag run --rootfs ./rootfs sh         # a plain directory instead of an image
-podbag check                            # is this system ready? (exit 1 if not)
-podbag check-image myapp:1              # programs that cannot run in the image (exit 1)
-podbag system service &                 # the Docker API, for the docker CLI (see below)
-podbag vm status                        # macOS: the Linux VM podbag starts by itself (see below)
+podbag run --rootfs ./rootfs sh              # a plain folder instead of an image
+podbag check                                 # is this system ready? (exit code 1 if not)
+podbag check-image myapp:1                   # programs that cannot run in the image
+podbag system service &                      # the Docker API, for the docker CLI
+podbag vm status                             # macOS and Windows: podbag's Linux VM
 ```
 
 ## How containers run
 
-There is no daemon. While containers run, one small keeper process (`podbag __keeper`,
-about 2 MiB) writes the logs of the detached ones and answers `stop`, `kill` and `wait`
-for them, so a detached container costs no process of its own. The keeper starts with the
-first container and leaves 10 seconds after the last one: with no containers, nothing
-runs. A container in the foreground, and one that publishes ports, keeps a helper process
-of its own while it runs. The keeper is the parent of the containers it watches: if it is
-killed, they end with it. It serves only the user that started it, in a runtime directory
-that nobody else can write to, and only the podbag program file it was started from:
-after an upgrade, new containers get a helper of their own until the old keeper has
-left. `keeper = false` in `config.toml` (or `PODBAG_KEEPER=0`) gives
-every container its own `podbag __shim` process instead; `keeper_linger = 10000`
-(milliseconds) sets how long an idle keeper stays. Containers run in new mount, PID, UTS, IPC and
-cgroup namespaces, plus a user namespace when run without root. Identical files in
-different images are stored once and share page cache. The store keeps at most 10 GiB by
-default.
+### No daemon
 
-Restart policies (`--restart no|always|unless-stopped|on-failure[:N]`, Docker's
-`RestartPolicy`) need no daemon either: when a container ends, whoever cleaned up after it
-starts a small `podbag __restart` process that waits (100 ms, then twice as long each
-time, at most a minute; 100 ms again after a run of 10 seconds) and starts the container
-again. `stop` and `kill` end the restarts until the next `start`; `--rm` does not go with a
-policy. Nothing starts containers when the machine starts, so `always` and
-`unless-stopped` behave the same; `inspect` shows the restarts since the last `start`.
+- podbag has no daemon.
+- One small **keeper** process (about 2 MiB) watches the containers in the background:
+  - it writes their logs,
+  - it answers `stop`, `kill` and `wait` for them.
+- The keeper starts with the first container. It stops 10 seconds after the last one.
+- With no container, nothing runs.
+- A container in the foreground, or one that publishes ports, has a small helper process
+  of its own while it runs.
 
-Health checks (`--health-cmd`, `--health-interval`, `--health-timeout`, `--health-retries`,
-`--health-start-period`, `--health-start-interval`, Docker's `Healthcheck`, and an image's
-`HEALTHCHECK`) cost no process between checks either: when one is due, the keeper (or the
-container's own helper) starts `podbag __health`, which runs the check in the container,
-keeps the result with the last five checks, and ends. A check that runs past its timeout
-is ended. `inspect` and `ps` show the health (`starting`, `healthy`, `unhealthy`);
-`--no-healthcheck` turns an image's check off. Images pulled with an earlier podbag have
-their check after the next pull.
+### The keeper
 
-## Image storage
+- The keeper is the parent of its containers. If it is killed, they stop too.
+- It serves only the user who started it.
+- After an upgrade, new containers get their own helper until the old keeper stops.
+- Turn it off with `keeper = false` in `config.toml`, or `PODBAG_KEEPER=0`. Then each
+  container gets its own `podbag __shim` process.
+- `keeper_linger = 10000` (milliseconds) sets how long an idle keeper stays.
 
-Every distinct file is stored once, whatever image it comes from. A container sees its
-image in one of two ways; the files, owners, modes, extended attributes and hard links it
-sees are the same:
+### Isolation
 
-- **composefs** (root, Linux 6.5 or later): each image has a small metadata file (EROFS)
-  that names the stored files. podbag mounts it once per image and every container of
-  the image shares that mount; overlayfs reads file contents from the store. Pulls do not
-  unpack a directory tree.
-- **Hard-link trees** (rootless, or older kernels): each image is unpacked once as a
-  directory of hard links to the stored files.
+- Each container gets new mount, PID, UTS, IPC and cgroup namespaces.
+- Without root, it also gets a user namespace.
 
-As root, podbag tries composefs once per kernel and remembers the result; `podbag check`
-shows the method in use and, when composefs is not available, why. Set
-`image_mount = "hardlink"` in `config.toml` (or `PODBAG_IMAGE_MOUNT=hardlink`) to use
-hard-link trees as root too. When the method changes, an image gets what it needs the first
-time a container uses it. Removing an image unmounts it.
+### Restart policies
+
+- Use `--restart no|always|unless-stopped|on-failure[:N]`.
+- No daemon is needed. When a container stops, a small `podbag __restart` process starts
+  it again.
+- The wait before a restart is 100 ms, then twice as long each time, up to 1 minute.
+  After a run of 10 seconds, it is 100 ms again.
+- `stop` and `kill` end the restarts until the next `start`.
+- `--rm` does not go with a restart policy.
+- Nothing starts containers when the machine starts, so `always` and `unless-stopped`
+  work the same.
+- `inspect` shows the restarts since the last `start`.
+
+### Health checks
+
+- Use `--health-cmd`, `--health-interval`, `--health-timeout`, `--health-retries`,
+  `--health-start-period` and `--health-start-interval`. An image's `HEALTHCHECK` works too.
+- No process runs between checks. When a check is due, the keeper (or the container's
+  helper) starts `podbag __health`.
+- `podbag __health` runs the check, keeps the last five results, and stops.
+- A check that runs past its timeout is stopped.
+- `ps` and `inspect` show the health: `starting`, `healthy` or `unhealthy`.
+- `--no-healthcheck` turns the image's check off.
+- Images pulled with an older podbag get their check at the next pull.
+
+## Images
+
+### Storage
+
+- Each distinct file is stored once, whatever image it comes from.
+- Identical files in different images share the page cache (memory).
+- The store keeps at most 10 GiB by default.
+
+### How a container sees its image
+
+- **composefs** (as root, Linux 6.5 or later):
+  - each image has a small metadata file (EROFS) that lists its files,
+  - podbag mounts it once; all containers of the image share that mount,
+  - a pull does not unpack a folder tree.
+- **Hard-link trees** (without root, or on older kernels):
+  - each image is unpacked once, as a folder of hard links to the stored files.
+- Both ways show the same files, owners, modes, extended attributes and hard links.
+
+### Choose the method
+
+- As root, podbag tests composefs once per kernel and remembers the result.
+- `podbag check` shows the method in use, and why composefs is not available.
+- To use hard-link trees as root too: `image_mount = "hardlink"` in `config.toml`, or
+  `PODBAG_IMAGE_MOUNT=hardlink`.
+- When the method changes, an image gets what it needs the first time a container uses it.
+- Removing an image unmounts it.
 
 ## Checks
 
-`podbag check` lists what podbag needs on this system, one line each: the kernel,
-cgroup v2, how images are mounted (as root), whether the keeper is in use and, without root,
-`newuidmap`/`newgidmap`, subordinate IDs, `pasta`, the systemd
-user session, AppArmor, linger and the lowest port a user may publish. Each problem comes
-with the command that fixes it. As root, it warns when Docker's firewall blocks bridge
-networks. `podbag check --apparmor-profile` prints the profile described under "AppArmor".
+### podbag check
 
-`podbag check-image IMAGE` reads every program and library in a pulled image (it never
-runs them) and reports the ones that cannot run there: built for another C library (a
-glibc program in a musl image such as Alpine, or the reverse), built for another CPU, or
-needing a library the image does not have (a warning). It exits with 1 when it finds an
-error, for use in CI.
+- Lists what podbag needs on this system, one line each:
+  - the kernel and cgroup v2,
+  - how images are mounted (as root),
+  - the keeper,
+  - without root: `newuidmap`/`newgidmap`, subordinate IDs, `pasta`, the systemd user
+    session, AppArmor, linger, and the lowest port a user can publish.
+- Each problem comes with the command that fixes it.
+- As root, it warns when Docker's firewall blocks bridge networks.
+- `podbag check --apparmor-profile` prints the AppArmor profile (see [AppArmor](#apparmor)).
 
-When a container's program cannot start for one of these reasons, `run` and `exec` say
-which, instead of "no such file": for example, that the program needs
-`/lib/ld-linux-aarch64.so.1` (glibc) and the image has no such file, or that a script's
-first line names an interpreter the image lacks.
+### podbag check-image
 
-Measurements are in [docs/benchmarks.md](docs/benchmarks.md): against Podman, Docker and Kiri on
-one Linux host, and against Docker Desktop, OrbStack, Kiri, Podman and Colima on a Mac.
-[docs/benchmarks-msa.md](docs/benchmarks-msa.md) compares their storage on a node of Spring
-microservices in two releases.
+- `podbag check-image IMAGE` reads every program and library in a pulled image. It does not
+  run them.
+- It reports what cannot run:
+  - programs built for another C library (glibc in a musl image such as Alpine, or the
+    reverse),
+  - programs built for another CPU,
+  - programs that need a library the image does not have (a warning).
+- It exits with code 1 when it finds an error, so CI can use it.
+
+### Clear errors
+
+- When a program cannot start for one of these reasons, `run` and `exec` say why, not just
+  "no such file". For example:
+  - the program needs `/lib/ld-linux-aarch64.so.1` (glibc), and the image does not have it,
+  - a script's first line names an interpreter that the image does not have.
 
 ## Volumes
 
 | Option | Effect |
 |---|---|
-| `-v /host/dir:/dir[:ro]`, `-v ./dir:/dir` | a host path; created if missing, like `docker run -v` |
-| `-v name:/dir[:ro][,nocopy]` | a named volume in `<data>/volumes/<name>/data`, created on first use |
-| `-v /dir` | an anonymous volume: removed with the container by `--rm` or `rm -v` |
-| `--tmpfs /dir[:size=64m,mode=1777,…]` | a memory file system (`nosuid,nodev,noexec` unless asked) |
+| `-v /host/dir:/dir[:ro]`, `-v ./dir:/dir` | a host folder; made if missing, as with `docker run -v` |
+| `-v name:/dir[:ro][,nocopy]` | a named volume in `<data>/volumes/<name>/data`, made on first use |
+| `-v /dir` | an anonymous volume, removed with the container by `--rm` or `rm -v` |
+| `--tmpfs /dir[:size=64m,mode=1777,…]` | a file system in memory (`nosuid,nodev,noexec` unless asked) |
 
-An empty volume is filled with the image's files at its target the first time it is
-mounted (owners and modes kept), unless `nocopy` is given. An image's `Volumes` become
-anonymous volumes. `podbag volume rm` refuses a volume that any container still names.
-Mount targets are resolved inside the container's root, so a symbolic link in the image
-cannot send a mount outside it; `/proc` and `/sys` cannot hold mounts.
+- The first time an empty volume is mounted, it gets the image's files at its target (with
+  their owners and modes). `nocopy` turns this off.
+- An image's `Volumes` become anonymous volumes.
+- `podbag volume rm` refuses a volume that a container still names.
+- Mount targets are found inside the container's root. A symbolic link in the image cannot
+  send a mount outside it.
+- `/proc` and `/sys` cannot hold mounts.
 
 ## Limits and security
+
+### Options
 
 | Option | Effect |
 |---|---|
 | `-m, --memory 512m` | `memory.max` (and as much swap); at least 6 MiB |
 | `--cpus 0.5` | `cpu.max`; at least 0.01 |
-| `--pids-limit 100` | `pids.max`; 0 or less is no limit |
-| `--cap-add NAME`, `--cap-drop NAME` | change Docker's 14 default capabilities (`ALL` allowed; drops first) |
-| `--security-opt no-new-privileges` | setuid programs cannot gain privileges (off by default, like Docker) |
+| `--pids-limit 100` | `pids.max`; 0 or less means no limit |
+| `--cap-add NAME`, `--cap-drop NAME` | change Docker's 14 default capabilities (`ALL` works; drops first) |
+| `--security-opt no-new-privileges` | setuid programs cannot gain privileges (off by default, as in Docker) |
 | `--security-opt seccomp=unconfined` | turn off the default seccomp filter |
-| `--privileged` | every capability, no seccomp filter, the kernel's files unmasked, a writable `/sys` and cgroup, any device (for BuildKit and other container tools); host devices are not added to `/dev` |
+| `--privileged` | every capability, no seccomp filter, kernel files shown, writable `/sys` and cgroup, any device; host devices are not added to `/dev` |
 
-**Memory budget.** All containers run in one parent cgroup. Its `memory.max` is the
-budget: by default 50% of the host's memory (`memory_budget` in `config.toml`, such as
-`"8GiB"`, `"25%"`, or `"0"` for no budget; `PODBAG_MEMORY_BUDGET` overrides it). Above
-90% of the budget the kernel reclaims cache first; above the budget it ends one container.
-A container ended for memory shows why in `ps` and `inspect`:
-`Exited (137, out of memory: memory budget)` or `… container limit`. The kernel may
-rarely end a second container when the first one's memory is not given back yet.
+### Memory budget
 
-**Where the cgroups are.** As root: `/sys/fs/cgroup/podbag/<id>`. Without root: the
-keeper runs in one transient systemd scope in the user's `podbag.slice` (started with
-`systemd-run --user --scope`) and makes each container's cgroup below it, `<scope>/c/<id>`,
-so a start needs no `systemd-run` of its own. Without the keeper every container gets a
-scope of its own, `podbag-<id>.scope`. `exec` runs commands in the same cgroup.
+- All containers run in one parent cgroup. Its `memory.max` is the budget.
+- The default budget is 50% of the host's memory.
+- Change it with `memory_budget` in `config.toml` (`"8GiB"`, `"25%"`, or `"0"` for no
+  budget), or with `PODBAG_MEMORY_BUDGET`.
+- Above 90% of the budget, the kernel frees cache first.
+- Above the budget, the kernel stops one container.
+- `ps` and `inspect` show why: `Exited (137, out of memory: memory budget)` or
+  `… container limit`.
+- Rarely, the kernel stops a second container before the first one's memory is free.
 
-**Security defaults.** Docker's 14 capabilities, a seccomp filter that refuses dangerous
-system calls (module loading, kexec, mount, new namespaces, keyrings, BPF, …), hidden
-kernel files (`/proc/kcore`, `/proc/keys`, `/sys/firmware`, …) and read-only kernel
-settings (`/proc/sys`, `/proc/sysrq-trigger`, …). A container may make device nodes, as
-with Docker, but open only the usual ones (`/dev/null`, `zero`, `full`, `random`,
-`urandom`, `tty`, `ptmx`, terminals, `net/tun`): as root these are runc's rules, in a cgroup
-BPF program; without root the user namespace refuses device nodes anyway. `exec` applies
-the same.
-`--privileged` drops all of these. Without root it still gives nothing the user does not
-have: the capabilities hold inside the container's user namespace, the host's kernel
-settings stay out of reach, and no host device is passed in. As root it is the host's root.
+### Where the cgroups are
+
+- As root: `/sys/fs/cgroup/podbag/<id>`.
+- Without root:
+  - the keeper runs in one systemd scope in the user's `podbag.slice`
+    (`systemd-run --user --scope`),
+  - each container's cgroup is below it, `<scope>/c/<id>`, so a start needs no
+    `systemd-run` of its own,
+  - without the keeper, each container gets its own scope, `podbag-<id>.scope`.
+- `exec` runs commands in the same cgroup.
+
+### Security defaults
+
+- Docker's 14 default capabilities.
+- A seccomp filter that refuses dangerous system calls: loading kernel modules, kexec,
+  mount, new namespaces, keyrings, BPF, and others.
+- Hidden kernel files: `/proc/kcore`, `/proc/keys`, `/sys/firmware`, and others.
+- Read-only kernel settings: `/proc/sys`, `/proc/sysrq-trigger`, and others.
+- Devices:
+  - a container can make device nodes, as with Docker,
+  - it can open only the usual ones: `/dev/null`, `zero`, `full`, `random`, `urandom`,
+    `tty`, `ptmx`, terminals and `net/tun`,
+  - as root, a cgroup BPF program applies runc's rules; without root, the user namespace
+    refuses device nodes.
+- `exec` gets the same rules.
+
+### --privileged
+
+- Turns all of these defaults off.
+- Without root, it gives nothing the user does not have already:
+  - the capabilities hold only inside the container's user namespace,
+  - the host's kernel settings stay out of reach,
+  - no host device is passed in.
+- As root, the container has the host's root powers.
 
 ## Networks
+
+### Options
 
 | Option | Effect |
 |---|---|
 | `--network bridge` (default) | the default network: bridge `podbag0`, `10.77.0.0/16` (`default_subnet` in `config.toml`) |
-| `--network NAME` | a network from `podbag network create`; containers on it find each other by name |
-| `--network A --network B` | further bridge networks too (`eth1`, …); the default route stays on the first |
-| `--network-alias NAME` | a further name on the (first) user network |
+| `--network NAME` | a network from `podbag network create`; its containers find each other by name |
+| `--network A --network B` | more bridge networks (`eth1`, …); the default route stays on the first |
+| `--network-alias NAME` | one more name on the first user network |
 | `--network host` | the host's network |
 | `--network none` | loopback only |
-| `-p [IP:][HOST:]CONTAINER[/tcp\|udp]` | publish a port; without a host port the kernel picks one (`ps`, `inspect`) |
+| `-p [IP:][HOST:]CONTAINER[/tcp\|udp]` | publish a port; without a host port, the kernel picks one (see `ps`, `inspect`) |
 
-New networks get `10.78.<n>.0/24` unless `--subnet` says otherwise; a subnet that overlaps
-another network or a host route is refused. Names on a network (container names and
-aliases) are written into each container's `/etc/hosts`, which podbag rewrites as
-containers start and stop; when two containers share an alias, the first line answers
-(there is no DNS server to rotate them). `podbag network connect [--alias NAME] NET
-CONTAINER` and `network disconnect NET CONTAINER` change a stopped container's further
-networks for its next start; a running container is refused.
+### Names and addresses
 
-As root, bridges live in the host's network namespace with an nftables table `podbag` for
-NAT (no other table is touched), and IPv4 forwarding is turned on. Without root, one
-session process per user holds a user and a network namespace; the bridges live there and
-`pasta` connects them to the host (DNS through pasta at `169.254.1.1`). The first container
-starts the session and the last one stops it. Rootless bridge containers share the
-session's user namespace. Published ports are relayed by each container's shim in both
-modes, so the container sees the gateway as the client address.
+- New networks get `10.78.<n>.0/24`, unless `--subnet` gives another.
+- A subnet that overlaps another network or a host route is refused.
+- Container names and aliases are written into each container's `/etc/hosts`. podbag
+  updates them as containers start and stop.
+- There is no DNS server. When two containers share an alias, the first one answers.
+- `podbag network connect [--alias NAME] NET CONTAINER` and
+  `podbag network disconnect NET CONTAINER` change the networks of a stopped container,
+  for its next start. A running container is refused.
+
+### How it works
+
+- As root:
+  - the bridges are in the host's network namespace,
+  - the NAT rules are in an nftables table named `podbag`; no other table is changed,
+  - IPv4 forwarding is turned on.
+- Without root:
+  - one session process per user holds a user namespace and a network namespace, with the
+    bridges in it,
+  - `pasta` connects them to the host; DNS goes through pasta at `169.254.1.1`,
+  - the first container starts the session, and the last one stops it.
+- Published ports go through each container's helper, in both modes. The container sees
+  the gateway as the client's address.
 
 ## Docker API
 
-`podbag system service` serves the Docker Engine API (version 1.47; clients down to 1.24
-work) on a Unix socket, so the `docker` CLI can drive podbag. It is not a daemon in the
-usual sense: containers do not depend on it, and it ends after 60 seconds without a
-connection (`--timeout`, 0 for never).
+### Start it
+
+- `podbag system service` serves the Docker Engine API on a Unix socket: version 1.47,
+  and clients down to 1.24.
+- It is not a daemon: containers do not depend on it.
+- It stops after 60 seconds without a connection (`--timeout`; `0` means never).
 
 ```sh
-podbag system service &                                   # rootless
-export DOCKER_HOST=unix://$XDG_RUNTIME_DIR/podbag/docker.sock   # root: /run/podbag/docker.sock
+podbag system service &                                         # without root
+export DOCKER_HOST=unix://$XDG_RUNTIME_DIR/podbag/docker.sock   # as root: /run/podbag/docker.sock
 docker run --rm -it alpine sh
-docker context create podbag --docker host=$DOCKER_HOST   # or keep it as a context
+docker context create podbag --docker host=$DOCKER_HOST         # or keep it as a context
 ```
 
-With systemd, the service can start on the first connection instead:
-`podbag system service --print-units` prints a socket and a service unit (for
-`~/.config/systemd/user/`, or `/etc/systemd/system/` as root); enable the socket unit.
-The socket is private to its user (0600; 0660 as root).
+- With systemd, the service can start on the first connection:
+  - `podbag system service --print-units` prints a socket unit and a service unit,
+  - put them in `~/.config/systemd/user/` (as root: `/etc/systemd/system/`), and enable
+    the socket unit.
+- The socket is private to its user (`0600`; `0660` as root).
 
-What works: `version`, `info`, `system df`, `events` (live: there is no history, so
-`--since` in the past shows nothing older); `pull`, `images`, `image inspect`, `tag`, `rmi`,
-`image prune`; `run` (attached, `-d`, `-i`, `-t`, `--rm`), `create`, `start [-a]`, `stop`,
-`restart`, `kill`, `wait`, `rm`, `logs` (`-f`, `--tail`, `-t`, `--since`), `attach`, `ps`
-(with `label`, `name`, `id`, `status` filters), `inspect`, `port`, `exec` (`-i`, `-t`, `-d`,
-`-e`, `-w`, `-u`), `cp` (both ways, running or not), `container prune`; `save` and `load`;
-`volume` and `network` (create, ls, inspect, rm, prune).
+### What works
 
-Settings podbag does not have are refused with a reason (devices, `--read-only`,
-`--pid host`, `--volumes-from`, `--link`, port ranges, other network or volume drivers),
-or accepted with a warning when ignoring them is harmless (`--dns`, `--add-host`,
-ulimits, log drivers, fixed addresses).
-Features it lacks answer 501 with what to do instead: the classic builder (`POST /build`;
-use buildx, below), `commit`, `export`, `diff`, `top`, `stats`, `pause`, `rename`,
-`update`, `push`, `search`, swarm and plugins. `network connect` and `disconnect` work on
-containers that do not run.
+- System: `version`, `info`, `system df`, `events` (live only; there is no history).
+- Images: `pull`, `images`, `image inspect`, `tag`, `rmi`, `image prune`, `save`, `load`.
+- Containers: `run` (attached, `-d`, `-i`, `-t`, `--rm`), `create`, `start [-a]`, `stop`,
+  `restart`, `kill`, `wait`, `rm`, `logs` (`-f`, `--tail`, `-t`, `--since`), `attach`,
+  `ps` (filters `label`, `name`, `id`, `status`), `inspect`, `port`,
+  `exec` (`-i`, `-t`, `-d`, `-e`, `-w`, `-u`), `cp`, `container prune`.
+- Volumes and networks: `create`, `ls`, `inspect`, `rm`, `prune`.
 
-`docker cp` works on running and stopped containers. In a running one it goes through
-the container's own mounts; in a stopped one podbag mounts its files (root filesystem,
-volumes, bind mounts) privately for the copy, and no start begins meanwhile. Paths are
-the container's: a symbolic link to `/etc` means the container's `/etc`, never the
-host's. The kernel's file systems (`/proc`, `/sys`) come out empty, as with Docker; a copy
-that fails partway is an error. `docker save` writes Docker's archive format; the store keeps files, not the
-original layer archives, so a saved image's layers (and its ID) get new digests, and it
-carries the image's command, environment, user, working directory, volumes and health
-check, but not its labels or history. `docker load` reads `docker save` archives and OCI
-image layouts (both, as BuildKit writes them), plain or gzip-compressed; every digest in
-the archive is checked, and an archive larger than the store limit is refused. An image
-whose name moves to a newly loaded one is removed unless a container uses it; images
-that came without a name are found by ID (the config's digest too, which buildx prints)
-and removed by `docker image prune`.
+### What does not work
 
-Differences from Docker: `docker attach` to a container that another process started
-reads its output from the log and cannot send input; a client that leaves an attached
-`exec` ends its command (Docker leaves it running). Volumes and networks keep their
-labels (`--label` on `network create` and `volume create`, and the `label` filters of
-`ls` and `prune`). `network connect` changes a stopped container only.
+- Refused, with the reason: devices, `--read-only`, `--pid host`, `--volumes-from`,
+  `--link`, port ranges, other network or volume drivers.
+- Accepted with a warning, because ignoring them is safe: `--dns`, `--add-host`, ulimits,
+  log drivers, fixed addresses.
+- Answered with 501 and what to do instead: the classic builder (`POST /build`; use
+  buildx), `commit`, `export`, `diff`, `top`, `stats`, `pause`, `rename`, `update`, `push`,
+  `search`, swarm and plugins.
 
-Docker Compose works through the same socket: `docker compose up` (again without making
-anything new when nothing changed), `down` (`-v`), `ps`, `logs`, `exec`, `run`, with the
-project's networks and volumes, several networks per service, services that reach each
-other by service and container name, `depends_on` with `condition: service_healthy`,
-restart policies and health checks. Names live in each container's `/etc/hosts` (there is
-no DNS server): when replicas share a name, the first one answers. `docker compose build`
-builds with a buildx builder (`--builder`, below).
+### cp, save and load
 
-**Building images with buildx.** buildx's `docker-container` driver runs BuildKit in a
-podbag container (privileged, so it can run each step in containers of its own) and
-loads the result through `docker load`:
+- `docker cp` works on running and stopped containers:
+  - in a running container, it goes through the container's own mounts,
+  - in a stopped container, podbag mounts its files privately for the copy, and no start
+    begins meanwhile,
+  - paths are the container's: a link to `/etc` means the container's `/etc`,
+  - `/proc` and `/sys` come out empty, as with Docker.
+- `docker save` writes Docker's archive format:
+  - the store keeps files, not layer archives, so the saved layers (and the image ID) get
+    new digests,
+  - it keeps the image's command, environment, user, working folder, volumes and health
+    check, but not its labels or history.
+- `docker load` reads `docker save` archives and OCI image layouts, plain or gzip:
+  - it checks every digest,
+  - it refuses an archive that is larger than the store limit.
+
+### Differences from Docker
+
+- `docker attach` to a container that another process started reads its output from the
+  log. It cannot send input.
+- When a client leaves an attached `exec`, the command ends. (Docker keeps it running.)
+- Volumes and networks keep their labels.
+- `network connect` changes stopped containers only.
+
+### Docker Compose
+
+- Works through the same socket: `up`, `down` (`-v`), `ps`, `logs`, `exec`, `run`.
+- Supports the project's networks and volumes, several networks per service, service and
+  container names, `depends_on` with `condition: service_healthy`, restart policies and
+  health checks.
+- Names live in each container's `/etc/hosts` (no DNS server). When replicas share a name,
+  the first one answers.
+- `docker compose build` uses a buildx builder (`--builder`; see below).
+
+### buildx
+
+- buildx's `docker-container` driver runs BuildKit in a podbag container (privileged), and
+  loads the result through `docker load`.
 
 ```sh
 docker buildx create --driver docker-container --name podbag --use
-docker buildx build --load -t myapp .          # then: docker run myapp
+docker buildx build --load -t myapp .      # then: docker run myapp
 docker compose build --builder podbag
 ```
 
-The builder keeps running after the service ends (it is an ordinary container), and its
-cache stays in its volume until `docker buildx rm`. The default `docker` driver (the
-daemon's built-in BuildKit) is not available.
+- The builder keeps running after the service stops: it is an ordinary container.
+- Its cache stays in its volume until `docker buildx rm`.
+- The default `docker` driver (the daemon's own BuildKit) is not available.
 
 ## macOS
 
-On a Mac (Apple silicon), podbag runs containers in a small Linux VM of its own
-(Virtualization.framework, Linux 6.18). The first command starts it (about half a second);
-it powers off 60 seconds after the last connection ends while no container runs or waits
-to restart (`PODBAG_VM_IDLE`, seconds), so nothing runs while no container does. A command
-that comes while the VM stops waits for the next one. A running VM answers `podbag run
---rm --network none alpine true` in about 8 ms and the same `docker run` in about 15 ms
-(9 ms of which is the docker CLI starting); docs/benchmarks.md compares it with the other
-tools.
+### The VM
 
-A release binary carries the guest already. To build one yourself:
+- On a Mac (Apple silicon), podbag runs containers in a small Linux VM of its own
+  (Virtualization.framework, Linux 6.18).
+- The first command starts the VM in about half a second.
+- The VM powers off 60 seconds after the last container (`PODBAG_VM_IDLE`, in seconds).
+- With no container, only a small standby process runs (under 2 MiB).
+- With the VM running, `podbag run --rm --network none alpine true` takes about 8 ms, and
+  the same `docker run` about 15 ms.
 
-```sh
-dev/vm.sh run dev/macos/build-guest.sh            # the guest: kernel, initramfs, empty data disk
-cargo build --release --features embed-guest      # the binary carries the guest (12 MB)
-dev/macos/sign.sh target/release/podbag          # VMs need the virtualization entitlement
-target/release/podbag run --rm -it alpine sh
-target/release/podbag vm status                  # also: vm start, vm stop, vm logs
-```
+### Commands and files
 
-A binary built with `embed-guest` writes its guest once to `~/.podbag/vm/<id>/` (a new
-build of the guest gets a new directory); without it, podbag reads `target/vm` beside its
-build directory, or the directory `PODBAG_VM_GUEST` names. Images must be for arm64: there
-is no Rosetta in the VM yet.
+- Commands run in the VM. Their output, exit code, signals and terminal size pass through.
+- Only commands that read input (`-i`, or `load` without `-i FILE`) take the Mac's stdin.
+- `-e NAME` takes the Mac's value of NAME.
+- The Mac's `/Users` is in the VM at the same path, so `-v ./src:/work` works from a folder
+  under `/Users`.
+- Other Mac paths are refused, also for `save -o`, `load -i` and `--rootfs`.
+- Named volumes live in the VM.
+- Images, containers and volumes stay on a 64 GiB sparse disk, `~/.podbag/disk.img`.
+- `podbag vm stop`, or logging out, powers the VM off cleanly.
+- Containers cannot reach the VM's agent.
 
-Commands run in the VM: the Mac's `podbag` passes them on with their output, exit code,
-signals and terminal size, as a local one would run. Only commands that read input
-(`-i`, `load` without `-i FILE`) take the Mac's stdin, and only `-i` on a terminal puts it
-in raw mode; a closed terminal is a hangup for the command, as locally. `-e NAME` takes the
-Mac's value of NAME. The Mac's `/Users` appears in the VM at the same path, so
-`-v ./src:/work` works from a directory under `/Users`; other Mac paths (also through `..`
-or a link, and files for `save -o`, `load -i`, `--rootfs`) are refused, and named volumes
-live in the VM. Of the `PODBAG_*` settings, the keeper's, the store's and the default
-subnet pass to the VM; paths and programs stay the Mac's. Containers cannot reach the VM's
-agent (vsock is closed to them). Images, containers and volumes stay on a sparse 64 GiB
-disk, `~/.podbag/disk.img`, between VM runs; `podbag vm stop` and a logout power the VM
-off cleanly, and when the disk cannot be mounted, commands say so instead of using memory.
-The VM uses 2 GiB of memory (`PODBAG_VM_MEMORY`, MiB) and the Mac's CPUs up to 8
-(`PODBAG_VM_CPUS`); containers get 1048576 open files and `vm.max_map_count` 262144, like
-Docker Desktop's. The VM's size is the containers' memory budget: in the VM, podbag sets
-none of its own (`PODBAG_MEMORY_BUDGET` given on the Mac still applies to `podbag`
-commands). A container that needs more memory than the VM has is ended with exit code 137
-within seconds, and the VM goes on; podbag's agent in the VM is never the one ended.
+### Resources
 
-The docker CLI, Compose and buildx use podbag through its Docker API socket:
+- Memory: 2 GiB (`PODBAG_VM_MEMORY`, in MiB). CPUs: the Mac's, up to 8 (`PODBAG_VM_CPUS`).
+- Containers get 1048576 open files and `vm.max_map_count` 262144, as in Docker Desktop.
+- A container that needs more memory than the VM has is stopped with exit code 137. The VM
+  keeps running.
+
+### docker CLI, Compose and buildx
 
 ```sh
 export DOCKER_HOST=unix://$HOME/.podbag/run/docker.sock
@@ -325,94 +408,86 @@ docker buildx create --use --driver docker-container
 docker buildx build --load -t app .
 ```
 
-The socket stays while the VM is off: a standby process (under 2 MiB of the Mac's memory)
-waits on it, and the first request starts the VM. It appears with the first podbag command (`podbag vm start`) and
-goes with `podbag vm stop`. Bind mounts must come from under `/Users` (`mounts denied`
-otherwise); named volumes live in the VM. Each docker request after a pause brings the
-VM's clock to the Mac's.
+- The socket stays while the VM is off. The standby process waits on it, and the first
+  request starts the VM.
+- Bind mounts must come from `/Users`.
 
-Published ports (`-p 8080:80`, from `docker` or `podbag`) answer on the Mac's
-`localhost:8080` (only there, not on the Mac's network) as soon as the command that
-published them ends, and close with their container. TCP only for now: a UDP port is
-named in `~/.podbag/run/host.log` as not forwarded, and so is a port another program
-holds on the Mac. The VM renews its DHCP lease (the Mac's lasts an hour), so it keeps its
-address however long it runs.
+### Ports, disk and memory
 
-Disk space comes back while the VM runs: what deleted images, containers and volumes held
-is given back to the Mac within seconds (the data disk discards, and the Mac's sparse
-`disk.img` shrinks). Memory comes back when the VM powers off, 60 seconds after its last
-container. While it runs, the VM keeps every page it has used, file cache included, up to
-its size (`PODBAG_VM_MEMORY`, 2048 MiB by default). Virtualization.framework's memory
-balloon does not change that on macOS 27.2: when the guest gave it 1.3 GiB, the Mac counted
-about 620 MiB more reusable pages, but the VM process's footprint (what Activity Monitor
-shows) stayed the same. The data disk's writes that the VM flushes are synced to the Mac's
-disk with fsync, not F_FULLFSYNC (as lima does): they outlive a crash of the VM, but a power
-cut can lose what the drive's cache held, and the disk may then need to be moved away.
+- Published ports (`-p 8080:80`) answer on the Mac's `localhost:8080`. TCP only for now.
+- Disk space comes back while the VM runs: the Mac gets back what deleted images,
+  containers and volumes used, within seconds.
+- Memory comes back when the VM powers off.
+- Disk writes are synced with fsync, as lima does. A power cut can lose what the drive's
+  cache held.
+
+### Build it yourself
+
+- Release files carry the VM already. To build one: [build.md](build.md#macos).
+- Images must be for arm64. There is no Rosetta in the VM yet.
 
 ## Windows (experimental)
 
-On Windows 10 or 11 (x86_64 or arm64), `podbag.exe` runs its Linux engine in a WSL 2
-distribution of its own, named `podbag`. This is new: it is built and unit-tested, but not
-yet tried on a Windows machine. Please report what you find.
+- On Windows 10 or 11 (x86_64 or arm64), `podbag.exe` runs its Linux engine in a WSL 2
+  distribution of its own, named `podbag`.
+- It is built and tested in CI, but not yet tried on a Windows machine. Please report what
+  you find.
 
-- WSL 2 must be on: run `wsl --install` in an administrator terminal, then restart.
-- The first command imports the distribution, with the engine that `podbag.exe` carries
-  (a static Linux podbag), into `%LOCALAPPDATA%\podbag\wsl`. A newer `podbag.exe` updates
-  the engine there; images, containers and volumes stay.
-- Commands run in the distribution with `wsl.exe --exec`, as root, in the current
-  directory. Their output, input and exit code are those of the Windows command.
-- Windows paths in `-v`, `--rootfs`, `load -i` and `save -o` become WSL paths
-  (`C:\src` is `/mnt/c/src`); network paths (`\\server\share`) are refused. Named
-  volumes and images live in the distribution.
-- `podbag vm status`, `vm start`, `vm stop` and `vm rm` show, start, stop and remove the
-  distribution. `vm rm` deletes its images, containers and volumes.
-- The distribution shares WSL's network with your other WSL distributions, so they see
-  podbag's bridge (`podbag0`, 10.77.0.0/16) and its firewall rules. Published ports
-  reach Windows through WSL's localhost forwarding.
-- Resource limits need cgroup v2. Where WSL's kernel does not provide it, containers run
+### Setup
+
+- Turn WSL 2 on: run `wsl --install` in an administrator terminal, then restart.
+- The first command imports the distribution into `%LOCALAPPDATA%\podbag\wsl`, with the
+  engine that `podbag.exe` carries.
+- A newer `podbag.exe` updates the engine there. Images, containers and volumes stay.
+
+### How it works
+
+- Commands run in the distribution with `wsl.exe --exec`, as root, in the current folder.
+- Their output, input and exit code are those of the Windows command.
+- Windows paths in `-v`, `--rootfs`, `load -i` and `save -o` become WSL paths:
+  `C:\src` is `/mnt/c/src`.
+- Network paths (`\\server\share`) are refused.
+- Named volumes and images live in the distribution.
+- `podbag vm status|start|stop|rm` shows, starts, stops or removes the distribution.
+  `vm rm` deletes its images, containers and volumes.
+
+### Limits
+
+- The distribution shares WSL's network with your other WSL distributions. They see
+  podbag's bridge (`podbag0`, `10.77.0.0/16`) and its firewall rules.
+- Published ports reach Windows through WSL's localhost forwarding.
+- Resource limits need cgroup v2. Where WSL's kernel does not have it, containers run
   without limits, with a warning.
 - Not yet: the Docker API for Windows programs (the docker CLI on Windows).
 
 ## Requirements on Linux
 
-- Linux 5.12 or later, with cgroup v2 at `/sys/fs/cgroup`. composefs (root only) needs
-  6.5 or later with EROFS; older kernels use hard-link trees.
-- Without root: `newuidmap`/`newgidmap` and entries in `/etc/subuid` and `/etc/subgid`;
-  `pasta` (package `passt`) for bridge networks (or use `--network host`/`none`);
-  on Ubuntu 24.04 and later an AppArmor profile (see below); for resource limits and the
-  memory budget, a systemd user session. Without one, containers still run, with a
-  warning, but `--memory`, `--cpus` and `--pids-limit` are refused.
+- Linux 5.12 or later, with cgroup v2 at `/sys/fs/cgroup`.
+- composefs (as root) needs Linux 6.5 or later with EROFS. Older kernels use hard-link
+  trees.
+- Without root:
+  - `newuidmap` and `newgidmap` (package `uidmap`), with entries in `/etc/subuid` and
+    `/etc/subgid`,
+  - `pasta` (package `passt`) for bridge networks, or `--network host` or `none`,
+  - on Ubuntu 24.04 and later, an AppArmor profile (below),
+  - a systemd user session, for resource limits and the memory budget. Without it,
+    containers still run, with a warning, but `--memory`, `--cpus` and `--pids-limit` are
+    refused.
 
 ## AppArmor
 
-Ubuntu 24.04 and later set `kernel.apparmor_restrict_unprivileged_userns=1`.
-With this setting, a program without an AppArmor profile cannot use the user
-namespaces that rootless containers need. podbag then stops with
-"cannot create an unprivileged user namespace". Install a profile once.
+- Ubuntu 24.04 and later set `kernel.apparmor_restrict_unprivileged_userns=1`.
+- With this setting, a program without an AppArmor profile cannot make the user namespaces
+  that rootless containers need.
+- podbag then stops with "cannot create an unprivileged user namespace".
+- Add a profile once:
 
-1. Find the full path of podbag: `command -v podbag` (for example `/usr/local/bin/podbag`,
-   or `/home/you/.cargo/bin/podbag` after `cargo install`).
-2. Save this as `podbag.apparmor`, with `/usr/local/bin/podbag` replaced by that path:
+  ```sh
+  podbag check --apparmor-profile | sudo tee /etc/apparmor.d/podbag >/dev/null
+  sudo apparmor_parser -r /etc/apparmor.d/podbag
+  ```
 
-   ```
-   abi <abi/4.0>,
-   include <tunables/global>
-
-   profile podbag /usr/local/bin/podbag flags=(unconfined) {
-     userns,
-   }
-   ```
-
-3. Load it:
-
-   ```sh
-   sudo install -m 0644 podbag.apparmor /etc/apparmor.d/podbag
-   sudo apparmor_parser -r /etc/apparmor.d/podbag
-   ```
-
-`podbag check --apparmor-profile > podbag.apparmor` writes the same file with the path
-already filled in.
-
-If you move podbag to another path, update the profile.
-
-After this one-time step, podbag runs without sudo.
+- `podbag check --apparmor-profile` fills in podbag's path. If you move podbag, add the
+  profile again.
+- The [install script](../install.sh) does this for you.
+- After this, podbag runs without sudo.
