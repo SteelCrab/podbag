@@ -43,6 +43,8 @@ httparse = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+# The CRI messages (`podbag cri serve`).
+prost = { version = "0.14", default-features = false, features = ["derive", "std"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { version = "1", features = ["fs", "mount", "pipe", "process", "system", "thread"] }

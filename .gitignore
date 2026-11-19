@@ -5,3 +5,5 @@ __pycache__/
 site/node_modules/
 site/.cloudflare/
 _site/
+/dev/cri/gen/Cargo.lock
+/dev/cri/gen/target/

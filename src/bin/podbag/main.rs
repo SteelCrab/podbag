@@ -268,6 +268,7 @@ fn dispatch(cmd: Cmd) -> i32 {
                 },
         } => service::service(socket, timeout, print_units),
         Cmd::System { cmd } => image::system(cmd),
+        Cmd::Cri { cmd } => cri(cmd),
         Cmd::Ps { all, quiet } => container::ps(all, quiet),
         Cmd::Inspect { container: c } => container::inspect(&c),
         Cmd::Logs {
@@ -340,6 +341,7 @@ fn dispatch(cmd: Cmd) -> i32 {
         Cmd::Load { input, quiet } => image::load(input.as_deref(), quiet),
         Cmd::Save { output, images } => image::save(output.as_deref(), &images),
         Cmd::System { cmd } => image::system(cmd),
+        Cmd::Cri { cmd } => cri(cmd),
         Cmd::Volume { cmd } => volume::run(cmd),
         Cmd::Network { cmd } => network::run(cmd),
         _ => unsupported(),
@@ -471,4 +473,44 @@ mod tests {
     fn network_paths_are_refused() {
         assert!(via_wsl(&["run", "-v", r"\\server\share:/data", "alpine"]).is_err());
     }
+}
+
+/// `podbag cri serve`.
+#[cfg(target_os = "linux")]
+fn cri(cmd: args::CriCmd) -> i32 {
+    use podbag::cri::service::{CgroupDriver, Options};
+    let args::CriCmd::Serve {
+        socket,
+        cni_conf_dir,
+        cni_bin_dir,
+        cgroup_driver,
+    } = cmd;
+    let options = Options {
+        socket,
+        cni_conf_dir,
+        cni_bin_dirs: cni_bin_dir
+            .split(':')
+            .filter(|d| !d.is_empty())
+            .map(Into::into)
+            .collect(),
+        cgroup_driver: match cgroup_driver {
+            args::CgroupDriverArg::Cgroupfs => CgroupDriver::Cgroupfs,
+            args::CgroupDriverArg::Systemd => CgroupDriver::Systemd,
+        },
+    };
+    match podbag::cri::server::serve(options) {
+        Ok(()) => 0,
+        Err(e) => image::report(&e),
+    }
+}
+
+/// `podbag cri serve` runs on Linux nodes only.
+#[cfg(not(target_os = "linux"))]
+fn cri(_cmd: args::CriCmd) -> i32 {
+    image::report(&podbag::Error::new(
+        podbag::ErrorKind::Unsupported,
+        "podbag cri serve",
+        "the CRI runs on Linux nodes, where the kubelet runs",
+        "run it on a Linux machine",
+    ))
 }
