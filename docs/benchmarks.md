@@ -5,6 +5,7 @@
   - the tools Mac users run, each with its own Linux VM.
 - Numbers compare only within one table: each table was measured in one session.
 - A node of Spring microservices in two releases: [benchmarks-msa.md](benchmarks-msa.md).
+- A Kubernetes node with podbag, containerd or CRI-O as its runtime: [benchmarks-k8s.md](benchmarks-k8s.md).
 - `dev/bench/report.sh` writes this page.
 
 ## Contents

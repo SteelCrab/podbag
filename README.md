@@ -154,6 +154,8 @@ docker compose up -d
 - Versions: podbag 0.1.0, Podman 5.7.0, Docker 29.1.3, Kiri 0.2.1.
 - All numbers and how they were measured: [docs/benchmarks.md](docs/benchmarks.md) and
   [docs/benchmarks-msa.md](docs/benchmarks-msa.md).
+- As a Kubernetes node's runtime under k3s, with 30 pods: 2 processes in 3.5 MiB, against
+  containerd's 63 (276 MiB) and CRI-O's 32 (85 MiB): [docs/benchmarks-k8s.md](docs/benchmarks-k8s.md).
 
 ## Compared with other tools
 
