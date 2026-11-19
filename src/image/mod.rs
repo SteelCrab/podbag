@@ -1,5 +1,6 @@
 //! Container images: names, registries and the public image API.
 
+pub mod auth;
 pub mod manifest;
 pub mod reference;
 pub mod registry;
