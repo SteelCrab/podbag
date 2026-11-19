@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="450" viewBox="0 0 800 450" role="img" aria-label="podbag: a container engine with no daemon, in one static binary, that stores images file by file">
+<title>podbag intro</title>
+<rect width="800" height="450" rx="14" fill="#101114"/>
+<g opacity="0"><animate attributeName="opacity" dur="26.0s" repeatCount="indefinite" keyTimes="0.0000;0.0192;0.1538;0.1731;1.0000" values="0;1;1;0;0"/>
+<text x="400.0" y="200" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="72" fill="#f0efec" font-weight="800" text-anchor="middle">podbag</text>
+<text x="400.0" y="248" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="22" fill="#9a998f" text-anchor="middle">A container engine with no daemon,</text>
+<text x="400.0" y="278" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="22" fill="#9a998f" text-anchor="middle">in one static binary.</text>
+</g>
+<g opacity="0"><animate attributeName="opacity" dur="26.0s" repeatCount="indefinite" keyTimes="0.0000;0.1731;0.1923;0.4423;0.4615;1.0000" values="0;0;1;1;0;0"/>
+<rect x="60" y="50" width="680" height="280" rx="10" fill="#1b1c20"/>
+<circle cx="84" cy="72" r="6" fill="#ec6a5e"/>
+<circle cx="104" cy="72" r="6" fill="#f4bf4f"/>
+<circle cx="124" cy="72" r="6" fill="#61c554"/>
+<clipPath id="type0"><rect x="84" y="98" height="32" width="0"><animate attributeName="width" dur="26.0s" repeatCount="indefinite" keyTimes="0.0000;0.1923;0.2462;1.0000" values="0;0;414.5;414.5"/></rect></clipPath>
+<text x="88" y="120" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="19" fill="#f0efec" text-anchor="start" clip-path="url(#type0)">$ podbag run --rm alpine echo hello</text>
+<g opacity="0"><animate attributeName="opacity" dur="26.0s" repeatCount="indefinite" keyTimes="0.0000;0.2577;0.2635;0.4612;0.4615;1.0000" values="0;0;1;1;0;0"/><text x="88" y="152" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="19" fill="#f0efec" text-anchor="start">hello</text></g>
+<clipPath id="type2"><rect x="84" y="174" height="32" width="0"><animate attributeName="width" dur="26.0s" repeatCount="indefinite" keyTimes="0.0000;0.2846;0.3308;1.0000" values="0;0;322.5;322.5"/></rect></clipPath>
+<text x="88" y="196" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="19" fill="#f0efec" text-anchor="start" clip-path="url(#type2)">$ sleep 15; pgrep -l podbag</text>
+<g opacity="0"><animate attributeName="opacity" dur="26.0s" repeatCount="indefinite" keyTimes="0.0000;0.3423;0.3481;0.4612;0.4615;1.0000" values="0;0;1;1;0;0"/><text x="88" y="228" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="19" fill="#9a998f" text-anchor="start"># nothing: no daemon stays running</text></g>
+<g opacity="0"><animate attributeName="opacity" dur="26.0s" repeatCount="indefinite" keyTimes="0.0000;0.3577;0.3635;0.4612;0.4615;1.0000" values="0;0;1;1;0;0"/>
+<text x="400.0" y="382" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="22" fill="#f0efec" font-weight="600" text-anchor="middle">A container starts in about 4 ms on Linux.</text>
+<text x="400.0" y="414" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="18" fill="#9a998f" text-anchor="middle">Seconds after the last one ends, nothing runs.</text>
+</g></g>
+<g opacity="0"><animate attributeName="opacity" dur="26.0s" repeatCount="indefinite" keyTimes="0.0000;0.4615;0.4808;0.6923;0.7115;1.0000" values="0;0;1;1;0;0"/>
+<text x="400.0" y="74" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="30" fill="#f0efec" font-weight="700" text-anchor="middle">Images are stored file by file</text>
+<text x="400.0" y="106" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="17" fill="#9a998f" text-anchor="middle">8 Spring services in 2 releases</text>
+<text x="110" y="160" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="18" fill="#f0efec" font-weight="600" text-anchor="start">Disk</text>
+<text x="190" y="196" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" fill="#9a998f" text-anchor="end">podbag</text>
+<rect x="204" y="180" height="22" rx="4" fill="#3987e5" width="0"><animate attributeName="width" dur="26.0s" repeatCount="indefinite" keyTimes="0.0000;0.4885;0.5346;1.0000" values="0;0;142.7;142.7"/></rect>
+<g opacity="0"><animate attributeName="opacity" dur="26.0s" repeatCount="indefinite" keyTimes="0.0000;0.5385;0.5442;0.7112;0.7115;1.0000" values="0;0;1;1;0;0"/><text x="356.74074074074076" y="197" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" fill="#f0efec" text-anchor="start">902 MiB</text></g>
+<text x="190" y="234" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" fill="#9a998f" text-anchor="end">Docker</text>
+<rect x="204" y="218" height="22" rx="4" fill="#5b5a55" width="0"><animate attributeName="width" dur="26.0s" repeatCount="indefinite" keyTimes="0.0000;0.4885;0.5346;1.0000" values="0;0;470.0;470.0"/></rect>
+<g opacity="0"><animate attributeName="opacity" dur="26.0s" repeatCount="indefinite" keyTimes="0.0000;0.5385;0.5442;0.7112;0.7115;1.0000" values="0;0;1;1;0;0"/><text x="684.0" y="235" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" fill="#f0efec" text-anchor="start">2,970 MiB</text></g>
+<text x="110" y="290" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="18" fill="#f0efec" font-weight="600" text-anchor="start">Page cache to start them</text>
+<text x="190" y="326" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" fill="#9a998f" text-anchor="end">podbag</text>
+<rect x="204" y="310" height="22" rx="4" fill="#3987e5" width="0"><animate attributeName="width" dur="26.0s" repeatCount="indefinite" keyTimes="0.0000;0.4885;0.5346;1.0000" values="0;0;155.1;155.1"/></rect>
+<g opacity="0"><animate attributeName="opacity" dur="26.0s" repeatCount="indefinite" keyTimes="0.0000;0.5385;0.5442;0.7112;0.7115;1.0000" values="0;0;1;1;0;0"/><text x="369.07128309572306" y="327" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" fill="#f0efec" text-anchor="start">324 MiB</text></g>
+<text x="190" y="364" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" fill="#9a998f" text-anchor="end">Docker</text>
+<rect x="204" y="348" height="22" rx="4" fill="#5b5a55" width="0"><animate attributeName="width" dur="26.0s" repeatCount="indefinite" keyTimes="0.0000;0.4885;0.5346;1.0000" values="0;0;470.0;470.0"/></rect>
+<g opacity="0"><animate attributeName="opacity" dur="26.0s" repeatCount="indefinite" keyTimes="0.0000;0.5385;0.5442;0.7112;0.7115;1.0000" values="0;0;1;1;0;0"/><text x="684.0" y="365" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="16" fill="#f0efec" text-anchor="start">982 MiB</text></g>
+</g>
+<g opacity="0"><animate attributeName="opacity" dur="26.0s" repeatCount="indefinite" keyTimes="0.0000;0.7115;0.7308;0.8654;0.8846;1.0000" values="0;0;1;1;0;0"/>
+<text x="400.0" y="170" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="40" fill="#f0efec" font-weight="700" text-anchor="middle">Linux · macOS · Windows</text>
+<text x="400.0" y="214" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="18" fill="#9a998f" text-anchor="middle">x86_64 and arm64 · Windows through WSL 2 (experimental)</text>
+<text x="400.0" y="290" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="22" fill="#f0efec" text-anchor="middle">Works with the docker CLI, Compose and buildx</text>
+</g>
+<g opacity="0"><animate attributeName="opacity" dur="26.0s" repeatCount="indefinite" keyTimes="0.0000;0.8846;0.9038;0.9808;1.0000;1.0000" values="0;0;1;1;0;0"/>
+<text x="400.0" y="200" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="34" fill="#f0efec" font-weight="700" text-anchor="middle">github.com/SteelCrab/podbag</text>
+<text x="400.0" y="246" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="20" fill="#9a998f" text-anchor="middle">Apache-2.0 · v0.1.0</text>
+</g>
+</svg>

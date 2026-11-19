@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="490" height="234" viewBox="0 0 490 234" role="img" aria-label="Memory for 100 containers: podbag (root) 105 MiB; Kiri 109 MiB; podbag (rootless) 117 MiB; Podman 203 MiB; Docker 562 MiB" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+<title>Memory for 100 containers: podbag (root) 105 MiB; Kiri 109 MiB; podbag (rootless) 117 MiB; Podman 203 MiB; Docker 562 MiB</title>
+<rect width="490" height="234" rx="10" fill="#1a1a19"/>
+<text x="20" y="30" font-size="15" font-weight="600" fill="#f0efec">Memory for 100 containers</text>
+<text x="20" y="49" font-size="12" fill="#c3c2b7">MiB the system holds, one network · lower is better</text>
+<text x="126" y="83.0" font-size="12.5" text-anchor="end" fill="#f0efec" font-weight="600">podbag (root)</text>
+<path d="M136,70h45.2a4,4 0 0 1 4,4v10a4,4 0 0 1 -4,4h-45.2z" fill="#3987e5"/>
+<text x="191.2" y="83.0" font-size="12" fill="#f0efec" style="font-variant-numeric:tabular-nums">105 MiB</text>
+<text x="126" y="113.0" font-size="12.5" text-anchor="end" fill="#c3c2b7">Kiri</text>
+<path d="M136,100h47.3a4,4 0 0 1 4,4v10a4,4 0 0 1 -4,4h-47.3z" fill="#3987e5"/>
+<text x="193.3" y="113.0" font-size="12" fill="#f0efec" style="font-variant-numeric:tabular-nums">109 MiB</text>
+<text x="126" y="143.0" font-size="12.5" text-anchor="end" fill="#f0efec" font-weight="600">podbag (rootless)</text>
+<path d="M136,130h51.1a4,4 0 0 1 4,4v10a4,4 0 0 1 -4,4h-51.1z" fill="#3987e5"/>
+<text x="197.1" y="143.0" font-size="12" fill="#f0efec" style="font-variant-numeric:tabular-nums">117 MiB</text>
+<text x="126" y="173.0" font-size="12.5" text-anchor="end" fill="#c3c2b7">Podman</text>
+<path d="M136,160h91.5a4,4 0 0 1 4,4v10a4,4 0 0 1 -4,4h-91.5z" fill="#3987e5"/>
+<text x="237.5" y="173.0" font-size="12" fill="#f0efec" style="font-variant-numeric:tabular-nums">203 MiB</text>
+<text x="126" y="203.0" font-size="12.5" text-anchor="end" fill="#c3c2b7">Docker</text>
+<path d="M136,190h260.0a4,4 0 0 1 4,4v10a4,4 0 0 1 -4,4h-260.0z" fill="#3987e5"/>
+<text x="406.0" y="203.0" font-size="12" fill="#f0efec" style="font-variant-numeric:tabular-nums">562 MiB</text>
+<line x1="136" y1="66" x2="136" y2="212" stroke="#383835" stroke-width="1"/>
+</svg>
