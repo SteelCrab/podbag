@@ -615,27 +615,29 @@ mod tests {
     #[test]
     fn reads_auths_in_every_form() {
         let tmp = tempfile::tempdir().unwrap();
-        write_config(
-            tmp.path(),
-            r#"{"auths": {
-                "https://index.docker.io/v1/": {"auth": "aHViOnNlY3JldA=="},
-                "https://ghcr.io": {"auth": "Z2g6dG9rZW4="},
-                "localhost:5000": {"auth": "dTo=", "identitytoken": "refresh-1"},
-                "empty.example": {}
-            }, "detachKeys": "ctrl-x"}"#,
+        // The `auth` values are base64 of "user:password", made here from test words.
+        let auth = |pair: &str| crate::base64::encode(pair.as_bytes());
+        let config = format!(
+            r#"{{"auths": {{
+                "https://index.docker.io/v1/": {{"auth": "{}"}},
+                "https://ghcr.io": {{"auth": "{}"}},
+                "localhost:5000": {{"auth": "{}", "identitytoken": "refresh-1"}},
+                "empty.example": {{}}
+            }}, "detachKeys": "ctrl-x"}}"#,
+            auth("hub:x1"),
+            auth("gh:x2"),
+            auth("u:"),
         );
+        write_config(tmp.path(), &config);
         let c = Credentials::at(tmp.path());
         let hub = c.get("docker.io").unwrap().unwrap();
         assert_eq!(
             (hub.username.as_str(), hub.password.as_str()),
-            ("hub", "secret")
+            ("hub", "x1")
         );
         assert_eq!(hub.serveraddress, DOCKER_HUB_KEY);
         let gh = c.get("ghcr.io").unwrap().unwrap();
-        assert_eq!(
-            (gh.username.as_str(), gh.password.as_str()),
-            ("gh", "token")
-        );
+        assert_eq!((gh.username.as_str(), gh.password.as_str()), ("gh", "x2"));
         let local = c.get("localhost:5000").unwrap().unwrap();
         assert_eq!(local.username, "u");
         assert_eq!(local.identitytoken, "refresh-1");
@@ -739,23 +741,17 @@ esac
         let c = Credentials::at(&dir).with_helper_dir(&bin);
         assert!(c.get("docker.io").unwrap().is_none());
         let stored = c
-            .store(
-                "docker.io",
-                &AuthConfig::with_password("hubuser", "hubpass"),
-            )
+            .store("docker.io", &AuthConfig::with_password("hub-user", "x3"))
             .unwrap();
         assert_eq!(stored, Stored::Helper("test".into()));
         // The file names the login, without the secret.
         let text = std::fs::read_to_string(dir.join("config.json")).unwrap();
-        assert!(
-            !text.contains("hubpass") && !text.contains("aHVi"),
-            "{text}"
-        );
+        assert!(!text.contains("\"x3") && !text.contains("aHVi"), "{text}");
         assert!(text.contains(DOCKER_HUB_KEY), "{text}");
         let got = c.get("docker.io").unwrap().unwrap();
         assert_eq!(
             (got.username.as_str(), got.password.as_str()),
-            ("hubuser", "hubpass")
+            ("hub-user", "x3")
         );
         // An identity token goes in as the user `<token>`, and comes back as one.
         c.store(

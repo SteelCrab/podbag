@@ -13,10 +13,17 @@ use std::process::{Output, Stdio};
 use std::time::{Duration, Instant};
 
 const PATH: &str = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
-/// A test login, and its bcrypt line for htpasswd.
+/// The test registry's user; its password is made fresh for each run.
 const USER: &str = "podbag-test";
-const PASSWORD: &str = "podbag-test-password";
-const HTPASSWD: &str = "podbag-test:$2y$05$58VHnGQQYv65LTDHMsnXrOj/QmJ.qpYMvZ6CBPXQfDeaFHkht40qe\n";
+
+/// A new random password for this run's registry.
+fn fresh_password() -> String {
+    let mut bytes = [0u8; 12];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut bytes))
+        .unwrap();
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
 
 fn enabled() -> bool {
     let on = std::env::var("PODBAG_TEST_NETWORK").as_deref() == Ok("1");
@@ -100,7 +107,20 @@ fn push_and_pull_back_through_a_real_registry() {
     // registry:2 with a login.
     let auth = sb.tmp.path().join("auth");
     std::fs::create_dir(&auth).unwrap();
-    std::fs::write(auth.join("htpasswd"), HTPASSWD).unwrap();
+    // registry:2 reads bcrypt lines; Apache's htpasswd makes one for this run's password.
+    let password = fresh_password();
+    let line = ok(&podbag(&[
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "httpd:2.4-alpine",
+        "htpasswd",
+        "-Bbn",
+        USER,
+        &password,
+    ]));
+    std::fs::write(auth.join("htpasswd"), format!("{}\n", line.trim())).unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&auth, std::fs::Permissions::from_mode(0o755)).unwrap();
     std::fs::set_permissions(sb.tmp.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -140,7 +160,7 @@ fn push_and_pull_back_through_a_real_registry() {
     assert!(stderr(&out).contains("login to"), "{}", stderr(&out));
     let mut login = sb.podbag();
     login.args(["login", &host, "-u", USER, "--password-stdin"]);
-    assert_eq!(ok(&with_stdin(login, PASSWORD)), "Login Succeeded");
+    assert_eq!(ok(&with_stdin(login, &password)), "Login Succeeded");
     ok(&podbag(&["tag", &source, &name]));
     let out = podbag(&["push", &name]);
     assert!(ok(&out).starts_with("1: digest: sha256:"));
@@ -180,7 +200,7 @@ fn push_and_pull_back_through_a_real_registry() {
         &["login", &host, "-u", USER, "--password-stdin"],
     );
     login.stdin(Stdio::piped());
-    assert!(ok(&with_stdin(login, PASSWORD)).contains("Login Succeeded"));
+    assert!(ok(&with_stdin(login, &password)).contains("Login Succeeded"));
     let pulled = ok(&docker_out(&sb, &service, &["pull", &docker_name]));
     assert!(pulled.contains("Downloaded newer image"), "{pulled}");
     assert_eq!(
