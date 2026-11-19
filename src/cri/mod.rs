@@ -13,6 +13,7 @@ pub mod h2;
 pub mod hpack;
 mod hpack_tables;
 pub mod images;
+pub mod logs;
 pub mod mapping;
 #[allow(missing_docs)]
 pub mod pb;
@@ -25,7 +26,11 @@ pub mod runtime;
 pub mod server;
 #[cfg(target_os = "linux")]
 pub mod service;
+pub mod spdy;
+mod spdy_dict;
 pub mod stats;
+#[cfg(target_os = "linux")]
+pub mod streaming;
 
 #[cfg(test)]
 mod hpack_examples;

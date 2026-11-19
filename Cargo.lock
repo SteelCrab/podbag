@@ -468,6 +468,7 @@ dependencies = [
  "http",
  "httparse",
  "libc",
+ "miniz_oxide",
  "objc2",
  "objc2-foundation",
  "objc2-virtualization",

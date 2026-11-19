@@ -31,7 +31,7 @@ cat >"$dir/pod.json" <<EOF
 EOF
 cat >"$dir/ctr.json" <<'EOF'
 {"metadata": {"name": "sleeper"}, "image": {"image": "busybox:1.36"},
- "command": ["sh", "-c", "echo hello from the pod; echo to stderr >&2; exec sleep 600"],
+ "command": ["sh", "-c", "echo hello from the pod; echo to stderr >&2; mkdir -p /tmp/www; echo pong >/tmp/www/index.html; httpd -p 8080 -h /tmp/www; while true; do echo tick; sleep 1; done"],
  "log_path": "sleeper/0.log"}
 EOF
 "$podbag" cri serve --socket "$sock" --cni-conf-dir "$dir/net.d" --cni-bin-dir "$cni_bin" \
@@ -84,6 +84,18 @@ check "exec exit code" "$(c exec -s "$ctr" sh -c 'exit 3' 2>&1 || echo "code $?"
 check "logs" "$(c logs "$ctr" 2>&1)" 'hello from the pod'
 check "logs keep stderr" "$(c logs "$ctr" 2>&1)" 'to stderr'
 check "log file format" "$(cat "$dir/logs/sleeper/0.log")" ' stdout F hello from the pod'
+# Streaming: exec with stdin, an exit code, a terminal, attach and a forwarded port.
+check "exec with stdin" "$(echo through stdin | c exec -i "$ctr" cat)" '^through stdin$'
+check "exec exit code (streamed)" "$(c exec "$ctr" sh -c 'exit 4' 2>&1; echo "code $?")" 'code 4'
+check "exec with a terminal" "$(script -qec "crictl --config /dev/null -r unix://$sock exec -it $ctr tty" /dev/null)" '/dev/pts/'
+check "attach" "$(timeout -s KILL 3 crictl --config /dev/null -r "unix://$sock" attach "$ctr" 2>&1 || true)" 'tick'
+c port-forward "$pod" 18080:8080 >"$dir/pf.log" 2>&1 &
+pf=$!
+sleep 1
+check "port forward" "$(wget -qO- http://127.0.0.1:18080/ 2>&1)" '^pong$'
+check "port forward again" "$(wget -qO- http://127.0.0.1:18080/ 2>&1)" '^pong$'
+kill $pf
+wait $pf 2>/dev/null || true
 check "stats" "$(c stats -o json "$ctr")" 'workingSetBytes'
 check "pod stats" "$(c statsp -o json "$pod")" 'workingSetBytes'
 check "inspect" "$(c inspect "$ctr")" '"state": "CONTAINER_RUNNING"'

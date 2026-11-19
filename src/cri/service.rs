@@ -27,14 +27,72 @@ pub struct Options {
 pub struct Cri {
     options: Options,
     runtime: super::runtime::Runtime,
+    streaming: std::sync::Arc<super::streaming::Streaming>,
 }
 
 impl Cri {
     pub fn new(options: Options) -> crate::Result<Cri> {
         Ok(Cri {
             runtime: super::runtime::Runtime::new(options.clone())?,
+            streaming: super::streaming::Streaming::start()?,
             options,
         })
+    }
+
+    fn exec(&self, r: pb::ExecRequest) -> Result<pb::ExecResponse, Status> {
+        use super::streaming::{Io, Request};
+        if r.cmd.is_empty() {
+            return Err(Status::new(Code::InvalidArgument, "no command to run"));
+        }
+        if !(r.stdin || r.stdout || r.stderr) {
+            return Err(Status::new(
+                Code::InvalidArgument,
+                "one of stdin, stdout and stderr must be set",
+            ));
+        }
+        let (container, _) = self.runtime.running_pid(&r.container_id)?;
+        let io = Io {
+            stdin: r.stdin,
+            stdout: r.stdout,
+            stderr: r.stderr,
+            tty: r.tty,
+        };
+        let url = self
+            .streaming
+            .url(Request::Exec {
+                container,
+                cmd: r.cmd,
+                io,
+            })
+            .map_err(|e| status_of(&e))?;
+        Ok(pb::ExecResponse { url })
+    }
+
+    fn attach(&self, r: pb::AttachRequest) -> Result<pb::AttachResponse, Status> {
+        use super::streaming::{Io, Request};
+        let (container, _) = self.runtime.running_pid(&r.container_id)?;
+        let (_, config) = self.runtime.container_config(&container)?;
+        let log = self.runtime.log_path(&container);
+        let io = Io {
+            stdin: r.stdin,
+            stdout: r.stdout,
+            stderr: r.stderr,
+            tty: r.tty || config.tty,
+        };
+        let url = self
+            .streaming
+            .url(Request::Attach { container, log, io })
+            .map_err(|e| status_of(&e))?;
+        Ok(pb::AttachResponse { url })
+    }
+
+    fn port_forward(&self, r: pb::PortForwardRequest) -> Result<pb::PortForwardResponse, Status> {
+        let (sandbox, netns) = self.runtime.sandbox_netns(&r.pod_sandbox_id)?;
+        let url = self
+            .streaming
+            .url(super::streaming::Request::PortForward { sandbox, netns })
+            .map_err(|e| status_of(&e))?;
+        Ok(pb::PortForwardResponse { url })
     }
 
     fn version(&self) -> pb::VersionResponse {
@@ -202,6 +260,11 @@ impl Service for Cri {
                     self.runtime.reopen_container_log(&r.container_id)?;
                     Ok(pb::ReopenContainerLogResponse {})
                 })
+            }
+            "RuntimeService/Exec" => call(request, |r: pb::ExecRequest| self.exec(r)),
+            "RuntimeService/Attach" => call(request, |r: pb::AttachRequest| self.attach(r)),
+            "RuntimeService/PortForward" => {
+                call(request, |r: pb::PortForwardRequest| self.port_forward(r))
             }
             "RuntimeService/ExecSync" => call(request, |r: pb::ExecSyncRequest| {
                 self.runtime.exec_sync(&r.container_id, r.cmd, r.timeout)

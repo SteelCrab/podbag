@@ -1003,6 +1003,14 @@ impl Runtime {
         Ok((id, s.net))
     }
 
+    /// Where a container's log is.
+    pub fn log_path(&self, id: &str) -> Option<String> {
+        self.records
+            .container(id)
+            .ok()
+            .and_then(|(r, _)| r.log_path)
+    }
+
     /// The pod of a container.
     pub fn sandbox_of(&self, id: &str) -> Option<String> {
         self.records.container(id).ok().map(|(r, _)| r.sandbox)
