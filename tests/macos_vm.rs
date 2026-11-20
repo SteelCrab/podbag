@@ -2297,3 +2297,168 @@ fn vm_stop_after_a_failed_start_leaves_nothing_running() {
         }
     }
 }
+
+/// `podbag vm status --json`.
+fn status_json(mac: &Mac) -> serde_json::Value {
+    serde_json::from_str(&mac.ok(&["vm", "status", "--json"])).unwrap()
+}
+
+/// The CPUs and the memory (MiB) a container sees in the VM.
+fn guest_size(cmd: impl Fn(&[&str]) -> Command) -> (u32, u64) {
+    let out = cmd(&[
+        "run",
+        "--rm",
+        "alpine:3.22",
+        "sh",
+        "-c",
+        "nproc; grep MemTotal /proc/meminfo",
+    ])
+    .stdin(Stdio::null())
+    .output()
+    .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        out.status.success(),
+        "{text}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mut lines = text.lines();
+    let cpus = lines.next().unwrap().trim().parse().unwrap();
+    let kib: u64 = lines
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap();
+    (cpus, kib / 1024)
+}
+
+#[test]
+fn vm_settings_apply_at_the_next_start_and_at_a_restart() {
+    if !enabled() {
+        return;
+    }
+    let mac = Mac::new(60);
+    // The harness's own settings would win over the saved ones.
+    let cmd = |args: &[&str]| {
+        let mut c = mac.cmd(args);
+        c.env_remove("PODBAG_VM_MEMORY")
+            .env_remove("PODBAG_VM_CPUS")
+            .env_remove("PODBAG_VM_IDLE");
+        c
+    };
+    let ok = |args: &[&str]| {
+        let out = cmd(args).stdin(Stdio::null()).output().unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(out.status.success(), "podbag {args:?}: {text}");
+        text
+    };
+    let status =
+        || -> serde_json::Value { serde_json::from_str(&ok(&["vm", "status", "--json"])).unwrap() };
+    // Checked before saving.
+    let bad = cmd(&["vm", "set", "--memory", "512M"]).output().unwrap();
+    assert!(!bad.status.success());
+    assert!(String::from_utf8_lossy(&bad.stderr).contains("--memory must be from 1 GiB"));
+    let bad = cmd(&["vm", "set", "--cpus", "0"]).output().unwrap();
+    assert!(!bad.status.success());
+    assert!(!mac.home.path().join("vm.json").exists());
+    let said = ok(&[
+        "vm", "set", "--cpus", "2", "--memory", "1536M", "--idle", "5m",
+    ]);
+    assert!(
+        said.contains("Saved: 2 CPUs, 1536 MiB memory, power off when idle: after 5m"),
+        "{said}"
+    );
+    assert!(said.contains("next start"), "{said}");
+    let (cpus, mib) = guest_size(cmd);
+    assert_eq!(cpus, 2);
+    assert!((1300..=1536).contains(&mib), "MemTotal {mib} MiB");
+    let s = status();
+    assert_eq!(s["state"], "running");
+    assert_eq!(s["inUse"]["cpus"], 2);
+    assert_eq!(s["inUse"]["memoryMiB"], 1536);
+    assert_eq!(s["inUse"]["idleSeconds"], 300, "the saved idle time ({s})");
+    assert_eq!(s["pending"], false);
+    // New values while it runs: pending until a restart.
+    let said = ok(&["vm", "set", "--cpus", "1", "--memory", "1G"]);
+    assert!(said.contains("podbag vm restart"), "{said}");
+    assert_eq!(status()["pending"], true);
+    assert_eq!(guest_size(cmd).0, 2);
+    ok(&["vm", "set", "--cpus", "1", "--restart", "--yes"]);
+    let (cpus, mib) = guest_size(cmd);
+    assert_eq!(cpus, 1);
+    assert!((800..=1024).contains(&mib), "MemTotal {mib} MiB");
+    assert_eq!(status()["pending"], false);
+}
+
+#[test]
+fn vm_status_json_start_stop_and_restart() {
+    if !enabled() {
+        return;
+    }
+    let mac = Mac::new(60);
+    let s = status_json(&mac);
+    assert_eq!(s["platform"], "macos");
+    assert_eq!(s["state"], "stopped");
+    assert!(s["inUse"].is_null() && s["uptimeSeconds"].is_null() && s["containers"].is_null());
+    assert_eq!(
+        s["next"]["memoryMiB"], 1024,
+        "the harness's PODBAG_VM_MEMORY"
+    );
+    assert_eq!(
+        s["overriddenBy"],
+        serde_json::json!(["PODBAG_VM_MEMORY", "PODBAG_VM_IDLE"])
+    );
+    assert!(s["limits"]["cpusMax"].as_u64().unwrap() >= 1);
+    assert!(s["limits"]["memoryMaxMiB"].as_u64().unwrap() >= 1024);
+    // The disk is a sparse file: far less on the Mac than its size.
+    let disk = &s["disk"];
+    assert_eq!(disk["sizeBytes"], 64u64 << 30);
+    assert!(
+        disk["allocatedBytes"].as_u64().unwrap() < 8u64 << 30,
+        "{disk}"
+    );
+    assert_eq!(mac.ok(&["vm", "start"]), "running");
+    mac.ok(&["run", "-d", "--name", "bg", "alpine:3.22", "sleep", "300"]);
+    // The host counts the containers and reads the guest's use every few seconds.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let s = loop {
+        let s = status_json(&mac);
+        if s["containers"] == 1 && s["cpuPercent"].is_number() {
+            break s;
+        }
+        assert!(Instant::now() < deadline, "{s}");
+        std::thread::sleep(Duration::from_millis(500));
+    };
+    assert_eq!(s["state"], "running");
+    assert!(s["uptimeSeconds"].as_u64().is_some());
+    let total = s["memoryTotalMiB"].as_u64().unwrap();
+    assert!((800..=1024).contains(&total), "{s}");
+    assert!(s["memoryUsedMiB"].as_u64().unwrap() < total);
+    // A restart stops the containers: without a terminal, only with --yes.
+    let refused = mac.run(&["vm", "restart"]);
+    assert_eq!(refused.status.code(), Some(1));
+    let err = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        err.contains("1 container runs") && err.contains("--yes"),
+        "{err}"
+    );
+    assert!(mac.ok(&["ps"]).contains("bg"));
+    let before = s["uptimeSeconds"].as_u64().unwrap();
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(mac.ok(&["vm", "restart", "--yes"]), "running");
+    let s = status_json(&mac);
+    assert!(s["uptimeSeconds"].as_u64().unwrap() <= before, "{s}");
+    let ps = mac.ok(&["ps", "-a"]);
+    assert!(ps.contains("bg") && !ps.contains("Up "), "{ps}");
+    mac.ok(&["vm", "stop"]);
+    let s = status_json(&mac);
+    assert_eq!(s["state"], "stopped");
+    assert!(s["containers"].is_null());
+}
