@@ -105,6 +105,19 @@ body {
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* ---- layout ---- */
+#window-bar:not([hidden]) {
+  height: 50px; display: flex; align-items: center; gap: 14px;
+  padding: 0 14px 0 86px; /* Leave room for the native macOS window controls. */
+  background: var(--surface); border-bottom: 1px solid var(--line);
+  user-select: none; -webkit-user-select: none;
+}
+#window-bar:not([hidden]) + .app { height: calc(100% - 50px); }
+#window-bar .brand { gap: 7px; padding: 0; font-size: 15px; font-weight: 650; }
+#window-bar .brand img { width: 23px; height: 23px; }
+#window-bar .engine { margin: 0 0 0 auto; padding: 0; border: 0; }
+#window-actions { display: flex; gap: 3px; padding-left: 10px; border-left: 1px solid var(--line); }
+#window-actions [aria-current="page"] { background: var(--accent-soft); color: var(--accent-text); }
+
 .app { display: grid; grid-template-columns: 216px minmax(0, 1fr); height: 100vh; }
 .sidebar {
   display: flex; flex-direction: column; gap: 4px;
