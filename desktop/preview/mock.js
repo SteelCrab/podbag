@@ -235,6 +235,12 @@
       { name: "registry.example.com/team/worker:1.4.2", size: 183_000_000, registry: "custom" },
     ],
     import_images: () => null,
+    take_star_prompt: () => {
+      if (view !== "first-launch" || sessionStorage.getItem("preview.starPromptShown")) return false;
+      sessionStorage.setItem("preview.starPromptShown", "1");
+      return true;
+    },
+    open_repository: () => null,
     get_settings: () => ({
       language: params.get("lang") || "en", theme: params.get("theme") || "system",
       sidebarWidth: 216, sidebarCollapsed: view === "collapsed",
