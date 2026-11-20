@@ -27,7 +27,9 @@ impl Choice {
             _ => {}
         }
         let path = text.strip_prefix("unix://").unwrap_or(text);
-        (Path::new(path).is_absolute()).then(|| Choice::Socket(PathBuf::from(path)))
+        // A Unix path also on Windows, where the socket is inside the WSL distribution.
+        (path.starts_with('/') || Path::new(path).is_absolute())
+            .then(|| Choice::Socket(PathBuf::from(path)))
     }
 
     /// As saved: `podbag`, `docker` or `unix:///path`.
