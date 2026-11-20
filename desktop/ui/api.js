@@ -43,7 +43,7 @@ const API = (() => {
     getSettings: () => invoke("get_settings"),
     setSettings: (settings) => invoke("set_settings", { settings }),
     // Events: changed, live, logs, pull-progress, shown, engine-changed, open-updates,
-    // open-settings, docker-changed, vm-status.
+    // open-settings, docker-switching, docker-changed, vm-status.
     on: listen,
   };
 })();
