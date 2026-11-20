@@ -70,8 +70,6 @@ function renderTutorials(main) {
         const practice = container ? containerPractice : record.id === volumePractice.id ? volumePractice : null;
         const progress = h("p", { class: "tutorial-progress", role: "status",
           text: t(record.completed ? "tutorial.complete" : "tutorial.installed") });
-        const resource = container ? ["containers", "training.containers", "lab-containers"]
-          : ["volumes", "practice.volumes", "lab-volumes"];
         return { record, practice, progress, card: h("section", { class: "card tutorial-card" },
           h("div", { class: "tutorial-title" }, icon("shell"), h("h2", { tabindex: "-1", text: lesson.title })),
           progress,
@@ -79,9 +77,8 @@ function renderTutorials(main) {
           practice ? null : codeLine("podbag lab start " + record.id),
           h("div", { class: "buttons-row" },
             practice ? trainingGuideButton(practice.id, "primary") : null,
-            button("shell", t("status.terminal"), () => toolsAction("start", null, record.id), practice ? "" : "primary"),
-            practice ? button(resource[0], t(resource[1]), () => go(resource[2]))
-              : button("refresh", t("action.refresh"), () => toolsAction("status")),
+            practice ? null : button("shell", t("status.terminal"), () => toolsAction("start", null, record.id), "primary"),
+            practice ? null : button("refresh", t("action.refresh"), () => toolsAction("status")),
             button("remove", t("tutorial.uninstall"), async () => {
               if (await confirmDialog(t("tutorial.removeNote"), t("tutorial.uninstall"))) {
                 await toolsAction("remove", null, record.id);
@@ -90,7 +87,7 @@ function renderTutorials(main) {
       });
       tools.replaceChildren(...cards.map(item => item.card));
       for (const {record, practice, progress} of cards) {
-        if (practice) watchPractice(progress, record.completed, null, practice, showModuleStatus);
+        if (practice) watchPractice(progress, practice, null, record.completed);
       }
       return true;
     } catch (error) {

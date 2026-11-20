@@ -659,32 +659,6 @@ dialog.import { width: min(520px, calc(100vw - 48px)); }
 .tutorial-status:not(:empty) { margin-top: 14px; color: var(--ink); }
 
 .practice-workspace { display: grid; align-content: start; gap: 16px; }
-.practice-workspace .card { padding: 18px; }
-.practice-progress h2, .practice-resources h2 { font-size: 16px; margin: 0 0 10px; }
-.practice-steps { list-style: none; padding: 0; margin: 0 0 12px; }
-.practice-steps li {
-  position: relative; display: grid; grid-template-columns: 18px minmax(0, 1fr) auto;
-  align-items: center; column-gap: 10px; min-height: 34px; padding: 5px 10px;
-  border-radius: 6px;
-}
-.practice-steps li::before, .practice-steps li::after {
-  content: ""; position: absolute; z-index: 1; inset-inline-start: 18px;
-  height: 50%; width: 2px; background: var(--line);
-}
-.practice-steps li::before { top: 0; }
-.practice-steps li::after { bottom: 0; }
-.practice-steps li:first-child::before, .practice-steps li:last-child::after { content: none; }
-.practice-steps .practice-done::before, .practice-steps .practice-done::after,
-.practice-steps .practice-current::before { background: var(--accent-text); }
-.practice-marker {
-  z-index: 2; display: grid; place-items: center; box-sizing: border-box; width: 18px; height: 18px;
-  border: 2px solid var(--muted); border-radius: 50%; background: var(--surface);
-}
-.practice-marker .icon { width: 12px; height: 12px; }
-.practice-done .practice-marker { border-color: var(--accent-text); color: var(--accent-text); }
-.practice-current .practice-marker { border: 5px solid var(--accent-text); }
-.practice-steps small { color: var(--ink-2); text-align: end; }
-.practice-steps .practice-current { background: var(--accent-soft); }
-.practice-current :is(.practice-step-name, small) { color: var(--accent-text); font-weight: 600; }
-.practice-workspace [role="alert"]:empty, .practice-resources[hidden] { display: none; }
+.practice-resources h2 { font-size: 16px; margin: 0; }
+.practice-workspace [role="alert"]:empty, .training-library [role="alert"]:empty { display: none; }
 .practice-resources { min-width: 0; overflow-x: auto; }
