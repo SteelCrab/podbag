@@ -137,6 +137,12 @@ podbag.exe runs a static Linux podbag in WSL 2. A build needs both.
 
 ### Windows desktop installer
 
+Find the MSI for your CPU in the v0.3.0 or later
+[GitHub release](https://github.com/SteelCrab/podbag/releases), or download an
+installer artifact from [CI](https://github.com/SteelCrab/podbag/actions/workflows/ci.yml).
+Install the MSI and open **Podbag Desktop** from the Start menu. Enable WSL 2
+to run containers.
+
 On Windows x86_64 or ARM64, build the CLI with the Linux engine for the same CPU.
 Use a native Rust toolchain for that CPU.
 Install the Visual Studio C++ build tools for your CPU, WebView2, and Node.js.
