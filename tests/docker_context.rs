@@ -201,8 +201,13 @@ fn without_a_docker_cli_it_says_so() {
     // Nowhere to find one, also not in the usual folders.
     c.env("PATH", home.path().join("bin"));
     let out = c.output().unwrap();
-    if Path::new("/usr/local/bin/docker").exists() || Path::new("/opt/homebrew/bin/docker").exists()
-    {
+    let always_searched = [
+        "/usr/local/bin/docker",
+        "/opt/homebrew/bin/docker",
+        "/usr/bin/docker",
+        "/Applications/Docker.app/Contents/Resources/bin/docker",
+    ];
+    if always_searched.iter().any(|p| Path::new(p).exists()) {
         return; // this machine has one in a folder that is always searched
     }
     assert_eq!(out.status.code(), Some(1), "{}", text(&out));
