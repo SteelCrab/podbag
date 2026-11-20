@@ -46,12 +46,29 @@ impl PullForm {
         }
     }
 
+    pub(super) fn set_place(&mut self, place: &Location) {
+        self.location = Location::all()
+            .iter()
+            .position(|l| l.with_host(&place.host()) == *place)
+            .unwrap_or(0);
+        self.host = place.host();
+        self.on_host = false;
+        self.found.clear();
+        self.chosen = None;
+        self.error = None;
+    }
+
     /// Another location: the next one (`step` 1) or the one before.
     fn go(&mut self, step: isize) {
         let n = Location::all().len() as isize;
         self.location = (self.location as isize + step).rem_euclid(n) as usize;
-        self.host.clear();
-        self.on_host = self.place().needs_host();
+        let next = &Location::all()[self.location];
+        self.host = if next.needs_host() {
+            super::resources::saved_registry_host(next)
+        } else {
+            String::new()
+        };
+        self.on_host = next.needs_host();
         self.found.clear();
         self.chosen = None;
         self.error = None;
@@ -61,6 +78,8 @@ impl PullForm {
 impl App {
     pub(super) fn pull_key(&mut self, key: KeyEvent, mut form: PullForm) -> Effect {
         let effect = match key.code {
+            KeyCode::F(2) => return Effect::ChooseRegistry,
+            KeyCode::F(3) => return Effect::RegistryLogin(form.place()),
             KeyCode::Esc => {
                 self.mode = Mode::List;
                 return Effect::None;
@@ -84,7 +103,19 @@ impl App {
             KeyCode::Enter => {
                 let place = form.place();
                 let name = match form.chosen.and_then(|i| form.found.get(i)) {
-                    Some(f) => f.name.clone(),
+                    Some(f) => {
+                        self.mode = Mode::Input {
+                            prompt: self
+                                .appearance
+                                .text("pull.tagFor")
+                                .replace("{name}", &f.name),
+                            text: String::new(),
+                            purpose: super::app::Purpose::PullTag {
+                                repository: f.name.clone(),
+                            },
+                        };
+                        return Effect::None;
+                    }
                     None => form.name.trim().to_string(),
                 };
                 if name.is_empty() || (place.needs_host() && place.host().is_empty()) {
@@ -161,7 +192,7 @@ impl App {
         let Mode::Pull(form) = &mut self.mode else {
             return;
         };
-        if form.name.trim() != term {
+        if form.place() != Location::DockerHub || form.name.trim() != term {
             return;
         }
         form.chosen = None;
@@ -188,7 +219,7 @@ impl App {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::super::app::tests::{code, key, sample};
     use super::super::app::{App, Effect, Mode, Msg};
@@ -352,9 +383,11 @@ mod tests {
         );
         app.on_key(code(KeyCode::Down));
         app.on_key(code(KeyCode::Down));
+        assert_eq!(app.on_key(code(KeyCode::Enter)), Effect::None);
+        type_text(&mut app, "v2");
         assert_eq!(
             app.on_key(code(KeyCode::Enter)),
-            Effect::Pull("nginx/unit".into())
+            Effect::Pull("nginx/unit:v2".into())
         );
     }
 

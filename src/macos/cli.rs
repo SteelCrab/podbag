@@ -151,6 +151,10 @@ const VM_USAGE: &str = "usage: podbag vm start|stop|restart [--yes]|status [--js
 pub fn vm_command(args: &[String]) -> i32 {
     let rest = args.get(1..).unwrap_or_default();
     let result = match args.first().map(String::as_str) {
+        Some("--help" | "-h" | "help") => {
+            println!("{VM_USAGE}");
+            Ok(())
+        }
         Some("start") => match start() {
             0 => {
                 println!("running");

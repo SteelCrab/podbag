@@ -37,6 +37,21 @@ pub enum Location {
 }
 
 impl Location {
+    /// Stable identifier used by the image picker and its saved registry hosts.
+    pub fn id(&self) -> &'static str {
+        match self {
+            Location::DockerHub => "dockerhub",
+            Location::GitHub => "github",
+            Location::Ecr(_) => "ecr",
+            Location::Quay => "quay",
+            Location::Gar(_) => "gar",
+            Location::GitLab => "gitlab",
+            Location::Acr(_) => "acr",
+            Location::Preset(preset, _) => preset.id,
+            Location::Custom(_) => "custom",
+        }
+    }
+
     /// Every kind, in the order to show them. User-supplied hosts start empty.
     pub fn all() -> Vec<Location> {
         let mut all = vec![
