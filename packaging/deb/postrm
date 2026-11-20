@@ -1,0 +1,27 @@
+#!/bin/sh
+# Unload the AppArmor profile when podbag is removed, and remove what is left on purge.
+set -e
+
+profile=/etc/apparmor.d/podbag
+disabled=/etc/apparmor.d/disable/podbag
+loaded=/sys/kernel/security/apparmor
+
+case "$1" in
+  remove)
+    if [ -f "$profile" ] && command -v apparmor_parser >/dev/null 2>&1; then
+      apparmor_parser -R "$profile" >/dev/null 2>&1 || true
+    fi
+    ;;
+  purge)
+    # dpkg has removed the profile itself by now.
+    if [ "$(readlink "$disabled" 2>/dev/null)" = ../podbag ]; then
+      rm -f "$disabled"
+    fi
+    if [ -w "$loaded/.remove" ] && grep -q '^podbag ' "$loaded/profiles" 2>/dev/null; then
+      printf podbag >"$loaded/.remove" 2>/dev/null || true
+    fi
+    rm -f /etc/apparmor.d/cache/podbag /var/cache/apparmor/*/podbag
+    ;;
+esac
+
+exit 0

@@ -1,0 +1,256 @@
+name: Release
+
+# A v* tag builds the release files, tests them and makes a draft release. Pull requests
+# that change the packaging, and manual runs, build and test without publishing.
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - packaging/**
+      - install.sh
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  NFPM_VERSION: 2.48.0
+  ZIGBUILD_VERSION: 0.24.1
+  ZIG_VERSION: 0.17.1
+  # The oldest glibc that podbag-<arch>-linux-gnu runs on (docs/build.md).
+  GLIBC: '2.28'
+
+jobs:
+  # Static (musl) and glibc programs, and the .deb and .rpm packages with the static one.
+  linux:
+    name: Linux ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, pkg: amd64, runner: ubuntu-26.04 }
+          - { arch: aarch64, pkg: arm64, runner: ubuntu-26.04-arm }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.arch }}-unknown-linux-musl, ${{ matrix.arch }}-unknown-linux-gnu
+      - name: Tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq musl-tools python3-venv >/dev/null
+          # cargo-zigbuild and zig, for the glibc build.
+          python3 -m venv "$RUNNER_TEMP/zig"
+          "$RUNNER_TEMP/zig/bin/pip" install -q "cargo-zigbuild==$ZIGBUILD_VERSION" "ziglang==$ZIG_VERSION"
+          echo "$RUNNER_TEMP/zig/bin" >> "$GITHUB_PATH"
+          # nfpm, for the packages.
+          base=https://github.com/goreleaser/nfpm/releases/download/v$NFPM_VERSION
+          deb=nfpm_${NFPM_VERSION}_${{ matrix.pkg }}.deb
+          cd "$RUNNER_TEMP"
+          curl -fsSLO "$base/$deb"
+          curl -fsSLO "$base/checksums.txt"
+          grep " $deb\$" checksums.txt | sha256sum -c
+          sudo apt-get install -y -qq "./$deb" >/dev/null
+      - name: Version
+        id: version
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 |
+            jq -r '.packages[] | select(.name == "podbag") | .version')
+          if [[ $GITHUB_REF == refs/tags/* && $GITHUB_REF_NAME != "v$version" ]]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml's version $version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Static build (musl)
+        env:
+          TARGET: ${{ matrix.arch }}-unknown-linux-musl
+        run: |
+          export "CC_${TARGET//-/_}=musl-gcc"
+          cargo build --release --target "$TARGET"
+          file "target/$TARGET/release/podbag"
+      - name: glibc build
+        env:
+          TARGET: ${{ matrix.arch }}-unknown-linux-gnu
+        run: |
+          cargo zigbuild --release --target "$TARGET.$GLIBC"
+          bin=target/$TARGET/release/podbag
+          file "$bin"
+          # No symbol may need a newer glibc than the floor.
+          newest=$(objdump -T "$bin" | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -n 1)
+          echo "newest glibc symbol: $newest"
+          [ "$(printf '%s\n%s\n' "$newest" "$GLIBC" | sort -V | tail -n 1)" = "$GLIBC" ]
+      - name: Files
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          ARCH: ${{ matrix.pkg }}
+        run: |
+          mkdir dist
+          musl=target/${{ matrix.arch }}-unknown-linux-musl/release/podbag
+          cp "$musl" "dist/podbag-${{ matrix.arch }}-linux-musl"
+          cp "$musl" "dist/podbag-${{ matrix.arch }}-linux"
+          cp "target/${{ matrix.arch }}-unknown-linux-gnu/release/podbag" "dist/podbag-${{ matrix.arch }}-linux-gnu"
+          export PODBAG_BIN=$musl
+          nfpm package -f packaging/nfpm.yaml -p deb -t "dist/podbag_${VERSION}_$ARCH.deb"
+          nfpm package -f packaging/nfpm.yaml -p rpm -t "dist/podbag-$VERSION-1.${{ matrix.arch }}.rpm"
+          dpkg-deb --info "dist/podbag_${VERSION}_$ARCH.deb"
+          dpkg-deb --contents "dist/podbag_${VERSION}_$ARCH.deb"
+          ls -l dist
+      - name: install.sh
+        run: packaging/test/install-script.sh dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  deb:
+    name: deb on Ubuntu ${{ matrix.arch }}
+    needs: linux
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, pkg: amd64, runner: ubuntu-26.04 }
+          - { arch: aarch64, pkg: arm64, runner: ubuntu-26.04-arm }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: dist
+      - name: Install, run and purge
+        run: packaging/test/deb.sh dist/podbag_*_${{ matrix.pkg }}.deb
+      - name: glibc program, rootless
+        run: |
+          bin=dist/podbag-${{ matrix.arch }}-linux-gnu
+          chmod +x "$bin"
+          ldd "$bin"
+          "$bin" --version
+          # Without the package's profile, allow user namespaces to all programs.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          XDG_RUNTIME_DIR=$(mktemp -d)
+          export XDG_RUNTIME_DIR
+          "$bin" run --rm --network none mirror.gcr.io/library/alpine:3.22 echo rootless
+
+  rpm:
+    name: rpm on Fedora ${{ matrix.arch }}
+    needs: linux
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-26.04 }
+          - { arch: aarch64, runner: ubuntu-26.04-arm }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: dist
+      - name: Install, run and remove
+        run: |
+          docker run --rm -v "$PWD:/src:ro" -w /src fedora:44 \
+            packaging/test/rpm.sh dist/podbag-*-1.${{ matrix.arch }}.rpm
+
+  # The glibc program and the packages on old distributions.
+  old:
+    name: ${{ matrix.image }} ${{ matrix.arch }}
+    needs: linux
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-26.04-arm' || 'ubuntu-26.04' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+        image: ['almalinux:8', 'debian:11']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: dist
+      - name: Run and install
+        run: |
+          chmod +x dist/podbag-*
+          case "${{ matrix.image }}" in
+            debian*) pkg=$(ls dist/podbag_*.deb) ;;
+            *) pkg=$(ls dist/podbag-*.rpm) ;;
+          esac
+          docker run --rm -v "$PWD:/src:ro" -w /src "${{ matrix.image }}" \
+            packaging/test/old.sh "dist/podbag-${{ matrix.arch }}-linux-gnu" "$pkg"
+
+  # podbag.exe carries the static Linux program.
+  windows:
+    name: Windows ${{ matrix.arch }}
+    needs: linux
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: windows-2025 }
+          - { arch: aarch64, runner: windows-11-arm }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Clang for ring
+        shell: pwsh
+        run: |
+          if (-not (Get-Command clang -ErrorAction SilentlyContinue)) {
+            $clang = Get-ChildItem -Recurse -Filter clang.exe -ErrorAction SilentlyContinue `
+              -Path "C:\Program Files\Microsoft Visual Studio", "C:\Program Files\LLVM" |
+              Select-Object -First 1
+            if ($clang) { Add-Content $env:GITHUB_PATH $clang.DirectoryName }
+          }
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: linux
+      - name: Build
+        shell: pwsh
+        run: |
+          $env:PODBAG_LINUX_BIN = Join-Path $PWD "linux\podbag-${{ matrix.arch }}-linux-musl"
+          cargo build --release --features embed-linux
+          ./target/release/podbag.exe --version
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item target/release/podbag.exe "dist/podbag-${{ matrix.arch }}-windows.exe"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Draft release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, deb, rpm, old, windows]
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+      - name: Draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          sed "s/@VERSION@/$version/g" packaging/release-notes.md > "$RUNNER_TEMP/notes.md"
+          gh release create "$GITHUB_REF_NAME" --draft --verify-tag \
+            --title "podbag $version" --notes-file "$RUNNER_TEMP/notes.md" dist/*

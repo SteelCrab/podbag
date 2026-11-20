@@ -1,0 +1,27 @@
+#!/bin/sh
+# The AppArmor profile (/etc/apparmor.d/podbag) lets podbag make user namespaces where
+# AppArmor restricts them (Ubuntu 23.10 and later).
+set -e
+
+profile=/etc/apparmor.d/podbag
+# Our own link, so that an older AppArmor skips the profile at boot. aa-disable makes
+# absolute links: those stay as they are.
+disabled=/etc/apparmor.d/disable/podbag
+
+if [ "$1" = configure ] && [ -f "$profile" ] && command -v apparmor_parser >/dev/null 2>&1; then
+  if apparmor_parser --skip-kernel-load --skip-cache "$profile" >/dev/null 2>&1; then
+    if [ "$(readlink "$disabled" 2>/dev/null)" = ../podbag ]; then
+      rm -f "$disabled"
+    fi
+    if [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = 1 ]; then
+      apparmor_parser -r -T -W "$profile" ||
+        echo "podbag: cannot load $profile; rootless containers need it" >&2
+    fi
+  else
+    # AppArmor before 4.0 does not know the userns rule.
+    mkdir -p /etc/apparmor.d/disable
+    ln -sfn ../podbag "$disabled"
+  fi
+fi
+
+exit 0

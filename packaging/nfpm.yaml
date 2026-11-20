@@ -1,0 +1,60 @@
+# The .deb and .rpm packages, built with nfpm (https://nfpm.goreleaser.com) from the
+# repository root:
+#
+#   VERSION=0.1.0 ARCH=amd64 PODBAG_BIN=path/to/static/podbag \
+#     nfpm package -f packaging/nfpm.yaml -p deb -t dist/
+#
+# ARCH is amd64 or arm64. PODBAG_BIN is the static (musl) program, so that one package
+# installs on every release of every distribution.
+name: podbag
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+release: 1
+section: admin
+priority: optional
+maintainer: pista <pista@firecrab.dev>
+description: |-
+  Container engine with no daemon, in one static binary
+  podbag runs Docker and OCI images with or without root. It stores images
+  file by file: a file that many images share is kept once.
+vendor: SteelCrab
+homepage: https://podbag.dev
+license: Apache-2.0
+
+contents:
+  - src: ${PODBAG_BIN}
+    dst: /usr/bin/podbag
+    expand: true
+    file_info:
+      mode: 0755
+  - src: README.md
+    dst: /usr/share/doc/podbag/README.md
+    file_info:
+      mode: 0644
+  - src: LICENSE
+    dst: /usr/share/doc/podbag/LICENSE
+    file_info:
+      mode: 0644
+  # Ubuntu 23.10 and later allow user namespaces (rootless containers) only to programs
+  # with an AppArmor profile. The same profile as `podbag check --apparmor-profile`.
+  - src: packaging/apparmor/podbag
+    dst: /etc/apparmor.d/podbag
+    type: config
+    packager: deb
+    file_info:
+      mode: 0644
+
+# Rootless containers: newuidmap and newgidmap, and pasta for networks.
+overrides:
+  deb:
+    recommends:
+      - uidmap
+      - passt
+    scripts:
+      postinstall: packaging/deb/postinst
+      postremove: packaging/deb/postrm
+  rpm:
+    recommends:
+      - shadow-utils
+      - passt
