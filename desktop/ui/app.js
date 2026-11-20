@@ -16,6 +16,8 @@ const S = {
   contexts: [],
   listErrors: {},
   kubeExpanded: false,
+  trainingExpanded: false,
+  trainingRecords: [],
   detail: null, // { kind, id, tab }
   lists: { containers: [], images: [], volumes: [], networks: [] },
   loaded: false,
@@ -146,12 +148,14 @@ function codeLine(text) {
 
 // ---- dialogs ----
 
-function confirmDialog(text, yesLabel) {
+function confirmDialog(text, yesLabel, { title = t("confirm.title"), style = "danger" } = {}) {
   const d = document.getElementById("confirm");
-  document.getElementById("confirm-title").textContent = t("confirm.title");
+  document.getElementById("confirm-title").textContent = title;
   document.getElementById("confirm-text").textContent = text;
   document.getElementById("confirm-cancel").textContent = t("action.cancel");
-  document.getElementById("confirm-yes").textContent = yesLabel || t("action.remove");
+  const yes = document.getElementById("confirm-yes");
+  yes.textContent = yesLabel || t("action.remove");
+  yes.className = "button " + style;
   d.returnValue = "";
   d.showModal();
   return new Promise((resolve) => {
@@ -438,7 +442,9 @@ function travel(step) {
   if (!entry) return;
   h.index += step;
   if (S.detail && S.detail.tab === "logs") API.logsStop();
-  S.view = entry.view;
+  S.view = entry.view.startsWith("training:")
+    && !trainingEntries().some(module => trainingView(module.id) === entry.view) ? "tutorials" : entry.view;
+  if (S.view === "tutorials" || S.view.startsWith("training:")) S.trainingExpanded = true;
   if (entry.kubeKind) { S.kubeKind = entry.kubeKind; S.kubeExpanded = true; }
   S.detail = entry.detail ? { ...entry.detail, json: null, extra: null } : null;
   renderNav();
@@ -462,6 +468,7 @@ function renderHistory() {
 }
 
 function go(view, kind = S.kubeKind) {
+  if (view === "tutorials" || view.startsWith("training:")) S.trainingExpanded = true;
   if (S.detail) closeDetail(true);
   if (view === "kubernetes") {
     S.kubeExpanded = true;
@@ -536,15 +543,69 @@ function updateKubeNav() {
   }
 }
 
+function setupTrainingNav() {
+  const label = t("nav.tutorials");
+  const open = h("button", {
+    type: "button", id: "nav-training-open", class: "nav-item", "aria-label": label, title: label,
+    onclick: () => go("tutorials"),
+  }, icon("tutorials"), h("span", { class: "label", text: label }));
+  const toggle = h("button", {
+    type: "button", id: "nav-training-toggle", class: "icon-button kube-toggle",
+    "aria-controls": "nav-training-children",
+    onclick: () => { S.trainingExpanded = !S.trainingExpanded; updateTrainingNav(); },
+  }, icon("back"));
+  const children = h("ul", { id: "nav-training-children", class: "nav kube-subnav", "aria-label": label });
+  document.getElementById("nav-training").replaceChildren(
+    h("li", {}, h("div", { class: "kube-nav-header" }, open, toggle), children));
+}
+
+function updateTrainingNav() {
+  const open = document.getElementById("nav-training-open");
+  if (!open) return;
+  const toggle = document.getElementById("nav-training-toggle");
+  const children = document.getElementById("nav-training-children");
+  const label = t("nav.tutorials");
+  const toggleLabel = t("training.modules");
+  open.title = label;
+  open.setAttribute("aria-label", label);
+  open.querySelector(".label").textContent = label;
+  toggle.title = toggleLabel;
+  toggle.setAttribute("aria-label", toggleLabel);
+  children.setAttribute("aria-label", toggleLabel);
+  const entries = trainingEntries();
+  const key = JSON.stringify(entries);
+  if (children.dataset.modules !== key) {
+    children.dataset.modules = key;
+    children.replaceChildren(...entries.map(entry => h("li", {}, h("button", {
+      type: "button", class: "nav-item", "data-view": trainingView(entry.id), title: entry.title,
+      "aria-label": entry.label, onclick: () => go(trainingView(entry.id)),
+    }, icon("tutorials"), h("span", { class: "label", text: entry.label })))));
+  }
+  const expanded = entries.length > 0 && S.trainingExpanded;
+  toggle.hidden = entries.length === 0;
+  toggle.setAttribute("aria-expanded", String(expanded));
+  children.hidden = !expanded;
+  open.toggleAttribute("data-active", S.view.startsWith("training:") && !expanded);
+  if (S.view === "tutorials") open.setAttribute("aria-current", "page");
+  else open.removeAttribute("aria-current");
+  for (const child of children.querySelectorAll("button")) {
+    if (child.dataset.view === S.view) child.setAttribute("aria-current", "page");
+    else child.removeAttribute("aria-current");
+  }
+}
+
 function renderNav() {
   const nav = document.getElementById("nav");
-  const item = (view, label, count) => h("li", {}, h("button", {
+  const item = (view, label, count, symbol = view) => h("li", {}, h("button", {
     type: "button", class: "nav-item", "aria-current": S.view === view ? "page" : null, onclick: () => go(view),
     "aria-label": label, title: count == null ? label : `${label} (${count})`,
-  }, icon(view), h("span", { class: "label", text: label }), h("span", { class: "count", text: count ?? "" })));
+  }, icon(symbol), h("span", { class: "label", text: label }), h("span", { class: "count", text: count ?? "" })));
   updateMigrationNav();
-  nav.replaceChildren(...KINDS.map(k => item(k, t(`nav.${k}`), S.loaded && !S.listErrors[k] ? S.lists[k].length : null)),
-    item("tutorials", t("nav.tutorials"), null));
+  nav.replaceChildren(...KINDS.map(k => item(k, t(`nav.${k}`), S.loaded && !S.listErrors[k] ? S.lists[k].length : null)));
+  updateTrainingNav();
+  document.getElementById("nav-practice").replaceChildren(
+    ...(S.practiceContainers ? [item("lab-containers", t("training.containers"), null, "containers")] : []),
+    ...(S.practiceInstalled ? [item("lab-volumes", t("practice.volumes"), null, "volumes")] : []));
   updateKubeNav();
   if (windowBar) {
     const [reload, settings] = document.getElementById("topbar-tools").children;
@@ -881,10 +942,20 @@ function renderMain(fresh) {
     shownView = S.view;
     return;
   }
-  if (S.view === "tutorials") {
-    if (fresh || shownView !== S.view) renderTutorials(main);
+  if (S.view === "lab-containers") {
+    if (fresh || shownView !== S.view) renderPracticeContainers(main);
     shownView = S.view;
     return;
+  }
+  if (S.view === "lab-volumes") {
+    if (fresh || shownView !== S.view) renderPracticeVolumes(main);
+    shownView = S.view;
+    return;
+  }
+  if (S.view === "tutorials" || S.view.startsWith("training:")) {
+    const rendered = fresh || shownView !== S.view ? renderTutorials(main) : undefined;
+    shownView = S.view;
+    return rendered;
   }
   if (S.view === "settings") {
     const redraw = fresh || shownView !== "settings";
@@ -1045,25 +1116,29 @@ function renderList() {
     content.replaceChildren(h("p", { class: "nothing", text: t("empty.search", { q }) }));
     return;
   }
+  content.replaceChildren(resourceTable(kind, rows, o => openDetail(kind, objectId(kind, o), "info"), o => rowActions(kind, o)));
+}
+
+function resourceTable(kind, rows, open, actions) {
   const cols = COLUMNS[kind];
   const head = h("thead", {}, h("tr", {}, cols.map(([key, c]) => h("th", { class: `col-${c}`, scope: "col", text: t(key) })),
     h("th", { class: "col-actions", scope: "col" }, h("span", { class: "visually-hidden", text: t("col.actions") }))));
   const body = h("tbody", {}, rows.map((o) => {
-    const tr = h("tr", {}, cells(kind, o).map((cell, i) => h("td", { class: `col-${cols[i][1]}` }, cell)), h("td", { class: "col-actions" }, rowActions(kind, o)));
+    const tr = h("tr", {}, cells(kind, o).map((cell, i) => h("td", { class: `col-${cols[i][1]}` }, cell)), h("td", { class: "col-actions" }, actions(o)));
     // The name opens the details; the row is clickable too, for the mouse.
     const first = tr.querySelector("td .primary-text");
     if (first) {
-      const link = h("button", { type: "button", class: "link", onclick: () => openDetail(kind, objectId(kind, o), "info") });
+      const link = h("button", { type: "button", class: "link", onclick: () => open(o) });
       first.replaceWith(link);
       link.append(first);
     }
     tr.addEventListener("click", (e) => {
       if (e.target.closest("button")) return;
-      openDetail(kind, objectId(kind, o), "info");
+      open(o);
     });
     return tr;
   }));
-  content.replaceChildren(h("table", { class: `list list-${kind}` }, head, body));
+  return h("table", { class: `list list-${kind}` }, head, body);
 }
 
 function emptyState(kind) {
@@ -1743,8 +1818,11 @@ async function init() {
   } catch { /* the defaults */ }
   applyTheme();
   await I18N.load(S.settings.language);
+  try { setInstalledPractice(await API.volumeToolsLab("summary")); }
+  catch { /* The Training page can retry the library. */ }
   setupWindowBar();
   setupKubeNav();
+  setupTrainingNav();
   setupSidebar();
   renderAll();
   refreshKubeCounts();

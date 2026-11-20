@@ -67,19 +67,35 @@ pub fn run(once: bool, engine: Option<Choice>, mouse: bool) -> i32 {
         eprintln!("podbag: the TUI needs a terminal");
         return 1;
     }
-    let mut runtime = Runtime::new(target, exe, Engines::real());
+    let practice = std::env::var_os(podbag::volume_lesson::SCOPE).is_some();
+    let engines = if practice {
+        Engines {
+            find: Box::new(|_| Err("This terminal is connected to the practice store.".into())),
+            save: Box::new(|_| Err("The practice store is temporary.".into())),
+            vm: Box::new(|_| None),
+            docker_cli: None,
+            docker: None,
+            login: Arc::new(|_| None),
+            auth: Arc::new(|_| None),
+        }
+    } else {
+        Engines::real()
+    };
+    let mut runtime = Runtime::new(target, exe, engines);
     runtime.app.appearance = preferences::Appearance::load();
     if let Err(e) = ready {
         runtime.app.message = Some((e, true));
     }
     runtime.app.mouse = mouse;
-    runtime.app.update = podbag::upgrade::known_newer().map(|v| v.to_string());
-    let tx = runtime.sender();
-    std::thread::spawn(move || {
-        tx.send(Msg::Update(
-            podbag::upgrade::newer_release().map(|v| v.to_string()),
-        ));
-    });
+    if !practice {
+        runtime.app.update = podbag::upgrade::known_newer().map(|v| v.to_string());
+        let tx = runtime.sender();
+        std::thread::spawn(move || {
+            tx.send(Msg::Update(
+                podbag::upgrade::newer_release().map(|v| v.to_string()),
+            ));
+        });
+    }
     let mut terminal = ratatui::init();
     // ratatui's hook restores the terminal on a panic; the mouse must go back too.
     let hook = std::panic::take_hook();

@@ -761,6 +761,15 @@ fn open_repository() -> Result<(), String> {
     open::that_detached(env!("CARGO_PKG_REPOSITORY")).map_err(|e| e.to_string())
 }
 
+#[tauri::command(async)]
+fn open_training_guide(id: &str, lang: &str) -> Result<(), String> {
+    let module = podbag::volume_lesson::Module::parse(id).map_err(|e| e.to_string())?;
+    let url = module
+        .guide_url(lang)
+        .ok_or("The module has no web guide.")?;
+    open::that_detached(url).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn get_settings(state: State<'_, AppState>) -> Settings {
     lock(&state.settings).clone()
@@ -1072,6 +1081,138 @@ fn build_app_menu(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
+#[tauri::command(async)]
+fn practice_volumes(
+    action: String,
+    session: Option<String>,
+    name: Option<String>,
+    containers: Option<bool>,
+    course: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    use podbag::volume_lesson as lesson;
+    let dir = lesson::directory().map_err(|e| e.to_string())?;
+    let containers = containers.unwrap_or(false);
+    let course = course.unwrap_or(false);
+    let request = |action: &str| -> Result<serde_json::Value, String> {
+        #[cfg(unix)]
+        {
+            let target = name.as_deref().unwrap_or("");
+            let result = if course {
+                lesson::course::view(&dir, action, session.as_deref(), target)
+                    .map(|view| serde_json::to_value(view))
+            } else if containers {
+                lesson::containers::view(&dir, action, session.as_deref(), target)
+                    .map(|view| serde_json::to_value(view))
+            } else {
+                lesson::gui::view(&dir, action, session.as_deref(), target)
+                    .map(|view| serde_json::to_value(view))
+            };
+            result
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            let active = if course {
+                lesson::course::ACTIVE
+            } else if containers {
+                lesson::containers::ACTIVE
+            } else {
+                lesson::gui::ACTIVE
+            };
+            if !dir.join(active).exists() && action == "status" {
+                return Ok(serde_json::Value::Null);
+            }
+            let path = podbag::wsl::wsl_path(&dir.to_string_lossy())?;
+            let mut command = std::process::Command::new("wsl.exe");
+            command.args([
+                "-d",
+                podbag::wsl::DISTRO,
+                "--exec",
+                podbag::wsl::ENGINE,
+                "lab",
+                "desktop-view",
+            ]);
+            if course {
+                command.arg("--course");
+            } else if containers {
+                command.arg("--containers");
+            }
+            let out = command
+                .args([&path, action])
+                .args(session.as_deref())
+                .args(name.as_deref())
+                .creation_flags(0x08000000)
+                .output()
+                .map_err(|e| e.to_string())?;
+            if !out.status.success() {
+                return Err(String::from_utf8_lossy(&out.stderr).trim().to_owned());
+            }
+            serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())
+        }
+    };
+    if course && action == "open-web" {
+        let view = request("show-web")?;
+        let port = view["web"]["port"]
+            .as_u64()
+            .and_then(|port| u16::try_from(port).ok())
+            .ok_or("The practice port is unavailable.")?;
+        open::that_detached(format!("http://127.0.0.1:{port}/")).map_err(|e| e.to_string())?;
+    }
+    request(&action)
+}
+
+#[tauri::command]
+fn volume_tools_lab(
+    action: &str,
+    package: Option<String>,
+    id: Option<String>,
+) -> Result<Vec<LessonRecord>, String> {
+    use podbag::volume_lesson as lesson;
+    let dir = lesson::directory().map_err(|e| e.to_string())?;
+    let module = || lesson::selected(&dir, id.as_deref()).map_err(|e| e.to_string());
+    match action {
+        "status" | "summary" => {}
+        "install" => {
+            lesson::install(&dir, package.as_deref().ok_or("Choose a module file.")?)
+                .map_err(|e| e.to_string())?;
+        }
+        "remove" => lesson::remove(&dir, module()?).map_err(|e| e.to_string())?,
+        _ => return Err("Unknown lesson action.".into()),
+    }
+    let mut records = Vec::new();
+    for mut record in lesson::list(&dir).map_err(|e| e.to_string())? {
+        let key = lesson::Module::for_format(&record.package.format)
+            .map_err(|e| e.to_string())?
+            .id();
+        if id
+            .as_deref()
+            .is_some_and(|id| action == "summary" && id != key)
+        {
+            continue;
+        }
+        record.package.animation = None;
+        let steps =
+            lesson::course::instructions(lesson::Module::parse(key).map_err(|e| e.to_string())?);
+        records.push(LessonRecord {
+            id: key,
+            record,
+            steps,
+        });
+    }
+    Ok(records)
+}
+
+#[derive(serde::Serialize)]
+struct LessonRecord {
+    id: &'static str,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    steps: Vec<podbag::volume_lesson::course::Instruction>,
+    #[serde(flatten)]
+    record: podbag::volume_lesson::Installed,
+}
+
 #[tauri::command]
 fn tutorial_lab(
     lab: State<'_, Mutex<lab::Lab>>,
@@ -1094,6 +1235,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             engine,
             tutorial_lab,
+            volume_tools_lab,
+            practice_volumes,
             list,
             kubernetes::kube_counts,
             migration::migration_sources,
@@ -1133,6 +1276,7 @@ fn main() {
             vm_resources,
             take_star_prompt,
             open_repository,
+            open_training_guide,
             get_settings,
             set_settings,
         ])

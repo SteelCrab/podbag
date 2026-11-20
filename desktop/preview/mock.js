@@ -157,6 +157,7 @@
       endpoint: selected === "kiri" ? "unix:///Users/me/.kiri/run/docker.sock" : selected, vm: null, version: selected });
   }
   let launchAtLogin = false;
+  const practiceModules = new Map();
   const commands = {
     "plugin:autostart|is_enabled": () => launchAtLogin,
     "plugin:autostart|enable": () => { launchAtLogin = true; },
@@ -241,6 +242,20 @@
       return true;
     },
     open_repository: () => null,
+    open_training_guide: () => null,
+    practice_volumes: () => null,
+    volume_tools_lab: ({ action, package: file, id }) => {
+      if (action === "install") {
+        const pack = JSON.parse(file);
+        const key = { "podbag-container-basics-v1": "container-basics",
+          "podbag-cli-gui-volumes-v1": "volume-basics", "podbag-cli-tui-volumes-v1": "tui-volumes",
+          "podbag-web-basics-v1": "web-basics", "podbag-volume-persistence-v1": "volume-persistence",
+          "podbag-web-service-lifecycle-v1": "web-service-lifecycle" }[pack.format];
+        practiceModules.set(key, { id: key, package: pack, completed: false });
+      }
+      if (action === "remove") practiceModules.delete(id);
+      return [...practiceModules.values()].filter(record => action !== "summary" || !id || record.id === id);
+    },
     tutorial_lab: ({ action }) => {
       if (action === "status") return { active: false };
       throw "Start the local lab in Podbag Desktop.";

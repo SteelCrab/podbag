@@ -74,12 +74,12 @@ function Activate-Button([string]$Name) {
 $deadline = [DateTime]::UtcNow.AddSeconds(90)
 do {
     Activate-Button 'Skip'
-    Activate-Button 'Tutorials'
+    Activate-Button 'Training'
     Start-Sleep -Milliseconds 500
-    $heading = Find-Text 'Install a tutorial module'
+    $heading = Find-Text 'No modules installed.'
     if ($heading) { break }
 } until ([DateTime]::UtcNow -gt $deadline)
-if (!$heading) { throw 'The installed WebView did not open the English Tutorials view' }
+if (!$heading) { throw 'The installed WebView did not open the English Training view' }
 
 $bounds = New-Object WindowCapture+Rect
 if (![WindowCapture]::GetWindowRect($window, [ref]$bounds)) { throw 'Cannot read window bounds' }
@@ -97,4 +97,4 @@ try {
 } finally {
     $image.Dispose()
 }
-Write-Output 'Opened Tutorials in the installed English desktop app.'
+Write-Output 'Opened Training in the installed English desktop app.'
