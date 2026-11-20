@@ -3,10 +3,12 @@
 //! a pull) holds its own connection while it is read.
 
 pub mod choice;
+pub mod dockercli;
 mod endpoint;
 #[cfg(unix)]
 #[doc(hidden)]
 pub mod fake;
+mod run;
 mod wire;
 
 pub use choice::{Choice, Target, ui_dir};

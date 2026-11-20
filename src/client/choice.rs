@@ -140,10 +140,7 @@ pub fn docker_endpoint(
     if let Some(h) = env("DOCKER_HOST") {
         return host(&h);
     }
-    let config = env("DOCKER_CONFIG")
-        .map(PathBuf::from)
-        .or_else(|| home.map(|h| h.join(".docker")));
-    if let Some(config) = &config
+    if let Some(config) = &docker_config_dir(env, home)
         && let Some(h) = context_host(config, env("DOCKER_CONTEXT"))
     {
         return host(&h);
@@ -169,17 +166,35 @@ pub fn docker_endpoint(
 /// The host of the docker CLI's current context; None for `default` (DOCKER_HOST or the
 /// usual socket) or when there is none.
 fn context_host(config: &Path, named: Option<String>) -> Option<String> {
-    let name = match named {
-        Some(n) => n,
-        None => {
-            let text = std::fs::read(config.join("config.json")).ok()?;
-            let v: serde_json::Value = serde_json::from_slice(&text).ok()?;
-            v["currentContext"].as_str()?.to_string()
-        }
-    };
+    let name = named.or_else(|| current_context(config))?;
     if name.is_empty() || name == "default" {
         return None;
     }
+    context_endpoint(config, &name)
+}
+
+/// The docker CLI's config folder: `DOCKER_CONFIG`, else `~/.docker`.
+pub fn docker_config_dir(
+    env: &dyn Fn(&str) -> Option<String>,
+    home: Option<&Path>,
+) -> Option<PathBuf> {
+    env("DOCKER_CONFIG")
+        .map(PathBuf::from)
+        .or_else(|| home.map(|h| h.join(".docker")))
+}
+
+/// `currentContext` in the docker CLI's config.json, if set.
+pub(super) fn current_context(config: &Path) -> Option<String> {
+    let text = std::fs::read(config.join("config.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&text).ok()?;
+    v["currentContext"]
+        .as_str()
+        .filter(|n| !n.is_empty())
+        .map(str::to_string)
+}
+
+/// The Docker host of context `name`, from `contexts/meta/<sha256 of the name>/meta.json`.
+pub(super) fn context_endpoint(config: &Path, name: &str) -> Option<String> {
     use sha2::Digest;
     let dir: String = sha2::Sha256::digest(name.as_bytes())
         .iter()
@@ -207,10 +222,17 @@ pub fn docker_cli() -> PathBuf {
 
 /// The docker CLI, if it is installed.
 pub fn find_docker_cli() -> Option<PathBuf> {
+    find_tool("docker")
+}
+
+/// A program of the Docker tools (`docker`, `docker-credential-osxkeychain`, …): in
+/// `PATH`, else where Docker Desktop and package managers put it. `.exe` is added on
+/// Windows.
+pub fn find_tool(name: &str) -> Option<PathBuf> {
     let name = if cfg!(windows) {
-        "docker.exe"
+        format!("{name}.exe")
     } else {
-        "docker"
+        name.to_string()
     };
     let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
         .map(|p| std::env::split_paths(&p).collect())
@@ -233,7 +255,9 @@ pub fn find_docker_cli() -> Option<PathBuf> {
             .map(PathBuf::from),
         );
     }
-    dirs.into_iter().map(|d| d.join(name)).find(|p| p.is_file())
+    dirs.into_iter()
+        .map(|d| d.join(&name))
+        .find(|p| p.is_file())
 }
 
 /// The folder of the UIs' shared files (`ui.json`, the update check's `update.json`):
