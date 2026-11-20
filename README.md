@@ -51,7 +51,7 @@ It stores images file by file: a file that many images share is kept once.
 ### Install script (Linux and macOS)
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/SteelCrab/podbag/main/install.sh | sh
+curl -fsSL https://podbag.dev/install.sh | sh
 ```
 
 - Downloads the file for your system and checks its SHA-256 sum.

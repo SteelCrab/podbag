@@ -52,7 +52,7 @@ def path_of(code):
 
 def session(words, ver):
     return [
-        ["c", "curl -fsSL https://raw.githubusercontent.com/SteelCrab/podbag/main/install.sh | sh"],
+        ["c", "curl -fsSL https://podbag.dev/install.sh | sh"],
         ["o", "Downloading podbag-x86_64-linux (latest)"],
         ["o", f"Installed /usr/local/bin/podbag (podbag {ver})"],
         ["c", "podbag run --rm alpine echo hello"],
@@ -122,6 +122,8 @@ def main():
     (out / "images").mkdir(parents=True)
     for name in ASSETS:
         shutil.copy(SITE / name, out / name)
+    # `curl -fsSL https://podbag.dev/install.sh | sh` gets the same script as the repository.
+    shutil.copy(REPO / "install.sh", out / "install.sh")
     for picture in sorted((REPO / "docs/images").iterdir()):
         if picture.suffix in (".svg", ".png"):
             shutil.copy(picture, out / "images" / picture.name)

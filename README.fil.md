@@ -51,7 +51,7 @@ Iniimbak nito ang mga image nang file-by-file: ang file na ginagamit ng maraming
 ### Install script (Linux at macOS)
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/SteelCrab/podbag/main/install.sh | sh
+curl -fsSL https://podbag.dev/install.sh | sh
 ```
 
 - Dina-download ang file para sa iyong system at sinusuri ang SHA-256 nito.

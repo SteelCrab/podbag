@@ -9,6 +9,7 @@ on:
       - "docs/media/**"
       - "dev/docs/site.py"
       - "dev/docs/storage.py"
+      - "install.sh"
       - "Cargo.toml"
       - ".github/workflows/site.yml"
   workflow_dispatch:
