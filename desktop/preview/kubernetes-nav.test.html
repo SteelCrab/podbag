@@ -2,7 +2,7 @@
 <html lang="en">
 <meta charset="utf-8">
 <title>Kubernetes sidebar navigation test</title>
-<iframe src="preview.html?view=offline&amp;lang=en" title="Desktop preview"></iframe>
+<iframe src="preview.html?view=offline&amp;lang=en" width="900" height="600" title="Desktop preview"></iframe>
 <pre id="result">Running</pre>
 <script>
 "use strict";
@@ -27,6 +27,19 @@ async function test() {
   toggle.click();
   check(!children.hidden && toggle.getAttribute("aria-expanded") === "true", "Expand the resource list");
   check(requests.length === 0, "Expanding the list must leave the current page open");
+  const resourceButtons = [...children.querySelectorAll("button")];
+  const icons = new Set();
+  for (const button of resourceButtons) {
+    const svg = button.querySelector("svg");
+    const symbol = svg?.querySelector("use")?.getAttribute("href");
+    check(symbol && doc.querySelector(symbol)?.localName === "symbol", "Render a resource icon");
+    check(svg.getAttribute("aria-hidden") === "true" && svg.getBBox().width > 0, "Draw the decorative icon");
+    const label = button.querySelector(".label");
+    check(label.getClientRects().length && label.textContent === button.title, "Show the resource name and tooltip");
+    check(button.getAttribute("aria-label") === label.textContent, "Keep the button accessible without visible text");
+    icons.add(symbol);
+  }
+  check(icons.size === 4, "Use a distinct icon for each Kubernetes resource");
   services.focus();
   services.click();
   check(current() === services && doc.activeElement === services, "Focus and select Services");
@@ -58,7 +71,20 @@ async function test() {
   byId("kube-deployments").click();
   await new Promise((resolve) => setTimeout(resolve, 0));
   check(doc.querySelector(".kube-list")?.textContent.includes("3/3"), "Show ready deployment replicas");
-
+  byId("sidebar-toggle").click();
+  await Promise.all(byId("app").getAnimations().map((animation) => animation.finished));
+  const rail = byId("sidebar").getBoundingClientRect();
+  for (const button of resourceButtons) {
+    const bounds = button.querySelector("svg").getBoundingClientRect();
+    check(bounds.width > 0 && bounds.left >= rail.left && bounds.right <= rail.right, "Fit each resource icon within the rail");
+    check(!button.querySelector(".label").getClientRects().length, "Hide the label in the compact sidebar");
+    button.click();
+    check(current() === button, "Navigate from each compact resource icon");
+  }
+  toggle.click();
+  check(children.hidden && current() === byId("nav-kube-open"), "Collapse the resource icons from the compact sidebar");
+  byId("nav-kube-open").click();
+  check(!children.hidden && current() === resourceButtons.at(-1), "Reopen the selected resource from the compact sidebar");
 }
 
 // The preview loads its scripts and translations after the frame's load event.

@@ -235,6 +235,9 @@ button.status-item:hover { background: var(--hover); color: var(--ink); }
 .kube-subnav { margin: 2px 0 0 18px; padding-inline-start: 10px; border-inline-start: 1px solid var(--line); }
 .kube-subnav[hidden] { display: none; }
 .kube-subnav .nav-item { padding-block: 5px; }
+.collapsed .kube-nav-header { display: grid; justify-items: center; }
+.collapsed .kube-nav-header .kube-toggle { width: 100%; height: 24px; }
+.collapsed .kube-subnav { margin-inline: 0; padding-inline-start: 0; }
 .engine-switch .engine-picker { width: 100%; min-width: 0; }
 .collapsed .engine-switch .engine-picker { display: none; }
 .sidebar { overflow-y: auto; }

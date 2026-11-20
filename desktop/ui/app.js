@@ -482,17 +482,23 @@ function go(view, kind = S.kubeKind) {
 
 // Keep the disclosure and child buttons mounted when the engine refreshes its lists.
 function setupKubeNav() {
-  const open = h("button", { type: "button", id: "nav-kube-open", class: "nav-item", onclick: () => go("kubernetes") },
-    icon("kubernetes"), h("span", { class: "label", text: t("nav.kubernetes") }));
+  const label = t("nav.kubernetes");
+  const open = h("button", {
+    type: "button", id: "nav-kube-open", class: "nav-item", "aria-label": label, title: label, onclick: () => go("kubernetes"),
+  }, icon("kubernetes"), h("span", { class: "label", text: label }));
   const toggle = h("button", {
     type: "button", id: "nav-kube-toggle", class: "icon-button kube-toggle",
     "aria-label": t("kube.resources"), title: t("kube.resources"), "aria-controls": "nav-kube-children",
     onclick: () => { S.kubeExpanded = !S.kubeExpanded; updateKubeNav(); },
   }, icon("back"));
   const children = h("ul", { class: "nav kube-subnav", id: "nav-kube-children", "aria-label": t("kube.resources") },
-    KUBE_KINDS.map((kind) => h("li", {}, h("button", {
-      type: "button", class: "nav-item", id: `nav-kube-${kind}`, onclick: () => go("kubernetes", kind),
-    }, t(`kube.${kind}`)))));
+    KUBE_KINDS.map((kind) => {
+      const label = t(`kube.${kind}`);
+      return h("li", {}, h("button", {
+        type: "button", class: "nav-item", id: `nav-kube-${kind}`, "aria-label": label, title: label,
+        onclick: () => go("kubernetes", kind),
+      }, icon(`kube-${kind}`), h("span", { class: "label", text: label })));
+    }));
   document.getElementById("nav-kubernetes").replaceChildren(
     h("li", {}, h("div", { class: "kube-nav-header" }, open, toggle), children));
 }
