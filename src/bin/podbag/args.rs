@@ -115,12 +115,18 @@ pub enum Cmd {
     Exec(ExecArgs),
     /// Manage containers, images, volumes and networks in the terminal
     ///
-    /// A client of the Docker API on podbag's socket (or DOCKER_HOST, when it is a Unix
-    /// socket). Press ? for the keys.
+    /// A client of the Docker API: podbag, Docker, or a socket (the saved choice, else
+    /// DOCKER_HOST when it is a Unix socket, else podbag). Press ? for the keys.
     Tui {
         /// Draw one screen as text, without a terminal, and exit
         #[arg(long, hide = true)]
         once: bool,
+        /// The engine for this run: podbag, docker, or a socket (unix:///path)
+        #[arg(long, value_name = "ENGINE", value_parser = parse_engine)]
+        engine: Option<podbag::client::Choice>,
+        /// Leave the mouse to the terminal (press m to change it)
+        #[arg(long)]
+        no_mouse: bool,
     },
     #[command(name = "__exec", hide = true)]
     ExecHelper { id: String, request: String },
@@ -429,6 +435,12 @@ pub fn parse_env(arg: &str, lookup: impl Fn(&str) -> Option<String>) -> Option<(
         Some((k, v)) => Some((k.to_string(), v.to_string())),
         None => lookup(arg).map(|v| (arg.to_string(), v)),
     }
+}
+
+/// `--engine`: podbag, docker, or a socket.
+fn parse_engine(text: &str) -> Result<podbag::client::Choice, String> {
+    podbag::client::Choice::parse(text)
+        .ok_or_else(|| "use podbag, docker, or a socket (unix:///path)".to_string())
 }
 
 #[cfg(test)]

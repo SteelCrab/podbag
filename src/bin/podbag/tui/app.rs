@@ -1,10 +1,12 @@
 //! The TUI's state and its keys. No input or output here: a key changes the state and
 //! may ask the runtime for an [`Effect`]; the runtime's results come back as [`Msg`].
 
+use super::mouse::Areas;
 use podbag::client::{
     ContainerSummary, Features, ImageSummary, Kind, NetworkSummary, VolumeSummary, short_id,
 };
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::time::Instant;
 
 /// The objects, as last listed.
 #[derive(Debug, Clone, Default)]
@@ -117,6 +119,10 @@ pub enum Effect {
         id: String,
         to: String,
     },
+    /// Go from podbag to Docker, or back (and save the choice).
+    SwitchEngine,
+    /// Take the mouse (true) or leave it to the terminal.
+    Mouse(bool),
 }
 
 /// What the runtime sends back.
@@ -137,6 +143,8 @@ pub enum Msg {
     LogEnd(u64, Option<String>),
     /// A line of a pull's progress.
     Progress(String),
+    /// A newer podbag, as `x.y.z`.
+    Update(Option<String>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -189,8 +197,22 @@ pub struct App {
     pub features: Features,
     /// The events stream is open; otherwise the lists are polled.
     pub live: bool,
-    /// The engine, as shown in the title.
+    /// The engine, as shown in the header: `podbag`, `Docker` or a socket's path.
     pub engine: String,
+    /// Where its API is, as shown when there is no message.
+    pub endpoint: String,
+    /// The macOS VM's state (podbag only): running, standby, starting, stopped.
+    pub vm: Option<&'static str>,
+    /// A newer podbag, as `x.y.z`.
+    pub update: Option<String>,
+    /// `e` can open a shell (Docker needs the docker CLI).
+    pub shell: bool,
+    /// The TUI takes the mouse.
+    pub mouse: bool,
+    /// Where things were in the last drawn frame.
+    pub areas: Areas,
+    /// The last click on a row: when, in which list, which row.
+    pub last_click: Option<(Instant, Kind, usize)>,
     /// Unix seconds, for "5 minutes ago".
     pub now: i64,
     /// The log view's generation: lines of an older one are dropped.
@@ -225,7 +247,7 @@ pub fn size(bytes: i64) -> String {
 }
 
 impl App {
-    pub fn new(engine: String) -> App {
+    pub fn new(engine: String, endpoint: String) -> App {
         App {
             tab: Kind::Containers,
             lists: Lists::default(),
@@ -238,6 +260,13 @@ impl App {
             features: Features::default(),
             live: false,
             engine,
+            endpoint,
+            vm: None,
+            update: None,
+            shell: true,
+            mouse: true,
+            areas: Areas::default(),
+            last_click: None,
             now: 0,
             log_generation: 0,
             page: 10,
@@ -359,11 +388,11 @@ impl App {
         rows.into_iter().nth(i)
     }
 
-    fn select(&mut self, i: usize) {
+    pub(super) fn select(&mut self, i: usize) {
         self.selected[tab_index(self.tab)] = i;
     }
 
-    fn move_by(&mut self, delta: isize) {
+    pub(super) fn move_by(&mut self, delta: isize) {
         let n = self.rows(self.tab).len();
         if n == 0 {
             return;
@@ -372,13 +401,31 @@ impl App {
         self.select(i.clamp(0, n as isize - 1) as usize);
     }
 
-    fn switch(&mut self, k: Kind) {
+    pub(super) fn switch(&mut self, k: Kind) {
         self.tab = k;
         self.search.clear();
     }
 
     fn say(&mut self, text: impl Into<String>, error: bool) {
         self.message = Some((text.into(), error));
+    }
+
+    /// Another engine: nothing of the old one stays.
+    pub fn switched(&mut self, engine: String, endpoint: String, shell: bool) {
+        self.message = Some((format!("Engine: {engine}"), false));
+        self.engine = engine;
+        self.endpoint = endpoint;
+        self.shell = shell;
+        self.lists = Lists::default();
+        self.loaded = false;
+        self.selected = [0; 4];
+        self.search.clear();
+        self.mode = Mode::List;
+        self.busy = None;
+        self.features = Features::default();
+        self.live = false;
+        self.vm = None;
+        self.last_click = None;
     }
 
     /// New lists; the selection stays on the same object where it can.
@@ -444,6 +491,7 @@ impl App {
                 }
             }
             Msg::Progress(line) => self.busy = Some(line),
+            Msg::Update(v) => self.update = v,
         }
     }
 
@@ -626,6 +674,17 @@ impl App {
             KeyCode::Home | KeyCode::Char('g') => self.select(0),
             KeyCode::End | KeyCode::Char('G') => self.move_by(isize::MAX / 2),
             KeyCode::F(5) => return Effect::Refresh,
+            KeyCode::Char('E') => return Effect::SwitchEngine,
+            KeyCode::Char('m') => {
+                self.mouse = !self.mouse;
+                let text = if self.mouse {
+                    "The mouse is on"
+                } else {
+                    "The mouse is off: the terminal selects text"
+                };
+                self.say(text, false);
+                return Effect::Mouse(self.mouse);
+            }
             KeyCode::Char('c') => return self.confirm_prune(),
             KeyCode::Char('p') if self.tab == Kind::Images => {
                 self.mode = Mode::Input {
@@ -710,7 +769,10 @@ impl App {
                 name: row.name.clone(),
             },
             KeyCode::Char('e') if containers => {
-                if row.running {
+                if !self.shell {
+                    self.say("No shell: the docker CLI is not installed", true);
+                    Effect::None
+                } else if row.running {
                     Effect::Shell {
                         id: row.id.clone(),
                         name: row.name.clone(),
@@ -768,6 +830,9 @@ impl App {
                     Kind::Images => vec![("p", "pull"), ("d", "remove"), ("c", "prune")],
                     Kind::Volumes | Kind::Networks => vec![("d", "remove"), ("c", "prune")],
                 };
+                if !self.shell {
+                    keys.retain(|(k, _)| *k != "e");
+                }
                 if self.tab != Kind::Containers {
                     keys.push(("⏎", "inspect"));
                 }
@@ -792,7 +857,10 @@ pub mod tests {
     }
 
     pub fn sample() -> App {
-        let mut app = App::new("unix:///run/user/1000/podbag/docker.sock".into());
+        let mut app = App::new(
+            "podbag".into(),
+            "unix:///run/user/1000/podbag/docker.sock".into(),
+        );
         app.now = 1_700_003_600;
         let containers: Vec<ContainerSummary> =
             serde_json::from_value(podbag::client::fake::containers_json()).unwrap();

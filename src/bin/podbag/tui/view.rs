@@ -1,8 +1,10 @@
-//! Drawing the TUI: tabs at the top, the list with the selected object's details, a
-//! message line and the keys at the bottom. Help, questions and prompts are pop-ups;
-//! inspect and logs take the whole body. It fits 80×24.
+//! Drawing the TUI: the engine and tabs at the top, the list with the selected object's
+//! details, a message line and the keys at the bottom. Help, questions and prompts are
+//! pop-ups; inspect and logs take the whole body. It fits 80×24. Where things are drawn
+//! is kept in [`App::areas`], for the mouse.
 
 use super::app::{App, Mode, Tone};
+use super::mouse::{Areas, hint_key};
 use podbag::client::{Kind, short_id};
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
@@ -23,14 +25,17 @@ fn title(kind: Kind) -> &'static str {
 }
 
 pub fn draw(f: &mut Frame, app: &mut App) {
-    let [top, body, message, keys] = Layout::vertical([
+    app.areas = Areas::default();
+    let [header, tabs, body, message, keys] = Layout::vertical([
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(3),
         Constraint::Length(1),
         Constraint::Length(1),
     ])
     .areas(f.area());
-    draw_tabs(f, app, top);
+    draw_header(f, app, header);
+    draw_tabs(f, app, tabs);
     match &app.mode {
         Mode::Text { .. } => draw_text(f, app, body),
         _ => draw_list(f, app, body),
@@ -39,33 +44,86 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     draw_keys(f, app, keys);
     match app.mode.clone() {
         Mode::Help => draw_help(f, app),
-        Mode::Confirm { question, .. } => popup(
-            f,
-            "Are you sure?",
-            vec![Line::from(question), Line::from("")],
-        ),
-        Mode::Input { prompt, text, .. } => popup(
-            f,
-            &prompt,
-            vec![Line::from(vec![
-                Span::raw(text),
-                Span::styled(" ", Style::new().add_modifier(Modifier::REVERSED)),
-            ])],
-        ),
+        Mode::Confirm { question, .. } => draw_confirm(f, app, question),
+        Mode::Input { prompt, text, .. } => {
+            popup(
+                f,
+                &prompt,
+                vec![Line::from(vec![
+                    Span::raw(text),
+                    Span::styled(" ", Style::new().add_modifier(Modifier::REVERSED)),
+                ])],
+            );
+        }
         _ => {}
     }
 }
 
-fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
+/// Spans in a row from `area`'s left: where each one is.
+fn place(area: Rect, spans: &[Span]) -> Vec<Rect> {
+    let mut x = area.x;
+    spans
+        .iter()
+        .map(|s| {
+            let w = (s.width() as u16).min((area.x + area.width).saturating_sub(x));
+            let r = Rect::new(x, area.y, w, 1);
+            x += w;
+            r
+        })
+        .collect()
+}
+
+/// podbag, the engine (click or E to switch), the VM's state, a newer release, and
+/// whether events come.
+fn draw_header(f: &mut Frame, app: &mut App, area: Rect) {
     let [left, right] =
         Layout::horizontal([Constraint::Min(0), Constraint::Length(10)]).areas(area);
-    let mut spans = vec![Span::styled(
-        " podbag ",
-        Style::new()
-            .fg(Color::White)
-            .bg(ACCENT)
-            .add_modifier(Modifier::BOLD),
-    )];
+    let dim = Style::new().fg(Color::DarkGray);
+    let mut spans = vec![
+        Span::styled(
+            " podbag ",
+            Style::new()
+                .fg(Color::White)
+                .bg(ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  Engine ", dim),
+        Span::styled(
+            app.engine.clone(),
+            Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" (E)", dim),
+    ];
+    if let Some(vm) = app.vm {
+        let color = if vm == "running" {
+            Color::Green
+        } else {
+            Color::DarkGray
+        };
+        spans.push(Span::styled("  VM ", dim));
+        spans.push(Span::styled(vm, Style::new().fg(color)));
+    }
+    if let Some(v) = &app.update {
+        spans.push(Span::styled(
+            format!("  Update {v} available"),
+            Style::new().fg(Color::Yellow),
+        ));
+    }
+    app.areas.engine = place(left, &spans).get(2).copied();
+    f.render_widget(Paragraph::new(Line::from(spans)), left);
+    let live = if app.live {
+        Span::styled("● live ", Style::new().fg(Color::Green))
+    } else {
+        Span::styled("○ polling ", Style::new().fg(Color::DarkGray))
+    };
+    f.render_widget(
+        Paragraph::new(Line::from(live)).alignment(Alignment::Right),
+        right,
+    );
+}
+
+fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect) {
+    let mut spans = Vec::new();
     for (n, k) in Kind::ALL.iter().enumerate() {
         let text = if app.loaded {
             format!(" {} {} {} ", n + 1, title(*k), app.count(*k))
@@ -82,16 +140,13 @@ fn draw_tabs(f: &mut Frame, app: &App, area: Rect) {
         spans.push(Span::raw(" "));
         spans.push(Span::styled(text, style));
     }
-    f.render_widget(Paragraph::new(Line::from(spans)), left);
-    let live = if app.live {
-        Span::styled("● live ", Style::new().fg(Color::Green))
-    } else {
-        Span::styled("○ polling ", Style::new().fg(Color::DarkGray))
-    };
-    f.render_widget(
-        Paragraph::new(Line::from(live)).alignment(Alignment::Right),
-        right,
-    );
+    let places = place(area, &spans);
+    app.areas.tabs = Kind::ALL
+        .iter()
+        .enumerate()
+        .map(|(n, k)| (places[2 * n + 1], *k))
+        .collect();
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn headers(kind: Kind) -> (Vec<&'static str>, Vec<Constraint>) {
@@ -166,7 +221,7 @@ fn empty_text(app: &App) -> Vec<Line<'static>> {
     }
 }
 
-fn draw_list(f: &mut Frame, app: &App, area: Rect) {
+fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     let rows = app.rows(app.tab);
     let (list_area, details_area) = if area.height >= 14 && !rows.is_empty() {
         let [a, b] = Layout::vertical([Constraint::Min(5), Constraint::Length(6)]).areas(area);
@@ -213,6 +268,13 @@ fn draw_list(f: &mut Frame, app: &App, area: Rect) {
         .row_highlight_style(Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD));
     let mut state = TableState::default().with_selected(Some(app.selected_index()));
     f.render_stateful_widget(table, list_area, &mut state);
+    // Under the header row.
+    let rows_area = Rect {
+        y: list_area.y + 1,
+        height: list_area.height.saturating_sub(1),
+        ..list_area
+    };
+    app.areas.rows = Some((rows_area, state.offset()));
     if let (Some(area), Some(row)) = (details_area, app.current()) {
         draw_details(f, app, &row.id, &row.name, area);
     }
@@ -349,24 +411,70 @@ fn draw_message(f: &mut Frame, app: &App, area: Rect) {
             Span::raw(app.search.clone()),
         ])
     } else {
-        Line::styled(app.engine.clone(), Style::new().fg(Color::DarkGray))
+        Line::styled(app.endpoint.clone(), Style::new().fg(Color::DarkGray))
     };
     f.render_widget(Paragraph::new(line), area);
 }
 
-fn draw_keys(f: &mut Frame, app: &App, area: Rect) {
+fn draw_keys(f: &mut Frame, app: &mut App, area: Rect) {
     let mut spans = Vec::new();
-    for (n, (k, what)) in app.key_help().into_iter().enumerate() {
+    let hints = app.key_help();
+    for (n, (k, what)) in hints.iter().enumerate() {
         if n > 0 {
             spans.push(Span::raw("  "));
         }
         spans.push(Span::styled(
-            k,
+            *k,
             Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::raw(format!(" {what}")));
     }
+    let places = place(area, &spans);
+    // Each hint is a gap (but the first), its key and its words.
+    let mut at = 0;
+    for (n, (k, _)) in hints.iter().enumerate() {
+        if n > 0 {
+            at += 1;
+        }
+        let (key, words) = (places[at], places[at + 1]);
+        at += 2;
+        if let Some(event) = hint_key(k) {
+            app.areas
+                .keys
+                .push((key.union(words).intersection(area), event));
+        }
+    }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// A question, with Yes and No to click.
+fn draw_confirm(f: &mut Frame, app: &mut App, question: String) {
+    let button = Style::new()
+        .fg(Color::White)
+        .bg(ACCENT)
+        .add_modifier(Modifier::BOLD);
+    let buttons = vec![
+        Span::raw("  "),
+        Span::styled(" Yes ", button),
+        Span::raw("   "),
+        Span::styled(" No ", Style::new().add_modifier(Modifier::REVERSED)),
+    ];
+    let rect = popup(
+        f,
+        "Are you sure?",
+        vec![
+            Line::from(question),
+            Line::from(""),
+            Line::from(buttons.clone()),
+        ],
+    );
+    // Inside the border, on the third line.
+    let line = Rect::new(rect.x + 1, rect.y + 3, rect.width.saturating_sub(2), 1);
+    if line.y < rect.y + rect.height.saturating_sub(1) {
+        let places = place(line, &buttons);
+        app.areas.yes = Some(places[1]);
+        app.areas.no = Some(places[3]);
+    }
 }
 
 fn draw_help(f: &mut Frame, app: &App) {
@@ -388,12 +496,18 @@ fn draw_help(f: &mut Frame, app: &App) {
         key("/  Esc", "find, clear"),
         key("c", "prune what is not used"),
         key("F5", "refresh now"),
+        key("E", "podbag or Docker (saved)"),
+        key("m", "mouse on or off"),
         key("q", "quit"),
         head("Containers"),
         key("s x r", "start, stop, restart"),
         key("d", "remove"),
-        key("l  e", "logs, shell (sh)"),
     ];
+    lines.push(if app.shell {
+        key("l  e", "logs, shell (sh)")
+    } else {
+        key("l", "logs")
+    });
     if app.features.pause {
         lines.push(key("p", "pause or resume"));
     }
@@ -405,8 +519,8 @@ fn draw_help(f: &mut Frame, app: &App) {
     popup(f, "Keys", lines);
 }
 
-/// A box in the middle of the screen.
-fn popup(f: &mut Frame, title: &str, lines: Vec<Line>) {
+/// A box in the middle of the screen; where it is.
+fn popup(f: &mut Frame, title: &str, lines: Vec<Line>) -> Rect {
     let area = f.area();
     let width = lines
         .iter()
@@ -432,6 +546,7 @@ fn popup(f: &mut Frame, title: &str, lines: Vec<Line>) {
         ));
     f.render_widget(Clear, rect);
     f.render_widget(Paragraph::new(lines).block(block), rect);
+    rect
 }
 
 /// A drawn screen as text, one line per row.

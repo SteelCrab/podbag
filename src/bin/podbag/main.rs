@@ -277,7 +277,11 @@ fn dispatch(cmd: Cmd) -> i32 {
         Cmd::System {
             cmd: args::SystemCmd::DialStdio,
         } => service::dial_stdio(),
-        Cmd::Tui { once } => tui::run(once),
+        Cmd::Tui {
+            once,
+            engine,
+            no_mouse,
+        } => tui::run(once, engine, !no_mouse),
         Cmd::System { cmd } => image::system(cmd),
         Cmd::Ps { all, quiet } => container::ps(all, quiet),
         Cmd::Inspect { container: c } => container::inspect(&c),
@@ -426,6 +430,37 @@ mod tests {
         let argv: Vec<String> = args.iter().map(|a| a.to_string()).collect();
         let cli = parse(&argv).expect("valid arguments");
         wsl_argv(&cli, argv)
+    }
+
+    #[test]
+    fn tui_takes_an_engine_and_no_mouse() {
+        use podbag::client::Choice;
+        let tui = |args: &[&str]| {
+            let argv: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            parse(&argv).map(|cli| match cli.cmd {
+                Cmd::Tui {
+                    engine, no_mouse, ..
+                } => (engine, no_mouse),
+                _ => panic!("not tui"),
+            })
+        };
+        assert_eq!(tui(&["tui"]).unwrap(), (None, false));
+        assert_eq!(
+            tui(&["tui", "--engine", "docker", "--no-mouse"]).unwrap(),
+            (Some(Choice::Docker), true)
+        );
+        assert_eq!(
+            tui(&["tui", "--engine=podbag"]).unwrap(),
+            (Some(Choice::Podbag), false)
+        );
+        assert_eq!(
+            tui(&["tui", "--engine", "unix:///run/x.sock"]).unwrap().0,
+            Some(Choice::Socket("/run/x.sock".into()))
+        );
+        let e = tui(&["tui", "--engine", "tcp://1.2.3.4:2375"])
+            .err()
+            .unwrap();
+        assert!(e.to_string().contains("podbag, docker"), "{e}");
     }
 
     #[test]
