@@ -167,3 +167,46 @@ pub fn scoped(root: &Path, cmd: Cmd) -> io::Result<i32> {
     }
     Ok(status.code().unwrap_or(1))
 }
+
+pub fn course_command(root: &Path) -> io::Result<i32> {
+    use volume_lesson::course::{Attempt, Step};
+    let _lock = Attempt::lock(root)?;
+    let mut attempt = Attempt::read(root)?;
+    let step = attempt.step()?;
+    let line = step
+        .command(attempt.port)
+        .and_then(|line| shlex::split(&line));
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if !line.as_ref().is_some_and(|line| {
+        args.iter()
+            .eq(line.iter().skip(1).map(std::ffi::OsStr::new))
+    }) {
+        return Err(io::Error::other(
+            "Use the command shown for the current Training step, or type exit.",
+        ));
+    }
+    if matches!(step, Step::RunWeb | Step::RunFirst) && attempt.refresh_port(root)? {
+        return Err(io::Error::other(format!(
+            "That port is in use. Copy the updated Training command for port {}.",
+            attempt.port
+        )));
+    }
+    let mut engine = engine_command(root)?;
+    engine.args(args);
+    let (status, output) = if step == Step::Read {
+        let result = engine.stderr(Stdio::inherit()).output()?;
+        io::stdout().write_all(&result.stdout)?;
+        (result.status, result.stdout)
+    } else {
+        (engine.status()?, Vec::new())
+    };
+    if !status.success() {
+        return Ok(status.code().unwrap_or(1));
+    }
+    step.verify_cli(root, &output)?;
+    attempt.advance(root)?;
+    if attempt.step()? == Step::Finish {
+        eprintln!("Verified. Type exit to finish the lab.");
+    }
+    Ok(0)
+}

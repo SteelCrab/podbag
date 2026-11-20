@@ -373,8 +373,10 @@ pub enum LabCmd {
         action: String,
         session: Option<String>,
         name: Option<String>,
-        #[arg(long)]
+        #[arg(long, conflicts_with = "course")]
         containers: bool,
+        #[arg(long)]
+        course: bool,
     },
     /// Install the downloaded .podbag module
     Install { file: std::path::PathBuf },

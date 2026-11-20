@@ -1,5 +1,6 @@
 //! Installed instructions and completion records for hands-on volume lessons. Lessons can include a small offline animation.
 pub mod containers;
+pub mod course;
 pub mod gui;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -17,16 +18,40 @@ pub const LIMIT: usize = 65_536;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Module {
     Containers,
+    Web,
+    Persistence,
+    Service,
     Volumes,
     Tui,
 }
 
 impl Module {
-    pub const ALL: [Self; 3] = [Self::Containers, Self::Volumes, Self::Tui];
+    pub const ALL: [Self; 6] = [
+        Self::Containers,
+        Self::Web,
+        Self::Persistence,
+        Self::Service,
+        Self::Volumes,
+        Self::Tui,
+    ];
+
+    pub fn format(self) -> &'static str {
+        match self {
+            Self::Containers => containers::FORMAT,
+            Self::Web => "podbag-web-basics-v1",
+            Self::Persistence => "podbag-volume-persistence-v1",
+            Self::Service => "podbag-web-service-lifecycle-v1",
+            Self::Volumes => gui::FORMAT,
+            Self::Tui => FORMAT,
+        }
+    }
 
     pub fn id(self) -> &'static str {
         match self {
             Self::Containers => "container-basics",
+            Self::Web => "web-basics",
+            Self::Persistence => "volume-persistence",
+            Self::Service => "web-service-lifecycle",
             Self::Volumes => "volume-basics",
             Self::Tui => "tui-volumes",
         }
@@ -40,18 +65,18 @@ impl Module {
     }
 
     pub fn for_format(format: &str) -> io::Result<Self> {
-        match format {
-            containers::FORMAT => Ok(Self::Containers),
-            gui::FORMAT => Ok(Self::Volumes),
-            FORMAT => Ok(Self::Tui),
-            _ => Err(io::Error::other("Unsupported practice module.")),
-        }
+        Self::ALL
+            .into_iter()
+            .find(|module| module.format() == format)
+            .ok_or_else(|| io::Error::other("Unsupported practice module."))
     }
 
     pub fn guide_url(self, lang: &str) -> Option<String> {
         let lang = lang.split(['-', '_', '.']).next().unwrap_or("en");
         let (post, locale) = match self {
-            Self::Containers => ("container-basics", if lang == "ko" { "ko/" } else { "" }),
+            Self::Containers | Self::Web | Self::Persistence | Self::Service => {
+                (self.id(), if lang == "ko" { "ko/" } else { "" })
+            }
             Self::Volumes => (
                 "cli-tui-volumes",
                 match lang {
@@ -137,7 +162,7 @@ fn read_file(path: &Path) -> io::Result<Option<Installed>> {
 }
 
 fn read_legacy(dir: &Path, module: Module) -> io::Result<Option<Installed>> {
-    if module == Module::Containers {
+    if !matches!(module, Module::Volumes | Module::Tui) {
         return Ok(None);
     }
     Ok(read_file(&dir.join("cli-tui-volumes.json"))?

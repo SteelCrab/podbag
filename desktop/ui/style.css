@@ -696,3 +696,7 @@ dialog.import { width: min(520px, calc(100vw - 48px)); }
 .practice-resources h2 { font-size: 16px; margin: 0; }
 .practice-workspace [role="alert"]:empty, .training-library [role="alert"]:empty { display: none; }
 .practice-resources { min-width: 0; overflow-x: auto; }
+
+.practice-start-option { margin-top: 16px; }
+.practice-ports { margin-top: 16px; padding: 16px; }
+.practice-ports > .button { margin-top: 8px; }

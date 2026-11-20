@@ -1087,66 +1087,80 @@ fn practice_volumes(
     session: Option<String>,
     name: Option<String>,
     containers: Option<bool>,
+    course: Option<bool>,
 ) -> Result<serde_json::Value, String> {
     use podbag::volume_lesson as lesson;
     let dir = lesson::directory().map_err(|e| e.to_string())?;
     let containers = containers.unwrap_or(false);
-    #[cfg(unix)]
-    {
-        if containers {
-            let view = lesson::containers::view(
-                &dir,
-                &action,
-                session.as_deref(),
-                name.as_deref().unwrap_or(""),
-            );
-            return serde_json::to_value(view.map_err(|e| e.to_string())?)
-                .map_err(|e| e.to_string());
+    let course = course.unwrap_or(false);
+    let request = |action: &str| -> Result<serde_json::Value, String> {
+        #[cfg(unix)]
+        {
+            let target = name.as_deref().unwrap_or("");
+            let result = if course {
+                lesson::course::view(&dir, action, session.as_deref(), target)
+                    .map(|view| serde_json::to_value(view))
+            } else if containers {
+                lesson::containers::view(&dir, action, session.as_deref(), target)
+                    .map(|view| serde_json::to_value(view))
+            } else {
+                lesson::gui::view(&dir, action, session.as_deref(), target)
+                    .map(|view| serde_json::to_value(view))
+            };
+            result
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())
         }
-        let view = lesson::gui::view(
-            &dir,
-            &action,
-            session.as_deref(),
-            name.as_deref().unwrap_or(""),
-        );
-        serde_json::to_value(view.map_err(|e| e.to_string())?).map_err(|e| e.to_string())
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            let active = if course {
+                lesson::course::ACTIVE
+            } else if containers {
+                lesson::containers::ACTIVE
+            } else {
+                lesson::gui::ACTIVE
+            };
+            if !dir.join(active).exists() && action == "status" {
+                return Ok(serde_json::Value::Null);
+            }
+            let path = podbag::wsl::wsl_path(&dir.to_string_lossy())?;
+            let mut command = std::process::Command::new("wsl.exe");
+            command.args([
+                "-d",
+                podbag::wsl::DISTRO,
+                "--exec",
+                podbag::wsl::ENGINE,
+                "lab",
+                "desktop-view",
+            ]);
+            if course {
+                command.arg("--course");
+            } else if containers {
+                command.arg("--containers");
+            }
+            let out = command
+                .args([&path, action])
+                .args(session.as_deref())
+                .args(name.as_deref())
+                .creation_flags(0x08000000)
+                .output()
+                .map_err(|e| e.to_string())?;
+            if !out.status.success() {
+                return Err(String::from_utf8_lossy(&out.stderr).trim().to_owned());
+            }
+            serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())
+        }
+    };
+    if course && action == "open-web" {
+        let view = request("show-web")?;
+        let port = view["web"]["port"]
+            .as_u64()
+            .and_then(|port| u16::try_from(port).ok())
+            .ok_or("The practice port is unavailable.")?;
+        open::that_detached(format!("http://127.0.0.1:{port}/")).map_err(|e| e.to_string())?;
     }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        let active = if containers {
-            lesson::containers::ACTIVE
-        } else {
-            lesson::gui::ACTIVE
-        };
-        if !dir.join(active).exists() && action == "status" {
-            return Ok(serde_json::Value::Null);
-        }
-        let path = podbag::wsl::wsl_path(&dir.to_string_lossy())?;
-        let mut command = std::process::Command::new("wsl.exe");
-        command.args([
-            "-d",
-            podbag::wsl::DISTRO,
-            "--exec",
-            podbag::wsl::ENGINE,
-            "lab",
-            "desktop-view",
-        ]);
-        if containers {
-            command.arg("--containers");
-        }
-        let out = command
-            .args([&path, &action])
-            .args(session)
-            .args(name)
-            .creation_flags(0x08000000)
-            .output()
-            .map_err(|e| e.to_string())?;
-        if !out.status.success() {
-            return Err(String::from_utf8_lossy(&out.stderr).trim().to_owned());
-        }
-        serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())
-    }
+    request(&action)
 }
 
 #[tauri::command]
@@ -1179,7 +1193,13 @@ fn volume_tools_lab(
             continue;
         }
         record.package.animation = None;
-        records.push(LessonRecord { id: key, record });
+        let steps =
+            lesson::course::instructions(lesson::Module::parse(key).map_err(|e| e.to_string())?);
+        records.push(LessonRecord {
+            id: key,
+            record,
+            steps,
+        });
     }
     Ok(records)
 }
@@ -1187,6 +1207,8 @@ fn volume_tools_lab(
 #[derive(serde::Serialize)]
 struct LessonRecord {
     id: &'static str,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    steps: Vec<podbag::volume_lesson::course::Instruction>,
     #[serde(flatten)]
     record: podbag::volume_lesson::Installed,
 }

@@ -20,7 +20,18 @@ pub fn command(cmd: LabCmd) -> i32 {
                 session,
                 name,
                 containers,
+                course,
             } => {
+                if course {
+                    let snapshot = volume_lesson::course::view(
+                        &library,
+                        &action,
+                        session.as_deref(),
+                        name.as_deref().unwrap_or(""),
+                    )?;
+                    println!("{}", serde_json::to_string(&snapshot)?);
+                    return Ok(());
+                }
                 if containers {
                     let snapshot = volume_lesson::containers::view(
                         &library,
@@ -209,8 +220,11 @@ fn session(
     if !io::stdin().is_terminal() {
         return Err(io::Error::other("Open the lab in an interactive terminal."));
     }
-    let container_lab = module == Module::Containers;
-    let prompt = if container_lab {
+    let course = !volume_lesson::course::steps(module).is_empty();
+    let container_lab = module == Module::Containers || course;
+    let prompt = if course {
+        "training $ "
+    } else if container_lab {
         "container-lab $ "
     } else {
         "volume-lab $ "
@@ -232,7 +246,17 @@ fn session(
             return Err(io::Error::other("The practice engine did not start."));
         }
         let dir = Path::new(line.trim_end());
+        if course {
+            volume_lesson::course::Attempt::start(dir, module)?;
+        }
         registration = match module {
+            Module::Web | Module::Persistence | Module::Service => {
+                Some(volume_lesson::gui::Registration::open_for(
+                    library,
+                    dir,
+                    volume_lesson::course::ACTIVE,
+                )?)
+            }
             Module::Containers => Some(volume_lesson::gui::Registration::open_for(
                 library,
                 dir,
@@ -255,6 +279,10 @@ fn session(
                 .status()?;
         } else {
             terminal_without_shell(dir, prompt)?;
+        }
+        if course {
+            return Ok(volume_lesson::course::Attempt::read(dir)?.step()?
+                == volume_lesson::course::Step::Finish);
         }
         Ok(dir.join("verified").is_file())
     })();
@@ -323,7 +351,12 @@ pub fn scoped(root: &Path, cmd: crate::args::Cmd) -> i32 {
         return 1;
     }
     if root.join("run/container-lab").is_file() {
-        return match containers::scoped(root, cmd) {
+        let result = if volume_lesson::course::Attempt::active(root) {
+            containers::course_command(root)
+        } else {
+            containers::scoped(root, cmd)
+        };
+        return match result {
             Ok(code) => code,
             Err(e) => {
                 eprintln!("podbag: {e}");

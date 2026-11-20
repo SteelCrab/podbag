@@ -16,6 +16,9 @@ function validTutorial(pack) {
 const JSON_LESSON = "volume-api";
 const TRAINING_FORMATS = new Map([
   ["podbag-container-basics-v1", "container-basics"],
+  ["podbag-web-basics-v1", "web-basics"],
+  ["podbag-volume-persistence-v1", "volume-persistence"],
+  ["podbag-web-service-lifecycle-v1", "web-service-lifecycle"],
   [GUI_VOLUME_FORMAT, "volume-basics"],
   ["podbag-cli-tui-volumes-v1", "tui-volumes"],
 ]);
@@ -46,18 +49,18 @@ function trainingEntries() {
 
 function setInstalledPractice(records) {
   S.trainingRecords = records;
-  S.practiceInstalled = records.some(r => r.id === volumePractice.id);
-  S.practiceContainers = records.some(r => r.id === containerPractice.id);
+  S.practiceInstalled = records.some(r => r.id === volumePractice.id || courseUsesVolumes(r));
+  S.practiceContainers = records.some(r => r.id === containerPractice.id || r.steps?.length);
 }
 
-function renderPracticeProgress(panel, announcement, practice, stage) {
+function renderPracticeProgress(panel, announcement, practice, stage, liveCommand) {
   const complete = stage === "complete";
   const current = practice.steps.findIndex(([key]) => key === (stage === "restart" ? "stop" : stage));
   const label = (key) => t(practice.namespace + key);
   const rows = practice.steps.map(([key, command], index) => {
     const done = complete || index < current;
     const active = index === current;
-    const line = active && (stage === "restart" ? "exit" : key === "start" ? practiceStartCommand(practice.id) : command);
+    const line = active && (stage === "restart" ? "exit" : key === "start" ? practiceStartCommand(practice.id) : (liveCommand || command));
     return h("li", { class: "training-step", "data-state": done ? "done" : active ? "current" : "pending",
       "aria-current": active ? "step" : null },
       h("div", { class: "training-step-heading" },
@@ -72,9 +75,12 @@ function renderPracticeProgress(panel, announcement, practice, stage) {
   });
   announcement.textContent = complete ? t("tutorial.complete")
     : practice.steps[current] ? label(practice.steps[current][0]) + " · " + t("practice.current") : "";
-  put(panel, h("ol", { class: "training-steps", role: "list" }, rows),
+  put(panel,
+    complete ? h("p", { class: "tutorial-progress", text: t("tutorial.complete") }) : null,
+    h("ol", { class: "training-steps", role: "list" }, rows),
     complete ? h("div", { class: "training-repeat" }, h("p", { text: t("training.terminalStart") }),
       codeLine(practiceStartCommand(practice.id))) : null);
+  panel.querySelector('[aria-current="step"]')?.scrollIntoView({ block: "nearest" });
 }
 
 function renderTutorials(main) {
@@ -126,7 +132,7 @@ function renderTutorials(main) {
     const records = id ? S.trainingRecords.filter(r => r.id === id) : S.trainingRecords;
     const entries = records.map(record => {
       const lesson = trainingWords(record.package);
-      const practice = record.id === containerPractice.id ? containerPractice : record.id === volumePractice.id ? volumePractice : null;
+      const practice = practiceFor(record);
       const detail = id && practice;
       const progress = detail ? h("div", { class: "training-progress" })
         : h("p", { class: "tutorial-progress", role: "status",
@@ -159,9 +165,9 @@ function renderTutorials(main) {
       !entries.length && !jsonOverview && !jsonDetail ? h("p", { class: "nothing", text: t("tutorial.empty") }) : null);
     for (const {record, practice, progress, announcement} of entries) {
       if (!practice) continue;
-      watchPractice(progress, practice, null, { completed: record.completed, onStage: (stage) => {
+      watchPractice(progress, practice, null, { completed: record.completed, onStage: (stage, command) => {
         if (id) {
-          renderPracticeProgress(progress, announcement, practice, stage);
+          renderPracticeProgress(progress, announcement, practice, stage, command);
           return;
         }
         const current = stage === "restart" ? "stop" : stage;
