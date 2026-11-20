@@ -376,8 +376,18 @@ docker compose build --builder podbag
 
 ### Which engine they use
 
-- `DOCKER_HOST`, when it is a Unix socket (`unix://…`).
-- Otherwise podbag's own socket:
+- They manage podbag, Docker (Docker Engine or Docker Desktop), or a socket you name.
+- The order:
+  1. `podbag tui --engine podbag|docker|unix:///path`, for one run.
+  2. The saved choice. Both UIs read and write it in `ui.json`: `~/.podbag/ui.json` on
+     macOS, `~/.config/podbag/ui.json` on Linux, `%LOCALAPPDATA%\podbag\ui.json` on
+     Windows.
+  3. `DOCKER_HOST`, when it is a Unix socket (`unix://…`).
+  4. podbag's own socket.
+- Docker is found as the docker CLI finds it: `DOCKER_HOST`, the current context, then the
+  usual sockets.
+- Docker is never started. When it does not answer, the UIs say how to start it.
+- podbag's own socket:
   - Linux: `$XDG_RUNTIME_DIR/podbag/docker.sock` (as root: `/run/podbag/docker.sock`).
     When nothing answers, they start `podbag system service`. It stops a minute after the
     last client.
@@ -393,6 +403,11 @@ docker compose build --builder podbag
 - The lists change as the engine's events come. Without events, they are read every 2
   seconds.
 - It fits a terminal of 80×24.
+- The top line shows the engine. On macOS, with podbag, it also shows the VM's state
+  (running, standby, starting or stopped). It reads the state from files, so it never
+  wakes the VM.
+- When a newer podbag is out, the top line says "Update x.y.z available".
+  `PODBAG_NO_UPDATE_CHECK=1` turns the check off.
 
 | Key | What it does |
 |---|---|
@@ -401,13 +416,38 @@ docker compose build --builder podbag
 | `Enter` or `i` | All details (inspect) |
 | `s`, `x`, `r` | Start, stop, restart a container |
 | `l` | Logs, as they come |
-| `e` | A shell: `podbag exec -it <container> sh`, then back to the TUI |
+| `e` | A shell in the container, then back to the TUI |
 | `d` | Remove (it asks first) |
 | `p` | Pull an image (in Images) |
 | `c` | Remove all that is not used (it asks first) |
 | `/` | Search. `Esc` clears it |
+| `E` | Switch between podbag and Docker. The choice is saved |
+| `m` | Mouse on or off |
 | `?` | All keys |
 | `q` | Quit |
+
+#### The engine
+
+- `E`, or a click on the engine's name, switches between podbag and Docker. From a socket,
+  it goes to podbag.
+- The choice is saved in `ui.json`, so the next `podbag tui` and the desktop app use it
+  too.
+- The shell (`e`) is `podbag exec -it <container> sh` with podbag. With Docker, it is
+  `docker exec -it <container> sh`. Without the docker CLI, there is no `e`.
+- With Docker, pause (`p`), rename (`n`), stats and top show, because Docker has them.
+
+#### The mouse
+
+- Click a tab to switch the list. Click a row to select it.
+- Double-click a row to see all its details (like `Enter`).
+- Click a key at the bottom to do what the key does.
+- Click Yes or No in a question.
+- The wheel scrolls the list, the details and the logs.
+- While the TUI has the mouse, the terminal does not select text. To select text, hold
+  `Shift` while you drag. Some macOS terminals use `Option` instead, for example iTerm2.
+  In Terminal.app, View > Allow Mouse Reporting (`⌘R`) gives the mouse back to the
+  terminal.
+- `m` turns the mouse off and on. `podbag tui --no-mouse` starts with it off.
 
 ### podbag-desktop
 
