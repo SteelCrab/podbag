@@ -143,7 +143,7 @@ fn error_since(log: &Path, at: u64) -> String {
     }
 }
 
-/// `podbag vm start|stop|status|logs`.
+/// `podbag vm start|stop|status|logs|resources`.
 pub fn vm_command(args: &[String]) -> i32 {
     let result = match args.first().map(String::as_str) {
         // A round trip to the VM's agent: the VM is up, and works.
@@ -159,6 +159,9 @@ pub fn vm_command(args: &[String]) -> i32 {
             }
             _ => return 1,
         },
+        Some("resources") => {
+            super::host::home().and_then(|home| super::resources::command(&home, &args[1..]))
+        }
         Some("status") => paths().map(|p| println!("{}", status(&p))),
         Some("stop") => stop(),
         Some("logs") => paths().and_then(|p| {
@@ -167,7 +170,7 @@ pub fn vm_command(args: &[String]) -> i32 {
             print!("{log}");
             Ok(())
         }),
-        _ => Err("usage: podbag vm start|stop|status|logs".into()),
+        _ => Err("usage: podbag vm start|stop|status|logs|resources".into()),
     };
     match result {
         Ok(()) => 0,
