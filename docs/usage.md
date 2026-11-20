@@ -506,6 +506,84 @@ docker compose build --builder podbag
 - Languages: English, 한국어, 日本語, 简体中文, Filipino, Español and Tiếng Việt. The app
   follows the system language. Settings can change it.
 
+#### Engine switch
+
+- "This window: podbag / Docker" sits at the top of the sidebar and in Settings.
+- The choice is saved in `ui.json`. `podbag tui` uses the same choice.
+- Switching reloads the lists. The app never starts Docker. When Docker does not answer,
+  it says so: "Docker is not running. Start Docker Desktop."
+- With Docker, Open shell runs `docker exec -it <container> sh`. It is hidden when the
+  docker CLI is missing. Pause, rename, stats and top show when the engine has them.
+- The tray shows the engine in use.
+
+#### Sidebar
+
+- Drag its edge to change its width (160–360 px). A double click sets it back.
+- The sidebar button in the top bar makes it a narrow rail of icons. Keys: `⌃⌘S` on
+  macOS, `Ctrl+B` elsewhere.
+- Below about 720 px it becomes a rail by itself. It comes back when there is room.
+- The edge works with the keyboard: arrow keys change the width, `Home` and `End` go to
+  the limits, `Enter` hides or shows the sidebar.
+- The app keeps the width and the rail choice.
+- Back and forward: the buttons in the top bar, `⌘[` `⌘]` on macOS, `Alt+←` `Alt+→`
+  elsewhere. `⌘K` or `Ctrl+K` goes to the search box.
+
+#### VM card and status bar
+
+- The VM card (podbag on macOS and Windows) shows the VM's state, running containers,
+  CPU and memory, and Start or Stop. It reads `podbag vm status --json`, which wakes
+  nothing. It updates only while the window shows.
+- The status bar shows podbag's version, a new version when one is known, a Terminal
+  button, the engine's state, "N of M running", the VM's memory and where the `docker`
+  command goes.
+
+#### Settings
+
+- Settings opens from the sidebar, from the tray (Settings…), with `⌘,` on macOS and
+  with `Ctrl+,` elsewhere.
+- Virtual machine (podbag on macOS): the state, the settings in use, uptime and disk use.
+  Start, Stop and Restart. CPUs, memory and the idle power-off time (0 = never). Apply
+  saves them with `podbag vm set`.
+  - When the VM runs, Apply asks: Restart now (it says how many containers stop) or At
+    the next start.
+  - When an environment variable (`PODBAG_VM_CPUS`, …) sets a value, the app says so.
+  - Windows: the state, Start and Stop only. WSL's CPUs and memory are set for all
+    distributions in `.wslconfig`. podbag does not change them.
+- Updates: podbag's version and the app's version. Check for updates. The app also
+  checks when the window opens, at most once a day. While the window is closed, it asks
+  nothing.
+  - Update podbag runs `podbag upgrade --yes`. When podbag's folder needs administrator
+    rights, the app shows the command (`sudo <path> upgrade`) with Copy and Open terminal.
+  - The desktop app has no installer yet. It cannot update itself.
+- The tray shows "Update available (x.y.z)…" when one is known. It opens Updates.
+
+#### Pull panel
+
+- Pull image on Images opens it. `⌘⇧P` (macOS) or `Ctrl+Shift+P` opens it from any
+  page.
+- One field: type to search Docker Hub, or paste a full reference. `↑` `↓` move, `Enter`
+  pulls, `Esc` closes.
+- A search result asks for the tag (`latest` first), then pulls.
+- When the engine cannot search (podbag today), the panel says so. Type the full name.
+- Pull from: Docker Hub, GitHub, Amazon ECR, Quay.io, Google Artifact Registry, GitLab or
+  your own registry. Each shows who is logged in.
+- Log in asks for a user and a password or token. The password goes only to the login
+  program's stdin. The app does not keep it or show it. ECR and Google Artifact Registry
+  show their cloud's login command.
+- A private pull sends the login only to an engine on this computer.
+
+#### docker command
+
+- When `docker` goes to another engine (for example Docker Desktop), a banner says so:
+  what you run in a terminal does not show here.
+- Use podbag for docker points the `docker` command at podbag with podbag's own docker
+  context. Other contexts stay as they are. The banner, the status bar, Settings and the
+  tray all offer it. Switch back goes to the context in use before.
+- When `DOCKER_HOST` is set, shells that set it do not follow the switch. The app says so.
+- Without the docker CLI, the app says so and hides the switch.
+- Import from Docker (on Images) copies chosen images from Docker to podbag. It only
+  reads from Docker.
+
 ### Build the desktop app
 
 - It is a separate program in `desktop/` (Tauri 2). The `podbag` binary does not carry
