@@ -344,7 +344,8 @@ const windowBar = window.podbagWindowToolbar && document.getElementById("window-
 function setupWindowBar() {
   if (!windowBar) return;
   const actions = document.getElementById("window-actions");
-  windowBar.prepend(document.querySelector(".brand"), document.getElementById("engine"));
+  windowBar.prepend(document.querySelector(".brand"));
+  document.getElementById("engine").remove();
   const reload = iconButton("refresh", "", () => S.engine?.reachable ? refresh() : connect(false));
   const settings = iconButton("settings", "", () => go("settings"));
   actions.append(reload, settings);
@@ -411,8 +412,9 @@ function engineState() {
 }
 
 function renderEngine() {
-  const [cls, text] = engineState();
   const el = document.getElementById("engine");
+  if (!el) return;
+  const [cls, text] = engineState();
   el.className = `engine engine-${cls}`;
   el.title = (S.engine && (S.engine.version || S.engine.error)) || "";
   el.replaceChildren(h("span", { class: "dot", "aria-hidden": "true" }), h("span", { text }));
