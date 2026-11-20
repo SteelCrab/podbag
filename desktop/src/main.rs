@@ -6,6 +6,8 @@
 
 mod cli;
 mod commands;
+mod dockercmd;
+mod images;
 mod settings;
 mod strings;
 
@@ -18,7 +20,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent, Wry};
 
@@ -43,6 +45,11 @@ struct TrayItems {
     running: MenuItem<Wry>,
     open: MenuItem<Wry>,
     vm: Option<MenuItem<Wry>>,
+    /// Where the `docker` command goes: podbag, or back where it was.
+    docker: Submenu<Wry>,
+    docker_podbag: CheckMenuItem<Wry>,
+    docker_other: CheckMenuItem<Wry>,
+    settings: MenuItem<Wry>,
     quit: MenuItem<Wry>,
 }
 
@@ -54,6 +61,8 @@ struct AppState {
     /// The engine's version (`podbag --version`), once asked.
     engine_version: Mutex<Option<String>>,
     version_asked: AtomicBool,
+    /// Where the `docker` command goes, as last read (files only).
+    docker: Mutex<Option<dockercmd::DockerCommand>>,
     settings: Mutex<Settings>,
     settings_file: Mutex<Option<PathBuf>>,
     /// The events stream, while the window is open.
@@ -68,6 +77,8 @@ struct AppState {
     /// Running containers, as last seen.
     running: Mutex<Option<usize>>,
     tray: Mutex<Option<TrayItems>>,
+    /// macOS: Settings… in the app menu.
+    app_settings: Mutex<Option<MenuItem<Wry>>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -90,6 +101,7 @@ impl AppState {
             podbag,
             engine_version: Mutex::new(None),
             version_asked: AtomicBool::new(false),
+            docker: Mutex::new(None),
             settings: Mutex::new(Settings::default()),
             settings_file: Mutex::new(None),
             watching: AtomicBool::new(false),
@@ -101,6 +113,7 @@ impl AppState {
             engine: Mutex::new(EngineState::Unknown),
             running: Mutex::new(None),
             tray: Mutex::new(None),
+            app_settings: Mutex::new(None),
         }
     }
 
@@ -213,13 +226,126 @@ fn features(state: State<'_, AppState>, sample: Option<String>) -> Features {
 }
 
 #[tauri::command(async)]
-fn pull(app: AppHandle, state: State<'_, AppState>, image: String) -> Result<(), String> {
-    state
-        .client()
-        .pull(&image, |line| {
+/// Pull `image` from `location` (with `host` for ECR, GAR or another registry), with the
+/// login for its registry when the engine is local. Gives the reference pulled.
+fn pull(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    image: String,
+    location: Option<String>,
+    host: Option<String>,
+) -> Result<String, String> {
+    let location = match &location {
+        Some(id) => Some(images::location(id, host.as_deref().unwrap_or(""))?),
+        None => None,
+    };
+    let reference = images::reference(&image, location.as_ref())?;
+    images::pull(
+        &state.client(),
+        &state.target(),
+        &reference,
+        podbag::client::registry_auth,
+        |line| {
             let _ = app.emit("pull-progress", line);
-        })
-        .map_err(|e| e.message)
+        },
+    )?;
+    Ok(reference)
+}
+
+/// Search Docker Hub through the engine.
+#[tauri::command(async)]
+fn search(state: State<'_, AppState>, term: String) -> images::Search {
+    images::search(&state.client(), &term)
+}
+
+/// The pull locations and who is logged in there (account names only).
+#[tauri::command(async)]
+fn registries(hosts: Vec<(String, String)>) -> Vec<images::LocationInfo> {
+    images::locations(&images::current_logins(), &hosts)
+}
+
+/// Log in to a location. The password goes to the login program's stdin only.
+#[tauri::command(async)]
+fn registry_login(
+    state: State<'_, AppState>,
+    location: String,
+    host: String,
+    user: String,
+    password: String,
+) -> Result<(), String> {
+    let loc = images::location(&location, &host)?;
+    if loc.needs_host() && loc.host().is_empty() {
+        return Err("the registry needs a host".into());
+    }
+    let server = if loc == podbag::client::Location::DockerHub {
+        String::new()
+    } else {
+        loc.host()
+    };
+    let docker = podbag::client::find_docker_cli();
+    podbag::client::login(&state.podbag, docker.as_deref(), &server, &user, &password)
+}
+
+/// podbag's own socket (where `docker` goes after "Use podbag for docker").
+fn podbag_socket(podbag: &std::path::Path) -> PathBuf {
+    match Endpoint::podbag_default(podbag) {
+        Ok(Endpoint::Socket { path, .. }) => path,
+        _ => PathBuf::new(),
+    }
+}
+
+/// Where the `docker` command goes. It reads files only.
+#[tauri::command(async)]
+fn docker_command(state: State<'_, AppState>) -> dockercmd::DockerCommand {
+    let now = dockercmd::current(&podbag_socket(&state.podbag));
+    *lock(&state.docker) = Some(now.clone());
+    now
+}
+
+/// Point the `docker` command at podbag (`use`), or back where it was (`back`).
+#[tauri::command(async)]
+fn docker_switch(app: AppHandle, to: String) -> Result<dockercmd::DockerCommand, String> {
+    switch_docker(&app, &to)
+}
+
+fn switch_docker(app: &AppHandle, to: &str) -> Result<dockercmd::DockerCommand, String> {
+    let state = app.state::<AppState>();
+    let docker = podbag::client::find_docker_cli().ok_or("the docker CLI is not installed")?;
+    let socket = podbag_socket(&state.podbag);
+    match to {
+        "use" => podbag::client::use_podbag(&docker, &socket)?,
+        "back" => drop(podbag::client::switch_back(&docker)?),
+        _ => return Err(format!("unknown switch {to}")),
+    }
+    let now = dockercmd::current(&socket);
+    *lock(&state.docker) = Some(now.clone());
+    update_tray(app);
+    let _ = app.emit("docker-changed", ());
+    Ok(now)
+}
+
+fn docker_client(podbag: &std::path::Path) -> Result<Client, String> {
+    Target::find(Some(&Choice::Docker), podbag).map(|t| Client::new(t.endpoint))
+}
+
+/// Docker's images, to copy to podbag. Only read; Docker is never started.
+#[tauri::command(async)]
+fn docker_images(state: State<'_, AppState>) -> Result<Value, String> {
+    let client = docker_client(&state.podbag)?;
+    if client.ping().is_err() {
+        return Err(podbag::client::choice::docker_down().into());
+    }
+    commands::list(&client, "images")
+}
+
+/// Copy images from Docker to podbag (this window must use podbag).
+#[tauri::command(async)]
+fn import_images(state: State<'_, AppState>, names: Vec<String>) -> Result<(), String> {
+    if !state.is_podbag() {
+        return Err("this window does not use podbag".into());
+    }
+    let from = docker_client(&state.podbag)?;
+    images::import(&from, &state.client(), &names)
 }
 
 #[derive(Clone, Serialize)]
@@ -457,6 +583,12 @@ fn show_window(app: &AppHandle) {
     let _ = app.emit("shown", ());
 }
 
+/// Open the window (or bring it forward) on the Settings page.
+fn open_settings(app: &AppHandle) {
+    show_window(app);
+    let _ = app.emit("open-settings", ());
+}
+
 fn update_tray(app: &AppHandle) {
     let state = app.state::<AppState>();
     let lang = state.language();
@@ -464,6 +596,10 @@ fn update_tray(app: &AppHandle) {
     let running = *lock(&state.running);
     let target = state.target();
     let update = state.known_update();
+    let docker = lock(&state.docker).clone();
+    if let Some(item) = lock(&state.app_settings).as_ref() {
+        let _ = item.set_text(strings::text(lang, "tray.settings", None));
+    }
     let mut tray = lock(&state.tray);
     let Some(items) = tray.as_mut() else {
         return;
@@ -504,6 +640,30 @@ fn update_tray(app: &AppHandle) {
     };
     let _ = items.running.set_text(running);
     let _ = items.open.set_text(t("tray.open"));
+    let _ = items.settings.set_text(t("tray.settings"));
+    match &docker {
+        Some(d) if d.installed => {
+            let _ = items
+                .docker
+                .set_text(strings::fill(lang, "tray.docker", &[("name", &d.name)]));
+            let _ = items.docker.set_enabled(true);
+            let _ = items.docker_podbag.set_checked(d.is_podbag);
+            let _ = items.docker_podbag.set_enabled(!d.is_podbag);
+            let other = if d.is_podbag {
+                let back = d.previous.clone().unwrap_or_else(|| "default".into());
+                strings::fill(lang, "tray.dockerBack", &[("name", &back)])
+            } else {
+                d.name.clone()
+            };
+            let _ = items.docker_other.set_text(other);
+            let _ = items.docker_other.set_checked(!d.is_podbag);
+            let _ = items.docker_other.set_enabled(d.is_podbag);
+        }
+        _ => {
+            let _ = items.docker.set_text(t("tray.dockerMissing"));
+            let _ = items.docker.set_enabled(false);
+        }
+    }
     let _ = items.quit.set_text(t("tray.quit"));
     if let Some(vm) = &items.vm {
         let key = if engine == EngineState::VmRunning {
@@ -523,6 +683,8 @@ fn refresh_tray(app: &AppHandle, asked: bool) {
     let state = app.state::<AppState>();
     // Once: `podbag --version` needs no engine and wakes nothing.
     let _ = state.engine_version();
+    // The docker CLI's files only.
+    *lock(&state.docker) = Some(dockercmd::current(&podbag_socket(&state.podbag)));
     let own =
         state.is_podbag() && matches!(state.client().endpoint, Endpoint::Socket { own: true, .. });
     let ask_api = asked || state.visible.load(Ordering::SeqCst);
@@ -565,14 +727,27 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     } else {
         None
     };
+    let settings = item("settings", true)?;
     let quit = item("quit", true)?;
+    let check = |id: &str| CheckMenuItem::with_id(app, id, id, true, false, None::<&str>);
+    let docker_podbag = check("docker-podbag")?;
+    let docker_other = check("docker-other")?;
+    let docker = Submenu::with_id_and_items(
+        app,
+        "docker",
+        "docker",
+        false,
+        &[&docker_podbag, &docker_other],
+    )?;
+    let _ = docker_podbag.set_text("podbag");
     let separator = PredefinedMenuItem::separator(app)?;
     let separator2 = PredefinedMenuItem::separator(app)?;
     let mut entries: Vec<&dyn tauri::menu::IsMenuItem<Wry>> =
-        vec![&engine, &status, &running, &separator, &open];
+        vec![&engine, &status, &running, &separator, &open, &settings];
     if let Some(vm) = &vm {
         entries.push(vm);
     }
+    entries.push(&docker);
     entries.push(&separator2);
     entries.push(&quit);
     let menu = Menu::with_items(app, &entries)?;
@@ -585,6 +760,10 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
         running,
         open,
         vm,
+        docker,
+        docker_podbag,
+        docker_other,
+        settings,
         quit,
     };
     let icon = if cfg!(target_os = "macos") {
@@ -603,6 +782,17 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
             "update" => {
                 show_window(app);
                 let _ = app.emit("open-updates", ());
+            }
+            "settings" => open_settings(app),
+            id @ ("docker-podbag" | "docker-other") => {
+                let app = app.clone();
+                let to = if id == "docker-podbag" { "use" } else { "back" };
+                std::thread::spawn(move || {
+                    if let Err(e) = switch_docker(&app, to) {
+                        eprintln!("podbag-desktop: {e}");
+                    }
+                    update_tray(&app);
+                });
             }
             "quit" => {
                 app.state::<AppState>().stop_streams();
@@ -632,6 +822,31 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
+/// macOS: the app menu gets Settings… (⌘,). Other systems have no app menu: the page
+/// takes Ctrl+, itself.
+fn build_app_menu(app: &tauri::App) -> tauri::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let menu = Menu::default(app.handle())?;
+        if let Some(tauri::menu::MenuItemKind::Submenu(first)) = menu.items()?.into_iter().next() {
+            let label = strings::text(app.state::<AppState>().language(), "tray.settings", None);
+            let settings =
+                MenuItem::with_id(app, "app-settings", label, true, Some("CmdOrCtrl+,"))?;
+            first.insert(&settings, 2)?;
+            first.insert(&PredefinedMenuItem::separator(app)?, 3)?;
+            *lock(&app.state::<AppState>().app_settings) = Some(settings);
+        }
+        app.set_menu(menu)?;
+        app.on_menu_event(|app, event| {
+            if event.id() == "app-settings" {
+                open_settings(app);
+            }
+        });
+    }
+    let _ = app;
+    Ok(())
+}
+
 fn main() {
     let app = tauri::Builder::default()
         .manage(AppState::new())
@@ -657,6 +872,13 @@ fn main() {
             set_engine,
             updates,
             upgrade,
+            search,
+            registries,
+            registry_login,
+            docker_command,
+            docker_switch,
+            docker_images,
+            import_images,
             get_settings,
             set_settings,
         ])
@@ -668,6 +890,7 @@ fn main() {
                 *lock(&state.settings_file) = Some(file);
             }
             build_tray(app)?;
+            build_app_menu(app)?;
             let handle = app.handle().clone();
             std::thread::spawn(move || {
                 loop {
