@@ -1,0 +1,55 @@
+name: podbag-desktop
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+release: 1
+maintainer: pista <pista@firecrab.dev>
+description: Manage containers, images, volumes and networks with Podbag Desktop.
+homepage: https://podbag.dev
+license: Apache-2.0
+section: utils
+
+contents:
+  - src: ${BIN_DIR}/podbag-desktop
+    dst: /usr/lib/podbag-desktop/podbag-desktop
+    expand: true
+    file_info:
+      mode: 0755
+  - src: ${BIN_DIR}/podbag
+    dst: /usr/lib/podbag-desktop/podbag
+    expand: true
+    file_info:
+      mode: 0755
+  - src: /usr/lib/podbag-desktop/podbag-desktop
+    dst: /usr/bin/podbag-desktop
+    type: symlink
+  - src: desktop/linux/podbag-desktop.desktop
+    dst: /usr/share/applications/podbag-desktop.desktop
+  - src: desktop/icons/128x128.png
+    dst: /usr/share/icons/hicolor/128x128/apps/podbag-desktop.png
+  - src: LICENSE
+    dst: /usr/share/doc/podbag-desktop/LICENSE
+  - src: desktop/linux/podbag-desktop-engine
+    dst: /usr/share/podbag-desktop/podbag-desktop-engine
+    packager: deb
+
+overrides:
+  deb:
+    depends:
+      - libc6 (>= 2.36)
+      - libwebkit2gtk-4.1-0
+      - libayatana-appindicator3-1
+      - libxdo3
+      - uidmap
+      - passt
+    scripts:
+      postinstall: desktop/linux/postinst
+      preremove: desktop/linux/prerm
+  rpm:
+    depends:
+      - glibc >= 2.36
+      - webkit2gtk4.1
+      - libayatana-appindicator-gtk3
+      - libxdo.so.3()(64bit)
+      - shadow-utils
+      - passt

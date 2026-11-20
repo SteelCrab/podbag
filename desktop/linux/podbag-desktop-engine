@@ -1,0 +1,6 @@
+abi <abi/4.0>,
+include <tunables/global>
+
+profile podbag-desktop-engine /usr/lib/podbag-desktop/podbag flags=(unconfined) {
+  userns,
+}

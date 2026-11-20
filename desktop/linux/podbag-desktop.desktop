@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Podbag Desktop
+Comment=Manage containers, images, volumes and networks
+Exec=podbag-desktop
+Icon=podbag-desktop
+Terminal=false
+Categories=Development;

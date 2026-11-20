@@ -1,0 +1,89 @@
+name: Linux desktop packages
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build packages (${{ matrix.arch }})
+    strategy:
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-24.04 }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    container: rust:1-bookworm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build tools
+        env:
+          NFPM_VERSION: 2.48.0
+        run: |
+          apt-get update -qq
+          apt-get install -y --no-install-recommends jq libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
+          cd /tmp
+          url="https://github.com/goreleaser/nfpm/releases/download/v$NFPM_VERSION"
+          deb="nfpm_${NFPM_VERSION}_$(dpkg --print-architecture).deb"
+          curl -fsSLO "$url/$deb"
+          curl -fsSLO "$url/checksums.txt"
+          awk -v f="$deb" '$2 == f { print }' checksums.txt | sha256sum --check --strict -
+          dpkg -i "$deb"
+      - name: Build GUI and engine packages
+        run: desktop/linux/package.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: podbag-desktop-${{ matrix.arch }}
+          path: target/packages/
+          if-no-files-found: error
+
+  install:
+    name: Install and launch (${{ matrix.system }}, ${{ matrix.arch }})
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+        system: ['debian:12', 'fedora:44']
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    container: ${{ matrix.system }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: podbag-desktop-${{ matrix.arch }}
+          path: dist
+      - name: Install package and display tools
+        run: |
+          if command -v apt-get >/dev/null; then
+            apt-get update -qq
+            apt-get install -y --no-install-recommends ./dist/*.deb
+            apt-get install -y --no-install-recommends xvfb xauth xdotool dbus-daemon desktop-file-utils libglib2.0-bin curl
+          else
+            dnf install -y ./dist/*.rpm
+            dnf install -y xorg-x11-server-Xvfb xorg-x11-xauth xdotool dbus-daemon desktop-file-utils util-linux
+          fi
+      - name: Open the installed application
+        env:
+          # The outer CI container supplies isolation. It cannot create WebKit's nested sandbox.
+          WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS: '1'
+          LIBGL_ALWAYS_SOFTWARE: '1'
+        run: |
+          useradd --create-home desktop-test
+          runuser -u desktop-test -- dbus-run-session -- xvfb-run -a sh desktop/linux/test-installed.sh
+      - name: Remove package
+        run: |
+          if command -v apt-get >/dev/null; then
+            apt-get purge -y podbag-desktop
+          else
+            dnf remove -y podbag-desktop
+          fi
+          test ! -e /usr/bin/podbag-desktop
+          test ! -e /usr/lib/podbag-desktop/podbag
+          test ! -e /usr/share/applications/podbag-desktop.desktop
