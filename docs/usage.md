@@ -420,7 +420,9 @@ docker compose build --builder podbag
 - The top line shows the engine. On macOS, with podbag, it also shows the VM's state
   (running, standby, starting or stopped). It reads the state from files, so it never
   wakes the VM.
-- When a newer podbag is out, the top line says "Update x.y.z available".
+- The top line also shows where the `docker` command goes, for example
+  `docker → Docker Desktop`. It is hidden when the docker CLI is not installed.
+- When a newer podbag is out, the bottom line says "Update x.y.z available".
   `PODBAG_NO_UPDATE_CHECK=1` turns the check off.
 
 | Key | What it does |
@@ -432,10 +434,11 @@ docker compose build --builder podbag
 | `l` | Logs, as they come |
 | `e` | A shell in the container, then back to the TUI |
 | `d` | Remove (it asks first) |
-| `p` | Pull an image (in Images) |
+| `p` | Pull an image (in Images). `Tab` changes where from |
 | `c` | Remove all that is not used (it asks first) |
 | `/` | Search. `Esc` clears it |
 | `E` | Switch between podbag and Docker. The choice is saved |
+| `D` | Point the `docker` command at podbag, or back (it asks first) |
 | `m` | Mouse on or off |
 | `?` | All keys |
 | `q` | Quit |
@@ -449,6 +452,29 @@ docker compose build --builder podbag
 - The shell (`e`) is `podbag exec -it <container> sh` with podbag. With Docker, it is
   `docker exec -it <container> sh`. Without the docker CLI, there is no `e`.
 - With Docker, pause (`p`), rename (`n`), stats and top show, because Docker has them.
+
+#### The docker command
+
+- `D`, or a click on `docker → …`, points the `docker` command at podbag. It asks first.
+- It makes a docker context named `podbag` and uses it. The context in use before is
+  saved in `ui.json`. Other contexts stay as they are.
+- At podbag, `D` goes back to the context before (`default` when none is saved).
+- When `DOCKER_HOST` is set, contexts do not apply. Shells that set it keep using it.
+- `podbag system docker status|use|restore` does the same in a shell.
+
+#### Pull
+
+- `p` in Images opens the pull form.
+- `Tab` changes where from: Docker Hub, GitHub, Amazon ECR, Quay.io, Google Artifact
+  Registry, GitLab or another registry. `Shift+Tab` goes back.
+- The form shows who is logged in there. It reads the docker CLI's logins. It never shows
+  a password.
+- ECR, GAR and another registry need a host. Type it, then press `Enter`.
+- ECR and GAR also show the command to log in.
+- A short name gets the registry's host: `me/app:1` from GitHub is `ghcr.io/me/app:1`.
+- From Docker Hub, typing searches Docker Hub, when the engine can search. `↑` `↓` choose
+  a result. podbag cannot search yet, so there is no search with podbag.
+- The pull sends your login for that registry to the engine.
 
 #### The mouse
 
