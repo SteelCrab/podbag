@@ -1047,6 +1047,15 @@ open target/release/podbag.app
 ```
 
 - The script makes the bundle itself (Tauri's bundler needs the separate `tauri-cli`).
+- To include the CLI and its Linux guest, build the guest first and use `--with-cli`.
+  Rebuild this bundle to update the included CLI and keep the app signature valid.
+
+  ```sh
+  dev/vm.sh up                     # set up the Linux build VM once
+  dev/vm.sh run dev/macos/build-guest.sh
+  desktop/bundle-macos.sh release --with-cli
+  ```
+
 - Run bare, the executable's menu says About, Hide and Quit podbag, but macOS shows
   `podbag-desktop` as the menu bar's title and in the Dock. Only a bundle changes that.
 - Windows: the .exe's product name and file description are podbag.

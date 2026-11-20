@@ -1,25 +1,40 @@
 #!/bin/sh
-# Build podbag.app: the desktop app as a macOS app named podbag, with its icon.
-#   desktop/bundle-macos.sh [debug|release]      (default: release)
-# Writes target/<profile>/podbag.app. The executable inside keeps its file name,
-# podbag-desktop: `podbag` is the command-line program, in the same target folder.
+# Build podbag.app. Use --with-cli to include the CLI and its Linux VM guest.
+#   desktop/bundle-macos.sh [debug|release] [--with-cli]
+# For --with-cli, build the guest first with dev/vm.sh run dev/macos/build-guest.sh.
 # Open it with: open target/release/podbag.app
 set -eu
 cd "$(dirname "$0")/.."
 profile=${1:-release}
-case $profile in
-  release) cargo build --release -p podbag-desktop ;;
-  debug) cargo build -p podbag-desktop ;;
-  *) echo "usage: desktop/bundle-macos.sh [debug|release]" >&2; exit 2 ;;
+with_cli=${2:-}
+usage() {
+  echo "usage: desktop/bundle-macos.sh [debug|release] [--with-cli]" >&2
+  exit 2
+}
+[ "$#" -le 2 ] || usage
+case $with_cli in
+  '' | --with-cli) ;;
+  *) usage ;;
 esac
+case $profile in
+  release) set -- --release ;;
+  debug) set -- ;;
+  *) usage ;;
+esac
+if [ "$with_cli" = --with-cli ]; then
+  cargo build "$@" --bin podbag --features embed-guest
+fi
+cargo build "$@" -p podbag-desktop
 target=${CARGO_TARGET_DIR:-target}/$profile
 app=$target/podbag.app
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' desktop/Cargo.toml | head -n 1)
-rm -rf "$app"
-mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-cp "$target/podbag-desktop" "$app/Contents/MacOS/podbag-desktop"
-cp desktop/icons/icon.icns "$app/Contents/Resources/icon.icns"
-cat > "$app/Contents/Info.plist" <<PLIST
+stage=$(mktemp -d "$target/.podbag.XXXXXX")
+trap 'rm -rf "$stage"' EXIT
+bundle=$stage/podbag.app
+mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
+cp "$target/podbag-desktop" "$bundle/Contents/MacOS/podbag-desktop"
+cp desktop/icons/icon.icns "$bundle/Contents/Resources/icon.icns"
+cat > "$bundle/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -37,6 +52,12 @@ cat > "$app/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
-# An ad-hoc signature, for this Mac.
-codesign --force --sign - "$app" >/dev/null 2>&1 || true
+if [ "$with_cli" = --with-cli ]; then
+  cp "$target/podbag" "$bundle/Contents/MacOS/podbag"
+  # Sign the CLI first so signing the app preserves its virtualization entitlement.
+  dev/macos/sign.sh "$bundle/Contents/MacOS/podbag"
+fi
+codesign --force --sign - "$bundle"
+rm -rf "$app"
+mv "$bundle" "$app"
 echo "$app"
