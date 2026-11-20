@@ -600,6 +600,31 @@ cargo build --release -p podbag-desktop
   `/opt/homebrew/bin` and `~/.local/bin`. `PODBAG_BIN` sets another one.
 - There are no installers yet (.dmg, .msi, AppImage).
 
+#### Its name: podbag
+
+- The executable is `podbag-desktop`, so that it does not take the place of the `podbag`
+  command in the same folder. The name people see is podbag.
+- macOS: build `podbag.app` (the name podbag in the menu bar and the Dock, and its icon):
+
+```sh
+desktop/bundle-macos.sh            # target/release/podbag.app (debug: add "debug")
+open target/release/podbag.app
+```
+
+- The script makes the bundle itself (Tauri's bundler needs the separate `tauri-cli`).
+- Run bare, the executable's menu says About, Hide and Quit podbag, but macOS shows
+  `podbag-desktop` as the menu bar's title and in the Dock. Only a bundle changes that.
+- Windows: the .exe's product name and file description are podbag.
+- Linux: `desktop/podbag.desktop` is a desktop entry named podbag. Copy it to
+  `~/.local/share/applications/`.
+
+#### Its icon
+
+- The app icon follows Apple's grid: a rounded square of 824 px on a 1024 px canvas, a
+  soft shadow, a light blue background, and the bag from `docs/images/logo.png`.
+- At 16 and 32 px the bag takes more of the square, so it stays readable.
+- `desktop/icons/make-icons.sh` makes every icon file again (macOS: Swift and `iconutil`).
+
 ### What is hidden
 
 - The API has no `pause`, `rename`, `stats` or `top` yet. Both UIs ask the engine when they
