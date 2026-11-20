@@ -38,14 +38,28 @@
   const lists = { containers, images, volumes, networks };
   if (view === "empty") { lists.containers = []; lists.volumes = []; }
 
+  const docker = view.startsWith("docker");
   const engine = {
     platform: "macos",
+    engine: docker ? "docker" : "podbag",
+    engineName: docker ? "Docker" : "podbag",
+    shell: true,
     endpoint: "unix:///Users/me/.podbag/run/docker.sock",
     reachable: !["offline", "vm"].includes(view),
     vm: view === "vm" ? "stopped" : "running",
     version: "podbag 0.1.0 (API 1.47)",
     error: view === "vm" ? "vm-stopped" : view === "offline" ? "cannot connect to unix:///Users/me/.podbag/run/docker.sock: No such file or directory" : null,
   };
+  if (docker) {
+    engine.endpoint = "unix:///Users/me/.docker/run/docker.sock";
+    engine.vm = null;
+    engine.version = "Docker Desktop 4.50.0 29.0.1 (API 1.52)";
+  }
+  if (view === "docker-down") {
+    engine.reachable = false;
+    engine.version = null;
+    engine.error = "Docker is not running. Start Docker Desktop.";
+  }
   if (view === "offline") { engine.platform = "linux"; engine.vm = null; engine.endpoint = "unix:///run/user/1000/podbag/docker.sock"; }
 
   const logLines = [
@@ -55,6 +69,27 @@
     "2026/11/20 03:12:01 [notice] 1#1: start worker processes",
     ...Array.from({ length: 24 }, (_, i) => `10.77.0.1 - - [20/Nov/2026:03:${String(14 + i).padStart(2, "0")}:07 +0000] "GET /api/items?page=${i + 1} HTTP/1.1" 200 ${1200 + i * 37} "-" "curl/8.11.0"`),
   ];
+
+  // podbag vm status --json
+  const vmStatus = view === "vm" ? {
+    platform: "macos", state: "stopped", resourcesEditable: true, inUse: null,
+    next: { cpus: 4, memoryMiB: 4096, idleSeconds: 300 }, saved: { cpus: 4, memoryMiB: 4096, idleSeconds: null },
+    overriddenBy: [], pending: false,
+    limits: { cpusMin: 1, cpusMax: 10, memoryMinMiB: 1024, memoryMaxMiB: 20480, macMemoryMiB: 24576 },
+    uptimeSeconds: null, containers: null, cpuPercent: null, memoryUsedMiB: null, memoryTotalMiB: null,
+    disk: { path: "/Users/me/.podbag/vm/disk.img", allocatedBytes: 3_400_000_000, sizeBytes: 68_719_476_736 },
+  } : {
+    platform: "macos", state: "running", resourcesEditable: true,
+    inUse: { cpus: 4, memoryMiB: 4096, idleSeconds: 300 },
+    next: { cpus: 4, memoryMiB: 6144, idleSeconds: 300 }, saved: { cpus: null, memoryMiB: 6144, idleSeconds: null },
+    overriddenBy: view === "settings-vm" ? ["PODBAG_VM_CPUS"] : [], pending: true,
+    limits: { cpusMin: 1, cpusMax: 10, memoryMinMiB: 1024, memoryMaxMiB: 20480, macMemoryMiB: 24576 },
+    uptimeSeconds: 7560, containers: 3, cpuPercent: 12.5, memoryUsedMiB: 1350, memoryTotalMiB: 3900,
+    disk: { path: "/Users/me/.podbag/vm/disk.img", allocatedBytes: 5_800_000_000, sizeBytes: 68_719_476_736 },
+  };
+  const update = view.startsWith("settings") || view === "update-admin" || view === "collapsed"
+    ? { engine: "0.1.0", app: "0.1.0", latest: "0.2.0", newer: true, checked: now - 3600, error: null }
+    : { engine: "0.1.0", app: "0.1.0", latest: "0.1.0", newer: false, checked: now - 3600, error: null };
 
   const commands = {
     engine: () => engine,
@@ -72,7 +107,16 @@
     watch: () => { setTimeout(() => emit("live", true), 10); return null; },
     open_shell: () => null,
     vm: () => null,
-    get_settings: () => ({ language: params.get("lang") || "en", theme: params.get("theme") || "system" }),
+    vm_status: () => (docker || engine.platform === "linux" ? null : vmStatus),
+    vm_set: () => "Saved.",
+    set_engine: () => null,
+    updates: () => update,
+    upgrade: () => ({ ok: false, code: 77, needsAdmin: true, command: "sudo /usr/local/bin/podbag upgrade", output: "podbag: cannot write to /usr/local/bin: it needs administrator rights" }),
+    open_terminal: () => null,
+    get_settings: () => ({
+      language: params.get("lang") || "en", theme: params.get("theme") || "system",
+      sidebarWidth: 216, sidebarCollapsed: view === "collapsed",
+    }),
     set_settings: () => null,
   };
 
@@ -90,6 +134,10 @@
       volumes: () => app.go("volumes"),
       networks: () => app.go("networks"),
       settings: () => app.go("settings"),
+      "settings-vm": () => { app.go("settings"); scrollTo("vm-settings"); },
+      "settings-updates": () => { app.go("settings"); scrollTo("updates"); },
+      "update-admin": async () => { app.go("settings"); await app.runUpgrade(); scrollTo("updates"); },
+      "docker-settings": () => app.go("settings"),
       detail: () => app.openDetail("containers", containers[0].Id, "info"),
       logs: () => app.openDetail("containers", containers[0].Id, "logs"),
       inspect: () => app.openDetail("containers", containers[0].Id, "inspect"),
@@ -97,8 +145,14 @@
       pull: () => { app.go("images"); app.pull(); },
       "empty-volumes": () => app.go("volumes"),
     };
+    // Scroll a settings section into view once it is drawn.
+    function scrollTo(id) {
+      const el = document.getElementById(id);
+      if (el && !el.hidden && el.childElementCount) el.scrollIntoView({ block: "start" });
+      else setTimeout(() => scrollTo(id), 30);
+    }
     if (view === "empty" && params.get("tab")) app.go(params.get("tab"));
-    (scenes[view] || (() => {}))();
+    await (scenes[view] || (() => {}))();
     document.documentElement.dataset.ready = "1";
   });
 })();
