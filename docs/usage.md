@@ -892,7 +892,7 @@ open target/release/podbag.app
 #### Its icon
 
 - The desktop icon shows a white bulk bag on a lilac background (`#8B65BF`). Four short
-  loops frame the rounded opening. Two eyes face forward, and a cube marks the side.
+  loops frame the rounded opening. Two oval eyes mark the front of the bag.
   The bag artwork is in `desktop/icons/bulk-bag.png`.
 - The macOS menu bar shows the same bag in a single color that follows the menu bar appearance.
 - At 16 and 32 px the bag takes more of the square, so it stays readable.
