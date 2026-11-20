@@ -68,6 +68,21 @@ Mac. The numbers come from [benchmarks.md](benchmarks.md) and
 - Without root, it makes a tree of hard links.
 - Two containers that read the same file read the same inode, so the kernel caches it once.
 
+### Keeping files right
+
+- Each path keeps its own modification time, from the layer:
+  - EROFS gives each path its time; the contents still come from the one shared file,
+  - hard links share one time, so in a tree a path whose time differs gets a copy (a
+    rebuilt image whose files got new times shares less without root). When no tree
+    links a stored file any more, garbage collection puts such a copy in its place.
+- Crontabs get an inode of their own: cron skips a crontab with more than one link.
+- The data reaches the disk (`syncfs`) before a layer's index or an image's tree gets its
+  name. A crash can still cut short a file that was just written: the next pull that
+  reads the file checks the stored size, and writes a short file again in the same inode.
+- `podbag system verify` hashes every stored file, for damage of any other kind.
+- Overlay mounts turn the inode index off, so a write to one path never shows at another
+  path that shares its inode.
+
 ### Example
 
 Eight Spring services in two releases. The second release was built again on a newer
