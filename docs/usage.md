@@ -666,6 +666,8 @@ docker compose build --builder podbag
 - With no containers, the window shows how to start one.
 - The tray item shows the engine's state and how many containers run. It has Open podbag
   and Quit. On macOS, it also has Start VM or Stop VM.
+- On macOS, open **Settings → Linux VM** to start or stop the local VM and choose its
+  CPU count and memory. Save applies the values at the next boot, including a wake from idle.
 - Closing the window keeps the tray item. Quit ends the app.
 - While the window is closed, the app asks the engine nothing. So it keeps no VM or
   service awake. On macOS, the tray still shows the VM's state: it reads it from files.
@@ -733,7 +735,10 @@ cargo build --release -p podbag-desktop
 
 ### Resources
 
-- Memory: 2 GiB (`PODBAG_VM_MEMORY`, in MiB). CPUs: the Mac's, up to 8 (`PODBAG_VM_CPUS`).
+- The VM defaults to 2 GiB of memory and up to 8 of the Mac's CPUs. To read its settings,
+  run `podbag vm resources`. For example, `podbag vm resources 2 4096` saves 2 CPUs and
+  4 GiB in `~/.podbag/vm-resources.json`. The VM host's `PODBAG_VM_MEMORY` (MiB) and
+  `PODBAG_VM_CPUS` environment variables override the corresponding saved values.
 - Containers get 1048576 open files and `vm.max_map_count` 262144, as in Docker Desktop.
 - A container that needs more memory than the VM has is stopped with exit code 137. The VM
   keeps running.

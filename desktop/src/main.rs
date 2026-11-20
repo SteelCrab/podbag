@@ -260,6 +260,35 @@ fn open_shell(state: State<'_, AppState>, id: String) -> Result<(), String> {
     commands::open_shell(&state.podbag, &id)
 }
 
+/// Query the companion CLI so preferences and boot always use the same VM home.
+#[tauri::command(async)]
+fn vm_resources(state: State<'_, AppState>, values: Option<VmResources>) -> Result<Value, String> {
+    if !cfg!(target_os = "macos")
+        || !matches!(state.client.endpoint, Endpoint::Socket { own: true, .. })
+    {
+        return Err("VM resources require the local macOS engine".into());
+    }
+    let mut command = std::process::Command::new(&state.podbag);
+    command.args(["vm", "resources"]);
+    if let Some(values) = values {
+        command.args([values.cpus.to_string(), values.memory_mib.to_string()]);
+    }
+    let out = command
+        .output()
+        .map_err(|e| format!("{}: {e}", state.podbag.display()))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_owned());
+    }
+    serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VmResources {
+    cpus: usize,
+    memory_mib: u64,
+}
+
 /// `podbag vm start` or `podbag vm stop` (macOS and Windows).
 #[tauri::command(async)]
 fn vm(app: AppHandle, action: String) -> Result<(), String> {
@@ -391,7 +420,12 @@ fn refresh_tray(app: &AppHandle, asked: bool) {
         }
         None => *lock(&state.engine),
     };
-    *lock(&state.engine) = engine;
+    let previous = std::mem::replace(&mut *lock(&state.engine), engine);
+    if previous != engine
+        && let Some(vm) = vm
+    {
+        let _ = app.emit("vm-status", vm);
+    }
     if ask_api
         && matches!(engine, EngineState::Ready | EngineState::VmRunning)
         && let Ok(list) = state.client.containers()
@@ -486,6 +520,7 @@ fn main() {
             watch,
             open_shell,
             vm,
+            vm_resources,
             get_settings,
             set_settings,
         ])
