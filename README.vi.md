@@ -62,17 +62,32 @@ curl -fsSL https://podbag.dev/install.sh | sh
 - Tùy chọn: `PODBAG_VERSION=v0.1.0`, `PODBAG_INSTALL_DIR=$HOME/.local/bin`,
   `PODBAG_SKIP_APPARMOR=1`.
 
+### Gói cài đặt (Linux)
+
+Tải gói từ [bản phát hành mới nhất](https://github.com/SteelCrab/podbag/releases/latest), rồi cài đặt:
+
+```sh
+sudo apt install ./podbag_<ver>_amd64.deb      # Debian, Ubuntu (arm64: podbag_<ver>_arm64.deb)
+sudo dnf install ./podbag-<ver>-1.x86_64.rpm   # Fedora, RHEL (arm64: podbag-<ver>-1.aarch64.rpm)
+```
+
+- Gói chứa chương trình tĩnh nên cài được trên mọi phiên bản bản phân phối.
+- Gói .deb còn thêm hồ sơ AppArmor mà container rootless cần.
+
 ### Tải về
 
 Tải tệp từ [bản phát hành mới nhất](https://github.com/SteelCrab/podbag/releases/latest). Kiểm tra bằng `SHA256SUMS`.
 
 | Hệ thống | Tệp |
 |---|---|
-| Linux, x86_64 | `podbag-x86_64-linux` |
-| Linux, arm64 | `podbag-aarch64-linux` |
+| Linux, x86_64 | `podbag-x86_64-linux-musl` hoặc `podbag-x86_64-linux-gnu` |
+| Linux, arm64 | `podbag-aarch64-linux-musl` hoặc `podbag-aarch64-linux-gnu` |
 | macOS, Apple silicon | `podbag-aarch64-macos` |
 | Windows, x86_64 (thử nghiệm) | `podbag-x86_64-windows.exe` |
 | Windows, arm64 (thử nghiệm) | `podbag-aarch64-windows.exe` |
+
+- Linux: `-musl` là bản tĩnh, chạy trên mọi bản phân phối. `-gnu` dùng glibc của hệ thống (2.28 trở lên) và cách tra tên máy chủ của nó. Nếu không chắc, hãy chọn `-musl`.
+- Lưu tệp với tên `podbag` trong `PATH`: podbag tìm các chương trình trợ giúp theo tên đó.
 
 Windows cần WSL 2 (chạy `wsl --install` một lần):
 

@@ -62,17 +62,32 @@ curl -fsSL https://podbag.dev/install.sh | sh
 - Opciones: `PODBAG_VERSION=v0.1.0`, `PODBAG_INSTALL_DIR=$HOME/.local/bin`,
   `PODBAG_SKIP_APPARMOR=1`.
 
+### Paquetes (Linux)
+
+Descarga el paquete de [última versión](https://github.com/SteelCrab/podbag/releases/latest) e instálalo:
+
+```sh
+sudo apt install ./podbag_<ver>_amd64.deb      # Debian, Ubuntu (arm64: podbag_<ver>_arm64.deb)
+sudo dnf install ./podbag-<ver>-1.x86_64.rpm   # Fedora, RHEL (arm64: podbag-<ver>-1.aarch64.rpm)
+```
+
+- Los paquetes llevan el programa estático, así que se instalan en cualquier versión.
+- El .deb también añade el perfil de AppArmor que necesitan los contenedores rootless.
+
 ### Descarga
 
 Descarga un archivo de la [última versión](https://github.com/SteelCrab/podbag/releases/latest). Compruébalo con `SHA256SUMS`.
 
 | Sistema | Archivo |
 |---|---|
-| Linux, x86_64 | `podbag-x86_64-linux` |
-| Linux, arm64 | `podbag-aarch64-linux` |
+| Linux, x86_64 | `podbag-x86_64-linux-musl` o `podbag-x86_64-linux-gnu` |
+| Linux, arm64 | `podbag-aarch64-linux-musl` o `podbag-aarch64-linux-gnu` |
 | macOS, Apple silicon | `podbag-aarch64-macos` |
 | Windows, x86_64 (experimental) | `podbag-x86_64-windows.exe` |
 | Windows, arm64 (experimental) | `podbag-aarch64-windows.exe` |
+
+- Linux: `-musl` es estático y funciona en cualquier distribución. `-gnu` usa la glibc del sistema (2.28 o posterior) y su búsqueda de nombres de host. Si no estás seguro, elige `-musl`.
+- Guarda el archivo como `podbag` en tu `PATH`: podbag busca sus programas auxiliares por ese nombre.
 
 Windows necesita WSL 2 (ejecuta `wsl --install` una vez):
 

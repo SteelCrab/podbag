@@ -62,17 +62,32 @@ curl -fsSL https://podbag.dev/install.sh | sh
 - 设置： `PODBAG_VERSION=v0.1.0`, `PODBAG_INSTALL_DIR=$HOME/.local/bin`,
   `PODBAG_SKIP_APPARMOR=1`.
 
+### 软件包（Linux）
+
+从[最新版本](https://github.com/SteelCrab/podbag/releases/latest)获取软件包，然后安装：
+
+```sh
+sudo apt install ./podbag_<ver>_amd64.deb      # Debian, Ubuntu (arm64: podbag_<ver>_arm64.deb)
+sudo dnf install ./podbag-<ver>-1.x86_64.rpm   # Fedora, RHEL (arm64: podbag-<ver>-1.aarch64.rpm)
+```
+
+- 软件包里是静态程序，所以能装在任何发行版的任何版本上。
+- .deb 还会添加 rootless 容器需要的 AppArmor 配置文件。
+
 ### 下载
 
 从[最新版本](https://github.com/SteelCrab/podbag/releases/latest)下载文件，并用 `SHA256SUMS` 校验。
 
 | 系统 | 文件 |
 |---|---|
-| Linux，x86_64 | `podbag-x86_64-linux` |
-| Linux，arm64 | `podbag-aarch64-linux` |
+| Linux，x86_64 | `podbag-x86_64-linux-musl` 或 `podbag-x86_64-linux-gnu` |
+| Linux，arm64 | `podbag-aarch64-linux-musl` 或 `podbag-aarch64-linux-gnu` |
 | macOS，Apple 芯片 | `podbag-aarch64-macos` |
 | Windows，x86_64（实验） | `podbag-x86_64-windows.exe` |
 | Windows，arm64（实验） | `podbag-aarch64-windows.exe` |
+
+- Linux：`-musl` 是静态构建，能在任何发行版上运行。`-gnu` 使用系统的 glibc（2.28 或更高）及其主机名解析。不确定时选 `-musl`。
+- 把文件以 `podbag` 为名保存到 `PATH` 中：podbag 按这个名字查找它的辅助程序。
 
 Windows 需要 WSL 2（运行一次 `wsl --install`）：
 

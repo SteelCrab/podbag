@@ -62,17 +62,32 @@ curl -fsSL https://podbag.dev/install.sh | sh
 - 설정: `PODBAG_VERSION=v0.1.0`, `PODBAG_INSTALL_DIR=$HOME/.local/bin`,
   `PODBAG_SKIP_APPARMOR=1`.
 
+### 패키지 (Linux)
+
+[최신 릴리스](https://github.com/SteelCrab/podbag/releases/latest)에서 패키지를 받아 설치합니다:
+
+```sh
+sudo apt install ./podbag_<ver>_amd64.deb      # Debian, Ubuntu (arm64: podbag_<ver>_arm64.deb)
+sudo dnf install ./podbag-<ver>-1.x86_64.rpm   # Fedora, RHEL (arm64: podbag-<ver>-1.aarch64.rpm)
+```
+
+- 패키지에는 정적 프로그램이 들어 있습니다. 그래서 어느 배포판 버전에도 설치됩니다.
+- .deb는 rootless 컨테이너에 필요한 AppArmor 프로필도 추가합니다.
+
 ### 직접 내려받기
 
 [최신 릴리스](https://github.com/SteelCrab/podbag/releases/latest)에서 파일을 받습니다. `SHA256SUMS`로 파일을 확인합니다.
 
 | 시스템 | 파일 |
 |---|---|
-| Linux, x86_64 | `podbag-x86_64-linux` |
-| Linux, arm64 | `podbag-aarch64-linux` |
+| Linux, x86_64 | `podbag-x86_64-linux-musl` 또는 `podbag-x86_64-linux-gnu` |
+| Linux, arm64 | `podbag-aarch64-linux-musl` 또는 `podbag-aarch64-linux-gnu` |
 | macOS, Apple silicon | `podbag-aarch64-macos` |
 | Windows, x86_64 (실험) | `podbag-x86_64-windows.exe` |
 | Windows, arm64 (실험) | `podbag-aarch64-windows.exe` |
+
+- Linux: `-musl`은 정적 빌드라서 어느 배포판에서나 실행됩니다. `-gnu`는 시스템의 glibc(2.28 이상)와 그 호스트 이름 조회를 씁니다. 잘 모르면 `-musl`을 고르세요.
+- 받은 파일은 `PATH` 안에 `podbag`이라는 이름으로 저장하세요. podbag은 이 이름으로 도우미 프로그램을 찾습니다.
 
 Windows에는 WSL 2가 필요합니다(`wsl --install`을 한 번 실행합니다):
 

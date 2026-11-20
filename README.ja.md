@@ -62,17 +62,32 @@ curl -fsSL https://podbag.dev/install.sh | sh
 - 設定: `PODBAG_VERSION=v0.1.0`, `PODBAG_INSTALL_DIR=$HOME/.local/bin`,
   `PODBAG_SKIP_APPARMOR=1`.
 
+### パッケージ（Linux）
+
+[最新リリース](https://github.com/SteelCrab/podbag/releases/latest)からパッケージを取得し、インストールします:
+
+```sh
+sudo apt install ./podbag_<ver>_amd64.deb      # Debian, Ubuntu (arm64: podbag_<ver>_arm64.deb)
+sudo dnf install ./podbag-<ver>-1.x86_64.rpm   # Fedora, RHEL (arm64: podbag-<ver>-1.aarch64.rpm)
+```
+
+- パッケージには静的なプログラムが入っています。そのため、どのリリースのディストリビューションにもインストールできます。
+- .deb は、rootless コンテナに必要な AppArmor プロファイルも追加します。
+
 ### ダウンロード
 
 [最新リリース](https://github.com/SteelCrab/podbag/releases/latest)からファイルをダウンロードします。`SHA256SUMS` でファイルを確認します。
 
 | システム | ファイル |
 |---|---|
-| Linux、x86_64 | `podbag-x86_64-linux` |
-| Linux、arm64 | `podbag-aarch64-linux` |
+| Linux、x86_64 | `podbag-x86_64-linux-musl` または `podbag-x86_64-linux-gnu` |
+| Linux、arm64 | `podbag-aarch64-linux-musl` または `podbag-aarch64-linux-gnu` |
 | macOS、Apple silicon | `podbag-aarch64-macos` |
 | Windows、x86_64（実験的） | `podbag-x86_64-windows.exe` |
 | Windows、arm64（実験的） | `podbag-aarch64-windows.exe` |
+
+- Linux: `-musl` は静的ビルドで、どのディストリビューションでも動きます。`-gnu` はシステムの glibc（2.28 以降）とそのホスト名の解決を使います。迷ったら `-musl` を選んでください。
+- ファイルは `PATH` の中に `podbag` という名前で保存してください。podbag はこの名前でヘルパーを探します。
 
 Windows には WSL 2 が必要です（`wsl --install` を一度実行します）:
 
