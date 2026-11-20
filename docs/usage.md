@@ -601,6 +601,10 @@ docker compose build --builder podbag
 ### podbag-desktop
 
 - A window with Containers, Images, Volumes, Networks and Settings.
+- On macOS, the window toolbar has Refresh and Settings on the right.
+  Drag the space between the title and the buttons to move the window.
+
+  ![The macOS window with the podbag title, Refresh and Settings in one row](images/macos-window-toolbar.png)
 - Each list has a search box, and the same actions as the TUI.
 - A container's page has its details, its logs (as they come) and all its data.
 - With no containers, the window shows how to start one.
