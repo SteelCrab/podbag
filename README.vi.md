@@ -35,8 +35,8 @@ Bạn có thể dùng dòng lệnh hoặc [Podbag Desktop](#podbag-desktop).
 - **Chia sẻ tệp giữa các image.** Các tệp giống nhau có thể dùng chung dung lượng đĩa và bộ nhớ đệm trang của Linux, kể cả khi nằm ở các lớp khác nhau.
 - **Chạy theo nhu cầu trên Linux.** Một tiến trình theo dõi các container của mỗi người dùng. Khi container cuối cùng dừng, tiến trình này thoát sau thời gian chờ.
 - **Tự tắt máy ảo trên macOS.** Theo mặc định, máy ảo Linux tắt sau 60 giây không hoạt động. Lệnh container tiếp theo sẽ khởi động lại máy ảo.
-- **Runtime cho nút Kubernetes (`main`).** Trên Linux, `podbag cri serve` cho phép kubelet chạy pod trực tiếp bằng Podbag.
-- **Di chuyển giữa các engine (`main`).** Sao chép image, volume và container đã dừng giữa các engine tương thích với Docker. Dữ liệu nguồn được giữ nguyên.
+- **Runtime cho nút Kubernetes (`v0.2.0`).** Trên Linux, `podbag cri serve` cho phép kubelet chạy pod trực tiếp bằng Podbag.
+- **Di chuyển giữa các engine (`v0.2.0`).** Sao chép image, volume và container đã dừng giữa các engine tương thích với Docker. Dữ liệu nguồn được giữ nguyên.
 
 <picture><source media="(max-width: 600px) and (prefers-color-scheme: dark)" srcset="docs/images/storage-vi-tall-dark.svg"><source media="(max-width: 600px)" srcset="docs/images/storage-vi-tall-light.svg"><source media="(prefers-color-scheme: dark)" srcset="docs/images/storage-vi-dark.svg"><img alt="Hoạt ảnh. Hai image có hầu hết các tệp giống nhau. Khi lưu theo lớp, một lớp chỉ được lưu một lần khi nó giống hệt; lớp trên của image B khác một tệp, nên spring.jar và jackson.jar được lưu lại: 8 tệp. podbag lưu mỗi tệp một lần: 6 tệp. Đo với 8 dịch vụ Spring trong 2 bản phát hành: 2.970 MiB đĩa khi lưu theo lớp (Docker), 902 MiB với podbag." src="docs/images/storage-vi-light.svg"></picture>
 
@@ -75,7 +75,7 @@ Chạy `wsl --install` trong PowerShell với quyền quản trị rồi khởi 
 
 - **Cargo trên Linux.** Chạy `cargo install --locked podbag` để cài bản CLI đã phát hành.
 - **Ứng dụng desktop trên Linux.** Tải tệp nén cho CPU của bạn từ GitHub Actions. Giải nén rồi cài gói `.deb` hoặc `.rpm` cho bản phân phối đang dùng. Gói này có sẵn engine. [Gói desktop cho Linux](docs/build.md#linux-desktop-packages)
-- **Biên dịch từ mã nguồn.** Biên dịch nhánh `main` để dùng runtime Kubernetes và tính năng di chuyển giữa các engine. [Hướng dẫn biên dịch](docs/build.md)
+- **Biên dịch từ mã nguồn.** Dùng Rust để biên dịch CLI và Podbag Desktop. [Hướng dẫn biên dịch](docs/build.md)
 
 ## Sử dụng
 
@@ -122,9 +122,9 @@ docker --host "$podbag_socket" compose up -d
 docker --host "$podbag_socket" compose down
 ```
 
-### Sao chép image từ Docker (`main`)
+### Sao chép image từ Docker (`v0.2.0`)
 
-Khởi động cả hai engine. Nếu Docker đã có image `alpine:latest`, hãy dùng CLI biên dịch từ `main` để sao chép image đó sang Podbag.
+Khởi động cả hai engine. Nếu Docker đã có image `alpine:latest`, hãy dùng Podbag CLI v0.2.0 trở lên để sao chép image đó sang Podbag.
 
 ```sh
 podbag migrate --from docker --to podbag image alpine:latest

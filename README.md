@@ -35,8 +35,8 @@ Use the command line or [Podbag Desktop](#podbag-desktop).
 - **File sharing across images.** Identical files in different layers can share both disk space and the Linux page cache.
 - **On-demand Linux engine.** One process watches a user’s containers. It exits when the last container stops and the idle timeout expires.
 - **Automatic VM shutdown on macOS.** The Linux VM shuts down after 60 idle seconds by default. The next container command starts it again.
-- **Kubernetes node runtime (`main`).** On Linux, `podbag cri serve` lets the kubelet run pods directly with Podbag.
-- **Migration between engines (`main`).** Copy images, volumes and stopped containers between Docker-compatible engines. The source stays in place.
+- **Kubernetes node runtime (`v0.2.0`).** On Linux, `podbag cri serve` lets the kubelet run pods directly with Podbag.
+- **Migration between engines (`v0.2.0`).** Copy images, volumes and stopped containers between Docker-compatible engines. The source stays in place.
 
 <picture><source media="(max-width: 600px) and (prefers-color-scheme: dark)" srcset="docs/images/storage-tall-dark.svg"><source media="(max-width: 600px)" srcset="docs/images/storage-tall-light.svg"><source media="(prefers-color-scheme: dark)" srcset="docs/images/storage-dark.svg"><img alt="Animation. Two images share most of their files. As layers, a layer is kept once only when it is the same; image B&#x27;s top layer differs by one file, so spring.jar and jackson.jar are stored again: 8 files. podbag stores each file once: 6 files. Measured with 8 Spring services in 2 releases: 2,970 MiB on disk with layers (Docker), 902 MiB with podbag." src="docs/images/storage-light.svg"></picture>
 
@@ -75,7 +75,7 @@ Enable WSL 2 with `wsl --install` in an administrator PowerShell window and rest
 
 - **Cargo on Linux.** Run `cargo install --locked podbag` to install the published CLI.
 - **Linux desktop.** Download the package archive for your CPU from GitHub Actions. Extract it and install the `.deb` or `.rpm`. The package includes the engine. [Linux desktop packages](docs/build.md#linux-desktop-packages)
-- **Build from source.** Build the `main` branch to use the Kubernetes runtime and engine migration. [Build guide](docs/build.md)
+- **Build from source.** Build the CLI and Podbag Desktop with Rust. [Build guide](docs/build.md)
 
 ## Use
 
@@ -122,9 +122,9 @@ docker --host "$podbag_socket" compose up -d
 docker --host "$podbag_socket" compose down
 ```
 
-### Copy an image from Docker (`main`)
+### Copy an image from Docker (`v0.2.0`)
 
-Start both engines. If Docker has a local `alpine:latest` image, copy it into Podbag with the CLI built from `main`.
+Start both engines. If Docker has a local `alpine:latest` image, copy it into Podbag with Podbag CLI v0.2.0 or later.
 
 ```sh
 podbag migrate --from docker --to podbag image alpine:latest

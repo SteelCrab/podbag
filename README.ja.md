@@ -35,8 +35,8 @@
 - **イメージ間でファイルを共有。** レイヤーが異なっても、同一のファイルはディスク領域と Linux のページキャッシュを共有できます。
 - **必要なときだけ動く Linux エンジン。** 1 つのプロセスがユーザーのコンテナを管理します。最後のコンテナが停止し、待機時間が過ぎると、このプロセスも終了します。
 - **macOS の仮想マシンを自動停止。** 既定では、アイドル状態が 60 秒続くと Linux 仮想マシンが停止します。次のコンテナコマンドで再び起動します。
-- **Kubernetes ノードのランタイム（`main`）。** Linux で `podbag cri serve` を実行すると、kubelet が Podbag で Pod を起動できます。
-- **エンジン間の移行（`main`）。** Docker 互換エンジン間でイメージ、ボリューム、停止中のコンテナをコピーできます。移行元のデータは保持されます。
+- **Kubernetes ノードのランタイム（`v0.2.0`）。** Linux で `podbag cri serve` を実行すると、kubelet が Podbag で Pod を起動できます。
+- **エンジン間の移行（`v0.2.0`）。** Docker 互換エンジン間でイメージ、ボリューム、停止中のコンテナをコピーできます。移行元のデータは保持されます。
 
 <picture><source media="(max-width: 600px) and (prefers-color-scheme: dark)" srcset="docs/images/storage-ja-tall-dark.svg"><source media="(max-width: 600px)" srcset="docs/images/storage-ja-tall-light.svg"><source media="(prefers-color-scheme: dark)" srcset="docs/images/storage-ja-dark.svg"><img alt="アニメーション。2つのイメージは、ほとんどのファイルが同じです。レイヤー方式では、同じレイヤーだけが1回で済みます。イメージ B の上のレイヤーはファイルが1つ違うので、spring.jar と jackson.jar をもう一度保存します: 8ファイル。podbag はファイルを1回だけ保存します: 6ファイル。Spring サービス8個・2リリースの実測ディスク: レイヤー (Docker) 2,970 MiB、podbag 902 MiB。" src="docs/images/storage-ja-light.svg"></picture>
 
@@ -75,7 +75,7 @@ Linux カーネル 5.12 以降と cgroup v2 が必要です。`podbag check` で
 
 - **Linux 用の Cargo パッケージ。** `cargo install --locked podbag` で公開版の CLI をインストールします。
 - **Linux デスクトップアプリ。** GitHub Actions から CPU に合ったアーカイブをダウンロードして展開し、`.deb` または `.rpm` をインストールします。エンジンも同梱されています。[デスクトップパッケージの手順](docs/build.md#linux-desktop-packages)
-- **ソースからビルド。** Kubernetes ランタイムとエンジン間の移行を使うには `main` ブランチをビルドします。[ビルド手順](docs/build.md)
+- **ソースからビルド。** Rust で CLI と Podbag Desktop をビルドします。 [ビルド手順](docs/build.md)
 
 ## 使い方
 
@@ -122,9 +122,9 @@ docker --host "$podbag_socket" compose up -d
 docker --host "$podbag_socket" compose down
 ```
 
-### Docker からイメージをコピーする（`main`）
+### Docker からイメージをコピーする（`v0.2.0`）
 
-両方のエンジンを起動します。Docker に `alpine:latest` イメージがある場合は、`main` からビルドした CLI で Podbag にコピーできます。
+両方のエンジンを起動します。Docker に `alpine:latest` イメージがある場合は、Podbag CLI v0.2.0 以降で Podbag にコピーできます。
 
 ```sh
 podbag migrate --from docker --to podbag image alpine:latest

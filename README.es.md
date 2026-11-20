@@ -35,8 +35,8 @@ Puedes usar la línea de comandos o [Podbag Desktop](#podbag-desktop).
 - **Archivos compartidos entre imágenes.** Los archivos idénticos pueden compartir espacio en disco y caché de páginas de Linux aunque pertenezcan a capas distintas.
 - **Motor Linux bajo demanda.** Un solo proceso supervisa los contenedores de cada usuario. Cuando se detiene el último, el proceso termina tras un periodo de inactividad.
 - **Apagado automático de la máquina virtual en macOS.** Por defecto, la máquina virtual Linux se apaga tras 60 segundos de inactividad. El siguiente comando de contenedores vuelve a iniciarla.
-- **Motor para nodos de Kubernetes (`main`).** En Linux, `podbag cri serve` permite que el kubelet ejecute pods directamente con Podbag.
-- **Migración entre motores (`main`).** Copia imágenes, volúmenes y contenedores detenidos entre motores compatibles con Docker. Los originales se conservan.
+- **Motor para nodos de Kubernetes (`v0.2.0`).** En Linux, `podbag cri serve` permite que el kubelet ejecute pods directamente con Podbag.
+- **Migración entre motores (`v0.2.0`).** Copia imágenes, volúmenes y contenedores detenidos entre motores compatibles con Docker. Los originales se conservan.
 
 <picture><source media="(max-width: 600px) and (prefers-color-scheme: dark)" srcset="docs/images/storage-es-tall-dark.svg"><source media="(max-width: 600px)" srcset="docs/images/storage-es-tall-light.svg"><source media="(prefers-color-scheme: dark)" srcset="docs/images/storage-es-dark.svg"><img alt="Animación. Dos imágenes comparten la mayoría de sus archivos. Con capas, una capa se guarda una vez solo si es igual; la capa superior de la imagen B tiene un archivo distinto, así que spring.jar y jackson.jar se guardan otra vez: 8 archivos. podbag guarda cada archivo una vez: 6 archivos. Medido con 8 servicios Spring en 2 versiones: 2.970 MiB de disco con capas (Docker), 902 MiB con podbag." src="docs/images/storage-es-light.svg"></picture>
 
@@ -75,7 +75,7 @@ Ejecuta `wsl --install` en PowerShell como administrador y reinicia Windows. Des
 
 - **Cargo en Linux.** Ejecuta `cargo install --locked podbag` para instalar la versión publicada de la CLI.
 - **Aplicación de escritorio para Linux.** Descarga desde GitHub Actions el archivo para tu CPU. Descomprímelo e instala el paquete `.deb` o `.rpm` de tu distribución. El paquete incluye el motor. [Paquetes de escritorio](docs/build.md#linux-desktop-packages)
-- **Compilación desde el código fuente.** Compila la rama `main` para usar el motor de Kubernetes y la migración entre motores. [Guía de compilación](docs/build.md)
+- **Compilación desde el código fuente.** Compila la CLI y Podbag Desktop con Rust. [Guía de compilación](docs/build.md)
 
 ## Uso
 
@@ -122,9 +122,9 @@ docker --host "$podbag_socket" compose up -d
 docker --host "$podbag_socket" compose down
 ```
 
-### Copiar una imagen desde Docker (`main`)
+### Copiar una imagen desde Docker (`v0.2.0`)
 
-Inicia los dos motores. Si Docker ya tiene la imagen `alpine:latest`, puedes copiarla a Podbag con la CLI compilada desde `main`.
+Inicia los dos motores. Si Docker ya tiene la imagen `alpine:latest`, puedes copiarla a Podbag con la CLI de Podbag v0.2.0 o posterior.
 
 ```sh
 podbag migrate --from docker --to podbag image alpine:latest

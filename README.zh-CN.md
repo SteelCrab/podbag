@@ -35,8 +35,8 @@
 - **跨镜像共享文件。** 即使位于不同的镜像层，相同的文件也可以共享磁盘空间和 Linux 页缓存。
 - **Linux 引擎按需运行。** 一个进程负责管理同一用户的容器。最后一个容器停止后，进程会在空闲超时后退出。
 - **macOS 虚拟机自动关机。** 默认情况下，Linux 虚拟机空闲 60 秒后会关机。下一条容器命令会再次启动它。
-- **Kubernetes 节点运行时（`main`）。** 在 Linux 上运行 `podbag cri serve` 后，kubelet 可以直接通过 Podbag 运行 Pod。
-- **跨引擎迁移（`main`）。** 可以在兼容 Docker 的引擎之间复制镜像、卷和已停止的容器。源端会保留原有数据。
+- **Kubernetes 节点运行时（`v0.2.0`）。** 在 Linux 上运行 `podbag cri serve` 后，kubelet 可以直接通过 Podbag 运行 Pod。
+- **跨引擎迁移（`v0.2.0`）。** 可以在兼容 Docker 的引擎之间复制镜像、卷和已停止的容器。源端会保留原有数据。
 
 <picture><source media="(max-width: 600px) and (prefers-color-scheme: dark)" srcset="docs/images/storage-zh-CN-tall-dark.svg"><source media="(max-width: 600px)" srcset="docs/images/storage-zh-CN-tall-light.svg"><source media="(prefers-color-scheme: dark)" srcset="docs/images/storage-zh-CN-dark.svg"><img alt="动画。两个镜像的大部分文件相同。按层存储时，只有完全相同的层才只存一次；镜像 B 的上层有一个文件不同，所以 spring.jar 和 jackson.jar 又存了一次：共 8 个文件。podbag 每个文件只存一次：共 6 个文件。8 个 Spring 服务、2 个版本的实测磁盘用量：按层（Docker）2,970 MiB，podbag 902 MiB。" src="docs/images/storage-zh-CN-light.svg"></picture>
 
@@ -75,7 +75,7 @@ Linux 需要 5.12 或更高版本的内核以及 cgroup v2。运行 `podbag chec
 
 - **Linux 上的 Cargo 安装。** 运行 `cargo install --locked podbag` 可安装已发布的 CLI。
 - **Linux 桌面应用。** 从 GitHub Actions 下载适合当前 CPU 的压缩包。解压后安装适合发行版的 `.deb` 或 `.rpm` 软件包，其中已包含引擎。[桌面软件包安装指南](docs/build.md#linux-desktop-packages)
-- **从源码构建。** 要使用 Kubernetes 运行时和跨引擎迁移功能，请构建 `main` 分支。[构建指南](docs/build.md)
+- **从源码构建。** 使用 Rust 构建 CLI 和 Podbag Desktop。 [构建指南](docs/build.md)
 
 ## 使用
 
@@ -122,9 +122,9 @@ docker --host "$podbag_socket" compose up -d
 docker --host "$podbag_socket" compose down
 ```
 
-### 从 Docker 复制镜像（`main`）
+### 从 Docker 复制镜像（`v0.2.0`）
 
-启动两个引擎。如果 Docker 本地已有 `alpine:latest` 镜像，可以使用从 `main` 构建的 CLI 将它复制到 Podbag。
+启动两个引擎。如果 Docker 本地已有 `alpine:latest` 镜像，可以使用Podbag CLI v0.2.0 或更高版本 将它复制到 Podbag。
 
 ```sh
 podbag migrate --from docker --to podbag image alpine:latest

@@ -2893,7 +2893,7 @@ dependencies = [
 
 [[package]]
 name = "podbag"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "block2",
  "clap",
@@ -2920,7 +2920,7 @@ dependencies = [
 
 [[package]]
 name = "podbag-desktop"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "open",
  "podbag",

@@ -35,8 +35,8 @@ Puwede mong gamitin ang command line o ang [Podbag Desktop](#podbag-desktop).
 - **Pinagsasaluhang file ng mga image.** Maaaring gumamit ng iisang kopya sa disk at sa page cache ng Linux ang magkaparehong file kahit nasa magkaibang layer ang mga ito.
 - **Tumatakbo ang Linux engine kapag kailangan.** Iisang proseso ang nagbabantay sa mga container ng bawat user. Kapag huminto ang huling container, magsasara ang proseso pagkalipas ng itinakdang oras ng paghihintay.
 - **Kusang pagsara ng VM sa macOS.** Sa default na setting, nagsasara ang Linux VM kapag 60 segundo na itong walang ginagawa. Muli itong bubukas sa susunod na command para sa container.
-- **Runtime para sa Kubernetes node (`main`).** Sa Linux, magagamit ng kubelet ang Podbag para direktang magpatakbo ng mga pod sa pamamagitan ng `podbag cri serve`.
-- **Paglipat sa ibang engine (`main`).** Maaaring kopyahin ang mga image, volume at nakahintong container mula sa isang Docker-compatible na engine papunta sa isa pa. Mananatili ang orihinal sa pinagmulan.
+- **Runtime para sa Kubernetes node (`v0.2.0`).** Sa Linux, magagamit ng kubelet ang Podbag para direktang magpatakbo ng mga pod sa pamamagitan ng `podbag cri serve`.
+- **Paglipat sa ibang engine (`v0.2.0`).** Maaaring kopyahin ang mga image, volume at nakahintong container mula sa isang Docker-compatible na engine papunta sa isa pa. Mananatili ang orihinal sa pinagmulan.
 
 <picture><source media="(max-width: 600px) and (prefers-color-scheme: dark)" srcset="docs/images/storage-fil-tall-dark.svg"><source media="(max-width: 600px)" srcset="docs/images/storage-fil-tall-light.svg"><source media="(prefers-color-scheme: dark)" srcset="docs/images/storage-fil-dark.svg"><img alt="Animation. Halos pareho ang mga file ng dalawang image. Sa mga layer, isang beses lang iniimbak ang layer kapag pareho ito; iba ang isang file sa itaas na layer ng image B, kaya iniimbak ulit ang spring.jar at jackson.jar: 8 file. Iniimbak ng podbag ang bawat file nang isang beses: 6 file. Sinukat sa 8 Spring service sa 2 release: 2,970 MiB sa disk gamit ang mga layer (Docker), 902 MiB gamit ang podbag." src="docs/images/storage-fil-light.svg"></picture>
 
@@ -75,7 +75,7 @@ Patakbuhin ang `wsl --install` sa PowerShell bilang administrator, pagkatapos ay
 
 - **Cargo sa Linux.** Patakbuhin ang `cargo install --locked podbag` para i-install ang nailabas na bersiyon ng CLI.
 - **Desktop app sa Linux.** I-download mula sa GitHub Actions ang archive para sa iyong CPU. I-extract ito at i-install ang `.deb` o `.rpm` para sa iyong distribusyon. Kasama na sa package ang engine. [Mga desktop package](docs/build.md#linux-desktop-packages)
-- **Pag-build mula sa source.** I-build ang `main` branch para gamitin ang Kubernetes runtime at maglipat ng data sa ibang engine. [Gabay sa pag-build](docs/build.md)
+- **Pag-build mula sa source.** Gamitin ang Rust para i-build ang CLI at Podbag Desktop. [Gabay sa pag-build](docs/build.md)
 
 ## Paggamit
 
@@ -122,9 +122,9 @@ docker --host "$podbag_socket" compose up -d
 docker --host "$podbag_socket" compose down
 ```
 
-### Kumopya ng image mula sa Docker (`main`)
+### Kumopya ng image mula sa Docker (`v0.2.0`)
 
-Simulan ang dalawang engine. Kung may lokal na `alpine:latest` image ang Docker, makokopya ito sa Podbag gamit ang CLI na binuo mula sa `main`.
+Simulan ang dalawang engine. Kung may lokal na `alpine:latest` image ang Docker, makokopya ito sa Podbag gamit ang Podbag CLI v0.2.0 o mas bago.
 
 ```sh
 podbag migrate --from docker --to podbag image alpine:latest
