@@ -64,6 +64,8 @@ struct AppState {
     version_asked: AtomicBool,
     /// Where the `docker` command goes, as last read (files only).
     docker: Mutex<Option<dockercmd::DockerCommand>>,
+    /// The window and tray share the same Docker CLI configuration.
+    docker_switch: Mutex<()>,
     settings: Mutex<Settings>,
     settings_file: Mutex<Option<PathBuf>>,
     /// The events stream, while the window is open.
@@ -103,6 +105,7 @@ impl AppState {
             engine_version: Mutex::new(None),
             version_asked: AtomicBool::new(false),
             docker: Mutex::new(None),
+            docker_switch: Mutex::new(()),
             settings: Mutex::new(Settings::default()),
             settings_file: Mutex::new(None),
             watching: AtomicBool::new(false),
@@ -311,18 +314,23 @@ fn docker_switch(app: AppHandle, to: String) -> Result<dockercmd::DockerCommand,
 
 fn switch_docker(app: &AppHandle, to: &str) -> Result<dockercmd::DockerCommand, String> {
     let state = app.state::<AppState>();
+    let _switch = state
+        .docker_switch
+        .try_lock()
+        .map_err(|_| "a Docker CLI switch is already in progress")?;
     let docker = podbag::client::find_docker_cli().ok_or("the docker CLI is not installed")?;
     let socket = podbag_socket(&state.podbag);
-    match to {
-        "use" => podbag::client::use_podbag(&docker, &socket)?,
-        "back" => drop(podbag::client::switch_back(&docker)?),
-        _ => return Err(format!("unknown switch {to}")),
-    }
+    let _ = app.emit("docker-switching", to);
+    let result = match to {
+        "use" => podbag::client::use_podbag(&docker, &socket),
+        "back" => podbag::client::switch_back(&docker).map(|_| ()),
+        _ => Err(format!("unknown switch {to}")),
+    };
     let now = dockercmd::current(&socket);
     *lock(&state.docker) = Some(now.clone());
     update_tray(app);
-    let _ = app.emit("docker-changed", ());
-    Ok(now)
+    let _ = app.emit("docker-changed", &now);
+    result.map(|()| now)
 }
 
 fn docker_client(podbag: &std::path::Path) -> Result<Client, String> {

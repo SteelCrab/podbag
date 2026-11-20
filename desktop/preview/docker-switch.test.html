@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Docker CLI switch test</title>
+<iframe src="preview.html?view=settings-docker&amp;lang=en" width="560" height="600" title="Desktop preview"></iframe>
+<pre id="result">Running</pre>
+<script>
+"use strict";
+const frame = document.querySelector("iframe");
+async function test() {
+  const win = frame.contentWindow;
+  const doc = frame.contentDocument;
+  const route = () => doc.querySelector("#docker-settings .docker-route");
+  const button = () => doc.querySelector("#docker-settings button");
+  const footer = () => doc.querySelector(".docker-item");
+  const check = (condition, message) => { if (!condition) throw Error(message); };
+  function checkRow(label) {
+    const center = (el) => {
+      const rect = el.getBoundingClientRect();
+      return rect.top + rect.height / 2;
+    };
+    for (const el of doc.querySelector("#docker-settings").children) {
+      check(Math.abs(center(el) - center(button())) < 1, "Keep the Docker CLI setting on one line");
+    }
+    check(button().textContent === "" && button().getAttribute("aria-label") === label, "Name the icon-only action");
+    check(Math.abs(center(footer()) - center(doc.querySelector("#statusbar button"))) < 1, "Keep the footer on one line");
+  }
+  const invoke = win.__TAURI__.core.invoke;
+  let writes = 0;
+  let read;
+  win.__TAURI__.core.invoke = (cmd, args) => {
+    if (cmd === "docker_switch") writes++;
+    if (cmd === "docker_command") return new Promise((resolve) => { read = resolve; });
+    return invoke(cmd, args);
+  };
+
+  const previous = win.podbag.state.docker;
+  const staleRead = win.refreshDocker();
+  check(route().textContent.includes("Docker Desktop"), "Show the current target");
+  checkRow("Use podbag for docker");
+  const switchDone = win.switchDocker("use");
+  check(route().querySelector(".docker-pending") && button().disabled && footer().querySelector("button").disabled, "Show and lock the pending switch");
+  await win.switchDocker("use");
+  check(writes === 1, "Accept only one switch");
+  await switchDone;
+  read(previous);
+  await staleRead;
+  check(route().querySelector(".docker-applied") && footer().textContent.includes("podbag active"), "Keep the confirmed target after a stale read");
+  checkRow("Switch back to desktop-linux");
+
+  const restoreDone = win.switchDocker("back");
+  check(route().textContent.includes("desktop-linux"), "Show the restore destination");
+  await restoreDone;
+  check(route().querySelector(".docker-other") && !button().disabled && !footer().querySelector("button").disabled, "Restore the previous target");
+
+  win.__TAURI__.core.invoke = async (cmd, args) => {
+    if (cmd !== "docker_switch") return invoke(cmd, args);
+    win.dockerSwitching(args.to);
+    const current = { ...previous, fromEnv: true };
+    win.dockerChanged(current);
+    return current;
+  };
+  await win.switchDocker("use");
+  check(route().querySelector(".docker-other"), "Use the effective target when the environment overrides the context");
+  check(doc.querySelector("#toasts").lastElementChild.textContent.includes("still uses Docker Desktop"), "Explain the effective target");
+}
+
+frame.addEventListener("load", async () => {
+  const doc = frame.contentDocument;
+  const result = document.querySelector("#result");
+  try {
+    const deadline = performance.now() + 5000;
+    while (!doc.querySelector("#docker-settings button")) {
+      if (performance.now() >= deadline) throw Error("Docker CLI settings did not load");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    await test();
+    result.textContent = "PASS";
+  } catch (error) {
+    result.textContent = "FAIL: " + error.message;
+  }
+});
+</script>
+</html>
