@@ -27,8 +27,8 @@ pub enum Cmd {
     /// Stop and start containers
     Restart {
         /// Seconds to wait before killing
-        #[arg(short, long, default_value_t = 10)]
-        time: u64,
+        #[arg(short, long, allow_negative_numbers = true)]
+        time: Option<i64>,
         #[arg(required = true)]
         containers: Vec<String>,
     },
@@ -153,8 +153,8 @@ pub enum Cmd {
     /// Stop containers: SIGTERM, then SIGKILL after a timeout
     Stop {
         /// Seconds to wait before SIGKILL
-        #[arg(short, long, default_value_t = 10)]
-        time: u64,
+        #[arg(short, long, allow_negative_numbers = true)]
+        time: Option<i64>,
         #[arg(required = true)]
         containers: Vec<String>,
     },
