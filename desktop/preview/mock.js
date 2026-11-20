@@ -91,6 +91,26 @@
     ? { engine: "0.1.0", app: "0.1.0", latest: "0.2.0", newer: true, checked: now - 3600, error: null }
     : { engine: "0.1.0", app: "0.1.0", latest: "0.1.0", newer: false, checked: now - 3600, error: null };
 
+  const hub = [
+    { name: "nginx", description: "Official build of Nginx.", star_count: 21034, is_official: true },
+    { name: "nginxinc/nginx-unprivileged", description: "Unprivileged NGINX Dockerfiles", star_count: 172, is_official: false },
+    { name: "nginx/nginx-ingress", description: "NGINX and NGINX Plus Ingress Controllers for Kubernetes", star_count: 109, is_official: false },
+    { name: "bitnami/nginx", description: "Bitnami container image for NGINX", star_count: 197, is_official: false },
+  ];
+  const registries = [
+    { id: "dockerhub", label: "Docker Hub", host: "docker.io", needsHost: false, account: null, hint: null },
+    { id: "github", label: "GitHub", host: "ghcr.io", needsHost: false, account: "octocat", hint: null },
+    { id: "ecr", label: "Amazon ECR", host: "", needsHost: true, account: null, hint: "aws ecr get-login-password --region <region> | docker login --username AWS --password-stdin <account>.dkr.ecr.<region>.amazonaws.com" },
+    { id: "quay", label: "Quay.io", host: "quay.io", needsHost: false, account: null, hint: null },
+    { id: "gar", label: "Google Artifact Registry", host: "", needsHost: true, account: null, hint: "gcloud auth configure-docker <region>-docker.pkg.dev" },
+    { id: "gitlab", label: "GitLab", host: "registry.gitlab.com", needsHost: false, account: null, hint: null },
+    { id: "custom", label: "Other registry", host: "", needsHost: true, account: null, hint: null },
+  ];
+  const elsewhere = ["banner", "settings-docker", "pull", "pull-locations"].includes(view);
+  const dockerCmd = elsewhere
+    ? { installed: true, name: "Docker Desktop", isPodbag: false, fromEnv: false, context: "desktop-linux", previous: null }
+    : { installed: true, name: "podbag", isPodbag: true, fromEnv: false, context: "podbag", previous: "desktop-linux" };
+
   const commands = {
     engine: () => engine,
     list: ({ kind }) => lists[kind],
@@ -113,6 +133,13 @@
     updates: () => update,
     upgrade: () => ({ ok: false, code: 77, needsAdmin: true, command: "sudo /usr/local/bin/podbag upgrade", output: "podbag: cannot write to /usr/local/bin: it needs administrator rights" }),
     open_terminal: () => null,
+    search: ({ term }) => ({ supported: true, error: null, results: hub.filter((r) => r.name.includes(term)) }),
+    registries: () => registries,
+    registry_login: () => null,
+    docker_command: () => dockerCmd,
+    docker_switch: () => ({ ...dockerCmd, name: "podbag", isPodbag: true }),
+    docker_images: () => images.concat([{ Id: "sha256:4e4f", RepoTags: ["mysql:8.4"], Created: now - 86400 * 7, Size: 603_000_000 }]),
+    import_images: () => null,
     get_settings: () => ({
       language: params.get("lang") || "en", theme: params.get("theme") || "system",
       sidebarWidth: 216, sidebarCollapsed: view === "collapsed",
@@ -142,7 +169,12 @@
       logs: () => app.openDetail("containers", containers[0].Id, "logs"),
       inspect: () => app.openDetail("containers", containers[0].Id, "inspect"),
       confirm: () => app.remove("containers", 0),
-      pull: () => { app.go("images"); app.pull(); },
+      pull: async () => { app.go("images"); await app.pull(); app.searchFor("nginx"); await new Promise((r) => setTimeout(r, 400)); },
+      "pull-locations": async () => { app.go("images"); await app.pull(); document.querySelector(".loc-button").click(); },
+      "pull-login": async () => { app.go("images"); await app.pull(); app.pullState.location = "quay"; app.pullState.step = "login"; app.render(); },
+      banner: () => {},
+      "settings-docker": () => app.go("settings"),
+      import: async () => { app.go("images"); await app.importFromDocker(); },
       "empty-volumes": () => app.go("volumes"),
     };
     // Scroll a settings section into view once it is drawn.
