@@ -157,6 +157,7 @@
       endpoint: selected === "kiri" ? "unix:///Users/me/.kiri/run/docker.sock" : selected, vm: null, version: selected });
   }
   let launchAtLogin = false;
+  let volumeLesson = null;
   const commands = {
     "plugin:autostart|is_enabled": () => launchAtLogin,
     "plugin:autostart|enable": () => { launchAtLogin = true; },
@@ -241,6 +242,12 @@
       return true;
     },
     open_repository: () => null,
+    volume_tools_lab: ({ action, package: file }) => {
+      if (action === "install") volumeLesson = { package: JSON.parse(file), completed: false };
+      if (action === "remove") volumeLesson = null;
+      if (action === "start") throw "Open a practice terminal in Podbag Desktop.";
+      return volumeLesson;
+    },
     tutorial_lab: ({ action }) => {
       if (action === "status") return { active: false };
       throw "Start the local lab in Podbag Desktop.";

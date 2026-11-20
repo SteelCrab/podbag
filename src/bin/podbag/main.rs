@@ -6,6 +6,7 @@ mod check;
 mod container;
 mod dockerctx;
 mod image;
+mod lesson;
 #[cfg(unix)]
 mod manage;
 mod network;
@@ -74,6 +75,13 @@ fn main() {
             .is_some_and(|a| a == podbag::vm::proto::INIT_ARG)
     {
         podbag::vm::guest::vm_init_main();
+    }
+    #[cfg(unix)]
+    if let Some(root) = std::env::var_os(podbag::volume_lesson::SCOPE) {
+        std::process::exit(lesson::scoped(
+            std::path::Path::new(&root),
+            Cli::parse().cmd,
+        ));
     }
     #[cfg(target_os = "macos")]
     if let Some(code) = macos_front(std::env::args().skip(1).collect()) {
@@ -224,7 +232,11 @@ fn macos_front(args: Vec<String>) -> Option<i32> {
 fn runs_here(cli: &Cli) -> bool {
     matches!(
         cli.cmd,
-        Cmd::Login { .. } | Cmd::Logout { .. } | Cmd::Search { .. } | Cmd::Migrate { .. }
+        Cmd::Lab { .. }
+            | Cmd::Login { .. }
+            | Cmd::Logout { .. }
+            | Cmd::Search { .. }
+            | Cmd::Migrate { .. }
     )
 }
 
@@ -375,6 +387,7 @@ fn fill_env(argv: &[String], trailing: usize) -> Vec<String> {
 #[cfg(unix)]
 fn dispatch(cmd: Cmd) -> i32 {
     match cmd {
+        Cmd::Lab { cmd } => lesson::command(cmd),
         Cmd::Run(a) => run::run(a),
         Cmd::Create(a) => run::create(a),
         Cmd::Start {
@@ -537,6 +550,7 @@ fn install_self(dest: &std::path::Path) -> i32 {
 #[cfg(not(unix))]
 fn dispatch(cmd: Cmd) -> i32 {
     match cmd {
+        Cmd::Lab { cmd } => lesson::command(cmd),
         Cmd::Migrate {
             from,
             to,

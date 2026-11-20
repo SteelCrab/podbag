@@ -27,7 +27,7 @@ required-features = ["cli"]
 
 [features]
 default = ["cli"]
-cli = ["dep:clap"]
+cli = ["dep:clap", "dep:shlex"]
 # macOS: the binary carries the VM's guest files from target/vm (or PODBAG_GUEST_DIR),
 # built first with `dev/vm.sh run dev/macos/build-guest.sh`.
 embed-guest = []
@@ -49,6 +49,7 @@ httparse = "1"
 tempfile = "3"
 
 [target.'cfg(unix)'.dependencies]
+shlex = { version = "2", optional = true }
 libc = "0.2"
 # `podbag tui` (on Windows, the TUI runs in the WSL distribution).
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }

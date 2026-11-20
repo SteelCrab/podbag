@@ -9,6 +9,11 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Cmd {
+    /// Install or run the hands-on CLI and TUI volume lesson
+    Lab {
+        #[command(subcommand)]
+        cmd: LabCmd,
+    },
     /// Run a command in a new container
     Run(RunArgs),
     /// Create a container without starting it
@@ -342,6 +347,24 @@ pub enum NetworkCmd {
     },
     /// Disconnect a stopped container from a further network
     Disconnect { network: String, container: String },
+}
+
+#[derive(Subcommand)]
+pub enum LabCmd {
+    #[cfg(unix)]
+    #[command(hide = true)]
+    Workspace,
+    /// Install the downloaded .podbag module
+    Install { file: std::path::PathBuf },
+    /// Open a shell in a new temporary practice store
+    Start {
+        #[arg(long)]
+        lang: Option<String>,
+        #[arg(long, hide = true)]
+        library: Option<std::path::PathBuf>,
+    },
+    /// Remove the installed module and its progress
+    Remove,
 }
 
 #[derive(Subcommand)]

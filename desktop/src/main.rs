@@ -1081,6 +1081,42 @@ fn build_app_menu(app: &tauri::App) -> tauri::Result<()> {
 }
 
 #[tauri::command]
+fn volume_tools_lab(
+    state: State<'_, AppState>,
+    action: &str,
+    package: Option<String>,
+    lang: Option<String>,
+) -> Result<Option<podbag::volume_lesson::Installed>, String> {
+    use podbag::volume_lesson as lesson;
+    let dir = lesson::directory().map_err(|e| e.to_string())?;
+    match action {
+        "status" => {}
+        "install" => lesson::install(&dir, package.as_deref().ok_or("Choose a module file.")?)
+            .map_err(|e| e.to_string())?,
+        "remove" => lesson::remove(&dir).map_err(|e| e.to_string())?,
+        "start" => {
+            if lesson::read(&dir).map_err(|e| e.to_string())?.is_none() {
+                return Err("Install the module first.".into());
+            }
+            let argv = [
+                state.podbag.to_string_lossy().into_owned(),
+                "lab".into(),
+                "start".into(),
+                "--lang".into(),
+                lang.unwrap_or_else(|| "en".into()),
+                "--library".into(),
+                dir.to_string_lossy().into_owned(),
+            ];
+            if !commands::open_terminal(Some(&argv)) {
+                return Err("Open a terminal and run podbag lab start.".into());
+            }
+        }
+        _ => return Err("Unknown lesson action.".into()),
+    }
+    lesson::read(&dir).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn tutorial_lab(
     lab: State<'_, Mutex<lab::Lab>>,
     action: lab::Action,
@@ -1102,6 +1138,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             engine,
             tutorial_lab,
+            volume_tools_lab,
             list,
             kubernetes::kube_counts,
             migration::migration_sources,

@@ -43,6 +43,17 @@ async function test() {
     btn("Tutorials").click();
     await new Promise(resolve => setTimeout(resolve, 0));
     check(doc.getElementById("tutorial-heading").textContent === "Lab · My HTTP lab", "Show an unnumbered title after reopening the installed module");
+    btn("Install module").click();
+    await select(JSON.stringify({ format: "podbag-cli-tui-volumes-v1",
+      translations: { en: { title: "CLI volumes", guide: "Use the CLI and TUI." } } }));
+    btn("Install module").click();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    check([...doc.querySelectorAll(".tutorial-card h2")].some(el => el.textContent === "CLI volumes"), "Show the new module");
+    check(doc.getElementById("tutorial-heading").textContent === "Lab · My HTTP lab", "Keep both modules installed");
+    btn("Remove module").click();
+    doc.getElementById("confirm-yes").click();
+    await new Promise(resolve => setTimeout(resolve, 30));
+    check(win.localStorage.getItem(key) && !!btn("Start lab"), "Removing the CLI module keeps the original lab");
     btn("Remove module").click();
     doc.getElementById("confirm-yes").click();
     await new Promise(resolve => setTimeout(resolve, 30));

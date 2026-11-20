@@ -16,8 +16,9 @@ function validTutorial(pack) {
 function renderTutorials(main) {
   const card = h("section", { class: "card tutorial-card", "aria-labelledby": "tutorial-heading" });
   const status = h("p", { role: "status", class: "tutorial-status" });
+  const tools = h("section", { class: "card tutorial-card", hidden: true });
   put(main, h("header", { class: "toolbar" }, h("h1", { text: t("nav.tutorials") })),
-    h("div", { class: "content tutorial" }, card));
+    h("div", { class: "content tutorial" }, tools, card));
   let installed;
   try {
     const saved = JSON.parse(localStorage.getItem(TUTORIAL_KEY));
@@ -45,6 +46,32 @@ function renderTutorials(main) {
       return false;
     }
   }
+  async function toolsAction(action, pack = null) {
+    try {
+      const record = await API.volumeToolsLab(action, pack);
+      if (!tools.isConnected) return;
+      tools.hidden = !record;
+      if (!record) {
+        tools.replaceChildren();
+        return true;
+      }
+      const lesson = words(record.package);
+      put(tools, h("div", { class: "tutorial-title" }, icon("shell"), h("h2", { text: lesson.title })),
+        h("p", { class: "tutorial-progress", text: t(record.completed ? "tutorial.complete" : "tutorial.installed") }),
+        h("p", { class: "lab-guide", text: lesson.guide }), codeLine("podbag lab start"),
+        h("div", { class: "buttons-row" },
+          button("shell", t("status.terminal"), () => toolsAction("start"), "primary"),
+          button("refresh", t("action.refresh"), () => toolsAction("status")),
+          button("remove", t("tutorial.uninstall"), async () => {
+            if (await confirmDialog(t("tutorial.removeNote"), t("tutorial.uninstall"))) await toolsAction("remove");
+          })));
+      return true;
+    } catch (error) {
+      status.textContent = String(error);
+      return false;
+    }
+  }
+  function home() { if (installed) openLab(); else installer(); }
   function installer() {
     const guide = I18N.lang === "en" ? "https://podbag.dev/blog/" : `https://podbag.dev/${I18N.lang}/blog/`;
     const input = h("input", { type: "file", accept: ".podbag", hidden: true });
@@ -56,13 +83,17 @@ function renderTutorials(main) {
       try {
         if (file.size > TUTORIAL_LIMIT) throw Error();
         const pack = JSON.parse(await file.text());
-        if (!validTutorial(pack)) throw Error();
+        const cliLab = pack?.format === "podbag-cli-tui-volumes-v1";
+        if (cliLab ? !pack.translations?.en?.title : !validTutorial(pack)) throw Error();
         if (!input.isConnected) return;
         show("tutorials", titleOf(words(pack)), h("p", { class: "mono", text: file.name }),
           h("p", { text: t("tutorial.installNote") }),
           h("div", { class: "buttons-row" },
-            button("pull", t("tutorial.install"), () => { if (save({ pack, complete: false })) openLab(); }, "primary"),
-            button(null, t("action.cancel"), installer)));
+            button("pull", t("tutorial.install"), async () => {
+              if (cliLab) { if (await toolsAction("install", JSON.stringify(pack))) home(); }
+              else if (save({ pack, complete: installed?.complete || false })) openLab();
+            }, "primary"),
+            button(null, t("action.cancel"), home)));
       } catch {
         status.textContent = t("tutorial.invalid");
         input.value = "";
@@ -71,7 +102,7 @@ function renderTutorials(main) {
       }
     };
     show("tutorials", t("tutorial.empty"), h("p", { text: t("tutorial.chooseHelp") }), codeLine(guide),
-      h("div", { class: "buttons-row" }, input, select));
+      h("div", { class: "buttons-row" }, input, select, installed && button(null, t("action.cancel"), home)));
   }
   function overview() {
     const lesson = words(installed.pack);
@@ -80,6 +111,7 @@ function renderTutorials(main) {
       h("p", { text: lesson.goal }),
       h("div", { class: "buttons-row" },
         button("start", t("lab.start"), () => run("start"), "primary"),
+        button("import", t("tutorial.install"), installer),
         button("remove", t("tutorial.uninstall"), async () => {
           if (await confirmDialog(t("tutorial.removeNote"), t("tutorial.uninstall")) && save(null)) installer();
         })));
@@ -144,6 +176,6 @@ function renderTutorials(main) {
           button("rename", t("lab.edit"), () => renderLab(state, true))));
     }
   }
-  if (installed) openLab();
-  else installer();
+  home();
+  toolsAction("status");
 }
