@@ -1,6 +1,6 @@
-<img src="docs/images/logo.png" alt="podbag" width="120" align="right">
-
 # podbag
+
+<img src="docs/images/logo.png" alt="podbag" width="120" align="right">
 
 Un motor de contenedores sin daemon, en un solo binario estático.
 Guarda las imágenes archivo por archivo: un archivo que comparten muchas imágenes se guarda una sola vez.
@@ -35,8 +35,10 @@ Guarda las imágenes archivo por archivo: un archivo que comparten muchas imáge
 - **Archivos, no capas.** Un archivo que comparten muchas imágenes se guarda y se cachea una sola vez.
 - **Rápido.** Un contenedor arranca en unos 4 ms en Linux.
 - **Funciona con las herramientas de Docker.** Imágenes Docker y OCI, el CLI `docker`, Compose y buildx.
+- **Construye Dockerfiles.** `podbag build`, y `docker build` con el constructor clásico, sin BuildKit ni daemon.
 - **Con o sin root.** El mismo programa funciona de las dos formas.
 - **Linux, macOS y Windows.** x86_64 y arm64. El soporte de Windows es experimental.
+- **Una TUI y una aplicación de escritorio.** `podbag tui` en la terminal, y una ventana con un icono en la barra de menús, para contenedores, imágenes, volúmenes y redes.
 
 ### Capas y archivos
 
@@ -51,7 +53,7 @@ Guarda las imágenes archivo por archivo: un archivo que comparten muchas imáge
 ### Script de instalación (Linux y macOS)
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/SteelCrab/podbag/main/install.sh | sh
+curl -fsSL https://podbag.dev/install.sh | sh
 ```
 
 - Descarga el archivo para tu sistema y comprueba su SHA-256.
@@ -119,6 +121,9 @@ podbag exec -it web sh                            # abre una shell en el contene
 podbag stats --no-stream                          # uso de CPU, memoria y red
 podbag stop web && podbag rm web                  # detén y borra
 podbag images                                     # lista las imágenes
+podbag build -t myapp .                           # construye una imagen desde un Dockerfile
+podbag login ghcr.io                              # inicia sesión en un registro (compartida con docker login)
+podbag push ghcr.io/me/app:1                      # envía una imagen a un registro
 ```
 
 ### CLI docker, Compose y buildx
@@ -173,7 +178,7 @@ docker compose up -d
 
 Los documentos de abajo están en inglés.
 
-- [Uso](docs/usage.md): comandos, volúmenes, redes, límites, API de Docker, macOS, Windows.
+- [Uso](docs/usage.md): comandos, volúmenes, redes, límites, API de Docker, TUI y GUI, macOS, Windows.
 - [Arquitectura](docs/architecture.md): en qué se diferencia podbag de Docker.
 - [Compilar desde el código fuente](docs/build.md): Linux, macOS, Windows.
 - [Rendimiento](docs/benchmarks.md) y la [prueba con microservicios Spring](docs/benchmarks-msa.md).

@@ -420,6 +420,54 @@ impl Container {
         }
     }
 
+    /// Run the container for a build step: `started` gets its ID, then `out` gets its
+    /// output (stdout and stderr) as it comes. The container stays, for its changes to be
+    /// read; the caller removes it. Returns its ID and exit code.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn run_for_build(
+        mut self,
+        started: &mut dyn FnMut(&str),
+        out: &mut dyn FnMut(&[u8]),
+    ) -> Result<(String, i32)> {
+        use crate::helper::Io;
+        use std::io::Read;
+        self.auto_remove = false;
+        let (cleanup, mut helper) =
+            linux_launch::launch(self, Io::Null, Io::Piped, Io::Piped, false)?;
+        let id = cleanup.disarm();
+        started(&id);
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let mut readers = Vec::new();
+        for mut pipe in [helper.take_stdout(), helper.take_stderr()]
+            .into_iter()
+            .flatten()
+        {
+            let tx = tx.clone();
+            readers.push(std::thread::spawn(move || {
+                let mut buf = vec![0u8; 16 * 1024];
+                loop {
+                    match pipe.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            if tx.send(buf[..n].to_vec()).is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }));
+        }
+        drop(tx);
+        for chunk in rx {
+            out(&chunk);
+        }
+        for r in readers {
+            let _ = r.join();
+        }
+        let code = linux_launch::wait(&mut helper)?;
+        Ok((id, code))
+    }
+
     /// Run the container with this process's stdin, stdout and stderr.
     /// Returns the command's exit code, or 128 + signal number. The container is removed
     /// when it ends.

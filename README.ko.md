@@ -1,6 +1,6 @@
-<img src="docs/images/logo.png" alt="podbag" width="120" align="right">
-
 # podbag
+
+<img src="docs/images/logo.png" alt="podbag" width="120" align="right">
 
 데몬 없는 컨테이너 엔진입니다. 정적 바이너리 하나로 동작합니다.
 이미지를 파일 단위로 저장합니다. 여러 이미지가 같은 파일을 쓰면 한 번만 저장합니다.
@@ -35,8 +35,10 @@
 - **레이어가 아니라 파일.** 여러 이미지가 같은 파일을 쓰면 디스크와 메모리에 한 번만 둡니다.
 - **빠릅니다.** Linux에서 컨테이너가 약 4 ms 만에 시작됩니다.
 - **Docker 도구와 함께 씁니다.** Docker·OCI 이미지, `docker` CLI, Compose, buildx를 지원합니다.
+- **Dockerfile을 빌드합니다.** `podbag build`와 클래식 빌더의 `docker build`를 씁니다. BuildKit과 데몬이 없어도 됩니다.
 - **root 없이도, root로도.** 같은 프로그램이 두 방식으로 동작합니다.
 - **Linux, macOS, Windows.** x86_64와 arm64를 지원합니다. Windows 지원은 실험 단계입니다.
+- **TUI와 데스크톱 앱이 있습니다.** 터미널에서는 `podbag tui`, 데스크톱에서는 메뉴 막대 아이콘이 있는 창으로 컨테이너, 이미지, 볼륨, 네트워크를 다룹니다.
 
 ### 레이어와 파일
 
@@ -51,7 +53,7 @@
 ### 설치 스크립트 (Linux, macOS)
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/SteelCrab/podbag/main/install.sh | sh
+curl -fsSL https://podbag.dev/install.sh | sh
 ```
 
 - 시스템에 맞는 파일을 받고 SHA-256 값을 확인합니다.
@@ -119,6 +121,9 @@ podbag exec -it web sh                            # 컨테이너 안에서 셸�
 podbag stats --no-stream                          # CPU, 메모리, 네트워크 사용량
 podbag stop web && podbag rm web                  # 멈추고 지웁니다
 podbag images                                     # 이미지 목록
+podbag build -t myapp .                           # Dockerfile로 이미지를 빌드합니다
+podbag login ghcr.io                              # 레지스트리에 로그인합니다 (docker login과 공유)
+podbag push ghcr.io/me/app:1                      # 이미지를 레지스트리로 보냅니다
 ```
 
 ### docker CLI, Compose, buildx
@@ -173,7 +178,7 @@ docker compose up -d
 
 아래 문서는 영문입니다.
 
-- [사용법](docs/usage.md): 명령, 볼륨, 네트워크, 제한, Docker API, macOS, Windows.
+- [사용법](docs/usage.md): 명령, 볼륨, 네트워크, 제한, Docker API, TUI와 GUI, macOS, Windows.
 - [구조](docs/architecture.md): podbag과 Docker의 차이.
 - [소스에서 빌드](docs/build.md): Linux, macOS, Windows.
 - [벤치마크](docs/benchmarks.md)와 [Spring 마이크로서비스 벤치마크](docs/benchmarks-msa.md).

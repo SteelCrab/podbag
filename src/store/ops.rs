@@ -10,6 +10,20 @@ pub enum StoreOp {
         /// One JSON [`crate::image::PullEvent`] per line on stderr.
         #[serde(default)]
         events: bool,
+        /// A login (JSON [`crate::image::auth::AuthConfig`]) comes on stdin: never on the
+        /// command line, where other users could read it.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        auth: bool,
+    },
+    /// Send the image `name` to its registry.
+    Push {
+        name: String,
+        progress: bool,
+        /// One JSON [`crate::image::PushEvent`] per line on stderr.
+        #[serde(default)]
+        events: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        auth: bool,
     },
     /// Give the image `source` the name `name` too.
     Tag {
@@ -22,6 +36,10 @@ pub enum StoreOp {
     Prune,
     /// Remove the images without a name that no container uses.
     PruneDangling,
+    /// Check every object; `fix`: remove the images that use damaged ones.
+    Verify {
+        fix: bool,
+    },
     RemoveContainer {
         id: String,
     },
@@ -36,6 +54,35 @@ pub enum StoreOp {
     Load,
     /// Write the images `names` as an archive on stdout (`docker save`).
     Save {
+        names: Vec<String>,
+    },
+    /// Store the layer tar on stdin, and an image of `base` plus it with `config`
+    /// (a build step, `commit`). Answers a [`crate::store::Committed`].
+    CommitLayer {
+        base: Vec<String>,
+        config: crate::image::ImageConfig,
+        created: u64,
+    },
+    /// Like `CommitLayer`, with a `COPY`/`ADD` plan (JSON) on stdin instead of a tar.
+    CommitPlan {
+        base: Vec<String>,
+        config: crate::image::ImageConfig,
+        created: u64,
+    },
+    /// An image of stored layers; with `artifact`, ready for containers. Answers its ID.
+    CreateImage {
+        config: crate::image::ImageConfig,
+        diff_ids: Vec<String>,
+        created: u64,
+        artifact: bool,
+    },
+    /// Build what containers of the image need, if it is missing.
+    EnsureArtifact {
+        digest: String,
+    },
+    /// Give the image these names. Answers the full names.
+    NameImage {
+        digest: String,
         names: Vec<String>,
     },
 }
@@ -55,7 +102,16 @@ pub fn helper_main(json: &str) -> i32 {
             ));
         }
     };
-    match run_as_store_owner(op) {
+    let auth = match &op {
+        StoreOp::Pull { auth: true, .. } | StoreOp::Push { auth: true, .. } => {
+            match read_auth(&mut std::io::stdin().lock()) {
+                Ok(a) => a,
+                Err(e) => return status.fail(e),
+            }
+        }
+        _ => None,
+    };
+    match run_as_store_owner(op, auth) {
         Ok(output) => {
             status.report(&crate::helper::StatusMessage::Done { output });
             0
@@ -71,18 +127,48 @@ pub fn helper_main(_json: &str) -> i32 {
     1
 }
 
+/// The login a job got on stdin: JSON, or nothing.
+#[cfg(unix)]
+fn read_auth(
+    input: &mut dyn std::io::Read,
+) -> crate::Result<Option<crate::image::auth::AuthConfig>> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    input
+        .take(64 * 1024)
+        .read_to_end(&mut bytes)
+        .map_err(|e| crate::Error::io("cannot read the login of a store job", &e, "try again"))?;
+    if bytes.iter().all(u8::is_ascii_whitespace) {
+        return Ok(None);
+    }
+    serde_json::from_slice(&bytes).map(Some).map_err(|e| {
+        crate::Error::new(
+            crate::ErrorKind::Internal,
+            "cannot read the login of a store job",
+            e.to_string(),
+            "report this bug",
+        )
+    })
+}
+
 #[cfg(target_os = "linux")]
-fn run_as_store_owner(op: StoreOp) -> crate::Result<serde_json::Value> {
+fn run_as_store_owner(
+    op: StoreOp,
+    auth: Option<crate::image::auth::AuthConfig>,
+) -> crate::Result<serde_json::Value> {
     // SAFETY: geteuid has no preconditions.
     let rootless = unsafe { libc::geteuid() } != 0;
     // Decide the directories out here: inside the user namespace the user ID is 0,
     // which would select the root-mode directories.
     let dirs = crate::paths::dirs()?;
-    crate::linux::userns::run_in_userns(move || linux_ops::run(op, &dirs, rootless))
+    crate::linux::userns::run_in_userns(move || linux_ops::run(op, &dirs, rootless, auth))
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
-fn run_as_store_owner(_op: StoreOp) -> crate::Result<serde_json::Value> {
+fn run_as_store_owner(
+    _op: StoreOp,
+    _auth: Option<crate::image::auth::AuthConfig>,
+) -> crate::Result<serde_json::Value> {
     Err(crate::Error::unsupported_os())
 }
 
@@ -97,8 +183,32 @@ mod linux_ops {
     use serde_json::Value;
 
     /// Runs as the store owner: root, or root of the user namespace when rootless.
-    pub(super) fn run(op: StoreOp, dirs: &Dirs, rootless: bool) -> Result<Value> {
+    pub(super) fn run(
+        op: StoreOp,
+        dirs: &Dirs,
+        rootless: bool,
+        auth: Option<crate::image::auth::AuthConfig>,
+    ) -> Result<Value> {
         match op {
+            StoreOp::Push {
+                name,
+                progress,
+                events,
+                ..
+            } => {
+                Store::open_existing(dirs).ok_or_else(|| crate::image::not_pulled(&name))?;
+                // Opened for writing: what the push learns about blobs is kept.
+                let store = Store::open(dirs, !rootless)?;
+                let mut show = |ev: crate::image::PushEvent| {
+                    if progress {
+                        print_push_progress(&ev);
+                    }
+                    if events && let Ok(line) = serde_json::to_string(&ev) {
+                        eprintln!("{line}");
+                    }
+                };
+                to_json(&store.push(&name, &mut Registry::with_auth(auth), &mut show)?)
+            }
             StoreOp::Tag { source, name } => {
                 to_json(
                     &Store::open(dirs, !rootless)?.tag(&source, &name, &|| images_in_use(dirs))?,
@@ -108,6 +218,7 @@ mod linux_ops {
                 name,
                 progress,
                 events,
+                ..
             } => {
                 let mut store = Store::open(dirs, !rootless)?;
                 let config = config::load(dirs)?;
@@ -122,8 +233,13 @@ mod linux_ops {
                         print_event(&p);
                     }
                 };
-                let (full, record) =
-                    store.pull(&name, &mut Registry::new(), limit, &in_use, &mut show)?;
+                let (full, record) = store.pull(
+                    &name,
+                    &mut Registry::with_auth(auth),
+                    limit,
+                    &in_use,
+                    &mut show,
+                )?;
                 to_json(&Image {
                     name: full,
                     digest: record.digest,
@@ -157,6 +273,64 @@ mod linux_ops {
                 })?;
                 Ok(Value::Null)
             }
+            StoreOp::CommitLayer {
+                base,
+                config,
+                created,
+            } => {
+                let store = Store::open(dirs, !rootless)?;
+                let mut input = std::io::stdin().lock();
+                to_json(&store.commit_layer(
+                    &base,
+                    &mut |w| crate::store::copy_all(&mut input, w, "the layer"),
+                    config,
+                    created,
+                )?)
+            }
+            StoreOp::CommitPlan {
+                base,
+                config,
+                created,
+            } => {
+                let store = Store::open(dirs, !rootless)?;
+                let plan: Vec<crate::build::plan::PlanEntry> =
+                    serde_json::from_reader(std::io::stdin().lock()).map_err(|e| {
+                        crate::Error::new(
+                            crate::ErrorKind::Internal,
+                            "cannot read a copy plan",
+                            e.to_string(),
+                            "report this bug",
+                        )
+                    })?;
+                to_json(&store.commit_layer(
+                    &base,
+                    &mut |w| crate::build::plan::write_plan(&plan, w),
+                    config,
+                    created,
+                )?)
+            }
+            StoreOp::CreateImage {
+                config,
+                diff_ids,
+                created,
+                artifact,
+            } => {
+                let mut store = Store::open(dirs, !rootless)?;
+                store.use_mount_method(rootless, config::load(dirs)?.image_mount);
+                to_json(&store.create_image(config, diff_ids, created, artifact)?)
+            }
+            StoreOp::EnsureArtifact { digest } => {
+                let mut store = Store::open(dirs, !rootless)?;
+                store.use_mount_method(rootless, config::load(dirs)?.image_mount);
+                let _lock = store.lock_shared()?;
+                store.ensure_artifact(&digest)?;
+                Ok(Value::Null)
+            }
+            StoreOp::NameImage { digest, names } => {
+                let store = Store::open(dirs, !rootless)?;
+                let limit = config::load(dirs)?.store_limit;
+                to_json(&store.name_image(&digest, &names, limit, &|| images_in_use(dirs))?)
+            }
             StoreOp::RemoveImage { name } => to_json(
                 &Store::open(dirs, !rootless)?.remove_image(&name, &|| images_in_use(dirs))?,
             ),
@@ -165,6 +339,9 @@ mod linux_ops {
             }
             StoreOp::PruneDangling => {
                 to_json(&Store::open(dirs, !rootless)?.prune_dangling(&|| images_in_use(dirs))?)
+            }
+            StoreOp::Verify { fix } => {
+                to_json(&Store::open(dirs, !rootless)?.verify(fix, &|| images_in_use(dirs))?)
             }
             StoreOp::CheckImage { name } => {
                 Store::open_existing(dirs).ok_or_else(|| crate::image::not_pulled(&name))?;
@@ -271,6 +448,23 @@ mod linux_ops {
         }
     }
 
+    /// A push the way `docker push` shows it, one line per layer as it is done.
+    fn print_push_progress(ev: &crate::image::PushEvent) {
+        use crate::image::PushEvent;
+        match ev {
+            PushEvent::Started { repository, .. } => {
+                eprintln!("The push refers to repository [{repository}]")
+            }
+            PushEvent::LayerExists { id } => eprintln!("{id}: Layer already exists"),
+            PushEvent::LayerMounted { id, from } => eprintln!("{id}: Mounted from {from}"),
+            PushEvent::LayerPushed { id, bytes } => {
+                eprintln!("{id}: Pushed ({})", crate::image::human_size(*bytes))
+            }
+            // The CLI prints the result.
+            PushEvent::Done { .. } => {}
+        }
+    }
+
     fn print_progress(p: &Progress) {
         let short = |d: &str| {
             d.strip_prefix("sha256:")
@@ -312,10 +506,22 @@ mod tests {
             name: "alpine".into(),
             progress: false,
             events: true,
+            auth: false,
         };
         assert_eq!(
             serde_json::to_string(&op).unwrap(),
             r#"{"op":"pull","name":"alpine","progress":false,"events":true}"#
+        );
+        // A login is never in the job, only the word that it comes on stdin.
+        let push = StoreOp::Push {
+            name: "localhost:5000/app:1".into(),
+            progress: true,
+            events: false,
+            auth: true,
+        };
+        assert_eq!(
+            serde_json::to_string(&push).unwrap(),
+            r#"{"op":"push","name":"localhost:5000/app:1","progress":true,"events":false,"auth":true}"#
         );
         let old: StoreOp =
             serde_json::from_str(r#"{"op":"pull","name":"alpine","progress":true}"#).unwrap();

@@ -1,6 +1,6 @@
-<img src="docs/images/logo.png" alt="podbag" width="120" align="right">
-
 # podbag
+
+<img src="docs/images/logo.png" alt="podbag" width="120" align="right">
 
 没有守护进程的容器引擎，只是一个静态二进制文件。
 镜像按文件存储：多个镜像共用的文件只保存一份。
@@ -35,8 +35,10 @@
 - **按文件，而不是按层。** 多个镜像共用的文件，在磁盘和内存中只保存一份。
 - **快。** 在 Linux 上，容器约 4 毫秒启动。
 - **兼容 Docker 工具。** 支持 Docker 和 OCI 镜像、`docker` CLI、Compose 和 buildx。
+- **构建 Dockerfile。** 可以用 `podbag build`，也可以用经典构建器的 `docker build`，不需要 BuildKit 或守护进程。
 - **有无 root 都可以。** 同一个程序两种方式都能用。
 - **Linux、macOS 和 Windows。** 支持 x86_64 和 arm64。Windows 支持处于实验阶段。
+- **有 TUI 和桌面应用。** 在终端里用 `podbag tui`，在桌面上用带菜单栏图标的窗口，管理容器、镜像、卷和网络。
 
 ### 层与文件
 
@@ -51,7 +53,7 @@
 ### 安装脚本（Linux、macOS）
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/SteelCrab/podbag/main/install.sh | sh
+curl -fsSL https://podbag.dev/install.sh | sh
 ```
 
 - 下载适合你系统的文件，并校验 SHA-256。
@@ -119,6 +121,9 @@ podbag exec -it web sh                            # 在容器里打开 shell
 podbag stats --no-stream                          # CPU、内存和网络用量
 podbag stop web && podbag rm web                  # 停止并删除
 podbag images                                     # 列出镜像
+podbag build -t myapp .                           # 用 Dockerfile 构建镜像
+podbag login ghcr.io                              # 登录镜像仓库（与 docker login 共用）
+podbag push ghcr.io/me/app:1                      # 把镜像推送到镜像仓库
 ```
 
 ### docker CLI、Compose 和 buildx
@@ -173,7 +178,7 @@ docker compose up -d
 
 以下文档为英文。
 
-- [使用](docs/usage.md)：命令、卷、网络、限制、Docker API、macOS、Windows。
+- [使用](docs/usage.md)：命令、卷、网络、限制、Docker API、TUI 和 GUI、macOS、Windows。
 - [架构](docs/architecture.md)：podbag 与 Docker 的区别。
 - [从源码构建](docs/build.md)：Linux、macOS、Windows。
 - [基准测试](docs/benchmarks.md)和 [Spring 微服务基准测试](docs/benchmarks-msa.md)。

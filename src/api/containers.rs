@@ -64,29 +64,7 @@ fn path_param(req: &Request) -> Result<String, Reply> {
 
 fn stat_header(stat: &crate::archive::PathStat) -> (&'static str, String) {
     let json = serde_json::to_vec(stat).unwrap_or_default();
-    (STAT_HEADER, base64(&json))
-}
-
-/// Standard base64 with padding.
-fn base64(data: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-    for group in data.chunks(3) {
-        let b = [
-            group[0],
-            *group.get(1).unwrap_or(&0),
-            *group.get(2).unwrap_or(&0),
-        ];
-        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
-        for (i, shift) in [18, 12, 6, 0].into_iter().enumerate() {
-            if i <= group.len() {
-                out.push(ALPHABET[(n >> shift & 63) as usize] as char);
-            } else {
-                out.push('=');
-            }
-        }
-    }
-    out
+    (STAT_HEADER, crate::base64::encode(&json))
 }
 
 /// `HEAD /containers/{id}/archive?path=`: the path's details, in a header.

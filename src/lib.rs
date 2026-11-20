@@ -8,9 +8,15 @@ pub mod api;
 /// Files in and out of a container as tar archives (`docker cp`).
 pub mod archive;
 #[doc(hidden)]
+pub mod base64;
+/// Image builds from a Dockerfile.
+pub mod build;
+#[doc(hidden)]
 pub mod caps;
 #[doc(hidden)]
 pub mod cgroup;
+/// A client for the Docker API on podbag's socket (the TUI and the desktop app).
+pub mod client;
 #[doc(hidden)]
 pub mod config;
 pub(crate) mod container;
@@ -87,6 +93,8 @@ pub use containers::{
     stats, top, update,
 };
 pub use error::{Error, ErrorKind, Result};
-pub use image::{DiskUsage, Image, ImageConfig, PruneReport, disk_usage, prune};
+pub use image::{
+    DiskUsage, Image, ImageConfig, PruneReport, VerifyReport, disk_usage, prune, verify_store,
+};
 pub use state::{State, Status};
 pub use volume::{Access, MountRequest, Volume};

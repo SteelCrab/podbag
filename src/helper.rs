@@ -701,20 +701,42 @@ pub fn run_store_op_with_output(
     }
 }
 
-/// [`run_store_op`], giving each line the helper writes to stderr to `on_line`.
-pub fn run_store_op_lines(
+/// Where a store job's stderr goes.
+pub enum StoreOutput<'a> {
+    /// To this process's stderr (progress for a person).
+    Inherit,
+    /// Nowhere.
+    Discard,
+    /// Each line to this function (events).
+    Lines(&'a mut dyn FnMut(&str)),
+}
+
+/// [`run_store_op`] with `secret` (a login) on the helper's stdin: never on its command
+/// line, which other users can read.
+pub fn run_store_op_with_secret(
     op: &crate::store::ops::StoreOp,
-    on_line: &mut dyn FnMut(&str),
+    secret: &[u8],
+    output: StoreOutput<'_>,
 ) -> Result<serde_json::Value> {
     let json = encode_store_op(op)?;
+    let stderr = match output {
+        StoreOutput::Inherit => Stdio::inherit(),
+        StoreOutput::Discard => Stdio::null(),
+        StoreOutput::Lines(_) => Stdio::piped(),
+    };
     let mut helper = spawn_with_args(
         &["__store", &json],
-        Stdio::null(),
-        Stdio::null(),
         Stdio::piped(),
+        Stdio::null(),
+        stderr,
         None,
     )?;
-    if let Some(stderr) = helper.take_stderr() {
+    if let Some(mut stdin) = helper.take_stdin() {
+        use std::io::Write;
+        // A helper that failed early closed its end; its result tells why.
+        let _ = stdin.write_all(secret);
+    }
+    if let (StoreOutput::Lines(on_line), Some(stderr)) = (output, helper.take_stderr()) {
         // Read to the end, whatever the bytes: a helper blocked on a full pipe would
         // never report its result.
         let mut reader = std::io::BufReader::new(stderr);

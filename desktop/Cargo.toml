@@ -1,0 +1,22 @@
+[package]
+name = "podbag-desktop"
+version = "0.1.0"
+edition = "2024"
+description = "podbag in a window: containers, images, volumes and networks, and a menu bar item"
+license = "Apache-2.0"
+repository = "https://github.com/SteelCrab/podbag"
+publish = false
+
+[[bin]]
+name = "podbag-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+podbag = { path = "..", default-features = false }
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sys-locale = "0.3"
