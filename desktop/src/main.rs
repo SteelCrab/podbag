@@ -600,13 +600,18 @@ fn get_settings(state: State<'_, AppState>) -> Settings {
 
 #[tauri::command]
 fn set_settings(
-    app: AppHandle,
+    window: tauri::WebviewWindow,
     state: State<'_, AppState>,
     settings: Settings,
 ) -> Result<(), String> {
     let settings = settings.checked();
+    if settings.theme != lock(&state.settings).theme {
+        window
+            .set_theme(settings.theme.native())
+            .map_err(|e| e.to_string())?;
+    }
     *lock(&state.settings) = settings.clone();
-    update_tray(&app);
+    update_tray(window.app_handle());
     match lock(&state.settings_file).as_ref() {
         Some(file) => settings.save(file),
         None => Ok(()),
@@ -943,6 +948,18 @@ fn main() {
                 *lock(&state.settings) = Settings::load(&file);
                 *lock(&state.settings_file) = Some(file);
             }
+            // Create the window with the saved appearance before the webview paints.
+            let config = app
+                .config()
+                .app
+                .windows
+                .iter()
+                .find(|w| w.label == "main")
+                .ok_or("missing main window configuration")?;
+            let theme = lock(&state.settings).theme.native();
+            tauri::WebviewWindowBuilder::from_config(app, config)?
+                .theme(theme)
+                .build()?;
             build_tray(app)?;
             build_app_menu(app)?;
             let handle = app.handle().clone();
@@ -955,6 +972,16 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            // GTK applies portal theme changes to every window, including pinned themes.
+            #[cfg(target_os = "linux")]
+            if let WindowEvent::ThemeChanged(actual) = event {
+                let preferred = lock(&window.state::<AppState>().settings).theme.native();
+                if let Some(theme) = preferred
+                    && theme != *actual
+                {
+                    let _ = window.set_theme(Some(theme));
+                }
+            }
             // Closing the window hides it; the tray item stays, and Quit ends the app.
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
