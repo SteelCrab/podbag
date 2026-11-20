@@ -23,9 +23,15 @@ const API = (() => {
     watch: (on) => invoke("watch", { on }),
     openShell: (id) => invoke("open_shell", { id }),
     vm: (action) => invoke("vm", { action }),
+    vmStatus: () => invoke("vm_status"),
+    vmSet: (settings) => invoke("vm_set", { settings }),
+    setEngine: (engine) => invoke("set_engine", { engine }),
+    updates: (check) => invoke("updates", { check }),
+    upgrade: () => invoke("upgrade"),
+    openTerminal: (what) => invoke("open_terminal", { what }),
     getSettings: () => invoke("get_settings"),
     setSettings: (settings) => invoke("set_settings", { settings }),
-    // Events: changed, live, logs, pull-progress, shown, engine-changed.
+    // Events: changed, live, logs, pull-progress, shown, engine-changed, open-updates.
     on: listen,
   };
 })();

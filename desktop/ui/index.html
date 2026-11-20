@@ -29,17 +29,40 @@
   <symbol id="i-back" viewBox="0 0 24 24"><path d="M15 5 8 12l7 7"/></symbol>
   <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/></symbol>
   <symbol id="i-rename" viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m13.5 6.5 4 4"/></symbol>
+  <symbol id="i-sidebar" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="15" rx="2"/><path d="M9 4.5v15M5.5 8.5h1.5M5.5 11.5h1.5"/></symbol>
+  <symbol id="i-forward" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+  <symbol id="i-vm" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M10 10h4v4h-4zM9 3v3M15 3v3M9 18v3M15 18v3M3 9h3M3 15h3M18 9h3M18 15h3"/></symbol>
+  <symbol id="i-update" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 16.5v-9M8 11l4-4 4 4"/></symbol>
+  <symbol id="i-warning" viewBox="0 0 24 24"><path d="M12 4 2.5 20h19z"/><path d="M12 10v4.5M12 17.5v.5"/></symbol>
+  <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+  <symbol id="i-engine" viewBox="0 0 24 24"><path d="M4 8h16M4 16h16"/><circle cx="9" cy="8" r="2.2"/><circle cx="15" cy="16" r="2.2"/></symbol>
+  <symbol id="i-star" viewBox="0 0 24 24"><path d="m12 3.5 2.6 5.3 5.9.9-4.3 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8L3.5 9.7l5.9-.9z"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5"/></symbol>
+  <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="m11 12 8-8M16 7l2.5 2.5M14 9l2 2"/></symbol>
+  <symbol id="i-import" viewBox="0 0 24 24"><path d="M4 14v5h16v-5M12 4v10M8 10l4 4 4-4"/></symbol>
 </svg>
 
-<div class="app">
-  <nav class="sidebar" aria-label="podbag">
+<div class="app" id="app">
+  <header class="topbar">
+    <button type="button" class="icon-button" id="sidebar-toggle" aria-controls="sidebar" aria-expanded="true"></button>
+    <button type="button" class="icon-button" id="nav-back" disabled></button>
+    <button type="button" class="icon-button" id="nav-forward" disabled></button>
+    <div class="topbar-space"></div>
+    <div class="topbar-tools" id="topbar-tools"></div>
+  </header>
+  <nav class="sidebar" id="sidebar" aria-label="podbag">
     <div class="brand"><img src="logo-small.png" alt="" width="28" height="28"><span>podbag</span></div>
+    <div class="engine-switch" id="engine-switch"></div>
     <ul class="nav" id="nav"></ul>
     <div class="spacer"></div>
     <ul class="nav" id="nav-bottom"></ul>
+    <section class="vm-card" id="vm-card" hidden></section>
     <div class="engine" id="engine" role="status"></div>
   </nav>
+  <div class="splitter" id="splitter" role="separator" tabindex="0" aria-orientation="vertical" aria-controls="sidebar" aria-valuemin="160" aria-valuemax="360" aria-valuenow="216"></div>
   <main id="main" tabindex="-1"></main>
+  <div class="banner" id="banner" role="region" hidden></div>
+  <footer class="statusbar" id="statusbar"></footer>
 </div>
 
 <dialog id="confirm" aria-labelledby="confirm-title">
