@@ -59,6 +59,8 @@ const API = (() => {
     updates: (check) => invoke("updates", { check }),
     upgrade: () => invoke("upgrade"),
     openTerminal: (what) => invoke("open_terminal", { what }),
+    takeStarPrompt: () => invoke("take_star_prompt"),
+    openRepository: () => invoke("open_repository"),
     getSettings: () => invoke("get_settings"),
     setSettings: (settings) => invoke("set_settings", { settings }),
     // Events: changed, live, logs, pull-progress, shown, engine-changed, open-updates,
