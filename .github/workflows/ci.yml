@@ -34,7 +34,7 @@ jobs:
       - name: Packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y musl-tools uidmap passt
+          sudo apt-get install -y musl-tools uidmap passt erofs-utils
           # Rootless containers need user namespaces, which Ubuntu's AppArmor restricts.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           for f in /etc/subuid /etc/subgid; do
@@ -63,6 +63,85 @@ jobs:
           name: podbag-${{ matrix.arch }}-linux
           path: target/${{ env.TARGET }}/release/podbag
           if-no-files-found: error
+
+  # The image store against the kernel: the store's integration tests and the library
+  # tests that need root, rootless and as root.
+  integration:
+    name: Integration ${{ matrix.mode }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+        mode: [rootless, root]
+    env:
+      PODBAG_TEST_ROOT: ${{ matrix.mode == 'root' && '1' || '' }}
+      PODBAG_TEST_ROOTFS: ${{ github.workspace }}/../alpine
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Packages
+        run: dev/ci/setup.sh
+      - name: Test root filesystem
+        run: dev/fetch-rootfs.sh "$PODBAG_TEST_ROOTFS"
+      - name: Store tests
+        timeout-minutes: 30
+        run: cargo test --test store --test image_mount
+      - name: Library tests as root
+        if: matrix.mode == 'root'
+        timeout-minutes: 15
+        run: dev/root-lib-tests.sh
+
+  # Real images and programs, compared with Docker: Python's .pyc files, cron, a damaged
+  # file in the store.
+  e2e:
+    name: E2E ${{ matrix.mode }} ${{ matrix.arch }}
+    needs: linux
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+        mode: [rootless, root]
+    env:
+      PODBAG_E2E_ROOT: ${{ matrix.mode == 'root' && '1' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: podbag-${{ matrix.arch }}-linux
+          path: bin
+      - name: Packages
+        run: dev/ci/setup.sh
+      - run: sudo install -m 0755 bin/podbag /usr/local/bin/podbag
+      - name: Files and repair
+        timeout-minutes: 15
+        run: tests/e2e/run.sh
+
+  # nginx through podbag and through the docker CLI on podbag's Docker API.
+  nginx:
+    name: Nginx ${{ matrix.mode }} ${{ matrix.arch }}
+    needs: linux
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+        mode: [rootless, root]
+    env:
+      PODBAG_E2E_ROOT: ${{ matrix.mode == 'root' && '1' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: podbag-${{ matrix.arch }}-linux
+          path: bin
+      - name: Packages
+        run: dev/ci/setup.sh
+      - run: sudo install -m 0755 bin/podbag /usr/local/bin/podbag
+      - name: nginx
+        timeout-minutes: 10
+        run: tests/e2e/nginx.sh
 
   windows:
     name: Windows ${{ matrix.arch }}
