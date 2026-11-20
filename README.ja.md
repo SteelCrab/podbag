@@ -4,6 +4,7 @@
 
 デーモンのないコンテナエンジンです。静的バイナリ1つで動きます。
 イメージをファイル単位で保存します。複数のイメージが同じファイルを使う場合、保存は1回だけです。
+コマンドラインまたは [Podbag Desktop](#podbag-desktop) を利用できます。
 
 [![CI](https://github.com/SteelCrab/podbag/actions/workflows/ci.yml/badge.svg)](https://github.com/SteelCrab/podbag/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/SteelCrab/podbag)](https://github.com/SteelCrab/podbag/releases/latest)
@@ -20,6 +21,7 @@
 ## 目次
 
 - [特徴](#特徴)
+- [Podbag Desktop](#podbag-desktop)
 - [インストール](#インストール)
 - [使い方](#使い方)
 - [ベンチマーク](#ベンチマーク)
@@ -47,6 +49,14 @@
 - レイヤー方式（Docker、Podman、Kiri）は、レイヤー全体が同じときだけ1回で済みます。ファイルが1つ違うだけで、レイヤー全体と、ほかのレイヤーと同じファイルも、もう一度保存されます。
 - podbag はファイルを1つずつ、1回だけ保存します。イメージは、それらのファイルを指すパスの一覧です。
 - Spring サービス8個・2リリースの場合: ディスク 902 MiB（Docker は 2,970 MiB）、ページキャッシュ 324 MiB（Docker は 982 MiB）。
+
+## Podbag Desktop
+
+Linux と macOS でコンテナ、イメージ、ボリューム、ネットワークを管理できます。Windows のサポートは実験段階で、WSL 2 が必要です。一覧からコンテナを起動、停止、再起動できます。コンテナを開くとログをリアルタイムで確認できます。
+
+![Podbag Desktop のサンプル一覧。実行中のコンテナ 3 個と停止中のコンテナ 2 個のイメージと公開ポートが表示されています。](docs/images/desktop-containers-en.png)
+
+[Linux パッケージのインストール手順](docs/build.md#linux-desktop-packages)と[ソースからのビルド手順](docs/usage.md#build-the-desktop-app)を参照してください。
 
 ## インストール
 
