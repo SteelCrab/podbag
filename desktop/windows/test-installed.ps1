@@ -45,14 +45,17 @@ try {
     & $engine --version
     if ($LASTEXITCODE -ne 0) { throw 'The installed engine launcher failed' }
 
-    # Use a fresh WebView2 profile and enable browser automation only for this process.
-    $profile = Join-Path $env:TEMP ("podbag-webview-" + [guid]::NewGuid())
-    $env:WEBVIEW2_USER_DATA_FOLDER = $profile
-    $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9222 --lang=en-US'
-    $app = Start-Process $gui -PassThru
+    $stderr = Join-Path $env:TEMP "podbag-window-$Arch.log"
+    $app = Start-Process $gui -PassThru -RedirectStandardError $stderr
     try {
-        node "$PSScriptRoot/test-window.cjs" "target/podbag-desktop-$Arch.png"
-        if ($LASTEXITCODE -ne 0) { throw 'The installed desktop window failed its smoke test' }
+        # Windows PowerShell has the desktop UI Automation assemblies on both runners.
+        powershell.exe -NoProfile -File "$PSScriptRoot/test-window.ps1" -AppPid $app.Id -OutputFile "target/podbag-desktop-$Arch.png"
+        if ($LASTEXITCODE -ne 0) {
+            Get-Content $stderr
+            $app.Refresh()
+            if ($app.HasExited) { throw "Podbag Desktop exited with code $($app.ExitCode)" }
+            throw "Could not verify the installed window (title: '$($app.MainWindowTitle)')"
+        }
     } finally {
         if (!$app.HasExited) {
             Stop-Process -Id $app.Id -Force
