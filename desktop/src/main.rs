@@ -821,12 +821,13 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
         quit,
     };
     let icon = if cfg!(target_os = "macos") {
-        tauri::image::Image::from_bytes(include_bytes!("../icons/tray-44.png"))?
+        tauri::image::Image::from_bytes(include_bytes!("../icons/tray-template.png"))?
     } else {
         tauri::image::Image::from_bytes(include_bytes!("../icons/64x64.png"))?
     };
     TrayIconBuilder::with_id("podbag")
         .icon(icon)
+        .icon_as_template(cfg!(target_os = "macos"))
         .tooltip("podbag")
         .menu(&menu)
         .show_menu_on_left_click(true)
