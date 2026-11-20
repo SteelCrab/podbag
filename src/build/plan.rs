@@ -868,6 +868,7 @@ mod tests {
             uid: 0,
             gid: 0,
             xattrs: vec![],
+            mtime: None,
         }
     }
 
