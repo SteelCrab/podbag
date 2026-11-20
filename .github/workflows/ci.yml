@@ -208,6 +208,38 @@ jobs:
           name: podbag-${{ matrix.arch }}-windows
           path: target/release/podbag.exe
           if-no-files-found: error
+      - name: Test Windows desktop
+        if: matrix.arch == 'x86_64'
+        run: cargo test --locked -p podbag-desktop
+      - name: Package Windows desktop
+        if: matrix.arch == 'x86_64'
+        working-directory: desktop
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force ../target/windows-engine | Out-Null
+          Copy-Item ../target/release/podbag.exe ../target/windows-engine/podbag.exe
+          npx --yes --package @tauri-apps/cli@2.12.6 tauri build --config windows/msi.json -- --locked
+      - name: Install and open Windows desktop
+        if: matrix.arch == 'x86_64'
+        shell: pwsh
+        run: |
+          npm install --prefix "$env:RUNNER_TEMP/browser-test" --no-audit --no-fund playwright-core@1.65.1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:NODE_PATH = "$env:RUNNER_TEMP/browser-test/node_modules"
+          $msi = Get-Item target/release/bundle/msi/*.msi
+          ./desktop/windows/test-installed.ps1 -Installer $msi.FullName -Arch ${{ matrix.arch }}
+      - uses: actions/upload-artifact@v4
+        if: matrix.arch == 'x86_64'
+        with:
+          name: podbag-desktop-${{ matrix.arch }}-windows
+          path: target/release/bundle/msi/*.msi
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: matrix.arch == 'x86_64'
+        with:
+          name: podbag-desktop-${{ matrix.arch }}-windows-screenshot
+          path: target/podbag-desktop-${{ matrix.arch }}.png
+          if-no-files-found: error
 
   macos:
     name: macOS
