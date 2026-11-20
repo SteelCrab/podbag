@@ -142,6 +142,5 @@ base, with the same jars:
 - **Kubernetes.** There is no CRI, so Kubernetes cannot use podbag as a node's runtime.
 - **Builds.** podbag builds Dockerfiles itself, with the classic builder's features. For
   BuildKit's (`RUN --mount`, secrets, other platforms), use buildx.
-- **Docker API.** No `top`, `stats`, `pause`, `rename`, `update` or plugins. Swarm mode runs
-  on one node only.
+- **Docker API.** Swarm mode runs on one node only. Image history and plugins are unsupported.
 - **Windows.** Not yet tried on a Windows machine.

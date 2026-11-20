@@ -1,6 +1,6 @@
 //! Docker's JSON for `GET /containers/json` and `GET /containers/{id}/json`.
 
-use super::docker::{rfc3339, state_name, status_text};
+use super::docker::{rfc3339, state_label, status_text};
 use crate::containers::MountInfo;
 use crate::network::{NetworkMode, PortMapping, Proto};
 use crate::spec::ContainerSpec;
@@ -56,12 +56,12 @@ pub fn list_entry(f: &Facts) -> Value {
         "Created": f.state.created,
         "Ports": ports,
         "Labels": f.spec.labels,
-        "State": state_name(f.state.status),
+        "State": state_label(f.state),
         "Status": format!(
             "{}{}",
             status_text(f.state, f.now),
             f.health
-                .filter(|_| f.state.status == Status::Running)
+                .filter(|_| f.state.status == Status::Running && !f.state.paused)
                 .map_or("", |h| h.status.ps_suffix())
         ),
         "HostConfig": {"NetworkMode": network_mode(f)},
@@ -130,9 +130,9 @@ pub fn inspect(f: &Facts) -> Value {
         "Path": f.spec.command.first().cloned().unwrap_or_default(),
         "Args": f.spec.command.iter().skip(1).collect::<Vec<_>>(),
         "State": {
-            "Status": state_name(st.status),
+            "Status": state_label(st),
             "Running": running,
-            "Paused": false,
+            "Paused": running && st.paused,
             "Restarting": false,
             "OOMKilled": st.oom.is_some(),
             "Dead": false,
@@ -168,6 +168,7 @@ pub fn inspect(f: &Facts) -> Value {
             "Tty": f.spec.tty,
             "OpenStdin": f.spec.interactive,
             "StdinOnce": false,
+            "StopTimeout": f.spec.stop_timeout,
             "Env": f.spec.env.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>(),
             "Cmd": f.spec.command,
             "Image": f.image,
@@ -303,10 +304,23 @@ fn networks(f: &Facts) -> Value {
 
 fn host_config(f: &Facts) -> Value {
     let limits = &f.spec.limits;
-    let nano_cpus = limits
-        .cpu_quota
-        .map(|q| q * 1_000_000_000 / crate::cgroup::CPU_PERIOD)
-        .unwrap_or(0);
+    // --cpus, or a quota and period of their own (`update --cpu-quota`).
+    let (nano_cpus, cpu_quota) = match limits.cpu_period {
+        None => (
+            limits
+                .cpu_quota
+                .map(|q| q * 1_000_000_000 / crate::cgroup::CPU_PERIOD)
+                .unwrap_or(0),
+            0,
+        ),
+        Some(_) => (0, limits.cpu_quota.unwrap_or(0)),
+    };
+    // Docker's memory+swap: twice the memory unless it was given.
+    let memory_swap = match (limits.memory, limits.memory_swap) {
+        (_, Some(total)) => total,
+        (Some(m), None) => (m as i64).saturating_mul(2),
+        (None, None) => 0,
+    };
     let binds: Vec<String> = f
         .mounts
         .iter()
@@ -335,6 +349,14 @@ fn host_config(f: &Facts) -> Value {
         "LogConfig": {"Type": "json-file", "Config": {}},
         "Memory": limits.memory.unwrap_or(0),
         "NanoCpus": nano_cpus,
+        "CpuQuota": cpu_quota,
+        "CpuPeriod": limits.cpu_period.unwrap_or(0),
+        "CpuShares": limits.cpu_shares.unwrap_or(0),
+        "CpusetCpus": limits.cpuset_cpus.clone().unwrap_or_default(),
+        "CpusetMems": limits.cpuset_mems.clone().unwrap_or_default(),
+        "MemorySwap": memory_swap,
+        "MemoryReservation": limits.memory_reservation.unwrap_or(0),
+        "BlkioWeight": limits.blkio_weight.unwrap_or(0),
         "PidsLimit": limits.pids,
         "CapAdd": f.spec.security.cap_add,
         "Privileged": f.spec.security.privileged,
@@ -410,6 +432,7 @@ mod tests {
             oom: None,
             ip: Some("10.78.0.2".into()),
             ports: vec![port(32768)],
+            paused: false,
         };
         let net = Network {
             name: "bridge".into(),
@@ -532,6 +555,7 @@ mod tests {
             oom: None,
             ip: None,
             ports: vec![],
+            paused: false,
         };
         let facts = Facts {
             spec: &spec,

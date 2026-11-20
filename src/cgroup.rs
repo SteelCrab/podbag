@@ -6,14 +6,17 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(target_os = "linux")]
 mod devices;
+pub mod freezer;
 #[cfg(target_os = "linux")]
 mod group;
+pub mod resources;
+pub mod stats;
 #[cfg(target_os = "linux")]
 pub use devices::restrict as restrict_devices;
 #[cfg(target_os = "linux")]
 pub use group::{
-    Group, ROOT, choose_placement, create, enable_controllers, own_cgroup, parent_name, remove_dir,
-    slice_budget, systemd_run, try_remove_dir, user_manager,
+    Group, ROOT, apply_live, choose_placement, create, enable_controllers, own_cgroup, parent_name,
+    remove_dir, slice_budget, systemd_run, try_remove_dir, user_manager,
 };
 
 /// Where a container's cgroup goes. The library decides; the shim creates it.
@@ -88,15 +91,38 @@ pub const MIN_MEMORY: u64 = 6 << 20;
 pub struct Limits {
     /// Bytes: `memory.max` (and `memory.swap.max`).
     pub memory: Option<u64>,
-    /// Microseconds per [`CPU_PERIOD`]: `cpu.max`.
+    /// Microseconds per [`CPU_PERIOD`] (or per `cpu_period`): `cpu.max`.
     pub cpu_quota: Option<u64>,
     /// Processes and threads: `pids.max`.
     pub pids: Option<u64>,
+    /// The `cpu.max` period in microseconds, when it was given (`--cpu-period`,
+    /// `--cpu-quota`); otherwise [`CPU_PERIOD`] and `cpu_quota` comes from `--cpus`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_period: Option<u64>,
+    /// Docker's memory+swap in bytes (`--memory-swap`); -1: swap without limit. None:
+    /// as much swap as memory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_swap: Option<i64>,
+    /// Bytes: `memory.low` (`--memory-reservation`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_reservation: Option<u64>,
+    /// Docker's CPU shares (`--cpu-shares`), written as `cpu.weight`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_shares: Option<u64>,
+    /// `cpuset.cpus` (`--cpuset-cpus`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpuset_cpus: Option<String>,
+    /// `cpuset.mems` (`--cpuset-mems`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpuset_mems: Option<String>,
+    /// Docker's block I/O weight, 10 to 1000 (`--blkio-weight`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blkio_weight: Option<u16>,
 }
 
 impl Limits {
     pub fn is_empty(&self) -> bool {
-        self.memory.is_none() && self.cpu_quota.is_none() && self.pids.is_none()
+        *self == Limits::default()
     }
 }
 

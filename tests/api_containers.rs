@@ -126,6 +126,34 @@ fn docker_run_d_ps_logs_stop_rm() {
 }
 
 #[test]
+fn configured_stop_timeout_survives_restart_and_allows_an_override() {
+    let s = setup();
+    let id = s.ok(&[
+        "run",
+        "-d",
+        "--stop-timeout",
+        "0",
+        &s.image,
+        "sh",
+        "-c",
+        "trap 'sleep 0.3; exit 42' TERM; touch /ready; while :; do sleep 0.1; done",
+    ]);
+    assert_eq!(
+        s.ok(&["inspect", "-f", "{{.Config.StopTimeout}}", &id]),
+        "0"
+    );
+    assert!(wait_for(Duration::from_secs(5), || s
+        .docker(&["exec", &id, "test", "-f", "/ready"])
+        .status
+        .success()));
+    s.ok(&["stop", "-t", "-1", &id]);
+    assert_eq!(s.ok(&["wait", &id]), "42");
+    s.ok(&["restart", &id]);
+    s.ok(&["stop", &id]);
+    assert_eq!(s.ok(&["wait", &id]), "137");
+}
+
+#[test]
 fn docker_run_interactive_reads_stdin() {
     let s = setup();
     let mut child = s

@@ -41,14 +41,18 @@ pub struct Paths {
     pub pid: PathBuf,
 }
 
-pub fn paths() -> Result<Paths, String> {
-    let home = match std::env::var_os("PODBAG_MAC_HOME") {
+pub(super) fn home() -> Result<PathBuf, String> {
+    Ok(match std::env::var_os("PODBAG_MAC_HOME") {
         Some(h) => PathBuf::from(h),
         None => {
             let user = std::env::var_os("HOME").ok_or("HOME is not set")?;
             PathBuf::from(user).join(".podbag")
         }
-    };
+    })
+}
+
+pub fn paths() -> Result<Paths, String> {
+    let home = home()?;
     let run = home.join("run");
     Ok(Paths {
         guest: guest_dir(&home),
@@ -382,18 +386,14 @@ fn serve_vm(p: &Paths, lock: &std::fs::File, inherited: Option<&Inherited>) -> R
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
+    let resources = super::resources::for_boot(&p.home)?;
     let spec = VmSpec {
         kernel: p.guest.join("Image"),
         initrd: p.guest.join("initramfs.gz"),
         disk: p.disk.clone(),
         console: p.console.clone(),
-        cpus: vm_cpus(
-            std::env::var("PODBAG_VM_CPUS")
-                .ok()
-                .and_then(|v| v.trim().parse().ok()),
-            std::thread::available_parallelism().map_or(2, |n| n.get()),
-        ),
-        memory: env_number("PODBAG_VM_MEMORY", 2048) << 20,
+        cpus: resources.cpus,
+        memory: resources.memory_mib << 20,
         // After `--`: the argument of /init, which makes podbag the VM's init. The kernel
         // sizes its bounce buffers for the VM's whole memory (64 MB at 8 GiB, written at
         // boot, so the Mac holds them), and nothing uses them: virtio here does not go
@@ -580,15 +580,6 @@ fn make_disk(p: &Paths) -> Result<(), String> {
         .and_then(|f| f.sync_all())
         .map_err(|e| err(&part, e))?;
     std::fs::rename(&part, &p.disk).map_err(|e| err(&p.disk, e))
-}
-
-/// The VM's CPUs: `PODBAG_VM_CPUS` when set (1 to the Mac's count), else the Mac's count
-/// up to 8.
-fn vm_cpus(setting: Option<u64>, mac: usize) -> usize {
-    match setting {
-        Some(n) => (n as usize).clamp(1, mac.max(1)),
-        None => mac.clamp(1, 8),
-    }
 }
 
 fn env_number(name: &str, default: u64) -> u64 {
@@ -1034,15 +1025,6 @@ mod tests {
             Path::new("/beside")
         );
         assert_eq!(choose_guest(None, || None, None, home), Path::new("/h/vm"));
-    }
-
-    #[test]
-    fn the_vm_gets_the_macs_cpus_up_to_8_unless_set() {
-        assert_eq!(vm_cpus(None, 10), 8);
-        assert_eq!(vm_cpus(None, 4), 4);
-        assert_eq!(vm_cpus(Some(10), 10), 10);
-        assert_eq!(vm_cpus(Some(64), 10), 10);
-        assert_eq!(vm_cpus(Some(0), 10), 1);
     }
 
     #[test]

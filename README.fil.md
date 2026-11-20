@@ -118,6 +118,7 @@ podbag run -d --name web -p 8080:80 nginx:alpine  # patakbuhin sa background
 podbag ps                                         # ilista ang mga container
 podbag logs -f web                                # sundan ang mga log
 podbag exec -it web sh                            # magbukas ng shell sa container
+podbag stats --no-stream                          # gamit ng CPU, memory at network
 podbag stop web && podbag rm web                  # ihinto at alisin
 podbag images                                     # ilista ang mga image
 podbag build -t myapp .                           # mag-build ng image mula sa isang Dockerfile

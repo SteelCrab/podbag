@@ -337,6 +337,39 @@ async function shell(c) {
   }
 }
 
+// ---- the macOS window toolbar ----
+
+const windowBar = window.podbagWindowToolbar && document.getElementById("window-bar");
+
+function setupWindowBar() {
+  if (!windowBar) return;
+  const actions = document.getElementById("window-actions");
+  windowBar.prepend(document.querySelector(".brand"));
+  document.getElementById("engine").remove();
+  const reload = iconButton("refresh", "", () => S.engine?.reachable ? refresh() : connect(false));
+  const settings = iconButton("settings", "", () => go("settings"));
+  actions.append(reload, settings);
+  document.getElementById("nav-bottom").remove();
+  windowBar.hidden = false;
+
+  // WebKit versions without focusgroup need one tab stop and arrow-key navigation.
+  if (!("focusGroup" in HTMLElement.prototype)) {
+    settings.tabIndex = -1;
+    actions.addEventListener("focusin", ({ target }) => {
+      reload.tabIndex = target === reload ? 0 : -1;
+      settings.tabIndex = target === settings ? 0 : -1;
+    });
+    actions.addEventListener("keydown", (event) => {
+      const { key, target } = event;
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(key)) return;
+      event.preventDefault();
+      if (key === "Home") reload.focus();
+      else if (key === "End") settings.focus();
+      else (target === reload ? settings : reload).focus();
+    });
+  }
+}
+
 // ---- the sidebar ----
 
 function go(view) {
@@ -352,6 +385,16 @@ function renderNav() {
     h("li", {}, h("button", {
       type: "button", class: "nav-item", "aria-current": S.view === k ? "page" : null, onclick: () => go(k),
     }, icon(k), h("span", { class: "label", text: t(`nav.${k}`) }), S.loaded ? h("span", { class: "count", text: S.lists[k].length }) : null))));
+  if (windowBar) {
+    const [reload, settings] = document.getElementById("window-actions").children;
+    for (const [button, label] of [[reload, t("action.refresh")], [settings, t("nav.settings")]]) {
+      button.title = label;
+      button.setAttribute("aria-label", label);
+    }
+    if (S.view === "settings") settings.setAttribute("aria-current", "page");
+    else settings.removeAttribute("aria-current");
+    return;
+  }
   document.getElementById("nav-bottom").replaceChildren(
     h("li", {}, h("button", {
       type: "button", class: "nav-item", "aria-current": S.view === "settings" ? "page" : null, onclick: () => go("settings"),
@@ -369,8 +412,10 @@ function engineState() {
 }
 
 function renderEngine() {
-  const [cls, text] = engineState();
+  syncVmSettings();
   const el = document.getElementById("engine");
+  if (!el) return;
+  const [cls, text] = engineState();
   el.className = `engine engine-${cls}`;
   el.title = (S.engine && (S.engine.version || S.engine.error)) || "";
   el.replaceChildren(h("span", { class: "dot", "aria-hidden": "true" }), h("span", { text }));
@@ -419,7 +464,7 @@ function toolbar(kind) {
         h("span", { class: "dot", "aria-hidden": "true" }), h("span", { class: "live-text", text: S.live ? t("live.on") : "" })),
       kind === "images" ? button("pull", t("action.pull"), pull, "primary") : null,
       button("prune", t("action.prune"), () => prune(kind)),
-      iconButton("refresh", t("action.refresh"), refresh)));
+      windowBar ? null : iconButton("refresh", t("action.refresh"), refresh)));
 }
 
 function renderLive() {
@@ -731,8 +776,93 @@ function onLogs(batch) {
 
 // ---- settings ----
 
+let vmActionPending = false;
+
+function syncVmSettings() {
+  const card = document.getElementById("vm-settings");
+  if (!card) return;
+  if (S.engine) card.hidden = S.engine.platform !== "macos" || !S.engine.vm;
+  if (card.hidden) return;
+  if (!card.childElementCount) {
+    const form = h("div", {});
+    const toggle = button(null, "", async () => {
+      if (vmActionPending || !S.engine) return;
+      const action = S.engine.vm === "running" ? "stop" : "start";
+      vmActionPending = true;
+      syncVmSettings();
+      try {
+        await API.vm(action);
+      } catch (err) {
+        toast(String(err), true);
+      } finally {
+        vmActionPending = false;
+        syncVmSettings();
+      }
+    });
+    toggle.id = "vm-toggle";
+    card.append(
+      h("div", { class: "vm-row" },
+        h("div", {}, h("h2", { class: "setting-label", text: "Linux VM" }),
+          h("p", { id: "vm-status", role: "status" })), toggle), form);
+    loadVmResources(form);
+  }
+  const vm = S.engine?.vm;
+  const toggle = card.querySelector("#vm-toggle");
+  toggle.disabled = !vm || vmActionPending;
+  toggle.textContent = t(vm === "running" ? "tray.stopVm" : "tray.startVm");
+  card.querySelector("#vm-status").textContent = vm ? t(vm === "running" ? "engine.vmRunning" : "engine.vmStopped") : t("engine.checking");
+}
+
+async function loadVmResources(form) {
+  try {
+    const { values, limits, envOverride } = await API.vmResources();
+    let saved = values;
+    const draft = { ...saved };
+    const save = button(null, t("action.save"), async () => {
+      fields.disabled = true;
+      try {
+        saved = (await API.vmResources(draft)).values;
+        toast(t("vm.saved"));
+      } catch (err) {
+        toast(String(err), true);
+      } finally {
+        fields.disabled = false;
+        updateSave();
+      }
+    }, "primary");
+    function updateSave() {
+      save.disabled = draft.cpus === saved.cpus && draft.memoryMib === saved.memoryMib;
+    }
+    function slider(key, label, min, max, step, format) {
+      const id = "vm-" + key;
+      const value = h("output", { for: id, text: format(draft[key]) });
+      const input = h("input", {
+        id, type: "range", min, max, step, value: draft[key], "aria-valuetext": value.textContent,
+        oninput: () => {
+          draft[key] = input.valueAsNumber;
+          value.textContent = format(draft[key]);
+          input.setAttribute("aria-valuetext", value.textContent);
+          updateSave();
+        },
+      });
+      return h("div", { class: "vm-slider" }, h("label", { for: id, text: label }), input, value);
+    }
+    const fields = h("fieldset", {}, h("legend", { class: "visually-hidden", text: t("detail.usage") }),
+      slider("cpus", "CPU", limits.minCpus, limits.maxCpus, 1, (n) => n.toLocaleString(I18N.lang)),
+      slider("memoryMib", t("vm.memory"), limits.minMemoryMib, limits.maxMemoryMib, limits.memoryStepMib,
+        (n) => n < 1024 ? n + " MiB" : (n / 1024).toLocaleString(I18N.lang) + " GiB"),
+      h("div", { class: "vm-row vm-footer" }, h("p", { text: t(envOverride ? "vm.envOverride" : "vm.nextBoot") }), save));
+    updateSave();
+    form.replaceChildren(fields);
+  } catch (err) {
+    form.replaceChildren(h("p", { class: "error-text", text: String(err) }),
+      button(null, t("action.retry"), () => loadVmResources(form)));
+  }
+}
+
 async function renderSettings(main) {
   if (!S.languageNames) S.languageNames = await I18N.names();
+  if (S.view !== "settings") return;
   const lang = h("select", {
     id: "language",
     onchange: async (e) => { S.settings.language = e.target.value; await saveSettings(); },
@@ -746,6 +876,7 @@ async function renderSettings(main) {
   main.replaceChildren(
     h("header", { class: "toolbar" }, h("h1", { text: t("settings.title") })),
     h("div", { class: "content settings" },
+      h("section", { id: "vm-settings", class: "card", hidden: true }),
       h("section", { class: "card" },
         h("label", { class: "setting-label", for: "language", text: t("settings.language") }), lang),
       h("section", { class: "card" },
@@ -758,6 +889,7 @@ async function renderSettings(main) {
       h("section", { class: "card" },
         h("h2", { class: "setting-label", text: t("settings.about") }),
         h("p", { text: t("settings.aboutText") }))));
+  syncVmSettings();
 }
 
 async function saveSettings() {
@@ -788,6 +920,7 @@ async function init() {
   } catch { /* the defaults */ }
   applyTheme();
   await I18N.load(S.settings.language);
+  setupWindowBar();
   renderNav();
   renderEngine();
   renderMain(true);
@@ -796,6 +929,22 @@ async function init() {
   API.on("logs", onLogs);
   API.on("pull-progress", (line) => { if (pullLine) pullLine(line); });
   API.on("shown", () => connect(false));
+  API.on("vm-status", (vm) => {
+    if (S.engine?.platform !== "macos" || !S.engine.vm || S.engine.vm === vm) return;
+    S.engine.vm = vm;
+    if (vm === "stopped") {
+      S.engine.reachable = false;
+      S.loaded = false;
+      clearTimeout(refreshTimer);
+      API.watch(false);
+      renderNav();
+    } else if (!S.engine.reachable && !document.hidden && !vmActionPending) {
+      connect(false);
+      return;
+    }
+    renderEngine();
+    renderMain();
+  });
   API.on("engine-changed", () => connect(false));
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) return API.watch(false);

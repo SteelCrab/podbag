@@ -1,6 +1,6 @@
 //! `/version`, `/info` and `/system/df`.
 
-use super::docker::{docker_arch, docker_image_name, state_name};
+use super::docker::{docker_arch, docker_image_name, state_label};
 use super::router::{Ctx, Reply, reply_error};
 use crate::state::Status;
 use serde_json::json;
@@ -69,6 +69,7 @@ pub fn info(ctx: &Ctx) -> Reply {
         Err(e) => return reply_error(&e),
     };
     let count = |s: Status| containers.iter().filter(|c| c.state.status == s).count();
+    let paused = containers.iter().filter(|c| c.state.paused).count();
     let images = crate::Image::list().map(|i| i.len()).unwrap_or(0);
     let mut security = vec![
         "name=seccomp,profile=builtin".to_string(),
@@ -83,8 +84,8 @@ pub fn info(ctx: &Ctx) -> Reply {
         json!({
             "ID": "podbag",
             "Containers": containers.len(),
-            "ContainersRunning": count(Status::Running),
-            "ContainersPaused": 0,
+            "ContainersRunning": count(Status::Running) - paused,
+            "ContainersPaused": paused,
             "ContainersStopped": count(Status::Exited) + count(Status::Created),
             "Images": images,
             "Driver": "overlayfs",
@@ -118,6 +119,32 @@ pub fn info(ctx: &Ctx) -> Reply {
     )
 }
 
+/// Bytes in the files below `dir` (as `du` counts them), without following links or
+/// leaving its file system. Folders it may not read count as empty.
+fn dir_size(dir: &std::path::Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(top) = std::fs::symlink_metadata(dir) else {
+        return 0;
+    };
+    let mut bytes = 0;
+    let mut todo = vec![dir.to_path_buf()];
+    while let Some(d) = todo.pop() {
+        for entry in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            if meta.dev() != top.dev() {
+                continue;
+            }
+            bytes += meta.blocks() * 512;
+            if meta.is_dir() {
+                todo.push(entry.path());
+            }
+        }
+    }
+    bytes
+}
+
 pub fn df() -> Reply {
     let usage = match crate::disk_usage() {
         Ok(u) => u,
@@ -139,21 +166,49 @@ pub fn df() -> Reply {
             })
         })
         .collect();
-    let containers: Vec<_> = containers
+    // As `docker ps` shows them (`system df -v` prints image, command, created, status).
+    let ctx = crate::paths::dirs().ok().map(Ctx::new);
+    let entries: Vec<_> = containers
         .iter()
-        .map(|c| json!({"Id": c.id, "Names": [format!("/{}", c.name)], "State": state_name(c.state.status), "SizeRw": 0, "SizeRootFs": 0}))
+        .map(|c| {
+            let spec = ctx
+                .as_ref()
+                .and_then(|ctx| Some((ctx, crate::state::read_config(&ctx.dirs, &c.id).ok()?)));
+            let mut entry = match spec {
+                Some((ctx, spec)) => {
+                    super::containers::shape(ctx, c, &spec, super::shapes::list_entry)
+                }
+                None => json!({"Id": c.id, "Names": [format!("/{}", c.name)],
+                               "State": state_label(&c.state)}),
+            };
+            entry["SizeRw"] = json!(0);
+            entry["SizeRootFs"] = json!(0);
+            entry
+        })
         .collect();
     let volumes: Vec<_> = crate::Volume::list()
         .unwrap_or_default()
         .iter()
-        .map(|v| json!({"Name": v.name, "Driver": "local", "Mountpoint": v.mountpoint, "UsageData": {"Size": -1, "RefCount": -1}}))
+        .map(|v| {
+            let users = containers
+                .iter()
+                .filter(|c| {
+                    c.mounts
+                        .iter()
+                        .any(|m| m.kind == "volume" && m.source == v.name)
+                })
+                .count();
+            let size = dir_size(std::path::Path::new(&v.mountpoint));
+            json!({"Name": v.name, "Driver": "local", "Mountpoint": v.mountpoint,
+                   "Scope": "local", "UsageData": {"Size": size, "RefCount": users}})
+        })
         .collect();
     Reply::Json(
         200,
         json!({
             "LayersSize": usage.object_bytes,
             "Images": images,
-            "Containers": containers,
+            "Containers": entries,
             "Volumes": volumes,
             "BuildCache": [],
         }),

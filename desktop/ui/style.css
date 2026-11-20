@@ -105,6 +105,18 @@ body {
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* ---- layout ---- */
+#window-bar:not([hidden]) {
+  height: 50px; display: flex; align-items: center; gap: 14px;
+  padding: 0 14px 0 86px; /* Leave room for the native macOS window controls. */
+  background: var(--surface); border-bottom: 1px solid var(--line);
+  user-select: none; -webkit-user-select: none;
+}
+#window-bar:not([hidden]) + .app { height: calc(100% - 50px); }
+#window-bar .brand { gap: 7px; padding: 0; font-size: 15px; font-weight: 650; }
+#window-bar .brand img { width: 23px; height: 23px; }
+#window-actions { display: flex; gap: 3px; margin-inline-start: auto; }
+#window-actions [aria-current="page"] { background: var(--accent-soft); color: var(--accent-text); }
+
 .app { display: grid; grid-template-columns: 216px minmax(0, 1fr); height: 100vh; }
 .sidebar {
   display: flex; flex-direction: column; gap: 4px;
@@ -274,6 +286,14 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 .card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; }
 .card p { margin: 0; color: var(--ink-2); }
 .setting-label { display: block; margin: 0 0 10px; font-size: 13px; font-weight: 600; color: var(--ink); padding: 0; }
+.vm-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
+.vm-row .setting-label { margin-bottom: 3px; font-size: 15px; }
+.vm-row p { font-size: 12px; }
+.vm-slider { display: grid; grid-template-columns: minmax(64px, 1fr) minmax(88px, 1.4fr) 62px; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.vm-slider:first-of-type { margin-top: 12px; border-top: 1px solid var(--line); }
+.vm-slider input { width: 100%; min-width: 0; margin: 0; accent-color: var(--ink-2); }
+.vm-slider output { text-align: end; font-variant-numeric: tabular-nums; }
+.vm-footer { margin-top: 12px; }
 fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
 .radios { display: flex; gap: 22px; flex-wrap: wrap; }
 select, input[type="text"] {

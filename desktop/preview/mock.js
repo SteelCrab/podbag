@@ -56,6 +56,7 @@
     ...Array.from({ length: 24 }, (_, i) => `10.77.0.1 - - [20/Nov/2026:03:${String(14 + i).padStart(2, "0")}:07 +0000] "GET /api/items?page=${i + 1} HTTP/1.1" 200 ${1200 + i * 37} "-" "curl/8.11.0"`),
   ];
 
+  let resources = { cpus: 4, memoryMib: 2048 };
   const commands = {
     engine: () => engine,
     list: ({ kind }) => lists[kind],
@@ -71,7 +72,15 @@
     logs_stop: () => null,
     watch: () => { setTimeout(() => emit("live", true), 10); return null; },
     open_shell: () => null,
-    vm: () => null,
+    vm: ({ action }) => {
+      engine.vm = action === "start" ? "running" : "stopped";
+      engine.reachable = action === "start";
+      emit("engine-changed", action);
+    },
+    vm_resources: ({ values }) => {
+      if (values) resources = { ...values };
+      return { values: { ...resources }, limits: { minCpus: 1, maxCpus: 12, minMemoryMib: 256, maxMemoryMib: 24576, memoryStepMib: 256 }, envOverride: false };
+    },
     get_settings: () => ({ language: params.get("lang") || "en", theme: params.get("theme") || "system" }),
     set_settings: () => null,
   };

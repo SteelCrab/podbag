@@ -23,9 +23,10 @@ const API = (() => {
     watch: (on) => invoke("watch", { on }),
     openShell: (id) => invoke("open_shell", { id }),
     vm: (action) => invoke("vm", { action }),
+    vmResources: (values) => invoke("vm_resources", { values: values || null }),
     getSettings: () => invoke("get_settings"),
     setSettings: (settings) => invoke("set_settings", { settings }),
-    // Events: changed, live, logs, pull-progress, shown, engine-changed.
+    // Events: changed, live, logs, pull-progress, shown, engine-changed, vm-status.
     on: listen,
   };
 })();

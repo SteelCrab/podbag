@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+profile=/usr/share/podbag-desktop/podbag-desktop-engine
+link=/etc/apparmor.d/podbag-desktop-engine
+if [ "$1" = remove ] && [ "$(readlink "$link" || true)" = "$profile" ]; then
+    if command -v apparmor_parser >/dev/null; then
+        apparmor_parser -R "$link" 2>/dev/null || true
+    fi
+    rm -f "$link"
+fi

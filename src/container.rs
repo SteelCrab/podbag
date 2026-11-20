@@ -54,6 +54,8 @@ pub struct Container {
     #[serde(default)]
     extra_networks: Vec<crate::spec::Attachment>,
     #[serde(default)]
+    stop_timeout: Option<i64>,
+    #[serde(default)]
     restart: crate::restart::RestartPolicy,
     #[serde(default)]
     health: Option<crate::health::HealthSettings>,
@@ -143,6 +145,7 @@ impl Container {
             labels: std::collections::BTreeMap::new(),
             aliases: Vec::new(),
             extra_networks: Vec::new(),
+            stop_timeout: None,
             restart: Default::default(),
             health: None,
             console_size: None,
@@ -184,6 +187,12 @@ impl Container {
     /// [`Container::auto_remove`].
     pub fn restart(mut self, policy: crate::restart::RestartPolicy) -> Container {
         self.restart = policy;
+        self
+    }
+
+    /// Set the default stop grace period in seconds. A negative value waits indefinitely.
+    pub fn stop_timeout(mut self, seconds: i64) -> Container {
+        self.stop_timeout = Some(seconds);
         self
     }
 
@@ -329,6 +338,7 @@ impl Container {
             memory: self.memory,
             cpu_quota: self.cpus.map(crate::cgroup::cpus_to_quota).transpose()?,
             pids: self.pids_limit.and_then(crate::cgroup::pids_max),
+            ..Default::default()
         })
     }
 
@@ -983,6 +993,7 @@ mod linux_launch {
                     network: network.clone(),
                     publish: c.publish.clone(),
                     aliases: c.aliases.clone(),
+                    stop_timeout: c.stop_timeout,
                     restart: c.restart,
                     health: health.clone(),
                     console_size: c.console_size,
@@ -1054,6 +1065,7 @@ mod linux_launch {
                     network: network.clone(),
                     publish: c.publish.clone(),
                     aliases: c.aliases.clone(),
+                    stop_timeout: c.stop_timeout,
                     restart: c.restart,
                     health: health.clone(),
                     console_size: c.console_size,

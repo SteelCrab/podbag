@@ -87,6 +87,46 @@ fn event(kind: &str, action: &str, id: &str, attributes: &BTreeMap<String, Strin
     })
 }
 
+/// Container changes this service announced itself (a pause and an unpause can come
+/// faster than the poller looks): (ID, what) for the poller to skip once.
+static ANNOUNCED: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+/// Whether the poller should skip a change: this service announced it already.
+fn announced(id: &str, what: &str) -> bool {
+    let mut list = ANNOUNCED.lock().unwrap_or_else(|p| p.into_inner());
+    match list.iter().position(|(i, w)| i == id && w == what) {
+        Some(at) => {
+            list.remove(at);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Tell every open stream about a container change this service made (`pause`,
+/// `unpause`, `rename`), at once; `what` names the change for the poller, which sees it
+/// in the state files later (or never, when it is undone first): `pause`, `unpause`, or
+/// `rename:<new name>`.
+pub fn publish_container(action: &str, id: &str, attributes: &[(&str, String)], what: &str) {
+    remember(id, what);
+    publish("container", action, id, attributes);
+}
+
+/// Note a change this service announced, for the poller to skip. The newest of one kind
+/// wins: a pause that the poller never saw is forgotten at the unpause.
+fn remember(id: &str, what: &str) {
+    let mut list = ANNOUNCED.lock().unwrap_or_else(|p| p.into_inner());
+    let kind = |w: &str| {
+        match w.split(':').next().unwrap_or(w) {
+            "unpause" => "pause",
+            k => k,
+        }
+        .to_string()
+    };
+    list.retain(|(i, w)| !(i == id && kind(w) == kind(what)));
+    list.push((id.to_string(), what.to_string()));
+}
+
 /// Tell every open event stream about an action of this service (images, volumes,
 /// networks). Containers are seen through their state files.
 pub fn publish(kind: &str, action: &str, id: &str, attributes: &[(&str, String)]) {
@@ -107,6 +147,8 @@ struct Seen {
     labels: BTreeMap<String, String>,
     /// Its health while it runs, when it has a check.
     health: Option<crate::health::Status>,
+    /// Frozen by `pause`.
+    paused: bool,
 }
 
 fn check(filters: &BTreeMap<String, Vec<String>>) -> Result<(), Reply> {
@@ -162,6 +204,7 @@ fn snapshot(
                     exit_code: c.state.exit_code,
                     labels: own,
                     health,
+                    paused: c.state.paused,
                 },
             )
         })
@@ -210,8 +253,23 @@ fn changes(before: &HashMap<String, Seen>, after: &HashMap<String, Seen>) -> Vec
                 }
             }
             Some(was) => {
+                if was.name != now.name {
+                    let mut a = attrs(now, false);
+                    a.insert("oldName".to_string(), format!("/{}", was.name));
+                    if !announced(id, &format!("rename:{}", now.name)) {
+                        out.push(event("container", "rename", id, &a));
+                    }
+                }
                 let restarted = now.started != was.started && ran;
                 let was_running = was.status == Status::Running;
+                // Paused or continued within one run (an end continues it too).
+                let paused_now = now.paused && now.status == Status::Running;
+                if !restarted && was.paused != paused_now && (paused_now || was_running) {
+                    let action = if paused_now { "pause" } else { "unpause" };
+                    if !announced(id, action) {
+                        out.push(event("container", action, id, &attrs(now, false)));
+                    }
+                }
                 // The run it was in ended.
                 if was_running && (now.status != Status::Running || restarted) {
                     out.push(event("container", "die", id, &attrs(was, true)));
@@ -330,6 +388,7 @@ mod tests {
             exit_code: Some(0),
             labels: BTreeMap::new(),
             health: None,
+            paused: false,
         }
     }
 
@@ -411,6 +470,63 @@ mod tests {
             .iter()
             .map(|e| e["Action"].as_str().unwrap().to_string())
             .collect()
+    }
+
+    #[test]
+    fn pauses_and_renames_are_events() {
+        let running = seen(Status::Running, Some(1));
+        let mut paused = running.clone();
+        paused.paused = true;
+        assert_eq!(
+            actions(&[("a", running.clone())], &[("a", paused.clone())]),
+            ["pause"]
+        );
+        assert_eq!(
+            actions(&[("a", paused.clone())], &[("a", running.clone())]),
+            ["unpause"]
+        );
+        // A paused container that is killed: it continues, then ends.
+        assert_eq!(
+            actions(&[("a", paused)], &[("a", seen(Status::Exited, Some(1)))]),
+            ["unpause", "die"]
+        );
+        let mut renamed = running.clone();
+        renamed.name = "m".into();
+        let evs = changes(
+            &HashMap::from([("a".to_string(), running)]),
+            &HashMap::from([("a".to_string(), renamed)]),
+        );
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0]["Action"], "rename");
+        assert_eq!(evs[0]["Actor"]["Attributes"]["name"], "m");
+        assert_eq!(evs[0]["Actor"]["Attributes"]["oldName"], "/n");
+    }
+
+    #[test]
+    fn what_the_service_announced_is_not_told_twice() {
+        let running = seen(Status::Running, Some(1));
+        let mut paused = running.clone();
+        paused.paused = true;
+        let one = |id: &str, a: &Seen, b: &Seen| {
+            changes(
+                &HashMap::from([(id.to_string(), a.clone())]),
+                &HashMap::from([(id.to_string(), b.clone())]),
+            )
+            .len()
+        };
+        remember("announced-1", "pause");
+        assert_eq!(one("announced-1", &running, &paused), 0);
+        // Once only: a later pause the service did not make is told.
+        assert_eq!(one("announced-1", &running, &paused), 1);
+        // A pause and an unpause the poller never saw: the unpause is the one left.
+        remember("announced-2", "pause");
+        remember("announced-2", "unpause");
+        assert_eq!(one("announced-2", &running, &paused), 1);
+        assert_eq!(one("announced-2", &paused, &running), 0);
+        let mut renamed = running.clone();
+        renamed.name = "m".into();
+        remember("announced-3", "rename:m");
+        assert_eq!(one("announced-3", &running, &renamed), 0);
     }
 
     #[test]

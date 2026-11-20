@@ -185,11 +185,15 @@ pub enum Relaunch {
 /// The container ended with `code`: start its restarter when its policy wants it.
 #[cfg(target_os = "linux")]
 pub(crate) fn after_exit(dirs: &Dirs, spec: &crate::spec::ContainerSpec, code: i32, how: Relaunch) {
-    if spec.restart == RestartPolicy::No || how == Relaunch::Never {
+    // As saved now: `update --restart` may have changed it while the container ran.
+    let policy = crate::state::read_config(dirs, &spec.id)
+        .map(|s| s.restart)
+        .unwrap_or(spec.restart);
+    if policy == RestartPolicy::No || how == Relaunch::Never {
         return;
     }
     let count = record(dirs, &spec.id).count;
-    if !wanted(&spec.restart, code, stopped_by_user(dirs, &spec.id), count) {
+    if !wanted(&policy, code, stopped_by_user(dirs, &spec.id), count) {
         return;
     }
     if let Err(e) = spawn(&spec.id, how) {

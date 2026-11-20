@@ -81,6 +81,9 @@ pub struct ContainerSpec {
     /// Further names of the container on its primary network (`--network-alias`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aliases: Vec<String>,
+    /// Seconds allowed for a graceful stop. A negative value allows an unlimited wait.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_timeout: Option<i64>,
     /// When the container is started again after it ended (`--restart`).
     #[serde(default)]
     pub restart: crate::restart::RestartPolicy,
@@ -383,6 +386,7 @@ pub(crate) fn spec_fixture() -> ContainerSpec {
         network: crate::network::NetworkMode::Host,
         publish: Vec::new(),
         aliases: Vec::new(),
+        stop_timeout: None,
         restart: Default::default(),
         health: None,
         console_size: None,

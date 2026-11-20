@@ -795,6 +795,22 @@ pub(crate) fn release(dirs: &Dirs, network: &str, id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Container `id` has a new name: its entries in the networks it is on (while it runs)
+/// take it. Returns those networks, whose hosts files need a refresh.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn rename_member(dirs: &Dirs, id: &str, name: &str) -> Result<Vec<String>> {
+    let _lock = lock(dirs)?;
+    let mut changed = Vec::new();
+    for mut record in all_records(dirs)? {
+        if let Some(m) = record.containers.get_mut(id).filter(|m| m.name != name) {
+            m.name = name.to_string();
+            write_record(dirs, &record)?;
+            changed.push(record.network.name);
+        }
+    }
+    Ok(changed)
+}
+
 /// A network's record with the lines of its containers, read once for a refresh.
 struct Loaded {
     record: Record,
@@ -1415,6 +1431,28 @@ mod tests {
             hosts_of(&dirs, &db),
             format!("{local}{db_ip}\tdb\n{web_ip}\tweb\n")
         );
+    }
+
+    #[test]
+    fn a_renamed_member_is_found_by_its_new_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = dirs_in(tmp.path());
+        create_in(&dirs, "app", None, &[]).unwrap();
+        let (web, web_ip) = member(&dirs, "web", "front");
+        let (db, _) = member(&dirs, "db", "db");
+        assert_eq!(rename_member(&dirs, &web, "api").unwrap(), ["app"]);
+        // The same name again changes nothing; a container on no network has nothing.
+        assert!(rename_member(&dirs, &web, "api").unwrap().is_empty());
+        assert!(
+            rename_member(&dirs, &"e".repeat(64), "x")
+                .unwrap()
+                .is_empty()
+        );
+        refresh_hosts(&dirs, "app");
+        let peer = hosts_of(&dirs, &db);
+        assert!(peer.contains(&format!("{web_ip}\tapi\n")), "{peer}");
+        assert!(!peer.contains("web"), "{peer}");
+        assert!(hosts_of(&dirs, &web).contains(&format!("{web_ip}\tfront api\n")));
     }
 
     #[test]

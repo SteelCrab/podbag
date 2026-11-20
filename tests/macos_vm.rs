@@ -237,6 +237,57 @@ impl Drop for Mac {
 }
 
 #[test]
+fn saved_resources_apply_on_the_next_boot() {
+    if !enabled() {
+        return;
+    }
+    let mac = Mac::bare(3);
+    let check = |cpus: u64, mib: u64| {
+        let out = Command::new("curl")
+            .args(["-fsS", "--max-time", "45", "--unix-socket"])
+            .arg(mac.docker_sock())
+            .arg("http://localhost/info")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let info: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(info["NCPU"], cpus);
+        // The guest reports usable memory after the kernel reserves its share.
+        let usable_mib = info["MemTotal"].as_u64().unwrap() >> 20;
+        assert!((mib - 128..=mib).contains(&usable_mib), "{usable_mib} MiB");
+    };
+    mac.ok(&["vm", "resources", "1", "768"]);
+    assert_eq!(mac.ok(&["vm", "status"]), "stopped");
+    let start = mac
+        .cmd(&["vm", "start"])
+        .env_remove("PODBAG_VM_CPUS")
+        .env_remove("PODBAG_VM_MEMORY")
+        .output()
+        .unwrap();
+    assert!(
+        start.status.success(),
+        "{}",
+        String::from_utf8_lossy(&start.stderr)
+    );
+    check(1, 768);
+    mac.ok(&["vm", "resources", "2", "1280"]);
+    check(1, 768);
+    mac.wait_until_stopped();
+    let saved: serde_json::Value = serde_json::from_str(&mac.ok(&["vm", "resources"])).unwrap();
+    assert_eq!(saved["values"]["memoryMib"], 1280);
+    assert_eq!(mac.ok(&["vm", "status"]), "stopped");
+    check(2, 1280); // The request wakes the standby.
+    mac.ok(&["vm", "stop"]);
+    // Mac::cmd sets PODBAG_VM_MEMORY to 1024. The saved CPU count still applies.
+    mac.ok(&["vm", "start"]);
+    check(2, 1024);
+}
+
+#[test]
 fn commands_run_in_the_vm() {
     if !enabled() {
         return;

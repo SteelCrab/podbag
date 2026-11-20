@@ -13,6 +13,7 @@ pub mod events;
 pub mod exec;
 pub mod http;
 pub mod images;
+pub mod manage;
 pub mod objects;
 pub mod router;
 pub mod shapes;
