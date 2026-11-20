@@ -2,12 +2,14 @@
 //! desktop app. One connection per request and no async runtime: a stream (logs, events,
 //! a pull) holds its own connection while it is read.
 
+pub mod choice;
 mod endpoint;
 #[cfg(unix)]
 #[doc(hidden)]
 pub mod fake;
 mod wire;
 
+pub use choice::{Choice, Target, ui_dir};
 pub use endpoint::{Closer, Endpoint, REQUEST_TIMEOUT, podbag_program};
 pub use wire::Demux;
 
