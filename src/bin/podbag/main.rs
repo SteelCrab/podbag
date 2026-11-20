@@ -21,6 +21,38 @@ mod volume;
 use args::{Cli, Cmd};
 use clap::Parser;
 
+fn migrate(
+    from: podbag::client::Choice,
+    to: podbag::client::Choice,
+    kind: &str,
+    name: &str,
+) -> i32 {
+    use podbag::client::{Client, Kind, Target, migration, podbag_program};
+    let connect =
+        |choice| Target::find(Some(choice), &podbag_program()).map(|t| Client::new(t.endpoint));
+    let kind = match kind {
+        "container" => Kind::Containers,
+        "image" => Kind::Images,
+        "volume" => Kind::Volumes,
+        _ => return 2,
+    };
+    let result = (|| {
+        migration::migrate(&connect(&from)?, &connect(&to)?, kind, name, |phase| {
+            eprintln!("{phase}")
+        })
+    })();
+    match result {
+        Ok(()) => {
+            println!("Verified {name} on {}", to.label());
+            0
+        }
+        Err(e) => {
+            eprintln!("podbag: {e}");
+            1
+        }
+    }
+}
+
 fn main() {
     // A login a front end (macOS, Windows) sent with the command: kept in memory, gone
     // from the environment before any thread or child process starts.
@@ -186,7 +218,7 @@ fn macos_front(args: Vec<String>) -> Option<i32> {
 fn runs_here(cli: &Cli) -> bool {
     matches!(
         cli.cmd,
-        Cmd::Login { .. } | Cmd::Logout { .. } | Cmd::Search { .. }
+        Cmd::Login { .. } | Cmd::Logout { .. } | Cmd::Search { .. } | Cmd::Migrate { .. }
     )
 }
 
@@ -345,6 +377,12 @@ fn dispatch(cmd: Cmd) -> i32 {
             containers,
         } => container::start(&containers, attach, interactive),
         Cmd::Restart { time, containers } => container::restart(&containers, time),
+        Cmd::Migrate {
+            from,
+            to,
+            kind,
+            name,
+        } => migrate(from, to, &kind, &name),
         Cmd::Pull { image } => image::pull(&image),
         Cmd::Push { image } => registry::push(&image),
         Cmd::Tag { source, target } => registry::tag(&source, &target),
@@ -487,6 +525,12 @@ fn install_self(dest: &std::path::Path) -> i32 {
 #[cfg(not(unix))]
 fn dispatch(cmd: Cmd) -> i32 {
     match cmd {
+        Cmd::Migrate {
+            from,
+            to,
+            kind,
+            name,
+        } => migrate(from, to, &kind, &name),
         Cmd::Pull { image } => image::pull(&image),
         Cmd::Push { image } => registry::push(&image),
         Cmd::Tag { source, target } => registry::tag(&source, &target),

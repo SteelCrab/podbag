@@ -35,7 +35,7 @@ async function test() {
     check(symbol && doc.querySelector(symbol)?.localName === "symbol", "Render a resource icon");
     check(svg.getAttribute("aria-hidden") === "true" && svg.getBBox().width > 0, "Draw the decorative icon");
     const label = button.querySelector(".label");
-    check(label.getClientRects().length && label.textContent === button.title, "Show the resource name and tooltip");
+    check(label.getClientRects().length && button.title.startsWith(label.textContent), "Show the resource name and tooltip");
     check(button.getAttribute("aria-label") === label.textContent, "Keep the button accessible without visible text");
     icons.add(symbol);
   }

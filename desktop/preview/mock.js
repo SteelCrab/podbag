@@ -164,6 +164,16 @@
     connection: () => [token, selected, selected === "podbag"],
     contexts: () => ["desktop-linux", "orbstack"],
     kube_contexts: () => ["dev", "staging"],
+    migration_sources: () => ["docker", "podman", "kiri", "podbag"],
+    kube_counts: ({ allNamespaces }) => Object.fromEntries(Object.entries(kube).map(([kind,items]) =>
+      [kind,items.filter(i=>allNamespaces||i.metadata.namespace==="default").length])),
+    migration_list: ({ kind }) => lists[kind],
+    migrate: async ({ request, updates }) => {
+      for (const phase of ["prepare", request.kind === "images" ? "image" : "files", "verify"]) {
+        updates.onmessage(phase);
+        await new Promise(resolve => setTimeout(resolve, 180));
+      }
+    },
     create_volume: ({ name }) => { volumes.push({ Name: name, Driver: "local" }); },
     engine: () => engine,
     list: ({ kind }) => lists[kind],
@@ -227,7 +237,7 @@
   };
 
   window.__TAURI__ = {
-    core: { invoke: async (cmd, args) => commands[cmd](args || {}) },
+    core: { Channel: class {}, invoke: async (cmd, args) => commands[cmd](args || {}) },
     event: { listen: async (name, fn) => { (listeners[name] ||= []).push(fn); return () => {}; } },
   };
 

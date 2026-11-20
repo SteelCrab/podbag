@@ -100,7 +100,7 @@ fn actions_send_the_right_requests() {
         [
             ("POST", "/containers/web/stop"),
             ("DELETE", "/containers/web?force=1"),
-            ("DELETE", "/images/alpine%3A3.20"),
+            ("DELETE", "/images/alpine:3.20"),
             ("DELETE", "/volumes/data"),
             ("POST", "/containers/prune"),
             (

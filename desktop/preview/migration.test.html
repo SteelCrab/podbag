@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Migration confirmation and progress</title>
+<iframe src="preview.html?lang=en" width="1000" height="650" title="Podbag Desktop"></iframe>
+<pre id="result">Running</pre>
+<script>
+"use strict";
+const frame = document.querySelector("iframe");
+frame.addEventListener("load", async () => {
+  const win = frame.contentWindow, doc = frame.contentDocument;
+  const wait = async fn => {
+    for (let i = 0; i < 150; i++) {
+      if (fn()) return;
+      await new Promise(resolve => setTimeout(resolve, 30));
+    }
+    throw Error("Timed out waiting for the migration UI");
+  };
+  const by = id => doc.getElementById(id);
+  const check = (v, label) => { if (!v) throw Error(label); };
+  try {
+    await wait(() => doc.documentElement.dataset.ready === "1");
+    const real = win.__TAURI__.core.invoke;
+    let calls = 0, finish, failure = false;
+    win.__TAURI__.core.invoke = (cmd, args) => {
+      if (cmd !== "migrate") return real(cmd, args);
+      calls++;
+      check(args.request.source === "docker" && args.request.destination === "podbag", "Pin both engines");
+      args.updates.onmessage("files");
+      return new Promise((resolve, reject) => { finish = () => failure ? reject("Destination conflict") : resolve(); });
+    };
+    win.podbag.go("migration");
+    const row = () => doc.querySelector('.migration-row[data-kind="volumes"]');
+    await wait(() => by("migration-source")?.options.length && !by("migration-source").disabled);
+    by("migration-source").value = "docker";
+    by("migration-source").dispatchEvent(new win.Event("change"));
+    await wait(() => row() && !by("migration-source").disabled);
+    check(!by("engine-switch") && !doc.querySelector(".topbar .brand"), "Remove window branding and engine selector");
+    const total = doc.querySelectorAll(".migration-row").length;
+    check(Number(doc.querySelector("#nav .count").textContent) === total, "Count the listed resources");
+    check([...doc.querySelectorAll(".migration-group")].every(g => g.querySelector(".migration-row")), "Hide empty groups");
+    row().click();
+    const dlg = () => doc.querySelector(".migration-dialog");
+    check(dlg().dataset.phase === "confirm" && calls === 0, "Review before writing");
+    dlg().querySelector(".buttons button").click();
+    await wait(() => !dlg());
+    check(calls === 0, "Cancel without migrating");
+    for (failure of [false, true]) {
+      await wait(() => row());
+      row().click();
+      by("migration-start").click();
+      check(dlg().dataset.phase === "running" && dlg().textContent.includes("volume files"), "Display backend progress");
+      check(!dlg().dispatchEvent(new win.Event("cancel", { cancelable: true })), "Keep the running operation visible");
+      finish();
+      await wait(() => dlg().dataset.phase === (failure ? "failed" : "done"));
+      check(dlg().textContent.includes(failure ? "Destination conflict" : "verified"), "Report the actual outcome");
+      dlg().querySelector(".buttons button").click();
+      await wait(() => !dlg());
+    }
+    check(calls === 2, "Perform each confirmed transfer once");
+    document.getElementById("result").textContent = "PASS";
+  } catch (e) { document.getElementById("result").textContent = "FAIL: " + e.message; }
+});
+</script>
+</html>

@@ -668,6 +668,39 @@ podbag tui --engine unix:///run/kiri/docker.sock
   - Windows: `podbag tui` runs in the WSL distribution. The desktop app reaches the API
     through `podbag.exe system dial-stdio`.
 
+### Migrate between engines or Kubernetes clusters
+
+In Podbag Desktop, open **Migrate**. The list shows the resources found on your local engines.
+Use the Kubernetes tab to choose a source cluster and namespace. Select a resource,
+choose its destination and start the migration. The dialog reports progress,
+verifies the destination and keeps the source. Existing destination containers and
+volumes block the copy. An identical image can be reused.
+
+- **Images** transfer a single-platform image archive with its selected tag and layers.
+- **Containers** must be stopped. Podbag snapshots the writable filesystem, copies its
+  named and anonymous volumes, and creates a stopped container with the same name,
+  command, environment and supported runtime settings. Create any custom networks on
+  the destination first. Host bind mounts require a separate host file transfer.
+- **Volumes** copy files from local Docker-compatible volumes, including hidden files,
+  links, permissions and ownership. Stop workloads writing to the source volume first.
+  Podbag uses a BusyBox 1.36.1 helper image and temporary local disk space for the archive.
+- **Kubernetes** supports standalone Pods, Services, Deployments and filesystem PVCs.
+  Select two kubeconfig contexts and an existing destination namespace. Kubernetes assigns
+  new UIDs, service addresses and node ports. Migrate PVCs before workloads that use them.
+  The destination needs the referenced images, credentials and configuration. A bound claim
+  needs compatible storage and permission to create temporary Pods and use `pods/exec` in
+  both namespaces. Podbag transfers the files through those Pods and checks their contents
+  on the destination. Stop writers before starting. Raw block devices and CSI snapshots
+  need a storage-specific transfer.
+
+The CLI supports the same engine transfers. For example, with Docker and Podbag running:
+
+```sh
+podbag migrate --from docker --to podbag image example/app:1
+podbag migrate --from podman --to podbag volume app-data
+podbag migrate --from context:staging --to podbag container web
+```
+
 ### podbag tui
 
 - Four lists: containers, images, volumes and networks. The selected one's details show
@@ -781,7 +814,7 @@ podbag tui --engine unix:///run/kiri/docker.sock
 
 #### Engine switch
 
-- Choose the engine under **This window** in the sidebar or in Settings.
+- Select the browsing engine in **Settings → Engine**. Migration uses its own source and destination.
 - The choice is saved in `ui.json`. `podbag tui` uses the same choice.
 - Switching reloads the lists. The app never starts Docker. When Docker does not answer,
   it says so: "Docker is not running. Start Docker Desktop."

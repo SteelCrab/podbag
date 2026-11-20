@@ -16,7 +16,15 @@ const API = (() => {
       token = id;
       return { name, local };
     },
+    migrationList: (source, kind) => invoke("migration_list", { source, kind }),
+    migrate(request, onProgress) {
+      const updates = new tauri.core.Channel();
+      updates.onmessage = onProgress;
+      return invoke("migrate", { request, updates });
+    },
     contexts: () => invoke("contexts"),
+    migrationSources: () => invoke("migration_sources"),
+    kubeCounts: (context, allNamespaces) => invoke("kube_counts", { context: context || null, allNamespaces }),
     kubeContexts: () => invoke("kube_contexts"),
     createVolume: (name) => scoped("create_volume", { name }),
     engine: (start) => scoped("engine", { start: !!start }),

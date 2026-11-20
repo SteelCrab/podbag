@@ -20,7 +20,7 @@ pub struct Snapshot {
     items: Vec<Value>,
 }
 
-fn kubectl(args: &[&str]) -> Result<Vec<u8>, String> {
+pub(super) fn kubectl_command() -> Result<Command, String> {
     let mut cmd = Command::new("kubectl");
     // Apps launched from Finder do not inherit the user's shell PATH.
     #[cfg(target_os = "macos")]
@@ -38,10 +38,17 @@ fn kubectl(args: &[&str]) -> Result<Vec<u8>, String> {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000);
     }
-    let out = cmd.args(args).output().map_err(|err| match err.kind() {
-        std::io::ErrorKind::NotFound => "kubectl-missing".to_owned(),
-        _ => format!("kubectl: {err}"),
-    })?;
+    Ok(cmd)
+}
+
+fn kubectl(args: &[&str]) -> Result<Vec<u8>, String> {
+    let out = kubectl_command()?
+        .args(args)
+        .output()
+        .map_err(|err| match err.kind() {
+            std::io::ErrorKind::NotFound => "kubectl-missing".to_owned(),
+            _ => format!("kubectl: {err}"),
+        })?;
     if !out.status.success() {
         let error = String::from_utf8_lossy(&out.stderr);
         return Err(format!("kubectl ({}): {}", out.status, error.trim()));
@@ -261,4 +268,43 @@ mod tests {
         });
         assert_eq!(denied.err().as_deref(), Some("dev: Forbidden"));
     }
+}
+
+#[tauri::command(async)]
+pub fn kube_counts(
+    context: Option<String>,
+    all_namespaces: bool,
+) -> Result<std::collections::BTreeMap<String, usize>, String> {
+    let mut args = vec![
+        "get",
+        "pods,services,deployments.apps,persistentvolumeclaims",
+        "--request-timeout=10s",
+        "--no-headers",
+        "-o",
+        "custom-columns=KIND:.kind",
+    ];
+    if let Some(ref c) = context {
+        args.extend(["--context", c]);
+    }
+    if all_namespaces {
+        args.push("--all-namespaces");
+    }
+    let bytes = kubectl(&args)?;
+    let mut counts = std::collections::BTreeMap::from([
+        ("pods".into(), 0),
+        ("services".into(), 0),
+        ("deployments".into(), 0),
+        ("claims".into(), 0),
+    ]);
+    for line in String::from_utf8_lossy(&bytes).lines() {
+        let key = match line.trim() {
+            "Pod" => "pods",
+            "Service" => "services",
+            "Deployment" => "deployments",
+            "PersistentVolumeClaim" => "claims",
+            _ => continue,
+        };
+        *counts.get_mut(key).unwrap() += 1;
+    }
+    Ok(counts)
 }

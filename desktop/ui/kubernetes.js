@@ -58,10 +58,11 @@ function renderKubernetes(main) {
   const content = h("div", { class: "content", "aria-live": "polite" });
   const search = h("input", { type: "search", class: "search", placeholder: t("search.placeholder"),
     "aria-label": t("search.placeholder"), oninput: renderRows });
-  const all = h("input", { type: "checkbox", onchange: load });
+  const all = h("input", { type: "checkbox", checked: S.kubeAllNamespaces, onchange: () => { S.kubeAllNamespaces = all.checked; refreshKubeCounts(); load(); } });
   const cluster = h("select", { id: "kube-context", onchange: () => {
     S.kubeContext = cluster.value;
     sessionStorage.setItem("kube-context", cluster.value);
+    refreshKubeCounts();
     load();
   } });
   function contexts(names) {
@@ -72,6 +73,7 @@ function renderKubernetes(main) {
   }
   contexts([]);
   function reload() {
+    refreshKubeCounts();
     API.kubeContexts().then(contexts).catch(() => {});
     return load();
   }

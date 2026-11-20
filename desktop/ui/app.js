@@ -7,8 +7,11 @@ const KINDS = ["containers", "images", "volumes", "networks"];
 const t = (key, vars) => I18N.t(key, vars);
 
 const S = {
-  view: "containers", // an engine resource, "kubernetes" or "settings"
+  view: "migration", // an engine resource, "kubernetes" or "settings"
   kubeKind: "pods",
+  kubeCounts: {},
+  kubeAllNamespaces: false,
+  migrationCount: null,
   kubeContext: sessionStorage.getItem("kube-context") || "",
   connection: null,
   contexts: [],
@@ -211,7 +214,6 @@ async function connect(startVm) {
     S.engine = { reachable: false, error: String(e), platform: "linux", endpoint: "" };
   }
   renderEngine();
-  renderSwitch();
   refreshVm();
   refreshDocker();
   if (S.engine.reachable) {
@@ -385,9 +387,9 @@ const windowBar = window.podbagWindowToolbar && document.getElementById("window-
 function setupWindowBar() {
   if (!windowBar) return;
   const actions = document.getElementById("topbar-tools");
-  windowBar.prepend(document.querySelector(".brand"));
   document.getElementById("engine").remove();
   const reload = iconButton("refresh", "", () => {
+    if (S.view === "migration") return migrationPanel?.reload();
     if (S.view === "kubernetes") return kubePanel.reload();
     return S.engine?.reachable ? refresh() : connect(false);
   });
@@ -395,7 +397,6 @@ function setupWindowBar() {
   actions.append(reload, settings);
   document.getElementById("nav-bottom").remove();
   windowBar.querySelector(".topbar-space").setAttribute("data-tauri-drag-region", "");
-  windowBar.querySelector(".brand").setAttribute("data-tauri-drag-region", "deep");
   windowBar.classList.add("native");
   windowBar.setAttribute("data-tauri-drag-region", "");
 
@@ -485,11 +486,11 @@ function setupKubeNav() {
   const label = t("nav.kubernetes");
   const open = h("button", {
     type: "button", id: "nav-kube-open", class: "nav-item", "aria-label": label, title: label, onclick: () => go("kubernetes"),
-  }, icon("kubernetes"), h("span", { class: "label", text: label }));
+  }, icon("kubernetes"), h("span", { class: "label", text: label }), h("span", { class: "count" }));
   const toggle = h("button", {
     type: "button", id: "nav-kube-toggle", class: "icon-button kube-toggle",
     "aria-label": t("kube.resources"), title: t("kube.resources"), "aria-controls": "nav-kube-children",
-    onclick: () => { S.kubeExpanded = !S.kubeExpanded; updateKubeNav(); },
+    onclick: () => { S.kubeExpanded = !S.kubeExpanded; updateKubeNav(); if (S.kubeExpanded) refreshKubeCounts(); },
   }, icon("back"));
   const children = h("ul", { class: "nav kube-subnav", id: "nav-kube-children", "aria-label": t("kube.resources") },
     KUBE_KINDS.map((kind) => {
@@ -497,14 +498,33 @@ function setupKubeNav() {
       return h("li", {}, h("button", {
         type: "button", class: "nav-item", id: `nav-kube-${kind}`, "aria-label": label, title: label,
         onclick: () => go("kubernetes", kind),
-      }, icon(`kube-${kind}`), h("span", { class: "label", text: label })));
+      }, icon(`kube-${kind}`), h("span", { class: "label", text: label }), h("span", { class: "count" })));
     }));
   document.getElementById("nav-kubernetes").replaceChildren(
     h("li", {}, h("div", { class: "kube-nav-header" }, open, toggle), children));
 }
 
+let kubeCountRequest = 0;
+async function refreshKubeCounts() {
+  const generation = ++kubeCountRequest;
+  S.kubeCounts = {};
+  updateKubeNav();
+  try {
+    const counts = await API.kubeCounts(S.kubeContext, S.kubeAllNamespaces);
+    if (generation === kubeCountRequest) { S.kubeCounts = counts; updateKubeNav(); }
+  } catch { /* An unavailable count stays blank. */ }
+}
+
 function updateKubeNav() {
   const active = S.view === "kubernetes";
+  const counts = KUBE_KINDS.map(kind => S.kubeCounts[kind]);
+  const total = counts.every(Number.isInteger) ? counts.reduce((sum, n) => sum + n, 0) : null;
+  for (const [id, count] of [["open", total], ...KUBE_KINDS.map(kind => [kind, S.kubeCounts[kind]])]) {
+    const button = document.getElementById(`nav-kube-${id}`);
+    const badge = button.querySelector(".count");
+    badge.textContent = count ?? "";
+    button.title = count == null ? button.getAttribute("aria-label") : `${button.getAttribute("aria-label")} (${count})`;
+  }
   document.getElementById("nav-kube-toggle").setAttribute("aria-expanded", String(S.kubeExpanded));
   document.getElementById("nav-kube-children").hidden = !S.kubeExpanded;
   for (const [id, current] of [
@@ -522,8 +542,9 @@ function renderNav() {
   const item = (view, label, count) => h("li", {}, h("button", {
     type: "button", class: "nav-item", "aria-current": S.view === view ? "page" : null, onclick: () => go(view),
     title: label,
-  }, icon(view), h("span", { class: "label", text: label }), count == null ? null : h("span", { class: "count", text: count })));
-  nav.replaceChildren(...KINDS.map((k) => item(k, t(`nav.${k}`), S.loaded ? S.lists[k].length : null)));
+  }, icon(view), h("span", { class: "label", text: label }), h("span", { class: "count", text: count ?? "" })));
+  nav.replaceChildren(item("migration", t("migration.title"), S.migrationCount),
+    ...KINDS.map(k => item(k, t(`nav.${k}`), S.loaded && !S.listErrors[k] ? S.lists[k].length : null)));
   updateKubeNav();
   if (windowBar) {
     const [reload, settings] = document.getElementById("topbar-tools").children;
@@ -560,11 +581,11 @@ function renderEngine() {
   el.hidden = !!S.vm && hasVm();
 }
 
-// "This window: podbag / Docker". `where` names the radio group (sidebar or settings).
-function engineChoice(where) {
+// The engine preference shared by Desktop and the TUI.
+function engineChoice() {
   const name = S.connection.name;
   const option = (value, text) => h("option", { value, text });
-  const select = h("select", { class: "engine-picker", id: where === "sidebar" ? "engine-picker" : "settings-engine-picker",
+  const select = h("select", { class: "engine-picker", id: "settings-engine-picker",
     "aria-label": t("settings.engine") },
     option("podbag", "podbag"), option("docker", "Docker"), option("podman", "Podman"), option("kiri", "Kiri"));
   if (S.contexts.length) select.append(h("optgroup", { label: t("engine.contexts") },
@@ -583,16 +604,6 @@ function engineChoice(where) {
     }
   };
   return select;
-}
-
-function renderSwitch() {
-  const name = S.engine?.engineName || S.connection.name;
-  const rail = iconButton("engine", t("switch.current", { name }), () => {
-    go("settings");
-    document.getElementById("settings-engine-picker")?.focus();
-  }, "switch-rail");
-  put(document.getElementById("engine-switch"),
-    h("label", { class: "switch-label", for: "engine-picker", text: t("switch.label") }), engineChoice("sidebar"), rail);
 }
 
 // ---- the sidebar's width, collapse and divider ----
@@ -858,6 +869,7 @@ function dockerCommandItem() { return null; }
 
 let shownView = null;
 let kubePanel;
+let migrationPanel;
 
 function renderMain(fresh) {
   const main = document.getElementById("main");
@@ -867,6 +879,11 @@ function renderMain(fresh) {
     return;
   }
   kubePanel = null;
+  if (S.view === "migration") {
+    if (fresh || shownView !== S.view) migrationPanel = renderMigration(main);
+    shownView = S.view;
+    return;
+  }
   if (S.view === "settings") {
     if (fresh || shownView !== "settings") renderSettings(main);
     shownView = "settings";
@@ -1303,7 +1320,7 @@ async function renderSettings(main) {
         h("fieldset", {}, h("legend", { class: "setting-label", text: t("settings.theme") }), h("div", { class: "radios" }, themes))),
       h("section", { class: "card", id: "engine-settings" },
         h("h2", { class: "setting-label", text: t("settings.engine") }),
-        h("div", { class: "setting-row" }, h("span", { class: "secondary-text", text: t("switch.label") }), engineChoice("settings")),
+        h("div", { class: "setting-row" }, h("span", { class: "secondary-text", text: t("settings.engine") }), engineChoice()),
         h("p", { class: "hint", text: t("settings.engineNote") }),
         h("dl", { class: "fields" },
           field(t("settings.socket"), e.endpoint, "mono"),
@@ -1597,7 +1614,6 @@ async function saveSettings() {
 function renderAll() {
   renderNav();
   renderEngine();
-  renderSwitch();
   renderVmCard();
   renderStatusbar();
   renderBanner();
@@ -1665,7 +1681,7 @@ function extraKeys() {}
 async function init() {
   S.connection = await API.connection();
   const view = sessionStorage.getItem("engine-view");
-  if ([...KINDS, "settings", "kubernetes"].includes(view)) S.view = view;
+  if ([...KINDS, "settings", "kubernetes", "migration"].includes(view)) S.view = view;
   const kind = sessionStorage.getItem("engine-resource");
   if (KUBE_KINDS.includes(kind)) S.kubeKind = kind;
   S.kubeExpanded = S.view === "kubernetes";
@@ -1673,10 +1689,7 @@ async function init() {
   sessionStorage.removeItem("engine-resource");
   API.contexts().then((names) => {
     S.contexts = names;
-    if (document.getElementById("engine-picker")) {
-      renderSwitch();
-      if (S.view === "settings") renderMain(true);
-    }
+    if (S.view === "settings" && document.getElementById("settings-engine-picker")) renderMain(true);
   }).catch(() => {});
   try {
     S.settings = { ...S.settings, ...(await API.getSettings()) };
@@ -1687,6 +1700,7 @@ async function init() {
   setupKubeNav();
   setupSidebar();
   renderAll();
+  refreshKubeCounts();
   remember();
   API.on("changed", refreshSoon);
   API.on("live", (v) => { S.live = !!v; renderLive(); });

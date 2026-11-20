@@ -5,10 +5,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod cli;
+mod cluster_migration;
 mod commands;
 mod dockercmd;
 mod images;
 mod kubernetes;
+mod migration;
 mod settings;
 mod strings;
 
@@ -55,6 +57,7 @@ struct TrayItems {
 }
 
 struct AppState {
+    migration: Mutex<()>,
     /// The engine this window uses, and its client.
     session: Mutex<Arc<Session>>,
     podbag: PathBuf,
@@ -103,6 +106,7 @@ impl AppState {
             },
         });
         AppState {
+            migration: Mutex::new(()),
             session: Mutex::new(Arc::new(Session::new(1, target))),
             podbag,
             engine_version: Mutex::new(None),
@@ -1059,6 +1063,10 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             engine,
             list,
+            kubernetes::kube_counts,
+            migration::migration_sources,
+            migration::migration_list,
+            migration::migrate,
             kubernetes::kube_list,
             kubernetes::kube_contexts,
             connection,

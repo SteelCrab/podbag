@@ -168,6 +168,16 @@ pub enum Cmd {
     },
     /// Run a command in a running container
     Exec(ExecArgs),
+    /// Copy a container, image or volume between engines and verify the destination
+    Migrate {
+        #[arg(long, value_parser = parse_engine)]
+        from: podbag::client::Choice,
+        #[arg(long, value_parser = parse_engine)]
+        to: podbag::client::Choice,
+        #[arg(value_parser = ["container", "image", "volume"])]
+        kind: String,
+        name: String,
+    },
     /// Manage containers, images, volumes and networks in the terminal
     ///
     /// A client of the Docker API: podbag, Docker, or a socket (the saved choice, else

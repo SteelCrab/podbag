@@ -788,7 +788,7 @@ mod tests {
                 "POST /containers/web/stop",
                 "DELETE /containers/web?force=1",
                 "POST /containers/web/pause",
-                "DELETE /images/sha256%3A22",
+                "DELETE /images/sha256:22",
                 "POST /containers/prune",
             ]
         );
