@@ -90,7 +90,8 @@ impl Store {
             h.set_mode(e.mode & 0o7777);
             h.set_uid(u64::from(e.uid));
             h.set_gid(u64::from(e.gid));
-            h.set_mtime(mtime);
+            // A layer stored by an older podbag has no times: the image's.
+            h.set_mtime(e.mtime.unwrap_or(mtime));
             h.set_size(0);
             if !e.xattrs.is_empty() {
                 let values: Vec<(String, Vec<u8>)> = e
@@ -333,6 +334,53 @@ mod tests {
         } else {
             b.append_data(&mut h, path, data).unwrap();
         }
+    }
+
+    /// `docker save` keeps file times; so does a round trip through podbag.
+    #[test]
+    fn a_saved_image_keeps_its_file_times() {
+        use tar::EntryType as T;
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open_at(tmp.path().join("store"), false, false).unwrap();
+        let at = |b: &mut tar::Builder<Vec<u8>>, path: &str, kind: T, data: &[u8], t: u64| {
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(kind);
+            h.set_mode(0o755);
+            h.set_uid(0);
+            h.set_gid(0);
+            h.set_mtime(t);
+            h.set_size(data.len() as u64);
+            if kind == T::Symlink {
+                b.append_link(&mut h, path, std::str::from_utf8(data).unwrap())
+                    .unwrap();
+            } else {
+                b.append_data(&mut h, path, data).unwrap();
+            }
+        };
+        let only = layer(|b| {
+            at(b, "app", T::Directory, b"", 100);
+            at(b, "app/main.py", T::Regular, b"print(1)\n", 200);
+            at(b, "app/link", T::Symlink, b"main.py", 300);
+        });
+        store
+            .import_for_test("example.com/app:1", vec![only], 1)
+            .unwrap();
+        let mut archive = Vec::new();
+        store
+            .save(&["example.com/app:1".to_string()], &mut archive)
+            .unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let fresh = Store::open_at(other.path().join("store"), false, false).unwrap();
+        fresh
+            .load(&mut archive.as_slice(), u64::MAX, &HashMap::new)
+            .unwrap();
+        let (_, record) = fresh.find("example.com/app:1").unwrap();
+        let root = fresh.rootfs_path(&record.digest);
+        let at = |p: &str| {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::symlink_metadata(root.join(p)).unwrap().mtime()
+        };
+        assert_eq!(["app", "app/main.py", "app/link"].map(at), [100, 200, 300]);
     }
 
     #[test]

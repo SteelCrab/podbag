@@ -53,12 +53,27 @@ dev/vm.sh static       # the static release binary, and a check of its size
 - `PODBAG_TEST_NETWORK=1` adds the tests that pull images or use the network.
 - `PODBAG_TEST_MACOS_VM=1 cargo test --test macos_vm` tests the macOS VM.
 
+### End-to-end tests
+
+They pull real images from `mirror.gcr.io`, and compare podbag with Docker (or Podman,
+when no Docker daemon runs):
+
+```sh
+tests/e2e/run.sh                     # .pyc files, cron, a damaged file in the store
+tests/e2e/nginx.sh                   # nginx with podbag, and with the docker CLI on its API
+PODBAG_E2E_ROOT=1 tests/e2e/run.sh   # as root
+PODBAG=./target/debug/podbag tests/e2e/nginx.sh   # another podbag binary
+```
+
+In the VM: `dev/vm.sh run bash -c 'cargo build && PODBAG=$CARGO_TARGET_DIR/debug/podbag tests/e2e/run.sh'`.
+
 ## Pull requests
 
 - One change per pull request, with tests for new behavior.
 - Run `cargo fmt`.
 - Leave no compiler warnings.
-- `cargo test` must pass. CI checks Linux, macOS and Windows.
+- `cargo test` must pass. CI checks Linux, macOS and Windows. On Linux it also runs the
+  store's integration tests, the end-to-end tests and nginx, without root and as root.
 - Commit messages are one line: `type: what changed`. Types: `feat`, `fix`, `docs`,
   `test`, `refactor`, `chore`.
 

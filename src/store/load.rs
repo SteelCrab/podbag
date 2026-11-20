@@ -139,7 +139,7 @@ impl Store {
                 )));
             }
             for (blob, diff_id) in image.layers.iter().zip(&config.diff_ids) {
-                if self.layer_path(diff_id).exists() {
+                if self.has_layer(diff_id) {
                     continue;
                 }
                 let path = files.find(&blob.path)?;
