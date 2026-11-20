@@ -32,26 +32,13 @@ Use the command line or [Podbag Desktop](#podbag-desktop).
 
 ## Features
 
-- **No daemon.** When no container runs, nothing runs.
-- **One static binary.** About 4 MB on Linux.
-- **Files, not layers.** A file that many images share is stored once and cached once.
-- **Fast.** A container starts in about 4 ms on Linux.
-- **Works with Docker tools.** Docker and OCI images, the `docker` CLI, Compose, buildx,
-  and swarm stacks on one node.
-- **Builds Dockerfiles.** `podbag build`, and `docker build` with the classic builder,
-  without BuildKit or a daemon.
-- **Kubernetes.** `podbag cri serve` is the container runtime of a node, for the kubelet or k3s.
-- **With or without root.** The same program works both ways.
-- **Linux, macOS and Windows.** x86_64 and arm64. Windows support is experimental.
-- **A TUI and a desktop app.** `podbag tui` in the terminal, and a window with a menu bar item, for containers, images, volumes and networks.
-
-### Layers and files
+- **File sharing across images.** Identical files in different layers can share both disk space and the Linux page cache.
+- **On-demand Linux engine.** One process watches a user’s containers. It exits when the last container stops and the idle timeout expires.
+- **Automatic VM shutdown on macOS.** The Linux VM shuts down after 60 idle seconds by default. The next container command starts it again.
+- **Kubernetes node runtime (`main`).** On Linux, `podbag cri serve` lets the kubelet run pods directly with Podbag.
+- **Migration between engines (`main`).** Copy images, volumes and stopped containers between Docker-compatible engines. The source stays in place.
 
 <picture><source media="(max-width: 600px) and (prefers-color-scheme: dark)" srcset="docs/images/storage-tall-dark.svg"><source media="(max-width: 600px)" srcset="docs/images/storage-tall-light.svg"><source media="(prefers-color-scheme: dark)" srcset="docs/images/storage-dark.svg"><img alt="Animation. Two images share most of their files. As layers, a layer is kept once only when it is the same; image B&#x27;s top layer differs by one file, so spring.jar and jackson.jar are stored again: 8 files. podbag stores each file once: 6 files. Measured with 8 Spring services in 2 releases: 2,970 MiB on disk with layers (Docker), 902 MiB with podbag." src="docs/images/storage-light.svg"></picture>
-
-- A layer store (Docker, Podman, Kiri) keeps a layer once only when the whole layer is the same. If one file differs, the whole layer is stored again, with the files it shares with other layers.
-- podbag keeps each file once. An image is a list of paths that point to the files.
-- For 8 Spring services in 2 releases: 902 MiB on disk against Docker's 2,970 MiB, and 324 MiB of page cache against 982 MiB.
 
 ## Podbag Desktop
 
@@ -63,95 +50,87 @@ Manage containers, images, volumes and networks on Linux and macOS. Windows supp
 
 ## Install
 
-### Install script (Linux and macOS)
+### Linux (x86_64, arm64) and macOS (Apple silicon)
 
 ```sh
 curl -fsSL https://podbag.dev/install.sh | sh
+podbag --version
 ```
 
-- Downloads the file for your system and checks its SHA-256 sum.
-- Installs it in `/usr/local/bin`, with `sudo` when needed.
-- On Ubuntu 24.04 and later, adds the AppArmor profile that rootless containers need.
-- Settings: `PODBAG_VERSION=v0.1.0`, `PODBAG_INSTALL_DIR=$HOME/.local/bin`,
-  `PODBAG_SKIP_APPARMOR=1`.
-- Later, `podbag upgrade` installs a newer release (`sudo podbag upgrade` in
-  `/usr/local/bin`).
+The installer checks the release’s SHA-256 checksum and installs the CLI in `/usr/local/bin`. Run it again to update.
 
-### Download
+Linux needs kernel 5.12 or later and cgroup v2. Run `podbag check` to see which prerequisites are missing. For rootless bridge networking, check the `uidmap` and `passt` packages. [Linux requirements](docs/usage.md#requirements-on-linux)
 
-Get a file from the [latest release](https://github.com/SteelCrab/podbag/releases/latest).
-Check it with `SHA256SUMS`.
+For a manual installation, download the binary for your OS and CPU and verify it against `SHA256SUMS`. [Release downloads](https://github.com/SteelCrab/podbag/releases/latest)
 
-| System | File |
-|---|---|
-| Linux, x86_64 | `podbag-x86_64-linux` |
-| Linux, arm64 | `podbag-aarch64-linux` |
-| macOS, Apple silicon | `podbag-aarch64-macos` |
-| Windows, x86_64 (experimental) | `podbag-x86_64-windows.exe` |
-| Windows, arm64 (experimental) | `podbag-aarch64-windows.exe` |
+### Windows (experimental)
 
-Windows needs WSL 2 (run `wsl --install` once):
+Enable WSL 2 with `wsl --install` in an administrator PowerShell window and restart Windows. Download `podbag-x86_64-windows.exe` or `podbag-aarch64-windows.exe` for your CPU. Compare its SHA-256 hash with `SHA256SUMS`, then rename it to `podbag.exe`. [Release downloads](https://github.com/SteelCrab/podbag/releases/latest)
 
 ```powershell
-curl.exe -fsSLo podbag.exe https://github.com/SteelCrab/podbag/releases/latest/download/podbag-x86_64-windows.exe
 .\podbag.exe run --rm alpine echo hello
 ```
 
-### Cargo
+### Other installation options
 
-```sh
-cargo install podbag
-```
-
-- For Linux. On macOS and Windows, use the release files: they carry the VM and the
-  Linux engine.
-
-### Build from source
-
-- See [docs/build.md](docs/build.md) for Linux, macOS and Windows.
-
-### Requirements and AppArmor (Linux)
-
-- Linux 5.12 or later, with cgroup v2.
-- Without root, podbag also needs:
-  - `newuidmap` (package `uidmap`),
-  - `pasta` (package `passt`) for networks,
-  - an AppArmor profile on Ubuntu 24.04 and later. The install script adds it. By hand:
-
-    ```sh
-    podbag check --apparmor-profile | sudo tee /etc/apparmor.d/podbag >/dev/null
-    sudo apparmor_parser -r /etc/apparmor.d/podbag
-    ```
-
-- `podbag check` lists what your system still needs, and how to add it.
+- **Cargo on Linux.** Run `cargo install --locked podbag` to install the published CLI.
+- **Linux desktop.** Download the package archive for your CPU from GitHub Actions. Extract it and install the `.deb` or `.rpm`. The package includes the engine. [Linux desktop packages](docs/build.md#linux-desktop-packages)
+- **Build from source.** Build the `main` branch to use the Kubernetes runtime and engine migration. [Build guide](docs/build.md)
 
 ## Use
 
-### Basic commands
+### Run a container
+
+This prints `hello` and removes the container when it exits.
 
 ```sh
-podbag run --rm alpine echo hello                 # pull the image if needed, run, remove
-podbag run -d --name web -p 8080:80 nginx:alpine  # run in the background
-podbag ps                                         # list containers
-podbag logs -f web                                # follow the logs
-podbag exec -it web sh                            # open a shell in the container
-podbag stats --no-stream                          # CPU, memory and network use
-podbag stop web && podbag rm web                  # stop and remove
-podbag images                                     # list images
-podbag build -t myapp .                           # build an image from a Dockerfile
-podbag login ghcr.io                              # log in to a registry (shared with docker login)
-podbag push ghcr.io/me/app:1                      # send an image to a registry
+podbag run --rm alpine echo hello
 ```
 
-### docker CLI, Compose and buildx
+Run nginx on port 8080, send a request and check the access log.
 
 ```sh
-podbag system service &      # Linux (on macOS: podbag vm start)
-export DOCKER_HOST=unix://$XDG_RUNTIME_DIR/podbag/docker.sock   # macOS: unix://$HOME/.podbag/run/docker.sock
-docker compose up -d
+podbag run -d --name web -p 8080:80 nginx:alpine
+podbag ps
+curl -I http://localhost:8080/
+podbag logs web
+podbag exec web nginx -v
+podbag stop web && podbag rm web
 ```
 
-- All commands and options: [docs/usage.md](docs/usage.md).
+### Docker CLI and Compose
+
+Linux with a non-root user and `XDG_RUNTIME_DIR` set
+
+```sh
+podbag system service &
+podbag_socket="unix://$XDG_RUNTIME_DIR/podbag/docker.sock"
+```
+
+macOS
+
+```sh
+podbag vm start
+podbag_socket="unix://$HOME/.podbag/run/docker.sock"
+```
+
+Once the socket is set, run these commands from a project whose `compose.yaml` uses published images.
+
+```sh
+docker --host "$podbag_socket" ps
+docker --host "$podbag_socket" compose up -d
+docker --host "$podbag_socket" compose down
+```
+
+### Copy an image from Docker (`main`)
+
+Start both engines. If Docker has a local `alpine:latest` image, copy it into Podbag with the CLI built from `main`.
+
+```sh
+podbag migrate --from docker --to podbag image alpine:latest
+```
+
+[Migration guide](docs/usage.md#migrate-between-engines-or-kubernetes-clusters) · [Command reference](docs/usage.md)
 
 ## Benchmarks
 
