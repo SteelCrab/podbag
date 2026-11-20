@@ -46,11 +46,19 @@ Gestiona contenedores, imágenes, volúmenes y redes en Linux y macOS. La compat
 
 ![Podbag Desktop muestra tres contenedores de ejemplo en ejecución y dos detenidos, con sus imágenes y puertos publicados](docs/images/desktop-containers-en.png)
 
-[Instala un paquete para Linux](docs/build.md#linux-desktop-packages) o [compila la aplicación de escritorio desde el código fuente](docs/usage.md#build-the-desktop-app).
+[Instala Podbag Desktop](#instalación) o [compila la aplicación de escritorio desde el código fuente](docs/usage.md#build-the-desktop-app).
 
 ## Instalación
 
-### Linux (x86_64, arm64) y macOS (Apple silicon)
+### Podbag Desktop (recomendado)
+
+Descarga el paquete para tu sistema desde la [última versión](https://github.com/SteelCrab/podbag/releases/latest).
+
+- **Linux (x86_64, arm64).** Instala el `.deb` en Debian o Ubuntu, o el `.rpm` en Fedora. El paquete incluye el motor.
+- **macOS (Apple silicon).** Instala la CLI con el comando de abajo. Descomprime `podbag-desktop-aarch64-macos.zip` y abre `podbag.app`.
+- **Windows (x86_64, ARM64, experimental).** Ejecuta el `.msi` para tu CPU. Si la versión no incluye un MSI, descárgalo desde una [ejecución de CI correcta](https://github.com/SteelCrab/podbag/actions/workflows/ci.yml?query=branch%3Amain). Activa WSL 2 para ejecutar contenedores.
+
+### CLI en Linux (x86_64, arm64) y macOS (Apple silicon)
 
 ```sh
 curl -fsSL https://podbag.dev/install.sh | sh
@@ -63,7 +71,7 @@ Linux requiere el kernel 5.12 o posterior y cgroup v2. Ejecuta `podbag check` pa
 
 Para instalarlo manualmente, descarga el archivo para tu sistema y CPU y verifica su suma con `SHA256SUMS`. [Descargas](https://github.com/SteelCrab/podbag/releases/latest)
 
-### Windows (experimental)
+### CLI en Windows (experimental)
 
 Ejecuta `wsl --install` en PowerShell como administrador y reinicia Windows. Descarga `podbag-x86_64-windows.exe` o `podbag-aarch64-windows.exe` según tu CPU. Compara su suma SHA-256 con `SHA256SUMS` y cambia el nombre del archivo a `podbag.exe`. [Descargas](https://github.com/SteelCrab/podbag/releases/latest)
 
@@ -74,7 +82,6 @@ Ejecuta `wsl --install` en PowerShell como administrador y reinicia Windows. Des
 ### Otras opciones de instalación
 
 - **Cargo en Linux.** Ejecuta `cargo install --locked podbag` para instalar la versión publicada de la CLI.
-- **Aplicación de escritorio para Linux.** Descarga desde GitHub Actions el archivo para tu CPU. Descomprímelo e instala el paquete `.deb` o `.rpm` de tu distribución. El paquete incluye el motor. [Paquetes de escritorio](docs/build.md#linux-desktop-packages)
 - **Compilación desde el código fuente.** Compila la CLI y Podbag Desktop con Rust. [Guía de compilación](docs/build.md)
 
 ## Uso

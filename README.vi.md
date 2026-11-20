@@ -46,11 +46,19 @@ Quản lý container, image, volume và mạng trên Linux và macOS. Hỗ trợ
 
 ![Podbag Desktop hiển thị ba container mẫu đang chạy và hai container đã dừng, cùng với image và các cổng được công bố](docs/images/desktop-containers-en.png)
 
-[Cài gói cho Linux](docs/build.md#linux-desktop-packages) hoặc [biên dịch ứng dụng desktop từ mã nguồn](docs/usage.md#build-the-desktop-app).
+[Cài Podbag Desktop](#cài-đặt) hoặc [biên dịch ứng dụng desktop từ mã nguồn](docs/usage.md#build-the-desktop-app).
 
 ## Cài đặt
 
-### Linux (x86_64, arm64) và macOS (Apple silicon)
+### Podbag Desktop (khuyên dùng)
+
+Tải gói cho hệ điều hành của bạn từ [bản phát hành mới nhất](https://github.com/SteelCrab/podbag/releases/latest).
+
+- **Linux (x86_64, arm64).** Cài gói `.deb` trên Debian hoặc Ubuntu, hoặc gói `.rpm` trên Fedora. Gói cài đặt có sẵn engine.
+- **macOS (Apple silicon).** Cài CLI bằng lệnh bên dưới. Giải nén `podbag-desktop-aarch64-macos.zip` rồi mở `podbag.app`.
+- **Windows (x86_64, ARM64, thử nghiệm).** Chạy tệp `.msi` phù hợp với CPU. Nếu bản phát hành chưa có MSI, tải tệp từ một [lần chạy CI thành công](https://github.com/SteelCrab/podbag/actions/workflows/ci.yml?query=branch%3Amain). Bật WSL 2 để chạy container.
+
+### CLI trên Linux (x86_64, arm64) và macOS (Apple silicon)
 
 ```sh
 curl -fsSL https://podbag.dev/install.sh | sh
@@ -63,7 +71,7 @@ Linux cần kernel 5.12 trở lên và cgroup v2. Chạy `podbag check` để bi
 
 Để cài thủ công, tải tệp phù hợp với hệ điều hành và CPU rồi đối chiếu mã kiểm tra với `SHA256SUMS`. [Tải bản phát hành](https://github.com/SteelCrab/podbag/releases/latest)
 
-### Windows (thử nghiệm)
+### CLI trên Windows (thử nghiệm)
 
 Chạy `wsl --install` trong PowerShell với quyền quản trị rồi khởi động lại Windows. Tải `podbag-x86_64-windows.exe` hoặc `podbag-aarch64-windows.exe` theo kiến trúc CPU. Đối chiếu mã SHA-256 với `SHA256SUMS` rồi đổi tên tệp thành `podbag.exe`. [Tải bản phát hành](https://github.com/SteelCrab/podbag/releases/latest)
 
@@ -74,7 +82,6 @@ Chạy `wsl --install` trong PowerShell với quyền quản trị rồi khởi 
 ### Các cách cài đặt khác
 
 - **Cargo trên Linux.** Chạy `cargo install --locked podbag` để cài bản CLI đã phát hành.
-- **Ứng dụng desktop trên Linux.** Tải tệp nén cho CPU của bạn từ GitHub Actions. Giải nén rồi cài gói `.deb` hoặc `.rpm` cho bản phân phối đang dùng. Gói này có sẵn engine. [Gói desktop cho Linux](docs/build.md#linux-desktop-packages)
 - **Biên dịch từ mã nguồn.** Dùng Rust để biên dịch CLI và Podbag Desktop. [Hướng dẫn biên dịch](docs/build.md)
 
 ## Sử dụng

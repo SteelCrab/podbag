@@ -46,11 +46,19 @@ Manage containers, images, volumes and networks on Linux and macOS. Windows supp
 
 ![Podbag Desktop showing three running and two stopped sample containers, their images and published ports](docs/images/desktop-containers-en.png)
 
-[Install a Linux package](docs/build.md#linux-desktop-packages) or [build the desktop app from source](docs/usage.md#build-the-desktop-app).
+[Install Podbag Desktop](#install) or [build it from source](docs/usage.md#build-the-desktop-app).
 
 ## Install
 
-### Linux (x86_64, arm64) and macOS (Apple silicon)
+### Podbag Desktop (recommended)
+
+Get the package for your system from the [latest release](https://github.com/SteelCrab/podbag/releases/latest).
+
+- **Linux (x86_64, arm64).** Install the `.deb` on Debian or Ubuntu, or the `.rpm` on Fedora. The package includes the engine.
+- **macOS (Apple silicon).** Install the CLI with the command below. Extract `podbag-desktop-aarch64-macos.zip` and open `podbag.app`.
+- **Windows (x86_64, ARM64, experimental).** Run the `.msi` for your CPU. If the release has no MSI, get it from a successful [CI run](https://github.com/SteelCrab/podbag/actions/workflows/ci.yml?query=branch%3Amain). Enable WSL 2 to run containers.
+
+### CLI on Linux (x86_64, arm64) and macOS (Apple silicon)
 
 ```sh
 curl -fsSL https://podbag.dev/install.sh | sh
@@ -63,7 +71,7 @@ Linux needs kernel 5.12 or later and cgroup v2. Run `podbag check` to see which 
 
 For a manual installation, download the binary for your OS and CPU and verify it against `SHA256SUMS`. [Release downloads](https://github.com/SteelCrab/podbag/releases/latest)
 
-### Windows (experimental)
+### CLI on Windows (experimental)
 
 Enable WSL 2 with `wsl --install` in an administrator PowerShell window and restart Windows. Download `podbag-x86_64-windows.exe` or `podbag-aarch64-windows.exe` for your CPU. Compare its SHA-256 hash with `SHA256SUMS`, then rename it to `podbag.exe`. [Release downloads](https://github.com/SteelCrab/podbag/releases/latest)
 
@@ -74,7 +82,6 @@ Enable WSL 2 with `wsl --install` in an administrator PowerShell window and rest
 ### Other installation options
 
 - **Cargo on Linux.** Run `cargo install --locked podbag` to install the published CLI.
-- **Linux desktop.** Download the package archive for your CPU from GitHub Actions. Extract it and install the `.deb` or `.rpm`. The package includes the engine. [Linux desktop packages](docs/build.md#linux-desktop-packages)
 - **Build from source.** Build the CLI and Podbag Desktop with Rust. [Build guide](docs/build.md)
 
 ## Use
