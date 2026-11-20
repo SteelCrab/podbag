@@ -53,12 +53,27 @@ dev/vm.sh static       # the static release binary, and a check of its size
 - `PODBAG_TEST_NETWORK=1` adds the tests that pull images or use the network.
 - `PODBAG_TEST_MACOS_VM=1 cargo test --test macos_vm` tests the macOS VM.
 
+### End-to-end tests
+
+They pull real images from `mirror.gcr.io`, and compare podbag with Docker (or Podman,
+when no Docker daemon runs):
+
+```sh
+tests/e2e/run.sh                     # .pyc files, cron, a damaged file in the store
+tests/e2e/nginx.sh                   # nginx with podbag, and with the docker CLI on its API
+PODBAG_E2E_ROOT=1 tests/e2e/run.sh   # as root
+PODBAG=./target/debug/podbag tests/e2e/nginx.sh   # another podbag binary
+```
+
+In the VM: `dev/vm.sh run bash -c 'cargo build && PODBAG=$CARGO_TARGET_DIR/debug/podbag tests/e2e/run.sh'`.
+
 ## Pull requests
 
 - One change per pull request, with tests for new behavior.
 - Run `cargo fmt`.
 - Leave no compiler warnings.
-- `cargo test` must pass. CI checks Linux, macOS and Windows.
+- `cargo test` must pass. CI checks Linux, macOS and Windows. On Linux it also runs the
+  store's integration tests, the end-to-end tests and nginx, without root and as root.
 - Commit messages are one line: `type: what changed`. Types: `feat`, `fix`, `docs`,
   `test`, `refactor`, `chore`.
 
@@ -67,25 +82,23 @@ dev/vm.sh static       # the static release binary, and a check of its size
 - `README.md` is the source. `README.<language>.md` files follow it.
 - When you change `README.md`, say so in the pull request, so that the translations can
   follow.
-- The website's words are in `site/i18n/<language>.json`. Every file needs every key that
-  `en.json` has: the build stops when one is missing.
+- The website's words are in the [podbag-page](https://github.com/SteelCrab/podbag-page)
+  repository, in `site/i18n/<language>.json`.
 - The words in the layers-and-files picture are in `dev/docs/storage.py` (`TEXT`).
 
 ## Website
 
-- The site is in `site/`: a page template (`page.html`), one string file per language
-  (`i18n/<language>.json`), the style and the script.
-- Build it, then look at it:
-
-```sh
-python3 dev/docs/site.py _site
-python3 -m http.server -d _site 8000    # then open http://localhost:8000
-```
-
-- A push to `main` deploys it to https://podbag.dev on Cloudflare
-  (`.github/workflows/site.yml`).
+- The website lives in its own repository:
+  [SteelCrab/podbag-page](https://github.com/SteelCrab/podbag-page).
+- When it builds, it takes these from this repository:
+  - the pictures (`docs/images`) and the videos (`docs/media`),
+  - `install.sh`, which https://podbag.dev/install.sh serves,
+  - the version (`Cargo.toml`) and the picture texts (`dev/docs/storage.py`).
+- A change to those files reaches the site at its next deploy: once a day, or by hand.
 - The pictures come from the scripts in `dev/docs/` and from `dev/bench/charts.py`. Run the
   script again after you change one.
+- The old address https://steelcrab.github.io/podbag/ sends visitors to podbag.dev
+  (`dev/pages/`, `.github/workflows/pages.yml`).
 
 ## License
 

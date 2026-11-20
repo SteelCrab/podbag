@@ -211,6 +211,7 @@ fn probe_in(scratch: &Path) -> std::result::Result<(), String> {
         uid: 0,
         gid: 0,
         xattrs: vec![],
+        mtime: None,
     };
     let tree = crate::store::tree::merge(&[vec![
         entry("d", EntryKind::Dir, 0o755),
@@ -348,6 +349,7 @@ mod tests {
         rdev: Option<u64>,
         xattrs: BTreeMap<String, Vec<u8>>,
         sha: Option<String>,
+        mtime: i64,
     }
 
     fn xattrs_of(path: &Path) -> BTreeMap<String, Vec<u8>> {
@@ -417,6 +419,7 @@ mod tests {
                         rdev: (ft.is_char_device() || ft.is_block_device()).then(|| m.rdev()),
                         xattrs: xattrs_of(&p),
                         sha,
+                        mtime: m.mtime(),
                     },
                 );
                 if ft.is_dir() {
@@ -457,33 +460,42 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let objects = ObjectStore::new(tmp.path().join("objects"), true).unwrap();
         let mut entries = Vec::new();
-        let mut file =
-            |path: &str, data: &[u8], mode: u32, uid: u32, xattrs: Vec<(String, Vec<u8>)>| {
-                let meta = Meta {
-                    uid,
-                    gid: uid,
-                    mode,
-                    xattrs: xattrs.clone(),
-                };
-                let (object, size) = objects.insert(&mut &data[..], &meta).unwrap();
-                entries.push(Entry {
-                    path: path.into(),
-                    kind: EntryKind::File { object, size },
-                    mode,
-                    uid,
-                    gid: uid,
-                    xattrs: xattrs.iter().map(|(k, v)| (k.clone(), hex(v))).collect(),
-                });
+        let mut file = |path: &str,
+                        data: &[u8],
+                        mode: u32,
+                        uid: u32,
+                        xattrs: Vec<(String, Vec<u8>)>,
+                        mtime: u64| {
+            let meta = Meta {
+                uid,
+                gid: uid,
+                mode,
+                xattrs: xattrs.clone(),
             };
-        file("bin/tool", b"tool", 0o4755, 0, vec![]);
-        file("a/one", b"same", 0o644, 0, vec![]);
-        file("b/two", b"same", 0o644, 0, vec![]);
-        file("empty", b"", 0o644, 0, vec![]);
-        file("empty2", b"", 0o644, 0, vec![]);
-        file("etc/conf", b"x=1\n", 0o644, 0, vec![]);
-        file("home/user/notes", b"mine", 0o600, 1000, vec![]);
+            let (object, size) = objects.insert(&mut &data[..], &meta, Some(mtime)).unwrap();
+            entries.push(Entry {
+                path: path.into(),
+                kind: EntryKind::File { object, size },
+                mode,
+                uid,
+                gid: uid,
+                xattrs: xattrs.iter().map(|(k, v)| (k.clone(), hex(v))).collect(),
+                mtime: Some(mtime),
+            });
+        };
+        file("bin/tool", b"tool", 0o4755, 0, vec![], 10);
+        file("a/one", b"same", 0o644, 0, vec![], 20);
+        file("b/two", b"same", 0o644, 0, vec![], 20);
+        // The same contents with another time: an inode of its own.
+        file("c/three", b"same", 0o644, 0, vec![], 30);
+        file("empty", b"", 0o644, 0, vec![], 40);
+        file("empty2", b"", 0o644, 0, vec![], 40);
+        file("etc/conf", b"x=1\n", 0o644, 0, vec![], 50);
+        // A crontab with the same object and time: an inode of its own too.
+        file("etc/cron.d/job", b"x=1\n", 0o644, 0, vec![], 50);
+        file("home/user/notes", b"mine", 0o600, 1000, vec![], 60);
         let big: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
-        file("big", &big, 0o644, 0, vec![]);
+        file("big", &big, 0o644, 0, vec![], 70);
         let cap: Vec<u8> = vec![
             1, 0, 0, 2, 0, 0x20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         ];
@@ -496,6 +508,7 @@ mod tests {
                 ("security.capability".into(), cap),
                 ("user.note".into(), b"hi".to_vec()),
             ],
+            80,
         );
         let plain = |path: &str, kind: EntryKind, mode: u32, uid: u32| Entry {
             path: path.into(),
@@ -504,6 +517,7 @@ mod tests {
             uid,
             gid: uid,
             xattrs: vec![],
+            mtime: Some(90 + u64::from(mode)),
         };
         entries.push(plain("tmp", EntryKind::Dir, 0o1777, 0));
         entries.push(plain("home/user", EntryKind::Dir, 0o700, 1000));
@@ -524,6 +538,7 @@ mod tests {
         entries.push(plain("run/fifo", EntryKind::Fifo, 0o600, 0));
         let tree = merge(&[entries]).unwrap();
         let image = tmp.path().join("image.erofs");
+        // Directories merge() made have no time: both views give them the default, 1.
         std::fs::write(&image, crate::store::erofs::build(&tree, 1).unwrap()).unwrap();
         Fixture {
             tmp,
@@ -535,7 +550,7 @@ mod tests {
 
     fn hardlink_view(f: &Fixture) -> (BTreeMap<String, Seen>, Vec<Vec<String>>) {
         let dest = f.tmp.path().join("tree");
-        materialize(&f.tree, &f.objects, &dest, true).unwrap();
+        materialize(&f.tree, &f.objects, &dest, true, 1).unwrap();
         walk(&dest, true)
     }
 
@@ -704,8 +719,8 @@ mod tests {
             mode: 0o644,
             xattrs: vec![],
         };
-        let (small, _) = objects.insert(&mut &b"x"[..], &meta).unwrap();
-        let (leaf, _) = objects.insert(&mut &b"leaf"[..], &meta).unwrap();
+        let (small, _) = objects.insert(&mut &b"x"[..], &meta, None).unwrap();
+        let (leaf, _) = objects.insert(&mut &b"leaf"[..], &meta, None).unwrap();
         // A sparse 5 GiB object; overlayfs does not check contents against the key.
         let huge = format!("cd{}.0.0.644", "0".repeat(62));
         let huge_path = objects_dir.join(ObjectStore::relative_path(&huge));
@@ -728,6 +743,7 @@ mod tests {
             uid: 0,
             gid: 0,
             xattrs: vec![],
+            mtime: None,
         };
         let mut entries: Vec<Entry> = names
             .iter()

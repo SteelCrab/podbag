@@ -1,6 +1,6 @@
-<img src="docs/images/logo.png" alt="podbag" width="120" align="right">
-
 # podbag
+
+<img src="docs/images/logo.png" alt="podbag" width="120" align="right">
 
 A container engine with no daemon, in one static binary.
 It stores images file by file: a file that many images share is kept once.
@@ -35,6 +35,8 @@ It stores images file by file: a file that many images share is kept once.
 - **Files, not layers.** A file that many images share is stored once and cached once.
 - **Fast.** A container starts in about 4 ms on Linux.
 - **Works with Docker tools.** Docker and OCI images, the `docker` CLI, Compose and buildx.
+- **Builds Dockerfiles.** `podbag build`, and `docker build` with the classic builder,
+  without BuildKit or a daemon.
 - **With or without root.** The same program works both ways.
 - **Linux, macOS and Windows.** x86_64 and arm64. Windows support is experimental.
 - **A TUI and a desktop app.** `podbag tui` in the terminal, and a window with a menu bar item, for containers, images, volumes and networks.
@@ -52,7 +54,7 @@ It stores images file by file: a file that many images share is kept once.
 ### Install script (Linux and macOS)
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/SteelCrab/podbag/main/install.sh | sh
+curl -fsSL https://podbag.dev/install.sh | sh
 ```
 
 - Downloads the file for your system and checks its SHA-256 sum.
@@ -123,6 +125,7 @@ podbag logs -f web                                # follow the logs
 podbag exec -it web sh                            # open a shell in the container
 podbag stop web && podbag rm web                  # stop and remove
 podbag images                                     # list images
+podbag build -t myapp .                           # build an image from a Dockerfile
 ```
 
 ### docker CLI, Compose and buildx

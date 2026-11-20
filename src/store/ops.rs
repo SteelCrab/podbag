@@ -22,6 +22,10 @@ pub enum StoreOp {
     Prune,
     /// Remove the images without a name that no container uses.
     PruneDangling,
+    /// Check every object; `fix`: remove the images that use damaged ones.
+    Verify {
+        fix: bool,
+    },
     RemoveContainer {
         id: String,
     },
@@ -36,6 +40,35 @@ pub enum StoreOp {
     Load,
     /// Write the images `names` as an archive on stdout (`docker save`).
     Save {
+        names: Vec<String>,
+    },
+    /// Store the layer tar on stdin, and an image of `base` plus it with `config`
+    /// (a build step, `commit`). Answers a [`crate::store::Committed`].
+    CommitLayer {
+        base: Vec<String>,
+        config: crate::image::ImageConfig,
+        created: u64,
+    },
+    /// Like `CommitLayer`, with a `COPY`/`ADD` plan (JSON) on stdin instead of a tar.
+    CommitPlan {
+        base: Vec<String>,
+        config: crate::image::ImageConfig,
+        created: u64,
+    },
+    /// An image of stored layers; with `artifact`, ready for containers. Answers its ID.
+    CreateImage {
+        config: crate::image::ImageConfig,
+        diff_ids: Vec<String>,
+        created: u64,
+        artifact: bool,
+    },
+    /// Build what containers of the image need, if it is missing.
+    EnsureArtifact {
+        digest: String,
+    },
+    /// Give the image these names. Answers the full names.
+    NameImage {
+        digest: String,
         names: Vec<String>,
     },
 }
@@ -157,6 +190,64 @@ mod linux_ops {
                 })?;
                 Ok(Value::Null)
             }
+            StoreOp::CommitLayer {
+                base,
+                config,
+                created,
+            } => {
+                let store = Store::open(dirs, !rootless)?;
+                let mut input = std::io::stdin().lock();
+                to_json(&store.commit_layer(
+                    &base,
+                    &mut |w| crate::store::copy_all(&mut input, w, "the layer"),
+                    config,
+                    created,
+                )?)
+            }
+            StoreOp::CommitPlan {
+                base,
+                config,
+                created,
+            } => {
+                let store = Store::open(dirs, !rootless)?;
+                let plan: Vec<crate::build::plan::PlanEntry> =
+                    serde_json::from_reader(std::io::stdin().lock()).map_err(|e| {
+                        crate::Error::new(
+                            crate::ErrorKind::Internal,
+                            "cannot read a copy plan",
+                            e.to_string(),
+                            "report this bug",
+                        )
+                    })?;
+                to_json(&store.commit_layer(
+                    &base,
+                    &mut |w| crate::build::plan::write_plan(&plan, w),
+                    config,
+                    created,
+                )?)
+            }
+            StoreOp::CreateImage {
+                config,
+                diff_ids,
+                created,
+                artifact,
+            } => {
+                let mut store = Store::open(dirs, !rootless)?;
+                store.use_mount_method(rootless, config::load(dirs)?.image_mount);
+                to_json(&store.create_image(config, diff_ids, created, artifact)?)
+            }
+            StoreOp::EnsureArtifact { digest } => {
+                let mut store = Store::open(dirs, !rootless)?;
+                store.use_mount_method(rootless, config::load(dirs)?.image_mount);
+                let _lock = store.lock_shared()?;
+                store.ensure_artifact(&digest)?;
+                Ok(Value::Null)
+            }
+            StoreOp::NameImage { digest, names } => {
+                let store = Store::open(dirs, !rootless)?;
+                let limit = config::load(dirs)?.store_limit;
+                to_json(&store.name_image(&digest, &names, limit, &|| images_in_use(dirs))?)
+            }
             StoreOp::RemoveImage { name } => to_json(
                 &Store::open(dirs, !rootless)?.remove_image(&name, &|| images_in_use(dirs))?,
             ),
@@ -165,6 +256,9 @@ mod linux_ops {
             }
             StoreOp::PruneDangling => {
                 to_json(&Store::open(dirs, !rootless)?.prune_dangling(&|| images_in_use(dirs))?)
+            }
+            StoreOp::Verify { fix } => {
+                to_json(&Store::open(dirs, !rootless)?.verify(fix, &|| images_in_use(dirs))?)
             }
             StoreOp::CheckImage { name } => {
                 Store::open_existing(dirs).ok_or_else(|| crate::image::not_pulled(&name))?;

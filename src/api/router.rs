@@ -119,7 +119,7 @@ pub fn streams_body(req: &Request) -> bool {
     let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
     matches!(
         (req.method.as_str(), segments.as_slice()),
-        ("PUT", ["containers", _, "archive"]) | ("POST", ["images", "load"])
+        ("PUT", ["containers", _, "archive"]) | ("POST", ["images", "load"] | ["build"])
     )
 }
 
@@ -134,7 +134,11 @@ pub fn route(req: &Request, ctx: &Ctx) -> Reply {
     }
     let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
     match (req.method.as_str(), segments.as_slice()) {
-        ("GET" | "HEAD", ["_ping"]) => Reply::Text(200, "OK".to_string()),
+        // Builder-Version 1: the classic builder (`POST /build`), not BuildKit.
+        ("GET" | "HEAD", ["_ping"]) => Reply::Headed(
+            vec![("Builder-Version", "1".to_string())],
+            Box::new(Reply::Text(200, "OK".to_string())),
+        ),
         ("GET", ["version"]) => super::system::version(),
         ("GET", ["info"]) => super::system::info(ctx),
         ("GET", ["system", "df"]) => super::system::df(),
@@ -149,10 +153,8 @@ pub fn route(req: &Request, ctx: &Ctx) -> Reply {
         ("HEAD", ["containers", id, "archive"]) => super::containers::stat_path(req, id),
         ("GET", ["containers", id, "archive"]) => super::containers::copy_out(req, id),
         ("PUT", ["containers", id, "archive"]) => super::containers::copy_in(req, id),
-        (_, ["containers", _, "export"] | ["containers", _, "changes"]) => not_supported(
-            "exporting or diffing container files",
-            "copy them with `docker cp`",
-        ),
+        ("GET", ["containers", id, "export"]) => super::build::export(id),
+        ("GET", ["containers", id, "changes"]) => super::build::changes(id),
         (_, ["containers", rest @ ..]) => super::containers::route(req, ctx, rest)
             .unwrap_or_else(|| message(404, "page not found")),
         (_, ["volumes", rest @ ..]) => super::objects::volumes(req, ctx, rest)
@@ -162,10 +164,12 @@ pub fn route(req: &Request, ctx: &Ctx) -> Reply {
         (_, ["exec", rest @ ..]) => {
             super::exec::route(req, ctx, rest).unwrap_or_else(|| message(404, "page not found"))
         }
-        (_, ["commit"]) => not_supported("commit", "build images with buildx"),
+        ("POST", ["commit"]) => super::build::commit(req),
+        ("POST", ["build"]) => super::build::build(req),
+        ("POST", ["build", "prune"]) => super::build::prune_cache(ctx),
         (_, ["build", ..]) => not_supported(
-            "the classic builder (POST /build)",
-            "use buildx with the docker-container driver",
+            "BuildKit's build API",
+            "use the classic builder (DOCKER_BUILDKIT=0), or buildx with the docker-container driver",
         ),
         (
             _,
