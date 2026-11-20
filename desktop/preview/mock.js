@@ -156,7 +156,11 @@
     Object.assign(engine, { engine: selected, engineName: selected === "kiri" ? "Kiri" : selected,
       endpoint: selected === "kiri" ? "unix:///Users/me/.kiri/run/docker.sock" : selected, vm: null, version: selected });
   }
+  let launchAtLogin = false;
   const commands = {
+    "plugin:autostart|is_enabled": () => launchAtLogin,
+    "plugin:autostart|enable": () => { launchAtLogin = true; },
+    "plugin:autostart|disable": () => { launchAtLogin = false; },
     connection: () => [token, selected, selected === "podbag"],
     contexts: () => ["desktop-linux", "orbstack"],
     kube_contexts: () => ["dev", "staging"],

@@ -137,6 +137,8 @@
   "vm.envOverride": "環境変数が設定されている項目は、起動時にその値を使用します。",
   "vm.saved": "VM 設定を保存しました。",
   "settings.title": "設定",
+  "settings.startup": "起動",
+  "settings.launchAtLogin": "ログイン時に Podbag Desktop を起動する",
   "settings.language": "言語",
   "settings.system": "システムと同じ",
   "settings.theme": "テーマ",

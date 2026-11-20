@@ -137,6 +137,8 @@
   "vm.envOverride": "Al iniciar, las variables de entorno tienen prioridad sobre los ajustes correspondientes.",
   "vm.saved": "Se guardaron los ajustes de la VM.",
   "settings.title": "Ajustes",
+  "settings.startup": "Inicio",
+  "settings.launchAtLogin": "Abrir Podbag Desktop al iniciar sesión",
   "settings.language": "Idioma",
   "settings.system": "Igual que el sistema",
   "settings.theme": "Tema",

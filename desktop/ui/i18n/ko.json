@@ -137,6 +137,8 @@
   "vm.envOverride": "VM을 시작할 때 환경 변수가 지정된 항목은 해당 값을 사용합니다.",
   "vm.saved": "VM 설정을 저장했습니다.",
   "settings.title": "설정",
+  "settings.startup": "시작 설정",
+  "settings.launchAtLogin": "로그인할 때 Podbag Desktop 실행",
   "settings.language": "언어",
   "settings.system": "시스템 설정 따르기",
   "settings.theme": "테마",

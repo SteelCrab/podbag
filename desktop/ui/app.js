@@ -1244,6 +1244,36 @@ function onLogs(batch) {
 
 // ---- settings ----
 
+// Settings can be reopened while the operating system is updating its login entry.
+let startupWrite = Promise.resolve();
+
+function startupSettings() {
+  const toggle = h("input", { type: "checkbox", id: "launch-at-login", disabled: true });
+  const status = h("div", { role: "status" });
+  async function readRegistration() {
+    toggle.disabled = true;
+    toggle.indeterminate = true;
+    status.replaceChildren();
+    await startupWrite;
+    try {
+      toggle.checked = await API.launchAtLogin();
+      toggle.indeterminate = false;
+      toggle.disabled = false;
+    } catch (err) {
+      status.replaceChildren(h("p", { class: "error-text", text: String(err) }),
+        button(null, t("action.retry"), readRegistration));
+    }
+  }
+  toggle.addEventListener("change", () => {
+    startupWrite = API.setLaunchAtLogin(toggle.checked).catch((err) => toast(String(err), true));
+    readRegistration();
+  });
+  readRegistration();
+  return h("section", { class: "card" },
+    h("h2", { class: "setting-label", text: t("settings.startup") }),
+    h("label", { class: "check" }, toggle, t("settings.launchAtLogin")), status);
+}
+
 async function renderSettings(main) {
   if (!S.languageNames) S.languageNames = await I18N.names();
   if (S.view !== "settings") return;
@@ -1260,6 +1290,7 @@ async function renderSettings(main) {
   put(main,
     h("header", { class: "toolbar" }, h("h1", { text: t("settings.title") })),
     h("div", { class: "content settings" },
+      startupSettings(),
       h("section", { class: "card" },
         h("label", { class: "setting-label", for: "language", text: t("settings.language") }), lang),
       h("section", { class: "card" },
