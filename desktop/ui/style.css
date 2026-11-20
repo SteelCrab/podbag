@@ -470,6 +470,8 @@ dialog.pull-panel input.pull-input:focus-visible { outline: none; }
   max-height: calc(100vh - 140px); overflow-y: auto;
   padding: 6px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow);
 }
+.loc-filter { position: sticky; top: -6px; z-index: 1; background: var(--surface); padding: 2px 4px 6px; }
+.loc-filter input { width: 100%; }
 .loc-menu ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 1px; }
 .loc-title { margin: 4px 8px 6px; font-size: 11.5px; font-weight: 600; color: var(--muted); }
 .loc-row { display: flex; align-items: center; gap: 6px; }

@@ -23,7 +23,7 @@ const API = (() => {
     registryLogin: (location, host, user, password) => invoke("registry_login", { location, host, user, password }),
     dockerCommand: () => invoke("docker_command"),
     dockerSwitch: (to) => invoke("docker_switch", { to }),
-    dockerImages: () => invoke("docker_images"),
+    dockerImages: (hosts) => invoke("docker_images", { hosts }),
     importImages: (names) => invoke("import_images", { names }),
     logsStart: (id) => invoke("logs_start", { id }),
     logsStop: () => invoke("logs_stop"),

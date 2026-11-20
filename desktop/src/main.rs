@@ -330,15 +330,25 @@ fn docker_client(podbag: &std::path::Path) -> Result<Client, String> {
 
 /// Docker's images, to copy to podbag. Only read; Docker is never started.
 #[tauri::command(async)]
-fn docker_images(state: State<'_, AppState>) -> Result<Vec<images::ImportImage>, String> {
+fn docker_images(
+    state: State<'_, AppState>,
+    hosts: Option<Vec<(String, String)>>,
+) -> Result<Vec<images::ImportImage>, String> {
     let client = docker_client(&state.podbag)?;
     if client.ping().is_err() {
         return Err(podbag::client::choice::docker_down().into());
     }
+    let configured: Vec<_> = hosts
+        .unwrap_or_default()
+        .iter()
+        .filter(|(id, host)| id != "custom" && !host.is_empty())
+        .filter_map(|(id, host)| images::location(id, host).ok())
+        .filter(|location| location.needs_host())
+        .collect();
     let images = client.images().map_err(|e| e.message)?;
     Ok(images
         .into_iter()
-        .filter_map(images::ImportImage::from_image)
+        .filter_map(|image| images::ImportImage::from_image(image, &configured))
         .collect())
 }
 

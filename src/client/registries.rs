@@ -4,6 +4,8 @@
 //! kept or shown; only [`registry_auth`] holds one, for the local engine.
 
 use super::choice::{docker_config_dir, find_tool};
+use super::registry_presets::PRESETS;
+pub use super::registry_presets::RegistryPreset;
 use super::run::{self, Run};
 use serde::Serialize;
 use serde_json::Value;
@@ -28,6 +30,8 @@ pub enum Location {
     GitLab,
     /// Azure Container Registry, at its login server.
     Acr(String),
+    /// A fixed or user-configured endpoint in the service catalog.
+    Preset(&'static RegistryPreset, String),
     /// Another registry, by host (`registry.example.com:5000`).
     Custom(String),
 }
@@ -35,7 +39,7 @@ pub enum Location {
 impl Location {
     /// Every kind, in the order to show them. User-supplied hosts start empty.
     pub fn all() -> Vec<Location> {
-        vec![
+        let mut all = vec![
             Location::DockerHub,
             Location::GitHub,
             Location::Ecr(String::new()),
@@ -43,12 +47,21 @@ impl Location {
             Location::Gar(String::new()),
             Location::GitLab,
             Location::Acr(String::new()),
-            Location::Custom(String::new()),
-        ]
+        ];
+        all.extend(
+            PRESETS
+                .iter()
+                .map(|preset| Location::Preset(preset, String::new())),
+        );
+        all.push(Location::Custom(String::new()));
+        all
     }
 
     /// The user must give a host ([`Location::with_host`]): ECR, GAR, ACR, Custom.
     pub fn needs_host(&self) -> bool {
+        if let Location::Preset(preset, _) = self {
+            return preset.needs_host();
+        }
         matches!(
             self,
             Location::Ecr(_) | Location::Gar(_) | Location::Acr(_) | Location::Custom(_)
@@ -62,6 +75,7 @@ impl Location {
             Location::Ecr(_) => Location::Ecr(host),
             Location::Gar(_) => Location::Gar(host),
             Location::Acr(_) => Location::Acr(host),
+            Location::Preset(preset, _) if preset.needs_host() => Location::Preset(preset, host),
             Location::Custom(_) => Location::Custom(host),
             other => other.clone(),
         }
@@ -72,6 +86,13 @@ impl Location {
         match self {
             Location::DockerHub => "docker.io".into(),
             Location::GitHub => "ghcr.io".into(),
+            Location::Preset(preset, host) => {
+                if preset.needs_host() {
+                    host.clone()
+                } else {
+                    preset.example.into()
+                }
+            }
             Location::Quay => "quay.io".into(),
             Location::GitLab => "registry.gitlab.com".into(),
             Location::Ecr(h) | Location::Gar(h) | Location::Acr(h) | Location::Custom(h) => {
@@ -90,8 +111,20 @@ impl Location {
             Location::Gar(_) => "Google Artifact Registry".into(),
             Location::GitLab => "GitLab".into(),
             Location::Acr(_) => "Azure Container Registry".into(),
+            Location::Preset(preset, _) => preset.label.into(),
             Location::Custom(h) if h.is_empty() => "Other registry".into(),
             Location::Custom(h) => h.clone(),
+        }
+    }
+
+    /// Example to show in the login server field.
+    pub fn host_example(&self) -> &'static str {
+        match self {
+            Location::Ecr(_) => "123456789012.dkr.ecr.us-east-1.amazonaws.com",
+            Location::Gar(_) => "us-docker.pkg.dev",
+            Location::Acr(_) => "contoso.azurecr.io",
+            Location::Preset(preset, _) => preset.example,
+            _ => "registry.example.com",
         }
     }
 
@@ -157,10 +190,17 @@ impl Location {
             "ghcr.io" => Location::GitHub,
             "quay.io" => Location::Quay,
             "registry.gitlab.com" => Location::GitLab,
-            h if h.contains(".dkr.ecr.") && h.ends_with(".amazonaws.com") => Location::Ecr(host),
+            h if h.contains(".dkr.ecr.")
+                && (h.ends_with(".amazonaws.com") || h.ends_with(".amazonaws.com.cn")) =>
+            {
+                Location::Ecr(host)
+            }
             h if h.ends_with("-docker.pkg.dev") => Location::Gar(host),
             h if acr_resource_name(h).is_some() => Location::Acr(host),
-            _ => Location::Custom(host),
+            _ => match PRESETS.iter().find(|preset| preset.recognizes(&host)) {
+                Some(preset) => Location::Preset(preset, String::new()).with_host(&host),
+                None => Location::Custom(host),
+            },
         }
     }
 
@@ -493,7 +533,7 @@ mod tests {
     #[test]
     fn hosts_labels_and_all() {
         let all = Location::all();
-        assert_eq!(all.len(), 8);
+        assert_eq!(all.len(), 8 + PRESETS.len());
         assert_eq!(all[0], Location::DockerHub);
         assert_eq!(Location::DockerHub.host(), "docker.io");
         assert_eq!(Location::GitHub.host(), "ghcr.io");
@@ -508,6 +548,28 @@ mod tests {
         assert_eq!(
             Location::Custom("r.example.com:5000".into()).label(),
             "r.example.com:5000"
+        );
+    }
+
+    #[test]
+    fn catalog_locations_qualify_and_recognize_their_servers() {
+        for preset in PRESETS {
+            let location = Location::Preset(preset, String::new()).with_host(preset.example);
+            let reference = format!("{}/team/tool:1", preset.example);
+            assert_eq!(location.qualify("team/tool:1"), reference);
+            assert_eq!(
+                location.qualify("elsewhere.example/team/tool:1"),
+                "elsewhere.example/team/tool:1"
+            );
+            if preset.recognizes(preset.example) {
+                assert_eq!(Location::of(&reference), location);
+            }
+            let unrelated = format!("{}.unrelated.example", preset.example);
+            assert!(!preset.recognizes(&unrelated));
+        }
+        assert_eq!(
+            Location::Custom("localhost:5000".into()).qualify("team/tool"),
+            "localhost:5000/team/tool"
         );
     }
 

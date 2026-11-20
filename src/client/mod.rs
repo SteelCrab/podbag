@@ -9,6 +9,7 @@ mod endpoint;
 #[doc(hidden)]
 pub mod fake;
 pub mod registries;
+mod registry_presets;
 mod run;
 mod wire;
 

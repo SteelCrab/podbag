@@ -297,9 +297,15 @@ mod tests {
     #[test]
     fn azure_login_and_pull_use_the_selected_server() {
         let mut app = open();
-        app.on_key(code(KeyCode::BackTab)); // Custom registry
+        let index = Location::all()
+            .iter()
+            .position(|l| matches!(l, Location::Acr(_)))
+            .unwrap();
+        for _ in 1..index {
+            app.on_key(code(KeyCode::Tab));
+        }
         assert_eq!(
-            app.on_key(code(KeyCode::BackTab)),
+            app.on_key(code(KeyCode::Tab)),
             Effect::Login(Location::Acr(String::new()))
         );
         let host = "contoso-a1b2.azurecr.io";

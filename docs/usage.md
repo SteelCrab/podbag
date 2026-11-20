@@ -710,8 +710,7 @@ docker compose build --builder podbag
 #### Pull
 
 - `p` in Images opens the pull form.
-- `Tab` changes where from: Docker Hub, GitHub, Amazon ECR, Quay.io, Google Artifact
-  Registry, GitLab, Azure Container Registry (ACR) or another registry. `Shift+Tab` goes back.
+- `Tab` cycles through the registry presets and the custom registry. `Shift+Tab` goes back.
 - The form shows who is logged in there. It reads the docker CLI's logins. It never shows
   a password.
 - ECR, GAR, ACR and custom registries need a host. Type it, then press `Enter`.
@@ -816,8 +815,16 @@ docker compose build --builder podbag
   pulls, `Esc` closes.
 - A search result asks for the tag (`latest` first), then pulls.
 - When the engine cannot search (podbag today), the panel says so. Type the full name.
-- Pull from: Docker Hub, GitHub, Amazon ECR, Quay.io, Google Artifact Registry, GitLab,
-  Azure Container Registry or your own registry. Each shows who is logged in.
+- Open the registry picker and search by service name or server. Choose **My registry**
+  to use any other Docker/OCI image registry supported by your engine. Enter the full
+  server name and optional port, then the repository and tag or digest.
+- Presets include Docker Hub and Hardened Images, GitHub, GitLab, Quay, Amazon ECR
+  (private and public), Azure Container Registry, Microsoft Artifact Registry, Google
+  Artifact Registry (including gcr.io), DigitalOcean, Oracle Cloud, Oracle Container
+  Registry, IBM, Alibaba, Tencent, Huawei, Scaleway, OVHcloud, Red Hat, SUSE, Kubernetes,
+  NVIDIA NGC, Chainguard and Cloudsmith. Harbor, JFrog Artifactory, Sonatype Nexus and
+  GitLab Self-Managed accept your installation's hostname. The Docker import list uses
+  that hostname to identify its images.
 - Log in asks for a user and a password or token. The password goes only to the login
   program's stdin. The app does not keep it or show it. ECR, Google Artifact Registry
   and ACR show their cloud's login command. For ACR, enter the full login server

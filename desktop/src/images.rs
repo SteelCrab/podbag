@@ -10,10 +10,11 @@ use serde::Serialize;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocationInfo {
-    /// `dockerhub`, `github`, `ecr`, `quay`, `gar`, `gitlab`, `acr` or `custom`.
+    /// The stable preference key and icon ID.
     pub id: &'static str,
     pub label: String,
     pub host: String,
+    pub host_example: &'static str,
     /// The user gives the host (ECR, GAR, ACR, another registry).
     pub needs_host: bool,
     /// Who is logged in there.
@@ -31,6 +32,7 @@ pub fn location_id(l: &Location) -> &'static str {
         Location::Gar(_) => "gar",
         Location::GitLab => "gitlab",
         Location::Acr(_) => "acr",
+        Location::Preset(preset, _) => preset.id,
         Location::Custom(_) => "custom",
     }
 }
@@ -49,6 +51,7 @@ fn info(l: &Location, logins: &[(String, String)]) -> LocationInfo {
         id: location_id(l),
         label: l.label(),
         host: l.host(),
+        host_example: l.host_example(),
         needs_host: l.needs_host(),
         account: l.account(logins).map(str::to_string),
         hint: l.login_hint(),
@@ -156,12 +159,18 @@ pub struct ImportImage {
 }
 
 impl ImportImage {
-    pub fn from_image(image: ImageSummary) -> Option<Self> {
+    pub fn from_image(image: ImageSummary, configured: &[Location]) -> Option<Self> {
         let name = image
             .repo_tags
             .into_iter()
             .find(|tag| tag != "<none>:<none>")?;
-        let registry = location_id(&Location::of(&registry_host(&name)));
+        let host = registry_host(&name);
+        let detected = Location::of(&host);
+        let location = configured
+            .iter()
+            .find(|l| l.host() == host)
+            .unwrap_or(&detected);
+        let registry = location_id(location);
         Some(Self {
             name,
             size: image.size,
@@ -203,18 +212,21 @@ mod tests {
         let all = locations(&logins, &[]);
         let ids: Vec<&str> = all.iter().map(|l| l.id).collect();
         assert_eq!(
-            ids,
-            [
-                "dockerhub",
-                "github",
-                "ecr",
-                "quay",
-                "gar",
-                "gitlab",
-                "acr",
-                "custom"
-            ]
+            &ids[..7],
+            ["dockerhub", "github", "ecr", "quay", "gar", "gitlab", "acr"]
         );
+        assert_eq!(ids.last(), Some(&"custom"));
+        assert_eq!(
+            ids.len(),
+            ids.iter().collect::<std::collections::HashSet<_>>().len()
+        );
+        let sprite = include_str!("../ui/registry-icons.svg");
+        for id in ids {
+            assert!(
+                sprite.contains(&format!("<symbol id=\"{id}\"")),
+                "missing icon for {id}"
+            );
+        }
         assert_eq!(all[0].account, None);
         assert_eq!(all[1].account.as_deref(), Some("octo"));
         // ECR with no host yet: any ECR login.
@@ -325,16 +337,21 @@ mod tests {
             ("ghcr.io/team/api:1", "github"),
             ("contoso.azurecr.io/team/api:1", "acr"),
             ("example.org/worker:1", "custom"),
+            ("harbor.example.org:8443/tools/app:1", "harbor"),
         ] {
-            let row = ImportImage::from_image(ImageSummary {
-                repo_tags: vec!["<none>:<none>".into(), name.into(), "other:2".into()],
-                ..Default::default()
-            })
+            let configured = [location("harbor", "harbor.example.org:8443").unwrap()];
+            let row = ImportImage::from_image(
+                ImageSummary {
+                    repo_tags: vec!["<none>:<none>".into(), name.into(), "other:2".into()],
+                    ..Default::default()
+                },
+                &configured,
+            )
             .unwrap();
             assert_eq!(row.name, name);
             assert_eq!(row.registry, registry);
         }
-        assert!(ImportImage::from_image(ImageSummary::default()).is_none());
+        assert!(ImportImage::from_image(ImageSummary::default(), &[]).is_none());
     }
 
     #[test]

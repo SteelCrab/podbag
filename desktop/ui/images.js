@@ -208,8 +208,7 @@ function toggleLocMenu() {
     renderLocMenu();
     menu.hidden = false;
     P.dialog.querySelector(".loc-button").setAttribute("aria-expanded", "true");
-    const first = menu.querySelector("button");
-    if (first) first.focus();
+    menu.querySelector("input").focus();
   } else {
     closeLocMenu();
   }
@@ -224,12 +223,28 @@ function closeLocMenu() {
 
 function renderLocMenu() {
   const menu = P.dialog.querySelector(".loc-menu");
+  const search = h("input", { type: "search", class: "loc-search", placeholder: t("search.placeholder"),
+    "aria-label": t("pull.location"), autocomplete: "off", spellcheck: "false",
+    oninput: () => {
+      const query = search.value.trim().toLowerCase();
+      for (const row of menu.querySelectorAll(".loc-row")) {
+        row.hidden = !row.dataset.search.includes(query) && row.dataset.id !== "custom";
+      }
+    },
+    onkeydown: (event) => {
+      if (event.key === "ArrowDown" || event.key === "Enter") {
+        event.preventDefault();
+        const first = menu.querySelector(".loc-row:not([hidden]) .loc-choice");
+        if (event.key === "Enter") first?.click(); else first?.focus();
+      }
+    },
+  });
   put(menu,
-    h("p", { class: "loc-title", text: t("pull.location") }),
+    h("div", { class: "loc-filter" }, h("p", { class: "loc-title", text: t("pull.location") }), search),
     h("ul", {}, P.locations.map((l) => {
       const chosen = l.id === P.location;
       const label = l.needsHost && l.host ? `${l.label} (${l.host})` : l.id === "custom" ? t("pull.myRegistry") : l.label;
-      return h("li", { class: "loc-row" },
+      return h("li", { class: "loc-row", "data-id": l.id, "data-search": [label, l.id, l.host, l.hostExample].join(" ").toLowerCase() },
         h("button", {
           type: "button", class: "loc-choice", "aria-pressed": chosen ? "true" : "false",
           onclick: () => {
@@ -336,8 +351,7 @@ function tagBody() {
 }
 
 function hostBody(loc) {
-  const examples = { ecr: "123456789012.dkr.ecr.us-east-1.amazonaws.com", gar: "us-docker.pkg.dev", acr: "contoso.azurecr.io" };
-  const host = h("input", { type: "text", id: "pull-host", value: loc.host, "data-focus": "", autocomplete: "off", spellcheck: "false", placeholder: examples[loc.id] || "registry.example.com" });
+  const host = h("input", { type: "text", id: "pull-host", value: loc.host, "data-focus": "", autocomplete: "off", spellcheck: "false", placeholder: loc.hostExample || "registry.example.com" });
   return h("form", { class: "pull-form", onsubmit: async (e) => {
     e.preventDefault();
     const v = host.value.trim();
@@ -488,7 +502,7 @@ renderBanner = function () {
 async function importFromDocker() {
   let list;
   try {
-    list = await API.dockerImages();
+    list = await API.dockerImages(Object.entries(P.hosts));
   } catch (e) {
     toast(String(e), true);
     return;
