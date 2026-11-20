@@ -735,7 +735,14 @@ docker compose build --builder podbag
 
 ### podbag-desktop
 
-- A window with Containers, Images, Volumes, Networks and Settings.
+- A window with Containers, Images, Volumes, Networks, Kubernetes and Settings.
+- Open Kubernetes in the sidebar, or expand it and select **Pods** or **Services**.
+  The sidebar and the page tabs show the same selection.
+- Install `kubectl` on the desktop host and
+  select a context with `kubectl config use-context`. The view starts in that context's
+  namespace. Select **All namespaces** to list resources across the cluster.
+- Search the Kubernetes list or select a name to inspect the object's JSON. Refresh
+  reads the active context again. These read-only views also work when the engine is off.
 - On macOS, the window toolbar has Refresh and Settings on the right.
   Drag the space between the title and the buttons to move the window.
 

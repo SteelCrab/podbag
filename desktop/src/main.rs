@@ -8,6 +8,7 @@ mod cli;
 mod commands;
 mod dockercmd;
 mod images;
+mod kubernetes;
 mod settings;
 mod strings;
 
@@ -903,6 +904,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             engine,
             list,
+            kubernetes::kube_list,
             inspect,
             act,
             remove,

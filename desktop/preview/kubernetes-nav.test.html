@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Kubernetes sidebar navigation test</title>
+<iframe src="preview.html?view=offline&amp;lang=en" title="Desktop preview"></iframe>
+<pre id="result">Running</pre>
+<script>
+"use strict";
+const frame = document.querySelector("iframe");
+async function test() {
+  const win = frame.contentWindow;
+  const doc = frame.contentDocument;
+  const byId = (id) => doc.getElementById(id);
+  const check = (condition, message) => { if (!condition) throw Error(message); };
+  const current = () => doc.querySelector(".sidebar [aria-current=page]");
+  const toggle = byId("nav-kube-toggle");
+  const children = byId("nav-kube-children");
+  const pods = byId("nav-kube-pods");
+  const services = byId("nav-kube-services");
+  const invoke = win.__TAURI__.core.invoke;
+  const requests = [];
+  win.__TAURI__.core.invoke = (cmd, args) => {
+    if (cmd === "kube_list") requests.push(args);
+    return invoke(cmd, args);
+  };
+  check(children.hidden, "The subtree must start collapsed");
+  toggle.click();
+  check(!children.hidden && toggle.getAttribute("aria-expanded") === "true", "Expand the resource list");
+  check(requests.length === 0, "Expanding the list must leave the current page open");
+  services.focus();
+  services.click();
+  check(current() === services && doc.activeElement === services, "Focus and select Services");
+  check(requests.length === 1 && requests[0].kind === "services", "Open Services directly");
+  check(byId("kube-services").getAttribute("aria-pressed") === "true", "Select the Services tab");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  check(doc.querySelector(".kube-list")?.textContent.includes("frontend"), "List Services with the engine offline");
+  doc.querySelector(".kube-tabs input").click();
+  byId("kube-pods").click();
+  check(current() === pods && requests.at(-1).allNamespaces, "Tabs must update the sidebar and keep the namespace scope");
+  const count = requests.length;
+  toggle.click();
+  check(children.hidden && current() === byId("nav-kube-open"), "Show the active parent when collapsed");
+  toggle.click();
+  pods.click();
+  check(current() === pods && requests.length === count, "Reopening the subtree must keep the active resource");
+  doc.querySelector("#nav button").click();
+  check(current() !== pods && !children.hidden, "Leave Kubernetes with the submenu still available");
+  byId("nav-kube-open").click();
+  check(current() === pods && byId("kube-pods").getAttribute("aria-pressed") === "true", "Open Kubernetes from its parent");
+}
+
+// The preview loads its scripts and translations after the frame's load event.
+frame.addEventListener("load", () => {
+  const root = frame.contentDocument.documentElement;
+  const result = document.getElementById("result");
+  const observer = new MutationObserver(startWhenReady);
+  function startWhenReady() {
+    if (root.dataset.ready !== "1") return;
+    observer.disconnect();
+    test().then(() => { result.textContent = "PASS"; }, (error) => { result.textContent = "FAIL: " + error.message; });
+  }
+  observer.observe(root, { attributes: true, attributeFilter: ["data-ready"] });
+  startWhenReady();
+});
+</script>
+</html>
