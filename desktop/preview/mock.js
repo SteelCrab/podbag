@@ -241,6 +241,10 @@
       return true;
     },
     open_repository: () => null,
+    tutorial_lab: ({ action }) => {
+      if (action === "status") return { active: false };
+      throw "Start the local lab in Podbag Desktop.";
+    },
     get_settings: () => ({
       language: params.get("lang") || "en", theme: params.get("theme") || "system",
       sidebarWidth: 216, sidebarCollapsed: view === "collapsed",
@@ -265,6 +269,7 @@
       volumes: () => app.go("volumes"),
       networks: () => app.go("networks"),
       settings: () => app.go("settings"),
+      tutorials: () => app.go("tutorials"),
       "settings-vm": () => app.openSettingsSection("vm-settings"),
       "settings-updates": app.openUpdates,
       "update-admin": async () => { await app.openUpdates(); await app.runUpgrade(); },

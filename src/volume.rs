@@ -43,9 +43,17 @@ impl Volume {
     /// As `create`, with labels for a new volume. A volume that exists is returned as it
     /// is: its labels do not change.
     pub fn create_with(name: Option<&str>, labels: crate::network::Labels) -> Result<Volume> {
-        let dirs = crate::paths::dirs()?;
-        let _lock = lock_shared(&dirs)?;
-        create_labeled_in(&dirs, name, false, labels).map(|(v, _)| v)
+        Self::create_in_store(&crate::paths::dirs()?, name, labels)
+    }
+
+    /// Create a volume in an explicit store, using the same locking and metadata as the CLI.
+    pub fn create_in_store(
+        dirs: &Dirs,
+        name: Option<&str>,
+        labels: crate::network::Labels,
+    ) -> Result<Volume> {
+        let _lock = lock_shared(dirs)?;
+        create_labeled_in(dirs, name, false, labels).map(|(v, _)| v)
     }
 
     pub fn get(name: &str) -> Result<Volume> {

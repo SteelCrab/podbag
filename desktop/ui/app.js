@@ -544,7 +544,8 @@ function renderNav() {
     title: label,
   }, icon(view), h("span", { class: "label", text: label }), h("span", { class: "count", text: count ?? "" })));
   updateMigrationNav();
-  nav.replaceChildren(...KINDS.map(k => item(k, t(`nav.${k}`), S.loaded && !S.listErrors[k] ? S.lists[k].length : null)));
+  nav.replaceChildren(...KINDS.map(k => item(k, t(`nav.${k}`), S.loaded && !S.listErrors[k] ? S.lists[k].length : null)),
+    item("tutorials", t("nav.tutorials"), null));
   updateKubeNav();
   if (windowBar) {
     const [reload, settings] = document.getElementById("topbar-tools").children;
@@ -884,6 +885,11 @@ function renderMain(fresh) {
   kubePanel = null;
   if (S.view === "migration") {
     if (fresh || shownView !== S.view) migrationPanel = renderMigration(main);
+    shownView = S.view;
+    return;
+  }
+  if (S.view === "tutorials") {
+    if (fresh || shownView !== S.view) renderTutorials(main);
     shownView = S.view;
     return;
   }

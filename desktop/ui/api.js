@@ -11,6 +11,7 @@ const API = (() => {
   const listen = (name, fn) => tauri.event.listen(events.has(name) ? `${name}-${token}` : name, (e) => fn(e.payload));
 
   return {
+    tutorialLab: (action, value = null) => invoke("tutorial_lab", { action, value }),
     async connection() {
       const [id, name, local] = await invoke("connection");
       token = id;
