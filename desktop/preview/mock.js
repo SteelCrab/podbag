@@ -252,7 +252,6 @@
         practiceModules.set(key, { id: key, package: pack, completed: false });
       }
       if (action === "remove") practiceModules.delete(id);
-      if (action === "start") throw "Open a practice terminal in Podbag Desktop.";
       return [...practiceModules.values()].filter(record => action !== "summary" || !id || record.id === id);
     },
     tutorial_lab: ({ action }) => {

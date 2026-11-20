@@ -1151,10 +1151,8 @@ fn practice_volumes(
 
 #[tauri::command]
 fn volume_tools_lab(
-    state: State<'_, AppState>,
     action: &str,
     package: Option<String>,
-    lang: Option<String>,
     id: Option<String>,
 ) -> Result<Vec<LessonRecord>, String> {
     use podbag::volume_lesson as lesson;
@@ -1167,36 +1165,6 @@ fn volume_tools_lab(
                 .map_err(|e| e.to_string())?;
         }
         "remove" => lesson::remove(&dir, module()?).map_err(|e| e.to_string())?,
-        "start" => {
-            let module = module()?;
-            if lesson::read(&dir, module)
-                .map_err(|e| e.to_string())?
-                .is_none()
-            {
-                return Err("Install the module first.".into());
-            }
-            let argv = [
-                state.podbag.to_string_lossy().into_owned(),
-                "lab".into(),
-                "start".into(),
-                module.id().into(),
-                "--lang".into(),
-                lang.unwrap_or_else(|| "en".into()),
-                "--library".into(),
-                dir.to_string_lossy().into_owned(),
-            ];
-            #[cfg(target_os = "macos")]
-            let opened = commands::open_practice_terminal(&argv).map_err(|e| e.to_string())?;
-            #[cfg(not(target_os = "macos"))]
-            let opened = commands::open_terminal(Some(&argv));
-            if !opened {
-                return Err(format!(
-                    "Open a terminal and run podbag lab start {}.",
-                    module.id()
-                ));
-            }
-            return Ok(Vec::new());
-        }
         _ => return Err("Unknown lesson action.".into()),
     }
     let mut records = Vec::new();

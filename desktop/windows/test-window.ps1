@@ -76,7 +76,7 @@ do {
     Activate-Button 'Skip'
     Activate-Button 'Training'
     Start-Sleep -Milliseconds 500
-    $heading = Find-Text 'Install a tutorial module'
+    $heading = Find-Text 'No modules installed.'
     if ($heading) { break }
 } until ([DateTime]::UtcNow -gt $deadline)
 if (!$heading) { throw 'The installed WebView did not open the English Training view' }

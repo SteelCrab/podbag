@@ -637,6 +637,34 @@ dialog.import { width: min(520px, calc(100vw - 48px)); }
 @keyframes migration-enter { from { opacity: 0; transform: translateY(5px) scale(.98); } to { opacity: 1; transform: none; } }
 @keyframes migration-transfer { from { transform: translateX(0); } to { transform: translateX(212%); } }
 @keyframes migration-check { 0% { opacity: .3; transform: scale(.78); } 70% { transform: scale(1.08); } 100% { opacity: 1; transform: scale(1); } }
+.training-toolbar h1 { overflow: hidden; text-overflow: ellipsis; }
+#nav-training-toggle[hidden], #nav-practice:empty { display: none; }
+#nav-training-open[data-active] { background: var(--accent-soft); color: var(--accent-text); }
+.training-library h2 { margin: 0 0 8px; font-size: 16px; }
+.training-library h2 .link { text-align: start; }
+.training-library h2 .link:hover { color: var(--accent-text); }
+.training-steps { list-style: none; margin: 14px 0 0; padding: 0; }
+.training-step { border-top: 1px solid var(--line); padding: 10px 0; }
+.training-step-heading { display: flex; gap: 10px; align-items: center; }
+.training-step-name { flex: 1; }
+.training-step-marker {
+  display: grid; place-items: center; flex: none; width: 17px; height: 17px;
+  color: var(--muted); border: 1px solid currentColor; border-radius: 50%;
+}
+.training-step-marker .icon { width: 12px; height: 12px; }
+.training-step-status { color: var(--muted); font-size: 12px; text-align: end; }
+.training-step[data-state="done"] :is(.training-step-marker, .training-step-status) { color: var(--green); }
+.training-step[data-state="done"] .training-step-marker { background: var(--green-soft); border-color: transparent; }
+.training-step[data-state="current"] .training-step-marker { border: 5px solid var(--accent); }
+.training-step[data-state="current"] :is(.training-step-name, .training-step-status) {
+  color: var(--accent-text); font-weight: 600;
+}
+.training-step-command { margin: 6px 0 0 27px; }
+.training-step-command p, .training-repeat p, .practice-resources > p { margin: 0; color: var(--ink-2); }
+.training-progress .code code, .practice-resources .code code { white-space: pre-wrap; overflow-wrap: anywhere; }
+.training-progress .code .icon-button, .practice-resources .code .icon-button { flex-shrink: 0; }
+.training-repeat { margin-top: 8px; }
+.tutorial .tutorial-status:empty { display: none; }
 /* An installed tutorial uses its own practice data, even when the engine is offline. */
 .tutorial { padding-block-start: 20px; }
 .tutorial-card { max-width: 680px; padding: 22px; overflow-wrap: anywhere; }

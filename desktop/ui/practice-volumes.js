@@ -4,24 +4,24 @@ const GUI_VOLUME_FORMAT = "podbag-cli-gui-volumes-v1";
 const volumePractice = {
   id: "volume-basics",
   namespace: "practice.",
+  steps: [
+    ["start"], ["create", "podbag volume create my-api"], ["inspect"], ["remove"],
+    ["verify", "podbag volume ls"], ["finish", "exit"],
+  ],
   request: (...args) => API.practiceVolumes(...args),
 };
 const containerPractice = {
   id: "container-basics",
   namespace: "training.container.",
+  steps: [
+    ["start"],
+    ["run", "podbag run -d --name hello-web --network none docker.io/library/busybox:1.37.0 httpd -f -p 8080"],
+    ["stop"], ["check", "podbag ps -a"], ["finish", "exit"],
+  ],
   request: (action, session, name) => API.practiceVolumes(action, session, name, true),
 };
 
-function showModuleStatus(status, stage, practice) {
-  if (status.dataset.stage === stage) return;
-  status.dataset.stage = stage;
-  const label = stage === "complete" ? "tutorial.complete"
-    : stage === "start" ? "tutorial.installed" : "practice.current";
-  const current = stage === "restart" ? "stop" : stage;
-  status.textContent = label === "practice.current"
-    ? t(label) + " · " + t(practice.namespace + current)
-    : t(label);
-}
+function practiceStartCommand(id) { return "podbag lab start " + id; }
 
 function trainingGuideButton(id, style) {
   return button("globe", t("training.guide"), async () => {
@@ -30,9 +30,13 @@ function trainingGuideButton(id, style) {
 }
 
 // Poll only while this view is mounted. Redraw on transitions so keyboard focus stays on the row or action.
-function watchPractice(panel, practice, onChange, completed) {
-  const tracksCompletion = completed !== undefined;
-  let last, timer, revision = 0;
+function watchPractice(panel, practice, onChange, { completed, onStage } = {}) {
+  let last, lastStage, timer, revision = 0;
+  function updateStage(stage) {
+    if (stage === lastStage) return;
+    lastStage = stage;
+    onStage?.(stage);
+  }
   const error = h("p", { role: "alert", class: "error-text" });
   panel.after(error);
   async function refresh() {
@@ -42,9 +46,9 @@ function watchPractice(panel, practice, onChange, completed) {
     try {
       const state = await practice.request();
       // Completion is saved by the shell after it shuts down the practice engine.
-      if (!state && tracksCompletion) completed = !!(await API.volumeToolsLab("summary", null, practice.id))[0]?.completed;
+      if (!state && onStage) completed = !!(await API.volumeToolsLab("summary", null, practice.id))[0]?.completed;
       if (!panel.isConnected || ticket !== revision) return;
-      if (tracksCompletion) showModuleStatus(panel, state?.stage || (completed ? "complete" : "start"), practice);
+      updateStage(state?.stage || (completed ? "complete" : "start"));
       const key = JSON.stringify(state);
       if (last !== key) onChange?.(state);
       last = key;
@@ -55,30 +59,26 @@ function watchPractice(panel, practice, onChange, completed) {
       if (panel.isConnected && ticket === revision) timer = setTimeout(refresh, 800);
     }
   }
-  if (tracksCompletion) showModuleStatus(panel, completed ? "complete" : "start", practice);
+  updateStage(completed ? "complete" : "start");
   refresh();
   return refresh;
 }
 
 function renderPracticeVolumes(main) {
   const resources = h("section", { class: "practice-resources" });
-  const terminal = button("shell", t("status.terminal"), async () => {
-    try { await API.volumeToolsLab("start", null, volumePractice.id); } catch (e) { toast(String(e), true); }
-  });
   const holder = h("div", { class: "content practice-workspace" }, resources);
   put(main, h("header", { class: "toolbar" },
     iconButton("back", t("nav.tutorials"), () => go("tutorials")),
-    h("h1", { text: t("practice.volumes") }), trainingGuideButton(volumePractice.id), terminal), holder);
+    h("h1", { text: t("practice.volumes") }), trainingGuideButton(volumePractice.id)), holder);
   let state, detail, busy = false;
   const refresh = watchPractice(resources, volumePractice, next => {
     if (!next || next.session !== state?.session || !next.volumes.some(v => v.Name === detail?.Name)) detail = null;
     state = next;
-    terminal.hidden = !!next;
     render();
   });
   function render() {
     if (!state) {
-      put(resources, h("p", { class: "nothing", text: t("training.terminalStart") }));
+      put(resources, h("p", { text: t("training.terminalStart") }), codeLine(practiceStartCommand(volumePractice.id)));
       return;
     }
     const target = state.session;
@@ -116,27 +116,23 @@ function renderPracticeVolumes(main) {
 
 function renderPracticeContainers(main) {
   const resources = h("section", { class: "practice-resources" });
-  const terminal = button("shell", t("status.terminal"), async () => {
-    try { await API.volumeToolsLab("start", null, containerPractice.id); } catch (e) { toast(String(e), true); }
-  });
   put(main, h("header", { class: "toolbar" },
     iconButton("back", t("nav.tutorials"), () => go("tutorials")),
-    h("h1", { text: t("training.containers") }), trainingGuideButton(containerPractice.id), terminal),
+    h("h1", { text: t("training.containers") }), trainingGuideButton(containerPractice.id)),
   h("div", { class: "content practice-workspace" }, resources));
   let state, detailId, busy = false;
   const refresh = watchPractice(resources, containerPractice, next => {
     if (next?.session !== state?.session) detailId = null;
     state = next;
-    terminal.hidden = !!next;
     render();
   });
 
   function render() {
     if (!state) {
-      put(resources, h("p", { class: "nothing", text: t("training.terminalStart") }));
+      put(resources, h("p", { text: t("training.terminalStart") }), codeLine(practiceStartCommand(containerPractice.id)));
       return;
     }
-    const action = state.stage === "restart" ? "start" : state.stage === "stop" ? "stop" : null;
+    const action = state.stage === "stop" ? "stop" : null;
     const resourceAction = row => action && iconButton(action, t("action." + action),
       () => change(action, row.Id, state.session));
     const detail = state.containers.find(row => row.Id === detailId);

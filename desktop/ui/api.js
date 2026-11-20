@@ -12,7 +12,7 @@ const API = (() => {
 
   return {
     practiceVolumes: (action = "status", session = null, name = null, containers = false) => invoke("practice_volumes", { action, session, name, containers }),
-    volumeToolsLab: (action, pack = null, id = null) => invoke("volume_tools_lab", { action, package: pack, lang: I18N.lang, id }),
+    volumeToolsLab: (action, pack = null, id = null) => invoke("volume_tools_lab", { action, package: pack, id }),
     tutorialLab: (action, value = null) => invoke("tutorial_lab", { action, value }),
     async connection() {
       const [id, name, local] = await invoke("connection");
