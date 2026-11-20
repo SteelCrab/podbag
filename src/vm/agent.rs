@@ -204,6 +204,10 @@ fn serve_cli(stream: UnixStream) -> std::io::Result<()> {
                 }
             },
             Some("__vm-busy") => i32::from(!busy()),
+            Some("__vm-stats") => {
+                out.send(Frame::Stdout(format!("{}\n", stats()).into_bytes()))?;
+                0
+            }
             _ => run_command(&req, reader, &out)?,
         }
     };
@@ -211,6 +215,48 @@ fn serve_cli(stream: UnixStream) -> std::io::Result<()> {
     // The thread that reads the Mac's frames learns from this that the command is over.
     let _ = stream.shutdown(std::net::Shutdown::Both);
     Ok(())
+}
+
+/// The VM's CPU time and memory, for `podbag vm status` on the Mac: `/proc/stat`'s
+/// first line (jiffies: all, idle) and `/proc/meminfo` (KiB: total, available), as JSON.
+fn stats() -> String {
+    let stat = std::fs::read_to_string("/proc/stat").unwrap_or_default();
+    let meminfo = std::fs::read_to_string("/proc/meminfo").unwrap_or_default();
+    stats_of(&stat, &meminfo).to_string()
+}
+
+fn stats_of(stat: &str, meminfo: &str) -> serde_json::Value {
+    let cpu: Vec<u64> = stat
+        .lines()
+        .find(|l| l.starts_with("cpu "))
+        .map(|l| {
+            l.split_whitespace()
+                .skip(1)
+                .filter_map(|n| n.parse().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    // user nice system idle iowait irq softirq steal: idle and iowait are idle time.
+    let total: u64 = cpu.iter().take(8).sum();
+    let idle = cpu.get(3).copied().unwrap_or(0) + cpu.get(4).copied().unwrap_or(0);
+    let cpus = stat
+        .lines()
+        .filter(|l| l.starts_with("cpu") && l.as_bytes().get(3).is_some_and(u8::is_ascii_digit))
+        .count();
+    let kib = |name: &str| -> u64 {
+        meminfo
+            .lines()
+            .find_map(|l| l.strip_prefix(name)?.strip_prefix(':'))
+            .and_then(|v| v.split_whitespace().next()?.parse().ok())
+            .unwrap_or(0)
+    };
+    serde_json::json!({
+        "cpuTotal": total,
+        "cpuIdle": idle,
+        "cpus": cpus,
+        "memTotalKiB": kib("MemTotal"),
+        "memAvailableKiB": kib("MemAvailable"),
+    })
 }
 
 /// A connection the Mac forwards from one of its ports: `TCP <port>` names the port
@@ -807,6 +853,20 @@ fn pump(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stats_from_proc() {
+        let stat = "cpu  100 0 50 800 50 0 0 0 0 0\ncpu0 50 0 25 400 25 0 0 0 0 0\n\
+                    cpu1 50 0 25 400 25 0 0 0 0 0\nintr 1 2 3\n";
+        let meminfo =
+            "MemTotal:        2000000 kB\nMemFree:  100 kB\nMemAvailable:    1500000 kB\n";
+        let v = stats_of(stat, meminfo);
+        assert_eq!(v["cpuTotal"], 1000);
+        assert_eq!(v["cpuIdle"], 850);
+        assert_eq!(v["cpus"], 2);
+        assert_eq!(v["memTotalKiB"], 2_000_000);
+        assert_eq!(v["memAvailableKiB"], 1_500_000);
+    }
 
     fn request(env: &[(&str, &str)]) -> CliRequest {
         CliRequest {

@@ -43,17 +43,30 @@ pub fn forward(argv: &[String]) -> i32 {
     }
 }
 
-/// `podbag vm start|status|stop|rm`.
+/// `podbag vm start|status [--json]|stop|restart|rm`. WSL's resources (CPUs, memory) are
+/// global, in `.wslconfig`: podbag does not change them, so there is no `vm set` here.
 pub fn vm_command(args: &[String]) -> i32 {
-    let done = match args.first().map(String::as_str) {
-        Some("start") => ensure()
+    let json = args.iter().skip(1).any(|a| a == "--json");
+    let start = || {
+        ensure()
             .and_then(|()| run_quiet(&["-d", DISTRO, "--exec", ENGINE, "--version"]))
-            .map(|()| println!("running")),
+            .map(|()| println!("running"))
+    };
+    let done = match args.first().map(String::as_str) {
+        Some("start") => start(),
+        Some("status") if json => status().map(|s| println!("{}", status_json(s))),
         Some("status") => status().map(|s| println!("{s}")),
         Some("stop") => run_quiet(&["--terminate", DISTRO]),
+        // Containers in the distribution stop with it.
+        Some("restart") => run_quiet(&["--terminate", DISTRO]).and_then(|()| start()),
         Some("rm") => remove(),
+        Some("set") => Err(
+            "WSL's CPUs and memory are set for all its distributions in \
+                            %UserProfile%\\.wslconfig; podbag does not change them"
+                .into(),
+        ),
         _ => {
-            eprintln!("usage: podbag vm start|status|stop|rm");
+            eprintln!("usage: podbag vm start|status [--json]|stop|restart|rm");
             return 2;
         }
     };
@@ -64,6 +77,15 @@ pub fn vm_command(args: &[String]) -> i32 {
             1
         }
     }
+}
+
+/// `podbag vm status --json` on Windows: the state only.
+pub fn status_json(state: &str) -> serde_json::Value {
+    serde_json::json!({
+        "platform": "windows",
+        "state": state,
+        "resourcesEditable": false,
+    })
 }
 
 fn status() -> Result<&'static str, String> {
