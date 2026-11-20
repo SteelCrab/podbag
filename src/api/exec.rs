@@ -168,6 +168,10 @@ fn running_container(name: &str) -> std::result::Result<ContainerHandle, Reply> 
         _ => reply_error(&e),
     })?;
     match handle.info() {
+        Ok(i) if i.state.paused => {
+            let e = crate::containers::pause::exec_refused(handle.id());
+            Err(message(409, e.what))
+        }
         Ok(i) if i.state.status == Status::Running => Ok(handle),
         Ok(_) => Err(message(
             409,

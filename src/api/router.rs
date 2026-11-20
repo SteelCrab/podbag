@@ -144,13 +144,6 @@ pub fn route(req: &Request, ctx: &Ctx) -> Reply {
         ("GET", ["system", "df"]) => super::system::df(),
         ("POST", ["auth"]) => super::images::login(req),
         ("GET", ["events"]) => super::events::stream(req),
-        (_, ["containers", _, "top"]) => not_supported(
-            "listing a container's processes (top)",
-            "use `docker exec <container> ps`",
-        ),
-        (_, ["containers", _, "stats"]) => {
-            not_supported("stats", "read the container's cgroup files")
-        }
         ("HEAD", ["containers", id, "archive"]) => super::containers::stat_path(req, id),
         ("GET", ["containers", id, "archive"]) => super::containers::copy_out(req, id),
         ("PUT", ["containers", id, "archive"]) => super::containers::copy_in(req, id),
