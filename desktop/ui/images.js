@@ -464,7 +464,7 @@ dockerCommandItem = function () {
       } else if (d.previous) {
         if (await confirmDialog(t("docker.askBack", { name: d.previous }), t("docker.back", { name: d.previous }))) switchDocker("back");
       } else {
-        go("settings");
+        openSettingsSection("engine-settings");
       }
     },
   }, d.isPodbag ? null : icon("warning"), text);

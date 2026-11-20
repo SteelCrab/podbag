@@ -223,10 +223,10 @@
       volumes: () => app.go("volumes"),
       networks: () => app.go("networks"),
       settings: () => app.go("settings"),
-      "settings-vm": () => { app.go("settings"); scrollTo("vm-settings"); },
-      "settings-updates": () => { app.go("settings"); scrollTo("updates"); },
-      "update-admin": async () => { app.go("settings"); await app.runUpgrade(); scrollTo("updates"); },
-      "docker-settings": () => app.go("settings"),
+      "settings-vm": () => app.openSettingsSection("vm-settings"),
+      "settings-updates": app.openUpdates,
+      "update-admin": async () => { await app.openUpdates(); await app.runUpgrade(); },
+      "docker-settings": () => app.openSettingsSection("engine-settings"),
       detail: () => app.openDetail("containers", containers[0].Id, "info"),
       logs: () => app.openDetail("containers", containers[0].Id, "logs"),
       inspect: () => app.openDetail("containers", containers[0].Id, "inspect"),
@@ -242,16 +242,10 @@
       },
       "pull-login": async () => { app.go("images"); await app.pull(); app.pullState.location = "quay"; app.pullState.step = "login"; app.render(); },
       banner: () => {},
-      "settings-docker": () => app.go("settings"),
+      "settings-docker": () => app.openSettingsSection("engine-settings"),
       import: async () => { app.go("images"); await app.importFromDocker(); },
       "empty-volumes": () => app.go("volumes"),
     };
-    // Scroll a settings section into view once it is drawn.
-    function scrollTo(id) {
-      const el = document.getElementById(id);
-      if (el && !el.hidden && el.childElementCount) el.scrollIntoView({ block: "start" });
-      else setTimeout(() => scrollTo(id), 30);
-    }
     if (view === "empty" && params.get("tab")) app.go(params.get("tab"));
     await (scenes[view] || (() => {}))();
     document.documentElement.dataset.ready = "1";
