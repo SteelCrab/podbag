@@ -122,9 +122,17 @@ impl Activity {
     }
 }
 
-/// Serve until killed, or until `timeout` passes without an open connection.
+/// After an upgrade, how long an old service waits without a connection before it ends.
+const REPLACED_GRACE: Duration = Duration::from_secs(2);
+
+/// Serve until killed, or until `timeout` passes without an open connection. A service
+/// that starts on demand (a timeout, or systemd's socket) also ends when its program
+/// was replaced (`podbag upgrade`) and no connection is open: the next client starts
+/// the new program.
 pub fn serve(opts: ServeOptions) -> Result<()> {
     let dirs = crate::paths::dirs()?;
+    let on_demand = opts.timeout.is_some() || opts.activated.is_some();
+    let program = on_demand.then(crate::upgrade::ProgramWatch::new).flatten();
     let (listener, owned_path) = match opts.activated {
         Some(fd) => (UnixListener::from(fd), None),
         None => (bind(&opts.socket)?, Some(opts.socket.clone())),
@@ -184,6 +192,9 @@ pub fn serve(opts: ServeOptions) -> Result<()> {
             }
         }
         if opts.timeout.is_some_and(|t| activity.idle_for() >= t) {
+            break;
+        }
+        if activity.idle_for() >= REPLACED_GRACE && program.as_ref().is_some_and(|p| p.replaced()) {
             break;
         }
     }
