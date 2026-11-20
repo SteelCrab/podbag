@@ -108,6 +108,7 @@ fn crictl_runs_a_pod_and_its_container() {
         &pod_json,
         serde_json::json!({
             "metadata": {"name": "t", "namespace": "default", "uid": "t-1"},
+            "labels": {"tier": "test"},
             "log_directory": dir.join("logs"),
             "linux": {"security_context": {"namespace_options": {"network": 2, "pid": 1}}}
         })
@@ -120,6 +121,7 @@ fn crictl_runs_a_pod_and_its_container() {
         serde_json::json!({
             "metadata": {"name": "c"},
             "image": {"image": image},
+            "labels": {"kind": "worker"},
             "command": ["sh", "-c", "echo started; exec sleep 300"],
             "envs": [{"key": "GREETING", "value": "hello"}],
             "log_path": "c/0.log"
@@ -138,6 +140,45 @@ fn crictl_runs_a_pod_and_its_container() {
         ],
     ));
     ok(&crictl(&socket, &["start", &ctr]));
+    // A pod's label selects it, including an empty pod; container labels are independent.
+    let mut empty_config: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&pod_json).unwrap()).unwrap();
+    empty_config["metadata"]["uid"] = "empty".into();
+    empty_config["metadata"]["name"] = "empty".into();
+    let empty_file = dir.join("empty.json");
+    std::fs::write(&empty_file, empty_config.to_string()).unwrap();
+    let empty = ok(&crictl(&socket, &["runp", empty_file.to_str().unwrap()]));
+    let list: serde_json::Value = serde_json::from_str(&ok(&crictl(
+        &socket,
+        &["statsp", "--label", "tier=test", "-o", "json"],
+    )))
+    .unwrap();
+    let pods = list["stats"].as_array().unwrap();
+    assert_eq!(pods.len(), 2);
+    let populated = pods.iter().find(|p| p["attributes"]["id"] == pod).unwrap();
+    let members = populated["linux"]["containers"].as_array().unwrap();
+    assert_eq!(members.len(), 1);
+    assert_eq!(members[0]["attributes"]["id"], ctr);
+    let vacant = pods
+        .iter()
+        .find(|p| p["attributes"]["id"] == empty)
+        .unwrap();
+    assert!(
+        vacant["linux"]["containers"]
+            .as_array()
+            .is_none_or(Vec::is_empty)
+    );
+    for (label, expected) in [("kind=worker", 1), ("kind=other", 0)] {
+        let stats: serde_json::Value = serde_json::from_str(&ok(&crictl(
+            &socket,
+            &["stats", "--pod", &pod, "--label", label, "-o", "json"],
+        )))
+        .unwrap();
+        assert_eq!(stats["stats"].as_array().map_or(0, Vec::len), expected);
+    }
+    ok(&crictl(&socket, &["stopp", &empty]));
+    ok(&crictl(&socket, &["rmp", &empty]));
+
     assert_eq!(
         ok(&crictl(
             &socket,
