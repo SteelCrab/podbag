@@ -86,6 +86,8 @@ pub use containers::{
     ContainerHandle, ContainerInfo, CopyOut, ExecOptions, LogFollower, LogLine, MountInfo, Stream,
 };
 pub use error::{Error, ErrorKind, Result};
-pub use image::{DiskUsage, Image, ImageConfig, PruneReport, disk_usage, prune};
+pub use image::{
+    DiskUsage, Image, ImageConfig, PruneReport, VerifyReport, disk_usage, prune, verify_store,
+};
 pub use state::{State, Status};
 pub use volume::{Access, MountRequest, Volume};

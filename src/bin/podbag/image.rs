@@ -162,6 +162,32 @@ pub fn system(cmd: SystemCmd) -> i32 {
             "prune deletes every image that no container uses",
             "add -f to confirm",
         )),
+        SystemCmd::Verify { fix } => match podbag::verify_store(fix) {
+            Ok(r) => {
+                println!("Checked {} files: {} damaged", r.objects, r.damaged.len());
+                if !r.images.is_empty() {
+                    println!("Images that use them: {}", r.images.join(", "));
+                }
+                if !r.removed.is_empty() {
+                    println!(
+                        "Removed: {} (pull or load them again)",
+                        r.removed.join(", ")
+                    );
+                }
+                if !r.in_use.is_empty() {
+                    println!(
+                        "Kept, a container uses them: {} (remove the containers, then run this again)",
+                        r.in_use.join(", ")
+                    );
+                }
+                if !fix && !r.damaged.is_empty() {
+                    println!("Run `podbag system verify --fix` to remove them");
+                }
+                let healthy = r.damaged.is_empty() || (fix && r.in_use.is_empty());
+                i32::from(!healthy)
+            }
+            Err(e) => report(&e),
+        },
         SystemCmd::Prune { force: true } => match podbag::prune() {
             Ok(r) => {
                 println!(

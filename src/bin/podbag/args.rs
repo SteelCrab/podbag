@@ -237,6 +237,15 @@ pub enum SystemCmd {
         #[arg(short, long)]
         force: bool,
     },
+    /// Read every stored file and check it against its hash
+    ///
+    /// Exits with 1 when a file is damaged. Damaged files cannot be repaired in place:
+    /// remove the images that use them (--fix), then pull or load them again.
+    Verify {
+        /// Remove the images that use damaged files (not those a container uses)
+        #[arg(long)]
+        fix: bool,
+    },
     /// Serve the Docker Engine API on a Unix socket, for the docker CLI
     ///
     /// Point the CLI at it with DOCKER_HOST=unix://<socket>. Containers do not depend on
