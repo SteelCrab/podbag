@@ -46,11 +46,19 @@ Sa Linux at macOS, puwede mong pamahalaan ang mga container, image, volume at ne
 
 ![Listahan sa Podbag Desktop ng tatlong tumatakbo at dalawang nakahintong halimbawa ng container, kasama ang mga image at port ng mga ito](docs/images/desktop-containers-en.png)
 
-[Mag-install ng package para sa Linux](docs/build.md#linux-desktop-packages) o [i-build ang desktop app mula sa source](docs/usage.md#build-the-desktop-app).
+[I-install ang Podbag Desktop](#pag-install) o [i-build ang desktop app mula sa source](docs/usage.md#build-the-desktop-app).
 
 ## Pag-install
 
-### Linux (x86_64, arm64) at macOS (Apple silicon)
+### Podbag Desktop (inirerekomenda)
+
+I-download ang package para sa iyong system mula sa [pinakabagong release](https://github.com/SteelCrab/podbag/releases/latest).
+
+- **Linux (x86_64, arm64).** I-install ang `.deb` sa Debian o Ubuntu, o ang `.rpm` sa Fedora. Kasama sa package ang engine.
+- **macOS (Apple silicon).** I-install ang CLI gamit ang command sa ibaba. I-extract ang `podbag-desktop-aarch64-macos.zip` at buksan ang `podbag.app`.
+- **Windows (x86_64, ARM64, eksperimental).** Patakbuhin ang `.msi` para sa iyong CPU. Kung walang MSI sa release, i-download ito mula sa matagumpay na [CI run](https://github.com/SteelCrab/podbag/actions/workflows/ci.yml?query=branch%3Amain). I-enable ang WSL 2 para makapagpatakbo ng mga container.
+
+### CLI sa Linux (x86_64, arm64) at macOS (Apple silicon)
 
 ```sh
 curl -fsSL https://podbag.dev/install.sh | sh
@@ -63,7 +71,7 @@ Kailangan ang Linux kernel 5.12 o mas bago at cgroup v2. Patakbuhin ang `podbag 
 
 Para sa manu-manong pag-install, i-download ang file para sa iyong OS at CPU at ihambing ang checksum nito sa `SHA256SUMS`. [Mga release file](https://github.com/SteelCrab/podbag/releases/latest)
 
-### Windows (eksperimental)
+### CLI sa Windows (eksperimental)
 
 Patakbuhin ang `wsl --install` sa PowerShell bilang administrator, pagkatapos ay i-restart ang Windows. I-download ang `podbag-x86_64-windows.exe` o `podbag-aarch64-windows.exe` ayon sa CPU. Ihambing ang SHA-256 checksum nito sa `SHA256SUMS`, pagkatapos ay palitan ang pangalan ng file ng `podbag.exe`. [Mga release file](https://github.com/SteelCrab/podbag/releases/latest)
 
@@ -74,7 +82,6 @@ Patakbuhin ang `wsl --install` sa PowerShell bilang administrator, pagkatapos ay
 ### Iba pang paraan ng pag-install
 
 - **Cargo sa Linux.** Patakbuhin ang `cargo install --locked podbag` para i-install ang nailabas na bersiyon ng CLI.
-- **Desktop app sa Linux.** I-download mula sa GitHub Actions ang archive para sa iyong CPU. I-extract ito at i-install ang `.deb` o `.rpm` para sa iyong distribusyon. Kasama na sa package ang engine. [Mga desktop package](docs/build.md#linux-desktop-packages)
 - **Pag-build mula sa source.** Gamitin ang Rust para i-build ang CLI at Podbag Desktop. [Gabay sa pag-build](docs/build.md)
 
 ## Paggamit

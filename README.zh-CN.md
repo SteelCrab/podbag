@@ -46,11 +46,19 @@
 
 ![Podbag Desktop 示例列表显示 3 个运行中和 2 个已停止的容器，以及各自的镜像和已发布端口。](docs/images/desktop-containers-en.png)
 
-参见 [Linux 软件包安装说明](docs/build.md#linux-desktop-packages)或[桌面应用源码构建说明](docs/usage.md#build-the-desktop-app)。
+参见 [Podbag Desktop 安装说明](#安装)或[桌面应用源码构建说明](docs/usage.md#build-the-desktop-app)。
 
 ## 安装
 
-### Linux（x86_64、arm64）和 macOS（Apple 芯片）
+### Podbag Desktop（推荐）
+
+从[最新版本](https://github.com/SteelCrab/podbag/releases/latest)下载适合当前系统的安装包。
+
+- **Linux（x86_64、arm64）。** Debian 和 Ubuntu 使用 `.deb`，Fedora 使用 `.rpm`。安装包内含引擎。
+- **macOS（Apple 芯片）。** 运行下方命令安装 CLI。解压 `podbag-desktop-aarch64-macos.zip`，然后打开 `podbag.app`。
+- **Windows（x86_64、ARM64，实验性支持）。** 运行与 CPU 架构匹配的 `.msi`。如果发行版没有提供 MSI，可从成功的 [CI 运行记录](https://github.com/SteelCrab/podbag/actions/workflows/ci.yml?query=branch%3Amain)下载。运行容器前请启用 WSL 2。
+
+### Linux（x86_64、arm64）和 macOS（Apple 芯片）的 CLI
 
 ```sh
 curl -fsSL https://podbag.dev/install.sh | sh
@@ -63,7 +71,7 @@ Linux 需要 5.12 或更高版本的内核以及 cgroup v2。运行 `podbag chec
 
 手动安装时，请下载适合当前操作系统和 CPU 的文件，并用 `SHA256SUMS` 校验。[下载发行文件](https://github.com/SteelCrab/podbag/releases/latest)
 
-### Windows（实验性支持）
+### Windows 的 CLI（实验性支持）
 
 在管理员 PowerShell 中运行 `wsl --install`，然后重启 Windows。根据 CPU 架构下载 `podbag-x86_64-windows.exe` 或 `podbag-aarch64-windows.exe`。将文件的 SHA-256 与 `SHA256SUMS` 核对后，将文件重命名为 `podbag.exe`。[下载发行文件](https://github.com/SteelCrab/podbag/releases/latest)
 
@@ -74,7 +82,6 @@ Linux 需要 5.12 或更高版本的内核以及 cgroup v2。运行 `podbag chec
 ### 其他安装方式
 
 - **Linux 上的 Cargo 安装。** 运行 `cargo install --locked podbag` 可安装已发布的 CLI。
-- **Linux 桌面应用。** 从 GitHub Actions 下载适合当前 CPU 的压缩包。解压后安装适合发行版的 `.deb` 或 `.rpm` 软件包，其中已包含引擎。[桌面软件包安装指南](docs/build.md#linux-desktop-packages)
 - **从源码构建。** 使用 Rust 构建 CLI 和 Podbag Desktop。 [构建指南](docs/build.md)
 
 ## 使用

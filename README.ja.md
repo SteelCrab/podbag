@@ -46,11 +46,19 @@ Linux と macOS でコンテナ、イメージ、ボリューム、ネットワ�
 
 ![Podbag Desktop のサンプル一覧。実行中のコンテナ 3 個と停止中のコンテナ 2 個のイメージと公開ポートが表示されています。](docs/images/desktop-containers-en.png)
 
-[Linux パッケージのインストール手順](docs/build.md#linux-desktop-packages)と[ソースからのビルド手順](docs/usage.md#build-the-desktop-app)を参照してください。
+[Podbag Desktop のインストール手順](#インストール)と[ソースからのビルド手順](docs/usage.md#build-the-desktop-app)を参照してください。
 
 ## インストール
 
-### Linux（x86_64、arm64）と macOS（Apple silicon）
+### Podbag Desktop（推奨）
+
+[最新リリース](https://github.com/SteelCrab/podbag/releases/latest)から環境に合ったパッケージをダウンロードします。
+
+- **Linux（x86_64、arm64）。** Debian と Ubuntu では `.deb`、Fedora では `.rpm` をインストールします。エンジンも同梱されています。
+- **macOS（Apple silicon）。** 下のコマンドで CLI をインストールします。`podbag-desktop-aarch64-macos.zip` を展開し、`podbag.app` を開きます。
+- **Windows（x86_64、ARM64、実験的サポート）。** CPU に合った `.msi` を実行します。リリースに MSI がない場合は、成功した [CI の実行結果](https://github.com/SteelCrab/podbag/actions/workflows/ci.yml?query=branch%3Amain)からダウンロードします。コンテナを実行するには WSL 2 を有効にします。
+
+### Linux（x86_64、arm64）と macOS（Apple silicon）向け CLI
 
 ```sh
 curl -fsSL https://podbag.dev/install.sh | sh
@@ -63,7 +71,7 @@ Linux カーネル 5.12 以降と cgroup v2 が必要です。`podbag check` で
 
 手動でインストールする場合は、OS と CPU に合うファイルをダウンロードし、`SHA256SUMS` と照合します。[リリースのダウンロード](https://github.com/SteelCrab/podbag/releases/latest)
 
-### Windows（実験的サポート）
+### Windows 向け CLI（実験的サポート）
 
 管理者権限の PowerShell で `wsl --install` を実行し、Windows を再起動します。CPU に合った `podbag-x86_64-windows.exe` または `podbag-aarch64-windows.exe` をダウンロードします。SHA-256 を `SHA256SUMS` と照合したら、ファイル名を `podbag.exe` に変更します。[リリースのダウンロード](https://github.com/SteelCrab/podbag/releases/latest)
 
@@ -74,7 +82,6 @@ Linux カーネル 5.12 以降と cgroup v2 が必要です。`podbag check` で
 ### その他のインストール方法
 
 - **Linux 用の Cargo パッケージ。** `cargo install --locked podbag` で公開版の CLI をインストールします。
-- **Linux デスクトップアプリ。** GitHub Actions から CPU に合ったアーカイブをダウンロードして展開し、`.deb` または `.rpm` をインストールします。エンジンも同梱されています。[デスクトップパッケージの手順](docs/build.md#linux-desktop-packages)
 - **ソースからビルド。** Rust で CLI と Podbag Desktop をビルドします。 [ビルド手順](docs/build.md)
 
 ## 使い方
