@@ -125,6 +125,8 @@
   "vm.envOverride": "Khi khởi động, các biến môi trường được ưu tiên hơn các thiết lập tương ứng.",
   "vm.saved": "Đã lưu thiết lập máy ảo.",
   "settings.title": "Cài đặt",
+  "settings.startup": "Khởi động",
+  "settings.launchAtLogin": "Mở Podbag Desktop khi tôi đăng nhập",
   "settings.language": "Ngôn ngữ",
   "settings.system": "Theo hệ thống",
   "settings.theme": "Giao diện",

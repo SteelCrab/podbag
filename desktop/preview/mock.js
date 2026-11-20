@@ -144,7 +144,11 @@
     ? { installed: true, name: "Docker Desktop", isPodbag: false, fromEnv: false, context: "desktop-linux", previous: null }
     : { installed: true, name: "podbag", isPodbag: true, fromEnv: false, context: "podbag", previous: "desktop-linux" };
 
+  let launchAtLogin = false;
   const commands = {
+    "plugin:autostart|is_enabled": () => launchAtLogin,
+    "plugin:autostart|enable": () => { launchAtLogin = true; },
+    "plugin:autostart|disable": () => { launchAtLogin = false; },
     engine: () => engine,
     list: ({ kind }) => lists[kind],
     kube_list: ({ kind, allNamespaces }) => ({

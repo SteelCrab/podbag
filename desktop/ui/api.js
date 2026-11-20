@@ -32,6 +32,8 @@ const API = (() => {
     openShell: (id) => invoke("open_shell", { id }),
     vm: (action) => invoke("vm", { action }),
     vmResources: (values) => invoke("vm_resources", { values: values || null }),
+    launchAtLogin: () => invoke("plugin:autostart|is_enabled"),
+    setLaunchAtLogin: (enabled) => invoke(enabled ? "plugin:autostart|enable" : "plugin:autostart|disable"),
     vmStatus: () => invoke("vm_status"),
     vmSet: (settings) => invoke("vm_set", { settings }),
     setEngine: (engine) => invoke("set_engine", { engine }),

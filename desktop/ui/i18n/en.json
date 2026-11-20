@@ -125,6 +125,8 @@
   "vm.envOverride": "Environment variables override the corresponding settings at startup.",
   "vm.saved": "VM settings saved.",
   "settings.title": "Settings",
+  "settings.startup": "Startup",
+  "settings.launchAtLogin": "Open Podbag Desktop when I sign in",
   "settings.language": "Language",
   "settings.system": "Same as the system",
   "settings.theme": "Theme",
