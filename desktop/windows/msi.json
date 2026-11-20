@@ -1,0 +1,11 @@
+{
+  "productName": "Podbag Desktop",
+  "bundle": {
+    "active": true,
+    "targets": ["msi"],
+    "publisher": "SteelCrab",
+    "resources": {
+      "../target/windows-engine/podbag.exe": "podbag.exe"
+    }
+  }
+}
