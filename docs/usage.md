@@ -520,6 +520,11 @@ docker context create podbag --docker host=$DOCKER_HOST         # or keep it as 
 - `docker compose build` works with the classic builder (see below), or with a buildx
   builder (`--builder`).
 
+- Compose's `stop_grace_period` is saved in `Config.StopTimeout`. Stop and restart
+  use it unless the caller supplies a timeout. With neither setting, podbag waits
+  10 seconds. A zero timeout allows immediate killing; a negative timeout waits
+  for exit without a deadline.
+
 ### Builds with the docker CLI
 
 ```sh
