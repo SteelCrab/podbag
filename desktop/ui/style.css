@@ -595,6 +595,9 @@ dialog.import { width: min(520px, calc(100vw - 48px)); }
 .docker-settings .docker-route:has(.docker-pending) { color: var(--accent-text); background: var(--accent-soft); }
 .docker-settings .docker-route:has(.docker-applied) { color: var(--green); background: var(--green-soft); }
 
+.app:not(.collapsed):has(#mnav-toggle[aria-expanded="true"]) .migration-tabs { display: none; }
+#nav-migration .kube-subnav .kube-subnav { margin-inline-start: 10px; }
+.collapsed #nav-migration .kube-subnav .kube-subnav { margin-inline-start: 0; }
 .migration-content { padding: 16px 20px 24px; }
 .migration-filters { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
 .migration-filters select { max-width: 100%; }

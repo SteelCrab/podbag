@@ -4,13 +4,73 @@ function migrationSocket() {
   return h("input", { type: "text", hidden: true, placeholder: "unix:///path/to/docker.sock", "aria-label": t("engine.socket") });
 }
 
-const migrationScope = { cluster: false, engine: "", context: "", namespace: "" };
+const ENGINE_MIGRATION_KINDS = ["containers", "images", "volumes"];
+const migrationScope = { cluster: false, engine: "", context: "", namespace: "", kind: "", expanded: true, counts: {} };
+
+function openMigration(cluster, kind = "") {
+  const changed = cluster !== migrationScope.cluster;
+  Object.assign(migrationScope, { cluster, kind, expanded: true });
+  if (changed) migrationScope.counts = {};
+  if (S.view !== "migration") return go("migration");
+  updateMigrationNav();
+  if (changed) migrationPanel?.reload();
+  else migrationPanel?.draw();
+}
+
+function updateMigrationNav() {
+  const tree = document.getElementById("nav-migration");
+  if (tree.dataset.lang !== I18N.lang || !tree.firstChild) {
+    const node = (id, symbol, label, click) => h("button", { id: "mnav-" + id, type: "button", class: "nav-item",
+      title: label, "aria-label": label, onclick: click }, icon(symbol), h("span", { class: "label", text: label }), h("span", { class: "count" }));
+    const resources = t("migration.kind");
+    const toggle = h("button", { id: "mnav-toggle", class: "icon-button kube-toggle", type: "button",
+      "aria-controls": "mnav-groups", "aria-label": resources, title: resources, onclick: () => {
+        migrationScope.expanded = !migrationScope.expanded; updateMigrationNav();
+      } }, icon("back"));
+    const groups = [false, true].map(cluster => {
+      const id = cluster ? "kube" : "engine", kinds = cluster ? KUBE_KINDS : ENGINE_MIGRATION_KINDS;
+      const label = t(cluster ? "nav.kubernetes" : "settings.engine");
+      const group = node(id, cluster ? "kubernetes" : "engine", label, () => openMigration(cluster));
+      group.setAttribute("aria-controls", "mnav-" + id + "-kinds");
+      return h("li", {}, group, h("ul", { class: "nav kube-subnav", id: "mnav-" + id + "-kinds", "aria-label": label },
+        kinds.map(kind => h("li", {}, node(kind, cluster ? "kube-" + kind : kind,
+          t((cluster ? "kube." : "nav.") + kind), () => openMigration(cluster, kind))))));
+    });
+    tree.replaceChildren(h("li", {}, h("div", { class: "kube-nav-header" },
+      node("root", "migration", t("migration.title"), () => openMigration(migrationScope.cluster)), toggle),
+      h("ul", { id: "mnav-groups", class: "nav kube-subnav", "aria-label": t("migration.title") }, groups)));
+    tree.dataset.lang = I18N.lang;
+  }
+  const { cluster, kind, counts, expanded } = migrationScope;
+  const selected = cluster ? "kube" : "engine";
+  const values = Object.values(counts);
+  const total = values.length ? values.reduce((a, b) => a + b, 0) : null;
+  const active = S.view === "migration" ? (expanded ? kind || selected : "root") : null;
+  const update = (id, count) => {
+    const el = document.getElementById("mnav-" + id);
+    el.querySelector(".count").textContent = count ?? "";
+    el.title = el.getAttribute("aria-label") + (count == null ? "" : " (" + count + ")");
+    if (id === active) el.setAttribute("aria-current", "page");
+    else el.removeAttribute("aria-current");
+    return el;
+  };
+  document.getElementById("mnav-toggle").setAttribute("aria-expanded", String(expanded));
+  document.getElementById("mnav-groups").hidden = !expanded;
+  update("root", total);
+  for (const group of ["engine", "kube"]) {
+    const open = group === selected;
+    update(group, open ? total : null).setAttribute("aria-expanded", String(open));
+    document.getElementById("mnav-" + group + "-kinds").hidden = !open;
+    for (const key of group === "engine" ? ENGINE_MIGRATION_KINDS : KUBE_KINDS) {
+      update(key, counts[key]).parentElement.hidden = !open || !counts[key];
+    }
+  }
+}
 
 function renderMigration(main) {
-  const engineKinds = ["containers", "images", "volumes"];
   const opt = ([value, text]) => h("option", { value, text });
   const tab = (id, label, cluster) => h("button", { id, class: "tab", type: "button", text: t(label),
-    onclick: () => { if (migrationScope.cluster !== cluster) { migrationScope.cluster = cluster; reload(); } } });
+    onclick: () => openMigration(cluster) });
   const engines = tab("migration-engine-tab", "settings.engine", false);
   const clusters = tab("migration-kube-tab", "nav.kubernetes", true);
   const picker = h("select", { id: "migration-source", "aria-label": t("migration.from") });
@@ -23,16 +83,23 @@ function renderMigration(main) {
   const filters = h("div", { class: "migration-filters" }, picker, socket, scope);
   main.replaceChildren(h("header", { class: "toolbar" }, h("h1", { text: t("migration.title") }),
     windowBar ? null : iconButton("refresh", t("action.refresh"), reload)),
-    h("div", { class: "tabs", role: "group", "aria-label": t("migration.from") }, engines, clusters),
+    h("div", { class: "tabs migration-tabs", role: "group", "aria-label": t("migration.from") }, engines, clusters),
     h("div", { class: "content migration-content" }, filters, resources, status));
 
   let revision = 0, items = [], choices = [], problems = [], pending = 0;
   const current = id => resources.isConnected && revision === id;
-  const kinds = () => migrationScope.cluster ? KUBE_KINDS : engineKinds;
+  const kinds = () => migrationScope.cluster ? KUBE_KINDS : ENGINE_MIGRATION_KINDS;
   const kindLabel = k => t((migrationScope.cluster ? "kube." : "nav.") + k);
   function draw() {
     const visible = items.filter(item => !migrationScope.cluster || !migrationScope.namespace || item.namespace === migrationScope.namespace);
+    const counts = {};
+    for (const row of visible) counts[row.kind] = (counts[row.kind] || 0) + 1;
+    if (!pending && !problems.length) for (const k of kinds()) counts[k] ??= 0;
+    migrationScope.counts = counts;
+    if (!pending && !counts[migrationScope.kind]) migrationScope.kind = "";
+    updateMigrationNav();
     resources.replaceChildren(...kinds().flatMap(kind => {
+      if (migrationScope.kind && migrationScope.kind !== kind) return [];
       const rows = visible.filter(item => item.kind === kind).sort((a, b) => a.label.localeCompare(b.label) || a.source.localeCompare(b.source));
       if (!rows.length) return [];
       return h("section", { class: "migration-group" }, h("h2", {}, icon(migrationScope.cluster ? "kube-" + kind : kind),
@@ -46,9 +113,6 @@ function renderMigration(main) {
     scope.value = migrationScope.namespace;
     put(status, pending ? t("engine.checking") : !visible.length && !problems.length ? t("migration.empty") : "",
       problems.length ? h("details", {}, h("summary", { text: t("migration.unavailable") }), h("ul", {}, problems.map(p => h("li", { text: p })))) : null);
-    S.migrationCount = visible.length || (pending || problems.length ? null : 0);
-    const badge = document.querySelector("#nav .nav-item .count");
-    if (badge) { badge.textContent = S.migrationCount ?? ""; }
     if (!pending && migrationScope.cluster && migrationScope.namespace && !namespaces.includes(migrationScope.namespace)) {
       migrationScope.namespace = ""; draw();
     }
@@ -114,7 +178,7 @@ function renderMigration(main) {
   };
   socket.onchange = reload;
   reload();
-  return { reload };
+  return { reload, draw };
 }
 
 function confirmMigration(item, choices, reload) {

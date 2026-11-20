@@ -11,7 +11,6 @@ const S = {
   kubeKind: "pods",
   kubeCounts: {},
   kubeAllNamespaces: false,
-  migrationCount: null,
   kubeContext: sessionStorage.getItem("kube-context") || "",
   connection: null,
   contexts: [],
@@ -544,8 +543,8 @@ function renderNav() {
     type: "button", class: "nav-item", "aria-current": S.view === view ? "page" : null, onclick: () => go(view),
     title: label,
   }, icon(view), h("span", { class: "label", text: label }), h("span", { class: "count", text: count ?? "" })));
-  nav.replaceChildren(item("migration", t("migration.title"), S.migrationCount),
-    ...KINDS.map(k => item(k, t(`nav.${k}`), S.loaded && !S.listErrors[k] ? S.lists[k].length : null)));
+  updateMigrationNav();
+  nav.replaceChildren(...KINDS.map(k => item(k, t(`nav.${k}`), S.loaded && !S.listErrors[k] ? S.lists[k].length : null)));
   updateKubeNav();
   if (windowBar) {
     const [reload, settings] = document.getElementById("topbar-tools").children;

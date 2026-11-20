@@ -673,7 +673,9 @@ podbag tui --engine unix:///run/kiri/docker.sock
 ### Migrate between engines or Kubernetes clusters
 
 In Podbag Desktop, open **Migrate**. The list shows the resources found on your local engines.
-Use the Kubernetes tab to choose a source cluster and namespace. Select a resource,
+Expand **Migrate** in the sidebar. Select **Engine** or **Kubernetes**, then choose
+a populated resource type to filter the list. For Kubernetes, choose a source cluster
+and namespace. Select a resource,
 choose its destination and start the migration. The dialog reports progress,
 verifies the destination and keeps the source. Existing destination containers and
 volumes block the copy. An identical image can be reused.
