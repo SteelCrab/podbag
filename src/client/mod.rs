@@ -8,6 +8,7 @@ mod endpoint;
 #[cfg(unix)]
 #[doc(hidden)]
 pub mod fake;
+pub mod migration;
 pub mod registries;
 mod registry_presets;
 mod run;
@@ -296,6 +297,19 @@ pub fn encode(s: &str) -> String {
     out
 }
 
+// Image references occupy several URL path segments. Some compatible engines route them
+// before decoding escapes, so preserve the Docker reference delimiters.
+fn resource_path(kind: Kind, name: &str) -> String {
+    let path = encode(name);
+    if kind == Kind::Images {
+        path.replace("%2F", "/")
+            .replace("%3A", ":")
+            .replace("%40", "@")
+    } else {
+        path
+    }
+}
+
 /// A Docker API client.
 #[derive(Debug, Clone)]
 pub struct Client {
@@ -411,9 +425,11 @@ impl Client {
     pub fn inspect(&self, kind: Kind, id: &str) -> Result<Value> {
         let path = match kind {
             Kind::Containers | Kind::Images => {
-                format!("/{}/{}/json", kind.segment(), encode(id))
+                format!("/{}/{}/json", kind.segment(), resource_path(kind, id))
             }
-            Kind::Volumes | Kind::Networks => format!("/{}/{}", kind.segment(), encode(id)),
+            Kind::Volumes | Kind::Networks => {
+                format!("/{}/{}", kind.segment(), resource_path(kind, id))
+            }
         };
         self.call("GET", &path, None)
     }
@@ -439,7 +455,7 @@ impl Client {
 
     /// Remove an object. `force`: a running container, or an image in use.
     pub fn remove(&self, kind: Kind, id: &str, force: bool) -> Result<()> {
-        let mut path = format!("/{}/{}", kind.segment(), encode(id));
+        let mut path = format!("/{}/{}", kind.segment(), resource_path(kind, id));
         if force && matches!(kind, Kind::Containers | Kind::Images) {
             path.push_str("?force=1");
         }
@@ -566,7 +582,8 @@ impl Client {
     /// Ask which optional parts the engine has. Read-only requests where they exist (stats
     /// and top, on `sample`, a container); otherwise a container that does not exist.
     pub fn features(&self, sample: Option<&str>) -> Features {
-        let missing = "podbag-feature-check-0000";
+        // An exclamation mark cannot appear in a container name or ID.
+        let missing = "podbag-feature-check!";
         let has = |r: Result<Value>| !matches!(r, Err(e) if e.unsupported() || e.status == 0);
         let target = sample.unwrap_or(missing);
         Features {
@@ -575,7 +592,9 @@ impl Client {
             pause: has(self
                 .container_action(missing, "pause")
                 .map(|()| Value::Null)),
-            rename: has(self.rename(missing, missing).map(|()| Value::Null)),
+            rename: has(self
+                .rename(missing, "podbag-feature-check")
+                .map(|()| Value::Null)),
         }
     }
 }

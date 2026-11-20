@@ -206,6 +206,12 @@ fn empty_text(app: &App) -> Vec<Line<'static>> {
             app.search
         ))];
     }
+    if !matches!(app.engine.as_str(), "podbag" | "Docker") && app.tab != Kind::Images {
+        return vec![Line::from(format!(
+            "No {} on this engine.",
+            app.tab.segment()
+        ))];
+    }
     let hint = Style::new().fg(ACCENT);
     // The command of the engine shown.
     let cli = if app.engine == "podbag" {

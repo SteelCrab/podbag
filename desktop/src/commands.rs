@@ -74,8 +74,9 @@ pub fn engine(target: &Target, client: &Client, podbag: &Path, start_vm: bool) -
         engine: engine_kind(&target.choice),
         engine_name: target.choice.label(),
         endpoint: client.endpoint.describe(),
-        shell: target.choice == Choice::Podbag
-            || podbag::client::choice::find_docker_cli().is_some(),
+        shell: target
+            .cli(podbag, podbag::client::choice::find_docker_cli().as_deref())
+            .is_some(),
         ..EngineStatus::default()
     };
     let own = target.choice == Choice::Podbag
@@ -117,18 +118,19 @@ pub fn engine_kind(choice: &Choice) -> &'static str {
         Choice::Podbag => "podbag",
         Choice::Docker => "docker",
         Choice::Socket(_) => "socket",
+        Choice::Kiri => "kiri",
+        Choice::Podman => "podman",
+        Choice::Context(_) => "context",
     }
 }
 
 /// Switch this window (and the TUI, which reads the same file) to `podbag` or `docker`:
 /// saved in `file` (`ui.json`), then found.
 pub fn choose(name: &str, file: &Path, podbag: &Path) -> Result<Target, String> {
-    let choice = match Choice::parse(name) {
-        Some(c @ (Choice::Podbag | Choice::Docker)) => c,
-        _ => return Err(format!("unknown engine {name}")),
-    };
+    let choice = Choice::parse(name).ok_or_else(|| format!("unknown engine {name}"))?;
+    let target = Target::find(Some(&choice), podbag)?;
     podbag::client::choice::save_in(file, &choice)?;
-    Target::find(Some(&choice), podbag)
+    Ok(target)
 }
 
 fn kind(name: &str) -> Result<Kind, String> {
@@ -235,7 +237,8 @@ pub fn running(list: &Value) -> usize {
 
 /// A container id or name that is safe in a command line.
 fn safe_id(id: &str) -> Result<&str, String> {
-    if !id.is_empty()
+    if !id.starts_with('-')
+        && !id.is_empty()
         && id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || "_.-".contains(c))
@@ -271,16 +274,31 @@ pub fn shell_command(
             by_hand: format!("podbag exec -it {id} sh"),
         });
     }
-    let mut argv = Vec::new();
-    if let Endpoint::Socket { path, .. } = &target.endpoint {
-        argv.push("env".to_string());
-        argv.push(format!("DOCKER_HOST=unix://{}", path.display()));
-    }
-    argv.push(docker.display().to_string());
+    let mut argv: Vec<String> = target
+        .cli(podbag, Some(docker))
+        .ok_or("No CLI for this engine")?
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
     argv.extend(tail);
+    let quoted: Vec<_> = argv
+        .iter()
+        .map(|arg| {
+            if cfg!(windows) {
+                format!("'{}'", arg.replace('\'', "''"))
+            } else {
+                format!("'{}'", arg.replace('\'', "'\\''"))
+            }
+        })
+        .collect();
+    let line = quoted.join(" ");
     Ok(Shell {
         argv,
-        by_hand: format!("docker exec -it {id} sh"),
+        by_hand: if cfg!(windows) {
+            format!("& {line}")
+        } else {
+            line
+        },
     })
 }
 
@@ -327,11 +345,21 @@ pub fn open_terminal(argv: Option<&[String]>) -> bool {
             .spawn()
             .is_ok()
     } else if cfg!(windows) {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "podbag"])
-            .args(argv)
-            .spawn()
-            .is_ok()
+        {
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                std::process::Command::new(&argv[0])
+                    .args(&argv[1..])
+                    .creation_flags(0x10)
+                    .spawn()
+                    .is_ok()
+            }
+            #[cfg(not(windows))]
+            {
+                false
+            }
+        }
     } else {
         linux_terminal(argv)
     }
@@ -548,7 +576,7 @@ mod tests {
             podbag::client::choice::saved_in(&file),
             Some(Choice::Podbag)
         );
-        assert!(choose("/tmp/other.sock", &file, podbag).is_err());
+        assert!(choose("bad-engine", &file, podbag).is_err());
         assert_eq!(
             podbag::client::choice::saved_in(&file),
             Some(Choice::Podbag)
@@ -568,16 +596,15 @@ mod tests {
         assert_eq!(
             shell.argv,
             [
-                "env",
-                "DOCKER_HOST=unix:///x/docker.sock",
                 "/usr/bin/docker",
+                "--host=unix:///x/docker.sock",
                 "exec",
                 "-it",
                 "web",
                 "sh"
             ]
         );
-        assert_eq!(shell.by_hand, "docker exec -it web sh");
+        assert!(shell.by_hand.contains("--host=unix:///x/docker.sock"));
         let podbag = Target {
             choice: Choice::Podbag,
             endpoint: Endpoint::Socket {

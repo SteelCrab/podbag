@@ -7,7 +7,7 @@
   const view = params.get("view") || "containers";
   const now = Math.floor(Date.now() / 1000);
   const listeners = {};
-  const emit = (name, payload) => (listeners[name] || []).forEach((fn) => fn({ payload }));
+  const emit = (name, payload) => (listeners[["changed", "live", "logs", "pull-progress", "engine-changed", "vm-status"].includes(name) ? `${name}-${token}` : name] || []).forEach((fn) => fn({ payload }));
 
   const port = (priv, pub) => ({ IP: "0.0.0.0", PrivatePort: priv, PublicPort: pub, Type: "tcp" });
   const containers = [
@@ -42,6 +42,12 @@
     pods: [
       { metadata: { name: "web", namespace: "default" }, spec: { containers: [{ name: "nginx" }], nodeName: "worker-1" }, status: { phase: "Running", containerStatuses: [{ name: "nginx", ready: true }] } },
       { metadata: { name: "web", namespace: "staging" }, spec: { containers: [{ name: "nginx" }] }, status: { phase: "Pending" } },
+    ],
+    deployments: [
+      { metadata: { name: "frontend", namespace: "default" }, spec: { replicas: 3, template: { spec: { containers: [{ image: "nginx:alpine" }] } } }, status: { readyReplicas: 3 } },
+    ],
+    claims: [
+      { metadata: { name: "postgres-data", namespace: "default" }, spec: { storageClassName: "standard" }, status: { phase: "Bound", capacity: { storage: "20Gi" } } },
     ],
     services: [
       { metadata: { name: "frontend", namespace: "default" }, spec: { type: "NodePort", clusterIP: "10.43.0.80", ports: [{ port: 80, nodePort: 30080, protocol: "TCP" }] } },
@@ -144,15 +150,35 @@
   const podbagContext = { installed: true, name: "podbag", isPodbag: true, fromEnv: false, context: "podbag", previous: "desktop-linux" };
   let dockerCmd = elsewhere ? desktopContext : podbagContext;
 
+  const selected = sessionStorage.getItem("preview-engine") || params.get("engine") || engine.engine;
+  const token = Number(sessionStorage.getItem("preview-token") || 1);
+  if (selected !== engine.engine) {
+    Object.assign(engine, { engine: selected, engineName: selected === "kiri" ? "Kiri" : selected,
+      endpoint: selected === "kiri" ? "unix:///Users/me/.kiri/run/docker.sock" : selected, vm: null, version: selected });
+  }
   let launchAtLogin = false;
   const commands = {
     "plugin:autostart|is_enabled": () => launchAtLogin,
     "plugin:autostart|enable": () => { launchAtLogin = true; },
     "plugin:autostart|disable": () => { launchAtLogin = false; },
+    connection: () => [token, selected, selected === "podbag"],
+    contexts: () => ["desktop-linux", "orbstack"],
+    kube_contexts: () => ["dev", "staging"],
+    migration_sources: () => ["docker", "podman", "kiri", "podbag"],
+    kube_counts: ({ allNamespaces }) => Object.fromEntries(Object.entries(kube).map(([kind,items]) =>
+      [kind,items.filter(i=>allNamespaces||i.metadata.namespace==="default").length])),
+    migration_list: ({ kind }) => lists[kind],
+    migrate: async ({ request, updates }) => {
+      for (const phase of ["prepare", request.kind === "images" ? "image" : "files", "verify"]) {
+        updates.onmessage(phase);
+        await new Promise(resolve => setTimeout(resolve, 180));
+      }
+    },
+    create_volume: ({ name }) => { volumes.push({ Name: name, Driver: "local" }); },
     engine: () => engine,
     list: ({ kind }) => lists[kind],
-    kube_list: ({ kind, allNamespaces }) => ({
-      context: "dev", namespace: "default",
+    kube_list: ({ kind, allNamespaces, context }) => ({
+      context: context || "dev", namespace: "default",
       items: kube[kind].filter((item) => allNamespaces || item.metadata.namespace === "default"),
     }),
     inspect: ({ kind, id }) => ({ Id: id, Name: "/web", Created: "2026-11-20T01:12:00Z", State: { Status: "running", Running: true, Pid: 4182, StartedAt: "2026-11-20T01:12:01Z" }, Config: { Image: "nginx:alpine", Cmd: ["nginx", "-g", "daemon off;"], Env: ["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "NGINX_VERSION=1.27.3"], Tty: false }, HostConfig: { PortBindings: { "80/tcp": [{ HostIp: "", HostPort: "8080" }] }, RestartPolicy: { Name: "no" } }, NetworkSettings: { IPAddress: "10.77.0.2" }, Kind: kind }),
@@ -175,7 +201,10 @@
     },
     vm_status: () => (docker || engine.platform === "linux" ? null : vmStatus),
     vm_set: () => "Saved.",
-    set_engine: () => null,
+    set_engine: ({ engine }) => {
+      sessionStorage.setItem("preview-engine", engine);
+      sessionStorage.setItem("preview-token", String(token + 1));
+    },
     updates: () => update,
     upgrade: () => ({ ok: false, code: 77, needsAdmin: true, command: "sudo /usr/local/bin/podbag upgrade", output: "podbag: cannot write to /usr/local/bin: it needs administrator rights" }),
     open_terminal: () => null,
@@ -214,7 +243,7 @@
   };
 
   window.__TAURI__ = {
-    core: { invoke: async (cmd, args) => commands[cmd](args || {}) },
+    core: { Channel: class {}, invoke: async (cmd, args) => commands[cmd](args || {}) },
     event: { listen: async (name, fn) => { (listeners[name] ||= []).push(fn); return () => {}; } },
   };
 
@@ -224,6 +253,7 @@
     await app.ready;
     const scenes = {
       pods: () => app.go("kubernetes"),
+      claims: () => app.go("kubernetes", "claims"),
       services: () => app.go("kubernetes", "services"),
       images: () => app.go("images"),
       volumes: () => app.go("volumes"),

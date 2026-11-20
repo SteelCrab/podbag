@@ -637,9 +637,9 @@ docker compose build --builder podbag
 
 ### Which engine they use
 
-- They manage podbag, Docker (Docker Engine or Docker Desktop), or a socket you name.
+- Choose Podbag, Docker, Podman, Kiri, a named Docker context or a Docker API socket.
 - The order:
-  1. `podbag tui --engine podbag|docker|unix:///path`, for one run.
+  1. `podbag tui --engine podbag|docker|podman|kiri|context:NAME|unix:///path`, for one run.
   2. The saved choice. Both UIs read and write it in `ui.json`: `~/.podbag/ui.json` on
      macOS, `~/.config/podbag/ui.json` on Linux, `%LOCALAPPDATA%\podbag\ui.json` on
      Windows.
@@ -648,6 +648,19 @@ docker compose build --builder podbag
 - Docker is found as the docker CLI finds it: `DOCKER_HOST`, the current context, then the
   usual sockets.
 - Docker is never started. When it does not answer, the UIs say how to start it.
+- The Podman preset uses its default machine on macOS and Windows. On Linux, enable
+  the rootless Podman API with `systemctl --user start podman.socket`. Root uses
+  `/run/podman/podman.sock`. The Kiri preset uses Kiri's standard socket or Windows pipe.
+- For OrbStack, Colima and other Docker API engines, select their Docker context.
+  Use a custom Unix socket for an alternate machine or socket path. SSH, TLS and Windows
+  pipe connections use the Docker CLI. The Windows TUI sees resources available in WSL.
+
+```sh
+podbag tui --engine podman
+podbag tui --engine context:orbstack
+podbag tui --engine unix:///run/kiri/docker.sock
+```
+
 - podbag's own socket:
   - Linux: `$XDG_RUNTIME_DIR/podbag/docker.sock` (as root: `/run/podbag/docker.sock`).
     When nothing answers, they start `podbag system service`. It stops a minute after the
@@ -656,6 +669,46 @@ docker compose build --builder podbag
     app asks first, with a Start VM button.
   - Windows: `podbag tui` runs in the WSL distribution. The desktop app reaches the API
     through `podbag.exe system dial-stdio`.
+
+### Migrate between engines or Kubernetes clusters
+
+In Podbag Desktop, open **Migrate**. The list shows the resources found on your local engines.
+Expand **Migrate** in the sidebar. Select **Engine** or **Kubernetes**, then choose
+a populated resource type to filter the list. For Kubernetes, choose a source cluster
+and namespace. Select a resource,
+choose its destination and start the migration. The dialog reports progress,
+verifies the destination and keeps the source. Existing destination containers and
+volumes block the copy. An identical image can be reused.
+
+- **Images** transfer a single-platform image archive with its selected tag and layers.
+- **Containers** must be stopped. Podbag snapshots the writable filesystem, copies its
+  named and anonymous volumes, and creates a stopped container with the same name,
+  command, environment and supported runtime settings. Create any custom networks on
+  the destination first. Host bind mounts require a separate host file transfer.
+  To use the destination engine’s logging driver and process limits, select this option
+  during review or pass `--destination-defaults` to the CLI. This supports Podman
+  containers that use journald and per-container ulimits when copying to Podbag.
+  Other unsupported runtime settings stop the transfer.
+- **Volumes** copy files from local Docker-compatible volumes, including hidden files,
+  links, permissions and ownership. Stop workloads writing to the source volume first.
+  Podbag uses a BusyBox 1.36.1 helper image and temporary local disk space for the archive.
+- **Kubernetes** supports standalone Pods, Services, Deployments and filesystem PVCs.
+  Select two kubeconfig contexts and an existing destination namespace. Kubernetes assigns
+  new UIDs, service addresses and node ports. Migrate PVCs before workloads that use them.
+  The destination needs the referenced images, credentials and configuration. A bound claim
+  needs compatible storage and permission to create temporary Pods and use `pods/exec` in
+  both namespaces. Podbag transfers the files through those Pods and checks their contents
+  on the destination. Stop writers before starting. Raw block devices and CSI snapshots
+  need a storage-specific transfer. If a bound claim fails during the copy, the destination
+  claim retains its storage and carries the annotation `podbag.io/migration-state=copying`.
+
+The CLI supports the same engine transfers. For example, with Docker and Podbag running:
+
+```sh
+podbag migrate --from docker --to podbag image example/app:1
+podbag migrate --from podman --to podbag volume app-data
+podbag migrate --from context:staging --to podbag container web
+```
 
 ### podbag tui
 
@@ -738,17 +791,18 @@ docker compose build --builder podbag
 ### podbag-desktop
 
 - A window with Containers, Images, Volumes, Networks, Kubernetes and Settings.
-- Open Kubernetes in the sidebar, or expand it and select **Pods** or **Services**.
-  The sidebar and the page tabs show the same selection.
-- Install `kubectl` on the desktop host and
-  select a context with `kubectl config use-context`. The view starts in that context's
-  namespace. Select **All namespaces** to list resources across the cluster.
-- Search the Kubernetes list or select a name to inspect the object's JSON. Refresh
-  reads the active context again. These read-only views also work when the engine is off.
-- On macOS, the window toolbar has Refresh and Settings on the right.
-  Drag the space between the title and the buttons to move the window.
+- Open **Volumes → Create volume** to add a named volume on the selected engine.
+- Open **Kubernetes** and choose a **Cluster context** from the host's kubeconfig.
+  **Current context** follows the active kubectl context. The selector applies only to
+  Podbag and works while the selected container engine is offline.
+- Install `kubectl` on the desktop host. Browse Pods, Services, Deployments and
+  persistent volume claims in the context's namespace or select **All namespaces**.
+  Select a name to inspect its JSON. These Kubernetes views are read-only.
 
-  ![The macOS window with the podbag title, Refresh and Settings in one row](images/macos-window-toolbar.png)
+![Available migrations in a Kubernetes namespace and resource counts in the sidebar](images/migration-overview-en.png)
+
+- On macOS, the window toolbar has Refresh and Settings on the right.
+  Drag the open space in the toolbar to move the window.
 - Each list has a search box, and the same actions as the TUI.
 - A container's page has its details, its logs (as they come) and all its data.
 - With no containers, the window shows how to start one.
@@ -767,7 +821,7 @@ docker compose build --builder podbag
 
 #### Engine switch
 
-- "This window: podbag / Docker" sits at the top of the sidebar and in Settings.
+- Select the browsing engine in **Settings → Engine**. Migration uses its own source and destination.
 - The choice is saved in `ui.json`. `podbag tui` uses the same choice.
 - Switching reloads the lists. The app never starts Docker. When Docker does not answer,
   it says so: "Docker is not running. Start Docker Desktop."

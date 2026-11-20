@@ -3,7 +3,7 @@
 //! another. No Tauri here, so it is tested against fake engines.
 
 use podbag::client::registries::{config_dir, registry_host};
-use podbag::client::{Choice, Client, Endpoint, ImageSummary, Location, Target, logins};
+use podbag::client::{Client, ImageSummary, Location, Target, logins};
 use serde::Serialize;
 
 /// A pull location, as the panel shows it. No secrets: only the account name.
@@ -112,12 +112,6 @@ pub fn search(client: &Client, term: &str) -> Search {
     }
 }
 
-/// A login goes only to an engine on this computer: podbag's own, or a Unix socket. A
-/// host reached through the docker CLI (tcp, ssh) may be another computer.
-pub fn auth_allowed(target: &Target) -> bool {
-    target.choice == Choice::Podbag || matches!(target.endpoint, Endpoint::Socket { .. })
-}
-
 /// The reference to pull: `image` at `location` (a short name at GitHub is
 /// `ghcr.io/<name>`). Empty names and spaces are refused.
 pub fn reference(image: &str, location: Option<&Location>) -> Result<String, String> {
@@ -140,7 +134,7 @@ pub fn pull(
     auth: impl Fn(&str) -> Option<String>,
     progress: impl FnMut(&str),
 ) -> Result<(), String> {
-    let login = if auth_allowed(target) {
+    let login = if target.allows_registry_auth() {
         auth(reference)
     } else {
         None
@@ -194,6 +188,7 @@ pub fn import(from: &Client, to: &Client, names: &[String]) -> Result<(), String
 mod tests {
     use super::*;
     use podbag::client::fake::{FakeEngine, json, small_engine};
+    use podbag::client::{Choice, Endpoint};
     use std::cell::Cell;
 
     fn target_of(choice: Choice, endpoint: Endpoint) -> Target {
@@ -314,11 +309,11 @@ mod tests {
             Choice::Docker,
             Endpoint::Command(vec!["docker".into(), "system".into(), "dial-stdio".into()]),
         );
-        assert!(!auth_allowed(&remote));
-        assert!(auth_allowed(&target_of(
-            Choice::Podbag,
-            Endpoint::Command(vec!["podbag.exe".into()])
-        )));
+        assert!(!remote.allows_registry_auth());
+        assert!(
+            target_of(Choice::Podbag, Endpoint::Command(vec!["podbag.exe".into()]))
+                .allows_registry_auth()
+        );
         pull(&engine.client, &remote, "ghcr.io/me/app:1", auth, |_| {}).unwrap();
         assert_eq!(asked.get(), 1, "not asked for a remote engine");
         assert_eq!(

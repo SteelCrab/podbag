@@ -1,4 +1,4 @@
-//! Read Pods and Services from the user's active kubectl context.
+//! Read workloads and storage from a kubeconfig context.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -9,6 +9,8 @@ use std::process::Command;
 pub enum Resource {
     Pods,
     Services,
+    Deployments,
+    Claims,
 }
 
 #[derive(Serialize)]
@@ -18,7 +20,7 @@ pub struct Snapshot {
     items: Vec<Value>,
 }
 
-fn kubectl(args: &[&str]) -> Result<Vec<u8>, String> {
+pub(super) fn kubectl_command() -> Result<Command, String> {
     let mut cmd = Command::new("kubectl");
     // Apps launched from Finder do not inherit the user's shell PATH.
     #[cfg(target_os = "macos")]
@@ -36,10 +38,17 @@ fn kubectl(args: &[&str]) -> Result<Vec<u8>, String> {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000);
     }
-    let out = cmd.args(args).output().map_err(|err| match err.kind() {
-        std::io::ErrorKind::NotFound => "kubectl-missing".to_owned(),
-        _ => format!("kubectl: {err}"),
-    })?;
+    Ok(cmd)
+}
+
+fn kubectl(args: &[&str]) -> Result<Vec<u8>, String> {
+    let out = kubectl_command()?
+        .args(args)
+        .output()
+        .map_err(|err| match err.kind() {
+            std::io::ErrorKind::NotFound => "kubectl-missing".to_owned(),
+            _ => format!("kubectl: {err}"),
+        })?;
     if !out.status.success() {
         let error = String::from_utf8_lossy(&out.stderr);
         return Err(format!("kubectl ({}): {}", out.status, error.trim()));
@@ -48,29 +57,50 @@ fn kubectl(args: &[&str]) -> Result<Vec<u8>, String> {
 }
 
 #[tauri::command(async)]
-pub fn kube_list(kind: Resource, all_namespaces: bool) -> Result<Snapshot, String> {
-    list(kind, all_namespaces, kubectl)
+pub fn kube_contexts() -> Result<Vec<String>, String> {
+    let names = kubectl(&["config", "get-contexts", "-o", "name"])?;
+    Ok(String::from_utf8_lossy(&names)
+        .lines()
+        .map(str::to_owned)
+        .collect())
+}
+
+#[tauri::command(async)]
+pub fn kube_list(
+    kind: Resource,
+    all_namespaces: bool,
+    context: Option<String>,
+) -> Result<Snapshot, String> {
+    list(kind, all_namespaces, context.as_deref(), kubectl)
 }
 
 fn list(
     kind: Resource,
     all_namespaces: bool,
+    selected: Option<&str>,
     run: impl Fn(&[&str]) -> Result<Vec<u8>, String>,
 ) -> Result<Snapshot, String> {
-    // Request only the selected context entry. It contains references, not credentials.
-    let config = run(&[
+    // Request only the context entry. It contains references, not credentials.
+    let mut args = vec![
         "config",
         "view",
         "--minify",
         "-o",
         "jsonpath={.contexts[0]}",
-    ])?;
+    ];
+    if let Some(context) = selected {
+        args.extend(["--context", context]);
+    }
+    let config = run(&args)?;
     let config: Value =
         serde_json::from_slice(&config).map_err(|e| format!("kubectl config: {e}"))?;
     let context = config["name"]
         .as_str()
         .filter(|s| !s.is_empty())
         .ok_or("No current kubectl context")?;
+    if selected.is_some_and(|name| name != context) {
+        return Err("kubectl returned a different context".into());
+    }
     let namespace = config["context"]["namespace"]
         .as_str()
         .filter(|s| !s.is_empty())
@@ -78,6 +108,8 @@ fn list(
     let resource = match kind {
         Resource::Pods => "pods",
         Resource::Services => "services",
+        Resource::Deployments => "deployments.apps",
+        Resource::Claims => "persistentvolumeclaims",
     };
     let mut args = vec![
         "get",
@@ -123,7 +155,7 @@ mod tests {
             } else {
                 namespace
             };
-            let snapshot = list(kind, all, |args| {
+            let snapshot = list(kind, all, None, |args| {
                 if args[0] == "config" {
                     assert_eq!(
                         args,
@@ -166,9 +198,60 @@ mod tests {
     }
 
     #[test]
+    fn explicit_context_scopes_storage_and_workloads() {
+        for (kind, name) in [
+            (Resource::Claims, "persistentvolumeclaims"),
+            (Resource::Deployments, "deployments.apps"),
+        ] {
+            list(kind, false, Some("other"), |args| {
+                if args[0] == "config" {
+                    assert_eq!(&args[5..], ["--context", "other"]);
+                    return Ok(br#"{"name":"other","context":{"namespace":"storage"}}"#.to_vec());
+                }
+                assert_eq!(
+                    args,
+                    [
+                        "get",
+                        name,
+                        "--context",
+                        "other",
+                        "--request-timeout=10s",
+                        "-o",
+                        "json",
+                        "--namespace",
+                        "storage"
+                    ]
+                );
+                Ok(br#"{"items":[]}"#.to_vec())
+            })
+            .unwrap();
+        }
+    }
+
+    #[test]
+    #[ignore = "requires KUBECONFIG and PODBAG_TEST_KUBE_CONTEXT for a test cluster"]
+    fn reads_a_configured_cluster() {
+        let context = std::env::var("PODBAG_TEST_KUBE_CONTEXT").unwrap();
+        assert!(kube_contexts().unwrap().contains(&context));
+        for kind in [
+            Resource::Pods,
+            Resource::Services,
+            Resource::Deployments,
+            Resource::Claims,
+        ] {
+            assert_eq!(
+                kube_list(kind, false, Some(context.clone()))
+                    .unwrap()
+                    .context,
+                context
+            );
+        }
+    }
+
+    #[test]
     fn distinguishes_empty_lists_from_failures() {
         for (response, ok) in [(r#"{"items":[]}"#, true), ("{}", false), ("invalid", false)] {
-            let result = list(Resource::Pods, false, |args| {
+            let result = list(Resource::Pods, false, None, |args| {
                 Ok(if args[0] == "config" {
                     br#"{"name":"dev","context":{}}"#.to_vec()
                 } else {
@@ -177,7 +260,7 @@ mod tests {
             });
             assert_eq!(result.is_ok(), ok);
         }
-        let denied = list(Resource::Services, true, |args| {
+        let denied = list(Resource::Services, true, None, |args| {
             if args[0] == "config" {
                 return Ok(br#"{"name":"dev","context":{}}"#.to_vec());
             }
@@ -185,4 +268,43 @@ mod tests {
         });
         assert_eq!(denied.err().as_deref(), Some("dev: Forbidden"));
     }
+}
+
+#[tauri::command(async)]
+pub fn kube_counts(
+    context: Option<String>,
+    all_namespaces: bool,
+) -> Result<std::collections::BTreeMap<String, usize>, String> {
+    let mut args = vec![
+        "get",
+        "pods,services,deployments.apps,persistentvolumeclaims",
+        "--request-timeout=10s",
+        "--no-headers",
+        "-o",
+        "custom-columns=KIND:.kind",
+    ];
+    if let Some(ref c) = context {
+        args.extend(["--context", c]);
+    }
+    if all_namespaces {
+        args.push("--all-namespaces");
+    }
+    let bytes = kubectl(&args)?;
+    let mut counts = std::collections::BTreeMap::from([
+        ("pods".into(), 0),
+        ("services".into(), 0),
+        ("deployments".into(), 0),
+        ("claims".into(), 0),
+    ]);
+    for line in String::from_utf8_lossy(&bytes).lines() {
+        let key = match line.trim() {
+            "Pod" => "pods",
+            "Service" => "services",
+            "Deployment" => "deployments",
+            "PersistentVolumeClaim" => "claims",
+            _ => continue,
+        };
+        *counts.get_mut(key).unwrap() += 1;
+    }
+    Ok(counts)
 }

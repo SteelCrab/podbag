@@ -46,6 +46,7 @@ ruzstd = "0.9"
 tar = { version = "0.4", default-features = false }
 sha2 = "0.11"
 httparse = "1"
+tempfile = "3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -66,10 +67,6 @@ objc2-foundation = "0.3"
 objc2-virtualization = "0.3.2"
 block2 = "0.6"
 dispatch2 = "0.3"
-tempfile = "3"
-
-[dev-dependencies]
-tempfile = "3"
 
 [profile.release]
 opt-level = "s"
