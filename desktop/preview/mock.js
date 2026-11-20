@@ -146,9 +146,9 @@
     { id: "custom", label: "Other registry", host: "", needsHost: true, account: null, hint: null },
   ];
   const elsewhere = ["banner", "settings-docker", "pull", "pull-locations"].includes(view);
-  const dockerCmd = elsewhere
-    ? { installed: true, name: "Docker Desktop", isPodbag: false, fromEnv: false, context: "desktop-linux", previous: null }
-    : { installed: true, name: "podbag", isPodbag: true, fromEnv: false, context: "podbag", previous: "desktop-linux" };
+  const desktopContext = { installed: true, name: "Docker Desktop", isPodbag: false, fromEnv: false, context: "desktop-linux", previous: null };
+  const podbagContext = { installed: true, name: "podbag", isPodbag: true, fromEnv: false, context: "podbag", previous: "desktop-linux" };
+  let dockerCmd = elsewhere ? desktopContext : podbagContext;
 
   const selected = sessionStorage.getItem("preview-engine") || params.get("engine") || engine.engine;
   const token = Number(sessionStorage.getItem("preview-token") || 1);
@@ -219,7 +219,13 @@
     },
     registry_login: () => null,
     docker_command: () => dockerCmd,
-    docker_switch: () => ({ ...dockerCmd, name: "podbag", isPodbag: true }),
+    docker_switch: async ({ to }) => {
+      emit("docker-switching", to);
+      await new Promise((resolve) => setTimeout(resolve, 650));
+      dockerCmd = to === "use" ? podbagContext : desktopContext;
+      emit("docker-changed", dockerCmd);
+      return dockerCmd;
+    },
     docker_images: () => [
       { name: "nginx:alpine", size: 52_400_000, registry: "dockerhub" },
       { name: "mysql:8.4", size: 603_000_000, registry: "dockerhub" },

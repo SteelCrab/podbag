@@ -50,7 +50,7 @@ func icon(_ size: Int) -> CGImage {
   ctx.setFillColor(CGColor(srgbRed: 139.0 / 255, green: 101.0 / 255, blue: 191.0 / 255, alpha: 1))
   ctx.fillPath()
 
-  let share: CGFloat = size <= 16 ? 0.86 : size <= 32 ? 0.82 : 0.78
+  let share: CGFloat = size <= 16 ? 0.76 : size <= 32 ? 0.70 : 0.62
   let width = shapeSide * share
   let height = width * CGFloat(logoCG.height) / CGFloat(logoCG.width)
   ctx.draw(logoCG, in: CGRect(x: (s - width) / 2, y: (s - height) / 2, width: width, height: height))

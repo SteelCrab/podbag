@@ -428,59 +428,122 @@ function progressBody() {
 
 // ---- the docker command ----
 
+let dockerSwitchTo = null;
+let dockerRequested = false;
+let dockerRead = 0;
+
 async function refreshDocker() {
+  if (dockerSwitchTo) return;
+  const read = ++dockerRead;
+  let current = null;
   try {
-    S.docker = await API.dockerCommand();
-  } catch {
-    S.docker = null;
-  }
+    current = await API.dockerCommand();
+  } catch { /* the target is unknown */ }
+  if (read !== dockerRead) return;
+  S.docker = current;
+  renderDocker();
+}
+
+function renderDocker() {
   renderBanner();
   renderStatusbar();
   const box = document.getElementById("docker-settings");
   if (box) box.replaceWith(dockerSettings());
 }
 
-async function switchDocker(to) {
-  try {
-    S.docker = await API.dockerSwitch(to);
-    toast(to === "use" ? t("docker.nowPodbag") : t("docker.nowOther", { name: S.docker.name }));
-  } catch (e) {
-    toast(String(e), true);
-  }
-  await refreshDocker();
+function dockerSwitching(to) {
+  ++dockerRead;
+  dockerSwitchTo = to;
+  renderDocker();
+  document.getElementById("docker-live").textContent = dockerRouteText();
 }
 
-// The status bar's "docker → …": a click offers the switch, after a question.
+function dockerChanged(current) {
+  ++dockerRead;
+  const changed = dockerSwitchTo && current.installed && S.docker && current.isPodbag !== S.docker.isPodbag;
+  dockerSwitchTo = null;
+  S.docker = current;
+  renderDocker();
+  document.getElementById("docker-live").textContent = dockerRequested ? "" : current.installed ? dockerRouteText() : t("docker.missing");
+  if (changed && !matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    for (const mark of document.querySelectorAll(".docker-route .docker-mark")) {
+      mark.animate([{ opacity: 0.25, transform: "scale(0.9)" }, { opacity: 1, transform: "scale(1)" }],
+        { duration: 220, easing: "cubic-bezier(0.23, 1, 0.32, 1)" });
+    }
+  }
+}
+
+function dockerRouteText() {
+  if (dockerSwitchTo) {
+    const name = dockerSwitchTo === "use" ? "podbag" : S.docker?.previous || "default";
+    return t("docker.switching", { name });
+  }
+  return S.docker.isPodbag ? t("docker.applied") : t("docker.using", { name: S.docker.name });
+}
+
+function dockerMark() {
+  const phase = dockerSwitchTo ? "pending" : S.docker.isPodbag ? "applied" : "other";
+  return h("span", { class: `docker-mark docker-${phase}`, "aria-hidden": "true" },
+    phase === "applied" ? icon("check") : null);
+}
+
+function dockerRoute() {
+  const text = dockerRouteText();
+  return h("span", { class: "docker-route", title: text }, dockerMark(), h("span", { class: "docker-target", text }));
+}
+
+async function switchDocker(to) {
+  if (dockerSwitchTo || dockerRequested) return;
+  dockerRequested = true;
+  try {
+    const current = await API.dockerSwitch(to);
+    if (!current.installed) toast(t("docker.missing"), true);
+    else if (current.isPodbag !== (to === "use")) toast(t("docker.stillUsing", { name: current.name }));
+    else toast(current.isPodbag ? t("docker.nowPodbag") : t("docker.nowOther", { name: current.name }));
+  } catch (e) {
+    toast(String(e), true);
+    await refreshDocker();
+  } finally {
+    dockerRequested = false;
+  }
+}
+
+function dockerSwitchButton(d, confirmFirst = false) {
+  if (d.isPodbag && !d.previous) return null;
+  const label = d.isPodbag ? t("docker.back", { name: d.previous }) : t("docker.use");
+  const action = iconButton(d.isPodbag ? "undo" : "switch", label, async () => {
+    if (confirmFirst) {
+      const question = d.isPodbag ? t("docker.askBack", { name: d.previous }) : t("docker.askUse", { name: d.name });
+      if (!(await confirmDialog(question, label))) return;
+    }
+    switchDocker(d.isPodbag ? "back" : "use");
+  }, "docker-action");
+  action.disabled = !!dockerSwitchTo;
+  return action;
+}
+
 dockerCommandItem = function () {
   const d = S.docker;
   if (!d) return null;
   if (!d.installed) return h("span", { class: "status-item", text: t("docker.missingShort") });
-  const text = `docker → ${d.name}`;
-  return h("button", {
-    type: "button", class: `status-item ${d.isPodbag ? "" : "status-warn"}`, title: t("docker.status", { name: d.name }),
-    onclick: async () => {
-      if (!d.isPodbag) {
-        if (await confirmDialog(t("docker.askUse", { name: d.name }), t("docker.use"))) switchDocker("use");
-      } else if (d.previous) {
-        if (await confirmDialog(t("docker.askBack", { name: d.previous }), t("docker.back", { name: d.previous }))) switchDocker("back");
-      } else {
-        openSettingsSection("engine-settings");
-      }
-    },
-  }, d.isPodbag ? null : icon("warning"), text);
+  return h("span", { class: "status-item docker-item", role: "group", "aria-label": t("docker.command"),
+    title: dockerSwitchTo ? dockerRouteText() : t("docker.status", { name: d.name }) },
+    t("docker.command"), dockerRoute(),
+    dockerSwitchButton(d, true) || iconButton("settings", t("nav.settings"), () => openSettingsSection("engine-settings")));
 };
 
 dockerSettings = function () {
   const d = S.docker;
-  const box = h("div", { class: "docker-settings", id: "docker-settings" });
+  const box = h("div", { class: "docker-settings", id: "docker-settings", role: "group", "aria-label": t("docker.command") });
   if (!d) return box;
+  const hint = t("docker.note");
   put(box,
-    h("dl", { class: "fields" }, field(t("docker.command"), d.installed ? d.name : t("docker.missing"))),
-    d.installed && d.fromEnv ? h("p", { class: "hint warn", text: t("docker.env") }) : null,
-    d.installed ? h("div", { class: "buttons-row" },
-      d.isPodbag ? null : button(null, t("docker.use"), () => switchDocker("use"), "primary"),
-      d.isPodbag && d.previous ? button(null, t("docker.back", { name: d.previous }), () => switchDocker("back")) : null) : null,
-    d.installed ? h("p", { class: "hint", text: t("docker.note") }) : null);
+    h("span", { class: "docker-label", text: t("docker.command"), title: d.installed ? hint : null }),
+    d.installed ? dockerRoute() : h("span", { class: "truncate", text: t("docker.missing") }),
+    d.installed && d.fromEnv ? h("span", { class: "docker-env", title: t("docker.env"), "aria-label": t("docker.env"), role: "img" },
+      icon("warning"), "DOCKER_HOST") : null,
+    d.installed ? dockerSwitchButton(d) : null);
+  if (d.installed) box.setAttribute("aria-description", d.fromEnv ? t("docker.env") : hint);
   return box;
 };
 
@@ -493,12 +556,15 @@ renderBanner = function () {
   el.hidden = !show;
   if (!show) return;
   el.setAttribute("aria-label", t("docker.command"));
+  const message = dockerSwitchTo ? dockerRouteText() : t("docker.banner", { name: d.name });
+  const warning = d.fromEnv ? ` ${t("docker.env")}` : "";
+  const summary = dockerSwitchTo ? message : t("docker.status", { name: d.name });
   put(el,
-    icon("warning"),
-    h("span", { class: "banner-text" },
-      h("strong", { text: t("docker.banner", { name: d.name }) }),
-      d.fromEnv ? ` ${t("docker.env")}` : null),
-    button(null, t("docker.use"), () => switchDocker("use"), "primary"),
+    dockerSwitchTo ? dockerMark() : icon("warning"),
+    h("span", { class: "banner-text truncate", title: message + warning },
+      h("span", { class: "banner-detail" }, h("strong", { text: message }), warning),
+      h("strong", { class: "banner-summary", "aria-hidden": "true", text: d.fromEnv ? `${summary} · DOCKER_HOST` : summary })),
+    dockerSwitchButton(d),
     iconButton("close", t("pull.close"), () => { bannerClosed = true; renderBanner(); }));
 };
 

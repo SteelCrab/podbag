@@ -814,6 +814,10 @@ function renderVmCard() {
 
 // ---- the status bar ----
 
+function statusValue(full, compact) {
+  return [h("span", { class: "status-full truncate", text: full }), h("span", { class: "status-compact", "aria-hidden": "true" }, compact)];
+}
+
 function renderStatusbar() {
   const bar = document.getElementById("statusbar");
   if (!bar) return;
@@ -823,22 +827,28 @@ function renderStatusbar() {
     left.push(h("button", { type: "button", class: "status-item", title: t("settings.updates"), onclick: openUpdates }, `podbag ${u.engine}`));
   }
   if (u && u.newer && u.latest) {
-    left.push(h("button", { type: "button", class: "status-item status-update", onclick: openUpdates },
-      icon("update"), t("status.available", { version: u.latest })));
+    const label = t("status.available", { version: u.latest });
+    left.push(h("button", { type: "button", class: "status-item status-update", onclick: openUpdates, title: label, "aria-label": label },
+      icon("update"), h("span", { class: "status-action-label", text: label })));
   }
-  left.push(h("button", { type: "button", class: "status-item", title: t("status.terminal"), onclick: openPlainTerminal }, icon("shell"), t("status.terminal")));
+  left.push(h("button", { type: "button", class: "status-item", title: t("status.terminal"), "aria-label": t("status.terminal"), onclick: openPlainTerminal },
+    icon("shell"), h("span", { class: "status-action-label", text: t("status.terminal") })));
   const right = [];
   const [cls, text] = S.vm && hasVm() ? [S.vm.state === "running" ? "ok" : "off", `${t("vm.title")}: ${t(`vm.state.${vmStateKey(S.vm.state)}`)}`] : engineState();
   const name = (S.engine && S.engine.engineName) || "podbag";
-  right.push(h("span", { class: `status-item engine-${cls}` }, h("span", { class: "dot", "aria-hidden": "true" }),
-    S.vm && hasVm() ? text : `${name}: ${text}`));
+  const engine = S.vm && hasVm() ? text : `${name}: ${text}`;
+  right.push(h("span", { class: `status-item engine-${cls}`, title: engine }, h("span", { class: "dot", "aria-hidden": "true" }),
+    statusValue(engine, S.vm && hasVm() ? icon("vm") : name)));
   if (S.loaded) {
     const total = S.lists.containers.length;
     const running = S.lists.containers.filter((c) => c.State === "running").length;
-    right.push(h("span", { class: "status-item", text: t("status.running", { n: running, total }) }));
+    const label = t("status.running", { n: running, total });
+    right.push(h("span", { class: "status-item", title: label }, statusValue(label, [icon("containers"), `${running}/${total}`])));
   }
   if (S.vm && S.vm.memoryTotalMiB) {
-    right.push(h("span", { class: "status-item", title: t("vm.memory"), text: `${mib(S.vm.memoryUsedMiB || 0)} / ${mib(S.vm.memoryTotalMiB)}` }));
+    const used = mib(S.vm.memoryUsedMiB || 0);
+    const memory = `${used} / ${mib(S.vm.memoryTotalMiB)}`;
+    right.push(h("span", { class: "status-item", title: `${t("vm.memory")} · ${memory}` }, statusValue(memory, used)));
   }
   const docker = dockerCommandItem();
   if (docker) right.push(docker);
@@ -1746,7 +1756,8 @@ async function init() {
   API.on("engine-changed", () => connect(false));
   API.on("open-updates", openUpdates);
   API.on("open-settings", () => go("settings"));
-  API.on("docker-changed", refreshDocker);
+  await API.on("docker-switching", dockerSwitching);
+  await API.on("docker-changed", dockerChanged);
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) return API.watch(false);
     if (S.engine && S.engine.reachable) { API.watch(true); refresh(); }
