@@ -1,6 +1,6 @@
 # podbag
 
-<img src="docs/images/logo.png" alt="podbag" width="120" align="right">
+<img src="desktop/icons/128x128.png" alt="podbag" width="120" align="right">
 
 Isang container engine na walang daemon, sa iisang static binary.
 Iniimbak nito ang mga image nang file-by-file: ang file na ginagamit ng maraming image ay iniimbak nang isang beses lang.

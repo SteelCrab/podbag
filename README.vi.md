@@ -1,6 +1,6 @@
 # podbag
 
-<img src="docs/images/logo.png" alt="podbag" width="120" align="right">
+<img src="desktop/icons/128x128.png" alt="podbag" width="120" align="right">
 
 Một container engine không có daemon, chỉ gồm một tệp nhị phân tĩnh.
 Image được lưu theo từng tệp: tệp mà nhiều image dùng chung chỉ được lưu một lần.

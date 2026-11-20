@@ -1,6 +1,6 @@
 # podbag
 
-<img src="docs/images/logo.png" alt="podbag" width="120" align="right">
+<img src="desktop/icons/128x128.png" alt="podbag" width="120" align="right">
 
 デーモンのないコンテナエンジンです。静的バイナリ1つで動きます。
 イメージをファイル単位で保存します。複数のイメージが同じファイルを使う場合、保存は1回だけです。
