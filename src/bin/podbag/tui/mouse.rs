@@ -20,6 +20,8 @@ pub struct Areas {
     pub tabs: Vec<(Rect, Kind)>,
     /// The engine's name in the header.
     pub engine: Option<Rect>,
+    /// Where the `docker` command goes, in the header.
+    pub docker: Option<Rect>,
     /// The list's rows, and the index of the first row shown.
     pub rows: Option<(Rect, usize)>,
     /// The key hints at the bottom, with the key each one stands for.
@@ -33,6 +35,7 @@ pub fn hint_key(hint: &str) -> Option<KeyEvent> {
     let code = match hint {
         "⏎" | "Enter" => KeyCode::Enter,
         "Esc" | "any key" => KeyCode::Esc,
+        "Tab" => KeyCode::Tab,
         _ => {
             let mut chars = hint.chars();
             match (chars.next(), chars.next()) {
@@ -103,6 +106,10 @@ impl App {
         if self.areas.engine.is_some_and(|r| r.contains(p)) {
             self.mode = Mode::List;
             return Effect::SwitchEngine;
+        }
+        if self.areas.docker.is_some_and(|r| r.contains(p)) {
+            self.mode = Mode::List;
+            return self.on_key(char_key('D'));
         }
         let Some((rows, first)) = self.areas.rows else {
             return Effect::None;
@@ -303,6 +310,26 @@ mod tests {
             Effect::SwitchEngine
         );
         assert_eq!(app.on_key(key('E')), Effect::SwitchEngine);
+    }
+
+    #[test]
+    fn the_header_shows_where_docker_goes() {
+        let mut app = sample();
+        assert!(!screen(&mut app, 80, 24).contains("docker →"));
+        app.docker = Some(podbag::client::DockerTarget {
+            context: Some("desktop-linux".into()),
+            host: "unix:///x/docker.sock".into(),
+            name: "Docker Desktop".into(),
+            is_podbag: false,
+            from_env: false,
+        });
+        let s = screen(&mut app, 80, 24);
+        assert!(s.contains("docker → Docker Desktop"), "{s}");
+        assert_eq!(
+            click(&mut app, find(&s, "Docker Desktop"), Instant::now()),
+            Effect::None
+        );
+        assert!(matches!(app.mode, Mode::Confirm { .. }));
     }
 
     #[test]

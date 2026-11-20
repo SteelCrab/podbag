@@ -5,6 +5,7 @@
 
 use super::app::{App, Mode, Tone};
 use super::mouse::{Areas, hint_key};
+use super::pull::PullForm;
 use podbag::client::{Kind, short_id};
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
@@ -55,6 +56,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 ])],
             );
         }
+        Mode::Pull(form) => draw_pull(f, app, &form),
         _ => {}
     }
 }
@@ -73,8 +75,8 @@ fn place(area: Rect, spans: &[Span]) -> Vec<Rect> {
         .collect()
 }
 
-/// podbag, the engine (click or E to switch), the VM's state, a newer release, and
-/// whether events come.
+/// podbag, the engine (click or E to switch), the VM's state, where the `docker`
+/// command goes (click or D to switch), and whether events come.
 fn draw_header(f: &mut Frame, app: &mut App, area: Rect) {
     let [left, right] =
         Layout::horizontal([Constraint::Min(0), Constraint::Length(10)]).areas(area);
@@ -103,13 +105,17 @@ fn draw_header(f: &mut Frame, app: &mut App, area: Rect) {
         spans.push(Span::styled("  VM ", dim));
         spans.push(Span::styled(vm, Style::new().fg(color)));
     }
-    if let Some(v) = &app.update {
-        spans.push(Span::styled(
-            format!("  Update {v} available"),
-            Style::new().fg(Color::Yellow),
-        ));
+    let docker_at = spans.len() + 1;
+    if let Some(d) = &app.docker {
+        spans.push(Span::styled("  docker → ", dim));
+        spans.push(Span::styled(d.name.clone(), Style::new().fg(ACCENT)));
     }
-    app.areas.engine = place(left, &spans).get(2).copied();
+    let places = place(left, &spans);
+    app.areas.engine = places.get(2).copied();
+    app.areas.docker = app
+        .docker
+        .as_ref()
+        .and_then(|_| places.get(docker_at).copied());
     f.render_widget(Paragraph::new(Line::from(spans)), left);
     let live = if app.live {
         Span::styled("● live ", Style::new().fg(Color::Green))
@@ -201,22 +207,31 @@ fn empty_text(app: &App) -> Vec<Line<'static>> {
         ))];
     }
     let hint = Style::new().fg(ACCENT);
+    // The command of the engine shown.
+    let cli = if app.engine == "podbag" {
+        "podbag"
+    } else {
+        "docker"
+    };
     match app.tab {
         Kind::Containers => vec![
             Line::from("No containers yet. Start one in another terminal:"),
             Line::from(""),
-            Line::styled("  podbag run -d --name web -p 8080:80 nginx:alpine", hint),
+            Line::styled(
+                format!("  {cli} run -d --name web -p 8080:80 nginx:alpine"),
+                hint,
+            ),
         ],
         Kind::Images => vec![Line::from("No images yet. Press p to pull one.")],
         Kind::Volumes => vec![
             Line::from("No volumes yet. Create one:"),
             Line::from(""),
-            Line::styled("  podbag volume create data", hint),
+            Line::styled(format!("  {cli} volume create data"), hint),
         ],
         Kind::Networks => vec![
             Line::from("No networks yet. Create one:"),
             Line::from(""),
-            Line::styled("  podbag network create app", hint),
+            Line::styled(format!("  {cli} network create app"), hint),
         ],
     }
 }
@@ -410,6 +425,11 @@ fn draw_message(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("Search: ", Style::new().fg(Color::DarkGray)),
             Span::raw(app.search.clone()),
         ])
+    } else if let Some(v) = &app.update {
+        Line::styled(
+            format!("Update {v} available: podbag upgrade"),
+            Style::new().fg(Color::Yellow),
+        )
     } else {
         Line::styled(app.endpoint.clone(), Style::new().fg(Color::DarkGray))
     };
@@ -445,6 +465,75 @@ fn draw_keys(f: &mut Frame, app: &mut App, area: Rect) {
         }
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// The pull form: where from, the login there, the host and name, search results.
+fn draw_pull(f: &mut Frame, app: &App, form: &PullForm) {
+    let dim = Style::new().fg(Color::DarkGray);
+    let cursor = Span::styled(" ", Style::new().add_modifier(Modifier::REVERSED));
+    let label = |t: &str| Span::styled(format!("{t:<7}"), dim);
+    let field = |name: &str, text: &str, typing: bool| {
+        let mut spans = vec![label(name), Span::raw(text.to_string())];
+        if typing {
+            spans.push(cursor.clone());
+        }
+        Line::from(spans)
+    };
+    let place = form.place();
+    let login = match app.logins.get(&place) {
+        None => Span::styled("Checking the login…", dim),
+        Some(None) => Span::styled("Not logged in", dim),
+        Some(Some(user)) => Span::styled(
+            format!("Logged in as {user}"),
+            Style::new().fg(Color::Green),
+        ),
+    };
+    let mut lines = vec![
+        Line::from(vec![
+            label("From"),
+            Span::styled(
+                place.label(),
+                Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  (Tab: another)", dim),
+        ]),
+        Line::from(vec![label("Login"), login]),
+    ];
+    if place.needs_host() {
+        lines.push(field("Host", &form.host, form.on_host));
+    }
+    lines.push(field("Image", &form.name, !form.on_host));
+    if let Some(hint) = place.login_hint() {
+        lines.push(Line::from(""));
+        lines.push(Line::styled("To log in:", dim));
+        // `aws ecr … | docker login …` on two lines.
+        for part in hint.split(" | ") {
+            lines.push(Line::styled(format!("  {part}"), dim));
+        }
+    }
+    if let Some(e) = &form.error {
+        lines.push(Line::from(""));
+        lines.push(Line::styled(e.clone(), Style::new().fg(Color::Red)));
+    } else if !form.found.is_empty() {
+        lines.push(Line::from(""));
+        for (i, r) in form.found.iter().enumerate() {
+            let chosen = form.chosen == Some(i);
+            let style = if chosen {
+                Style::new().add_modifier(Modifier::REVERSED | Modifier::BOLD)
+            } else {
+                Style::new()
+            };
+            let about: String = r.about.chars().take(50).collect();
+            lines.push(Line::from(vec![
+                Span::styled(format!("{:<28}", r.name), style),
+                Span::styled(format!(" {about}"), dim),
+            ]));
+        }
+    } else if app.can_search && place == podbag::client::Location::DockerHub {
+        lines.push(Line::from(""));
+        lines.push(Line::styled("Type a name to search Docker Hub.", dim));
+    }
+    popup(f, "Pull image", lines);
 }
 
 /// A question, with Yes and No to click.
@@ -513,6 +602,9 @@ fn draw_help(f: &mut Frame, app: &App) {
     }
     if app.features.rename {
         lines.push(key("n", "rename"));
+    }
+    if app.docker.is_some() {
+        lines.insert(9, key("D", "the docker command: podbag or back"));
     }
     lines.push(head("Images"));
     lines.push(key("p  d", "pull, remove"));
@@ -629,6 +721,11 @@ mod tests {
         let s = screen(&mut app, 80, 24);
         assert!(s.contains("No containers yet"), "{s}");
         assert!(s.contains("podbag run -d"), "{s}");
+        // With Docker, the docker command.
+        app.engine = "Docker".into();
+        let s = screen(&mut app, 80, 24);
+        assert!(s.contains("  docker run -d"), "{s}");
+        app.engine = "podbag".into();
         app.search = "zzz".into();
         app.lists = sample().lists;
         assert!(screen(&mut app, 80, 24).contains("Nothing matches"));

@@ -2,10 +2,13 @@
 //! may ask the runtime for an [`Effect`]; the runtime's results come back as [`Msg`].
 
 use super::mouse::Areas;
+use super::pull::PullForm;
 use podbag::client::{
-    ContainerSummary, Features, ImageSummary, Kind, NetworkSummary, VolumeSummary, short_id,
+    ApiError, ContainerSummary, DockerTarget, Features, ImageSummary, Kind, Location,
+    NetworkSummary, SearchResult, VolumeSummary, short_id,
 };
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::collections::HashMap;
 use std::time::Instant;
 
 /// The objects, as last listed.
@@ -123,6 +126,14 @@ pub enum Effect {
     SwitchEngine,
     /// Take the mouse (true) or leave it to the terminal.
     Mouse(bool),
+    /// Who is logged in at a pull location.
+    Login(Location),
+    /// Search Docker Hub (once the typing stops).
+    Search(String),
+    /// Point the `docker` command at podbag (true), or back to the context before.
+    DockerCli {
+        to_podbag: bool,
+    },
 }
 
 /// What the runtime sends back.
@@ -145,11 +156,16 @@ pub enum Msg {
     Progress(String),
     /// A newer podbag, as `x.y.z`.
     Update(Option<String>),
+    /// The account logged in at a location (None: no login).
+    Login(Location, Option<String>),
+    /// What a search for this text found.
+    Found(String, Result<Vec<SearchResult>, ApiError>),
+    /// Where the `docker` command goes now, and the context `D` goes back to.
+    DockerTarget(DockerTarget, Option<String>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Purpose {
-    Pull,
     Rename { id: String },
 }
 
@@ -176,6 +192,7 @@ pub enum Mode {
         text: String,
         purpose: Purpose,
     },
+    Pull(PullForm),
 }
 
 /// The most log lines kept.
@@ -213,6 +230,14 @@ pub struct App {
     pub areas: Areas,
     /// The last click on a row: when, in which list, which row.
     pub last_click: Option<(Instant, Kind, usize)>,
+    /// Where the `docker` command goes (None: no docker CLI, so no `D`).
+    pub docker: Option<DockerTarget>,
+    /// The context `D` goes back to from podbag.
+    pub docker_previous: Option<String>,
+    /// The engine can search Docker Hub (false once it says it cannot).
+    pub can_search: bool,
+    /// Who is logged in at each pull location, as far as known.
+    pub logins: HashMap<Location, Option<String>>,
     /// Unix seconds, for "5 minutes ago".
     pub now: i64,
     /// The log view's generation: lines of an older one are dropped.
@@ -267,6 +292,10 @@ impl App {
             mouse: true,
             areas: Areas::default(),
             last_click: None,
+            docker: None,
+            docker_previous: None,
+            can_search: true,
+            logins: HashMap::new(),
             now: 0,
             log_generation: 0,
             page: 10,
@@ -426,6 +455,7 @@ impl App {
         self.live = false;
         self.vm = None;
         self.last_click = None;
+        self.can_search = true;
     }
 
     /// New lists; the selection stays on the same object where it can.
@@ -492,6 +522,14 @@ impl App {
             }
             Msg::Progress(line) => self.busy = Some(line),
             Msg::Update(v) => self.update = v,
+            Msg::Login(location, account) => {
+                self.logins.insert(location, account);
+            }
+            Msg::Found(term, found) => self.found(&term, found),
+            Msg::DockerTarget(target, previous) => {
+                self.docker = Some(target);
+                self.docker_previous = previous;
+            }
         }
     }
 
@@ -539,6 +577,7 @@ impl App {
                 Effect::None
             }
             Mode::Text { .. } => self.text_key(key),
+            Mode::Pull(form) => self.pull_key(key, form),
             Mode::Confirm { then, .. } => match key.code {
                 KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
                     self.mode = Mode::List;
@@ -566,10 +605,6 @@ impl App {
                         return Effect::None;
                     }
                     match purpose {
-                        Purpose::Pull => {
-                            self.busy = Some(format!("Pulling {text}"));
-                            Effect::Pull(text)
-                        }
                         Purpose::Rename { id } => Effect::Rename { id, to: text },
                     }
                 }
@@ -675,6 +710,7 @@ impl App {
             KeyCode::End | KeyCode::Char('G') => self.move_by(isize::MAX / 2),
             KeyCode::F(5) => return Effect::Refresh,
             KeyCode::Char('E') => return Effect::SwitchEngine,
+            KeyCode::Char('D') => self.ask_docker_cli(),
             KeyCode::Char('m') => {
                 self.mouse = !self.mouse;
                 let text = if self.mouse {
@@ -687,11 +723,10 @@ impl App {
             }
             KeyCode::Char('c') => return self.confirm_prune(),
             KeyCode::Char('p') if self.tab == Kind::Images => {
-                self.mode = Mode::Input {
-                    prompt: "Pull image".into(),
-                    text: String::new(),
-                    purpose: Purpose::Pull,
-                };
+                let form = PullForm::default();
+                let login = Effect::Login(form.place());
+                self.mode = Mode::Pull(form);
+                return login;
             }
             _ => return self.row_key(key),
         }
@@ -789,6 +824,35 @@ impl App {
         }
     }
 
+    /// `D`: point the `docker` command at podbag, or back; a question first.
+    fn ask_docker_cli(&mut self) {
+        let Some(d) = &self.docker else {
+            return;
+        };
+        let (mut question, to_podbag) = if d.is_podbag {
+            let back = self.docker_previous.as_deref().unwrap_or("default");
+            (
+                format!("Point the docker command back to the context {back}?"),
+                false,
+            )
+        } else {
+            (
+                format!(
+                    "Point the docker command at podbag? It goes to {} now.",
+                    d.name
+                ),
+                true,
+            )
+        };
+        if d.from_env {
+            question.push_str(" DOCKER_HOST is set: shells that set it keep using it.");
+        }
+        self.mode = Mode::Confirm {
+            question,
+            then: Effect::DockerCli { to_podbag },
+        };
+    }
+
     fn confirm_prune(&mut self) -> Effect {
         let question = match self.tab {
             Kind::Containers => "Remove all stopped containers?",
@@ -816,6 +880,12 @@ impl App {
             Mode::Text { .. } => vec![("↑↓", "scroll"), ("PgUp/PgDn", "page"), ("Esc", "back")],
             Mode::Confirm { .. } => vec![("y", "yes"), ("n", "no")],
             Mode::Input { .. } => vec![("Enter", "ok"), ("Esc", "cancel")],
+            Mode::Pull(_) => vec![
+                ("Tab", "from"),
+                ("↑↓", "choose"),
+                ("Enter", "pull"),
+                ("Esc", "cancel"),
+            ],
             Mode::Help => vec![("any key", "back")],
             Mode::List => {
                 let mut keys = match self.tab {
@@ -846,6 +916,7 @@ impl App {
 #[cfg(test)]
 pub mod tests {
     use super::*;
+    use podbag::client::DockerTarget;
     use ratatui::crossterm::event::KeyEvent;
 
     pub fn key(c: char) -> KeyEvent {
@@ -1019,5 +1090,50 @@ pub mod tests {
         assert!(!follow);
         assert_eq!(*scroll, 2);
         assert_eq!(app.on_key(code(KeyCode::Esc)), Effect::CloseLogs);
+    }
+
+    fn docker_at(name: &str, is_podbag: bool, from_env: bool) -> DockerTarget {
+        DockerTarget {
+            context: (!from_env).then(|| "desktop-linux".to_string()),
+            host: "unix:///x/docker.sock".into(),
+            name: name.into(),
+            is_podbag,
+            from_env,
+        }
+    }
+
+    #[test]
+    fn d_points_the_docker_command_at_podbag_after_a_question() {
+        let mut app = sample();
+        // No docker CLI: no D.
+        assert_eq!(app.on_key(key('D')), Effect::None);
+        assert_eq!(app.mode, Mode::List);
+        app.docker = Some(docker_at("Docker Desktop", false, false));
+        app.on_key(key('D'));
+        let Mode::Confirm { question, .. } = &app.mode else {
+            panic!("no question")
+        };
+        assert!(
+            question.contains("podbag") && question.contains("Docker Desktop"),
+            "{question}"
+        );
+        assert_eq!(app.on_key(key('y')), Effect::DockerCli { to_podbag: true });
+        // At podbag: back to the context before.
+        app.docker = Some(docker_at("podbag", true, false));
+        app.docker_previous = Some("desktop-linux".into());
+        app.on_key(key('D'));
+        let Mode::Confirm { question, .. } = &app.mode else {
+            panic!("no question")
+        };
+        assert!(question.contains("desktop-linux"), "{question}");
+        assert_eq!(app.on_key(key('y')), Effect::DockerCli { to_podbag: false });
+        // DOCKER_HOST is set: contexts do not reach shells that have it.
+        app.docker = Some(docker_at("Docker Desktop", false, true));
+        app.on_key(key('D'));
+        let Mode::Confirm { question, .. } = &app.mode else {
+            panic!("no question")
+        };
+        assert!(question.contains("DOCKER_HOST"), "{question}");
+        assert_eq!(app.on_key(key('n')), Effect::None);
     }
 }

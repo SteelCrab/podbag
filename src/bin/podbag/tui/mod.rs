@@ -5,11 +5,15 @@
 
 mod app;
 mod mouse;
+mod pull;
 mod view;
 
 use app::{App, Effect, Lists, Msg, Verb};
 use podbag::client::choice::{self, docker_down};
-use podbag::client::{ApiError, Choice, Client, Closer, Endpoint, Kind, Target, podbag_program};
+use podbag::client::{
+    ApiError, Choice, Client, Closer, DockerTarget, Endpoint, Kind, Location, Target,
+    podbag_program,
+};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind,
@@ -27,8 +31,13 @@ const POLL: Duration = Duration::from_secs(2);
 const SETTLE: Duration = Duration::from_millis(150);
 /// How often the lists are read while events come, for the times they show.
 const AGES: Duration = Duration::from_secs(15);
-/// How often the VM's state is read (from files: it never wakes the VM).
+/// How often the VM's state and the docker command's target are read (from files: it
+/// never wakes the VM).
 const VM_EVERY: Duration = Duration::from_secs(2);
+/// A search starts when the typing stops this long.
+const SEARCH_WAIT: Duration = Duration::from_millis(300);
+/// The most search results shown.
+const SEARCH_LIMIT: usize = 10;
 
 pub fn run(once: bool, engine: Option<Choice>, mouse: bool) -> i32 {
     let exe = podbag_program();
@@ -200,6 +209,10 @@ fn prune(client: &Client, kind: Kind) -> Msg {
 type FindEngine = Box<dyn Fn(&Choice) -> Result<Target, String>>;
 type SaveChoice = Box<dyn Fn(&Choice) -> Result<(), String>>;
 type VmState = Box<dyn Fn(&Target) -> Option<&'static str>>;
+/// The account logged in at a location.
+type Login = Arc<dyn Fn(&Location) -> Option<String> + Send + Sync>;
+/// The login header for a pull of this image. A secret: never shown or logged.
+type Auth = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
 /// How the TUI finds, saves and looks at engines (tests give fakes).
 struct Engines {
@@ -207,16 +220,53 @@ struct Engines {
     save: SaveChoice,
     vm: VmState,
     docker_cli: Option<PathBuf>,
+    /// Where the `docker` command goes, and switching it (None: no docker CLI).
+    docker: Option<DockerCmd>,
+    login: Login,
+    auth: Auth,
+}
+
+/// The `docker` command's target, and `D`'s switch.
+#[derive(Clone)]
+struct DockerCmd {
+    target: Arc<dyn Fn() -> DockerTarget + Send + Sync>,
+    use_podbag: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
+    /// Gives the context now in use.
+    switch_back: Arc<dyn Fn() -> Result<String, String> + Send + Sync>,
+    previous: Arc<dyn Fn() -> Option<String> + Send + Sync>,
+}
+
+impl DockerCmd {
+    fn real(docker: PathBuf, podbag_socket: PathBuf) -> DockerCmd {
+        let (d1, d2, s1) = (docker.clone(), docker, podbag_socket.clone());
+        DockerCmd {
+            target: Arc::new(move || DockerTarget::current(&podbag_socket)),
+            use_podbag: Arc::new(move || podbag::client::use_podbag(&d1, &s1)),
+            switch_back: Arc::new(move || podbag::client::switch_back(&d2)),
+            previous: Arc::new(podbag::client::previous_context),
+        }
+    }
 }
 
 impl Engines {
     fn real() -> Engines {
         let exe = podbag_program();
+        let docker_cli = choice::find_docker_cli();
+        let podbag_socket = match Endpoint::podbag_default(&exe) {
+            Ok(Endpoint::Socket { path, .. }) => Some(path),
+            _ => None,
+        };
         Engines {
             find: Box::new(move |c| Target::find(Some(c), &exe)),
             save: Box::new(choice::save),
             vm: Box::new(vm_state),
-            docker_cli: choice::find_docker_cli(),
+            docker: docker_cli
+                .clone()
+                .zip(podbag_socket)
+                .map(|(cli, socket)| DockerCmd::real(cli, socket)),
+            docker_cli,
+            login: Arc::new(podbag::client::login_state),
+            auth: Arc::new(podbag::client::registry_auth),
         }
     }
 }
@@ -258,6 +308,8 @@ struct Runtime {
     /// The open log stream.
     logs: Option<Closer>,
     asked_features: bool,
+    /// A search to start once the typing stops.
+    pending_search: Option<(String, Instant)>,
 }
 
 impl Runtime {
@@ -266,6 +318,10 @@ impl Runtime {
         let mut app = App::new(target.choice.label(), target.endpoint.describe());
         app.shell = shell_command(&target, &exe, engines.docker_cli.as_deref(), "").is_some();
         app.vm = (engines.vm)(&target);
+        if let Some(d) = &engines.docker {
+            app.docker = Some((d.target)());
+            app.docker_previous = (d.previous)();
+        }
         Runtime {
             client: Client::new(target.endpoint.clone()),
             target,
@@ -283,6 +339,7 @@ impl Runtime {
             poll: POLL,
             logs: None,
             asked_features: false,
+            pending_search: None,
         }
     }
 
@@ -320,9 +377,14 @@ impl Runtime {
             if !self.loading && self.next_refresh.is_some_and(|t| Instant::now() >= t) {
                 self.refresh();
             }
+            self.search_if_due();
             if Instant::now() >= self.next_vm {
                 self.next_vm = Instant::now() + VM_EVERY;
                 self.app.vm = (self.engines.vm)(&self.target);
+                if let Some(d) = &self.engines.docker {
+                    self.app.docker = Some((d.target)());
+                    self.app.docker_previous = (d.previous)();
+                }
             }
         }
     }
@@ -415,6 +477,18 @@ impl Runtime {
         });
     }
 
+    /// Start the waiting search when the typing has stopped.
+    fn search_if_due(&mut self) {
+        let Some((term, _)) = self.pending_search.take_if(|(_, at)| Instant::now() >= *at) else {
+            return;
+        };
+        let (client, tx) = (self.client.clone(), self.sender());
+        std::thread::spawn(move || {
+            let found = client.search(&term, SEARCH_LIMIT);
+            tx.send(Msg::Found(term, found));
+        });
+    }
+
     fn close_events(&self) {
         if let Some(c) = self.events.lock().unwrap_or_else(|p| p.into_inner()).take() {
             c.close();
@@ -457,6 +531,7 @@ impl Runtime {
         self.app.vm = (self.engines.vm)(&target);
         self.target = target;
         self.asked_features = false;
+        self.pending_search = None;
         // Make sure it answers (podbag may start; Docker never does), then the lists.
         self.loading = true;
         self.next_refresh = None;
@@ -557,9 +632,40 @@ impl Runtime {
                     }
                 }
             }
-            Effect::Pull(image) => {
+            Effect::Login(location) => {
+                let login = self.engines.login.clone();
                 std::thread::spawn(move || {
-                    let done = client.pull(&image, |line| {
+                    let account = login(&location);
+                    tx.send(Msg::Login(location, account));
+                });
+            }
+            Effect::Search(term) => {
+                self.pending_search = Some((term, Instant::now() + SEARCH_WAIT));
+            }
+            Effect::DockerCli { to_podbag } => {
+                let Some(d) = self.engines.docker.clone() else {
+                    return;
+                };
+                self.app.busy = Some("Switching the docker command".into());
+                std::thread::spawn(move || {
+                    let done = if to_podbag {
+                        (d.use_podbag)().map(|()| "podbag".to_string())
+                    } else {
+                        (d.switch_back)()
+                    };
+                    tx.send(Msg::DockerTarget((d.target)(), (d.previous)()));
+                    tx.send(match done {
+                        Ok(to) => Msg::Done(format!("The docker command now goes to {to}"), false),
+                        Err(e) => Msg::Done(format!("Cannot switch the docker command: {e}"), true),
+                    });
+                });
+            }
+            Effect::Pull(image) => {
+                let auth = self.engines.auth.clone();
+                std::thread::spawn(move || {
+                    // The login stays in this thread: it is sent to the engine only.
+                    let login = auth(&image);
+                    let done = client.pull_auth(&image, login.as_deref(), |line| {
                         tx.send(Msg::Progress(format!("Pulling {image}: {line}")));
                     });
                     tx.send(match done {
@@ -630,7 +736,7 @@ impl Runtime {
 mod tests {
     use super::*;
     use podbag::client::fake::{FakeEngine, small_engine};
-    use podbag::client::{Choice, Target};
+    use podbag::client::{Choice, DockerTarget, Location, Target};
     use std::path::Path;
 
     #[test]
@@ -764,6 +870,9 @@ mod tests {
             }),
             vm: Box::new(|t| (t.choice == Choice::Podbag).then_some("standby")),
             docker_cli: None,
+            docker: None,
+            login: Arc::new(|_| None),
+            auth: Arc::new(|_| None),
         };
         let start = target(Choice::Podbag, &podbag);
         let mut rt = Runtime::new(start, PathBuf::from("podbag"), engines);
@@ -837,6 +946,9 @@ mod tests {
             save: Box::new(|_| Ok(())),
             vm: Box::new(|_| None),
             docker_cli: None,
+            docker: None,
+            login: Arc::new(|_| None),
+            auth: Arc::new(|_| None),
         };
         let mut rt = Runtime::new(
             target(Choice::Podbag, &podbag),
@@ -856,6 +968,154 @@ mod tests {
             rt.app.message,
             Some((podbag::client::choice::docker_down().to_string(), true))
         );
+    }
+
+    /// Engines with only `engine`, and the given login and auth.
+    fn one_engine(engine: &FakeEngine, auth: Auth, docker: Option<DockerCmd>) -> Runtime {
+        let t = target(Choice::Podbag, engine);
+        let found = t.clone();
+        let engines = Engines {
+            find: Box::new(move |_| Ok(found.clone())),
+            save: Box::new(|_| Ok(())),
+            vm: Box::new(|_| None),
+            docker_cli: None,
+            docker,
+            login: Arc::new(|l| (*l == Location::GitHub).then(|| "octo".to_string())),
+            auth,
+        };
+        Runtime::new(t, PathBuf::from("podbag"), engines)
+    }
+
+    fn wait_for(rt: &mut Runtime, done: impl Fn(&Msg) -> bool) -> Msg {
+        let end = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(Instant::now() < end, "timed out");
+            if let Ok((_, msg)) = rt.rx.recv_timeout(Duration::from_millis(20)) {
+                if done(&msg) {
+                    return msg;
+                }
+                rt.on_msg(msg);
+            }
+        }
+    }
+
+    #[test]
+    fn a_pull_sends_the_login_of_its_registry() {
+        let engine = FakeEngine::start(small_engine);
+        let asked: Arc<Mutex<Vec<String>>> = Arc::default();
+        let log = asked.clone();
+        let auth: Auth = Arc::new(move |image| {
+            log.lock().unwrap().push(image.to_string());
+            Some(format!("made-at-run-time-{}", image.len()))
+        });
+        let mut rt = one_engine(&engine, auth, None);
+        rt.apply(Effect::Pull("ghcr.io/me/app:1".into()));
+        let done = wait_for(&mut rt, |m| matches!(m, Msg::Done(..)));
+        assert!(
+            matches!(done, Msg::Done(ref t, false) if t == "Pulled ghcr.io/me/app:1"),
+            "{done:?}"
+        );
+        assert_eq!(*asked.lock().unwrap(), ["ghcr.io/me/app:1"]);
+        assert!(
+            engine
+                .requests()
+                .contains(&"POST /images/create?fromImage=ghcr.io%2Fme%2Fapp&tag=1".to_string())
+        );
+        // The login of a location.
+        rt.apply(Effect::Login(Location::GitHub));
+        let m = wait_for(&mut rt, |m| matches!(m, Msg::Login(..)));
+        assert!(
+            matches!(m, Msg::Login(Location::GitHub, Some(ref u)) if u == "octo"),
+            "{m:?}"
+        );
+    }
+
+    #[test]
+    fn search_waits_for_typing_to_stop() {
+        let docker = FakeEngine::start(|method, path| match path.split('?').next() {
+            Some("/images/search") => podbag::client::fake::json(
+                200,
+                serde_json::json!([{"name": "nginx", "description": "web", "star_count": 9,
+                    "is_official": true}]),
+            ),
+            _ => small_engine(method, path),
+        });
+        let mut rt = one_engine(&docker, Arc::new(|_| None), None);
+        rt.apply(Effect::Search("ng".into()));
+        rt.apply(Effect::Search("ngi".into()));
+        let end = Instant::now() + Duration::from_secs(5);
+        let found = loop {
+            assert!(Instant::now() < end, "timed out");
+            rt.search_if_due();
+            if let Ok((_, m @ Msg::Found(..))) = rt.rx.recv_timeout(Duration::from_millis(20)) {
+                break m;
+            }
+        };
+        let Msg::Found(term, Ok(results)) = found else {
+            panic!("{found:?}")
+        };
+        assert_eq!(term, "ngi");
+        assert_eq!(results[0].name, "nginx");
+        let searches: Vec<String> = docker
+            .requests()
+            .into_iter()
+            .filter(|r| r.contains("/images/search"))
+            .collect();
+        assert_eq!(searches, ["GET /images/search?term=ngi&limit=10"]);
+    }
+
+    #[test]
+    fn d_runs_the_docker_cli_switch_and_shows_the_new_target() {
+        let engine = FakeEngine::start(small_engine);
+        let at_podbag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (a, b, c) = (at_podbag.clone(), at_podbag.clone(), at_podbag.clone());
+        let docker = DockerCmd {
+            target: Arc::new(move || DockerTarget {
+                context: Some(
+                    if a.load(Ordering::SeqCst) {
+                        "podbag"
+                    } else {
+                        "desktop-linux"
+                    }
+                    .into(),
+                ),
+                host: "unix:///x.sock".into(),
+                name: if a.load(Ordering::SeqCst) {
+                    "podbag"
+                } else {
+                    "Docker Desktop"
+                }
+                .into(),
+                is_podbag: a.load(Ordering::SeqCst),
+                from_env: false,
+            }),
+            use_podbag: Arc::new(move || {
+                b.store(true, Ordering::SeqCst);
+                Ok(())
+            }),
+            switch_back: Arc::new(move || {
+                c.store(false, Ordering::SeqCst);
+                Ok("desktop-linux".into())
+            }),
+            previous: Arc::new(|| Some("desktop-linux".into())),
+        };
+        let mut rt = one_engine(&engine, Arc::new(|_| None), Some(docker));
+        assert_eq!(rt.app.docker.as_ref().unwrap().name, "Docker Desktop");
+        rt.apply(Effect::DockerCli { to_podbag: true });
+        let done = wait_for(&mut rt, |m| matches!(m, Msg::Done(..)));
+        assert!(
+            matches!(done, Msg::Done(ref t, false) if t.contains("podbag")),
+            "{done:?}"
+        );
+        assert_eq!(rt.app.docker.as_ref().unwrap().name, "podbag");
+        assert_eq!(rt.app.docker_previous.as_deref(), Some("desktop-linux"));
+        rt.apply(Effect::DockerCli { to_podbag: false });
+        let done = wait_for(&mut rt, |m| matches!(m, Msg::Done(..)));
+        assert!(
+            matches!(done, Msg::Done(ref t, false) if t.contains("desktop-linux")),
+            "{done:?}"
+        );
+        assert_eq!(rt.app.docker.as_ref().unwrap().name, "Docker Desktop");
     }
 
     #[test]
