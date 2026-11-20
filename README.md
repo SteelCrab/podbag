@@ -37,6 +37,7 @@ It stores images file by file: a file that many images share is kept once.
 - **Works with Docker tools.** Docker and OCI images, the `docker` CLI, Compose and buildx.
 - **With or without root.** The same program works both ways.
 - **Linux, macOS and Windows.** x86_64 and arm64. Windows support is experimental.
+- **A TUI and a desktop app.** `podbag tui` in the terminal, and a window with a menu bar item, for containers, images, volumes and networks.
 
 ### Layers and files
 
@@ -174,7 +175,7 @@ docker compose up -d
 
 ## Documentation
 
-- [Usage](docs/usage.md): commands, volumes, networks, limits, Docker API, macOS, Windows.
+- [Usage](docs/usage.md): commands, volumes, networks, limits, Docker API, TUI and GUI, macOS, Windows.
 - [Architecture](docs/architecture.md): how podbag differs from Docker.
 - [Build from source](docs/build.md): Linux, macOS, Windows.
 - [Benchmarks](docs/benchmarks.md) and the [Spring microservices benchmark](docs/benchmarks-msa.md).

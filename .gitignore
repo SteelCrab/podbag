@@ -2,3 +2,7 @@
 logs/
 /bench-results/
 __pycache__/
+site/node_modules/
+site/.cloudflare/
+_site/
+/desktop/gen/

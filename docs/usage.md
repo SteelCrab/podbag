@@ -12,6 +12,7 @@ The [README](../README.md) shows how to install podbag. This page shows what it 
 - [Limits and security](#limits-and-security)
 - [Networks](#networks)
 - [Docker API](#docker-api)
+- [TUI and GUI](#tui-and-gui)
 - [macOS](#macos)
 - [Windows (experimental)](#windows-experimental)
 - [Requirements on Linux](#requirements-on-linux)
@@ -45,6 +46,7 @@ podbag check                                 # is this system ready? (exit code 
 podbag check-image myapp:1                   # programs that cannot run in the image
 podbag system service &                      # the Docker API, for the docker CLI
 podbag vm status                             # macOS and Windows: podbag's Linux VM
+podbag tui                                   # containers, images, volumes and networks
 ```
 
 ## How containers run
@@ -391,6 +393,85 @@ docker compose build --builder podbag
 - The builder keeps running after the service stops: it is an ordinary container.
 - Its cache stays in its volume until `docker buildx rm`.
 - The default `docker` driver (the daemon's own BuildKit) is not available.
+
+## TUI and GUI
+
+- `podbag tui` shows containers, images, volumes and networks in the terminal.
+- `podbag-desktop` shows them in a window, with a tray (menu bar) item.
+- Both are clients of the Docker API. They work the same on Linux, macOS and Windows.
+
+### Which engine they use
+
+- `DOCKER_HOST`, when it is a Unix socket (`unix://…`).
+- Otherwise podbag's own socket:
+  - Linux: `$XDG_RUNTIME_DIR/podbag/docker.sock` (as root: `/run/podbag/docker.sock`).
+    When nothing answers, they start `podbag system service`. It stops a minute after the
+    last client.
+  - macOS: `~/.podbag/run/docker.sock`. The TUI starts the VM when it is off. The desktop
+    app asks first, with a Start VM button.
+  - Windows: `podbag tui` runs in the WSL distribution. The desktop app reaches the API
+    through `podbag.exe system dial-stdio`.
+
+### podbag tui
+
+- Four lists: containers, images, volumes and networks. The selected one's details show
+  under the list.
+- The lists change as the engine's events come. Without events, they are read every 2
+  seconds.
+- It fits a terminal of 80×24.
+
+| Key | What it does |
+|---|---|
+| `1`–`4`, `Tab`, `←` `→` | Switch the list |
+| `↑` `↓`, `PgUp` `PgDn` | Move |
+| `Enter` or `i` | All details (inspect) |
+| `s`, `x`, `r` | Start, stop, restart a container |
+| `l` | Logs, as they come |
+| `e` | A shell: `podbag exec -it <container> sh`, then back to the TUI |
+| `d` | Remove (it asks first) |
+| `p` | Pull an image (in Images) |
+| `c` | Remove all that is not used (it asks first) |
+| `/` | Search. `Esc` clears it |
+| `?` | All keys |
+| `q` | Quit |
+
+### podbag-desktop
+
+- A window with Containers, Images, Volumes, Networks and Settings.
+- Each list has a search box, and the same actions as the TUI.
+- A container's page has its details, its logs (as they come) and all its data.
+- With no containers, the window shows how to start one.
+- The tray item shows the engine's state and how many containers run. It has Open podbag
+  and Quit. On macOS, it also has Start VM or Stop VM.
+- Closing the window keeps the tray item. Quit ends the app.
+- While the window is closed, the app asks the engine nothing. So it keeps no VM or
+  service awake. On macOS, the tray still shows the VM's state: it reads it from files.
+- Open shell opens a terminal window: Terminal on macOS, the first terminal found on
+  Linux, a console window on Windows.
+- Light and dark themes follow the system. Settings can change the theme.
+- Languages: English, 한국어, 日本語, 简体中文, Filipino, Español and Tiếng Việt. The app
+  follows the system language. Settings can change it.
+
+### Build the desktop app
+
+- It is a separate program in `desktop/` (Tauri 2). The `podbag` binary does not carry
+  it, and `cargo build` leaves it out.
+- On Linux, it needs WebKitGTK 4.1 and an app indicator library:
+
+```sh
+sudo apt install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
+cargo build --release -p podbag-desktop
+./target/release/podbag-desktop
+```
+
+- It finds the `podbag` program next to itself, in `PATH`, or in `/usr/local/bin`,
+  `/opt/homebrew/bin` and `~/.local/bin`. `PODBAG_BIN` sets another one.
+- There are no installers yet (.dmg, .msi, AppImage).
+
+### What is hidden
+
+- The API has no `pause`, `rename`, `stats` or `top` yet. Both UIs ask the engine when they
+  start, and hide what it does not have.
 
 ## macOS
 

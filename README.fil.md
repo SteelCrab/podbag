@@ -37,6 +37,7 @@ Iniimbak nito ang mga image nang file-by-file: ang file na ginagamit ng maraming
 - **Gumagana sa mga tool ng Docker.** Mga Docker at OCI image, ang `docker` CLI, Compose at buildx.
 - **May root man o wala.** Iisang programa ang gumagana sa dalawang paraan.
 - **Linux, macOS at Windows.** x86_64 at arm64. Eksperimental pa ang suporta sa Windows.
+- **May TUI at desktop app.** `podbag tui` sa terminal, at isang window na may item sa menu bar, para sa mga container, image, volume at network.
 
 ### Mga layer at mga file
 
@@ -172,7 +173,7 @@ docker compose up -d
 
 Nasa Ingles ang mga dokumento sa ibaba.
 
-- [Paggamit](docs/usage.md): mga command, volume, network, limit, Docker API, macOS, Windows.
+- [Paggamit](docs/usage.md): mga command, volume, network, limit, Docker API, TUI at GUI, macOS, Windows.
 - [Arkitektura](docs/architecture.md): paano naiiba ang podbag sa Docker.
 - [Pag-build mula sa source](docs/build.md): Linux, macOS, Windows.
 - [Mga benchmark](docs/benchmarks.md) at ang [benchmark ng Spring microservices](docs/benchmarks-msa.md).

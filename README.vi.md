@@ -37,6 +37,7 @@ Image được lưu theo từng tệp: tệp mà nhiều image dùng chung chỉ
 - **Dùng được với công cụ của Docker.** Image Docker và OCI, CLI `docker`, Compose và buildx.
 - **Có hoặc không có root.** Cùng một chương trình chạy được theo cả hai cách.
 - **Linux, macOS và Windows.** x86_64 và arm64. Hỗ trợ Windows đang ở giai đoạn thử nghiệm.
+- **Có TUI và ứng dụng desktop.** `podbag tui` trong terminal, và một cửa sổ có biểu tượng trên thanh menu, cho container, image, volume và mạng.
 
 ### Lớp và tệp
 
@@ -172,7 +173,7 @@ docker compose up -d
 
 Các tài liệu dưới đây bằng tiếng Anh.
 
-- [Sử dụng](docs/usage.md): lệnh, volume, mạng, giới hạn, Docker API, macOS, Windows.
+- [Sử dụng](docs/usage.md): lệnh, volume, mạng, giới hạn, Docker API, TUI và GUI, macOS, Windows.
 - [Kiến trúc](docs/architecture.md): podbag khác Docker thế nào.
 - [Biên dịch từ mã nguồn](docs/build.md): Linux, macOS, Windows.
 - [Đo hiệu năng](docs/benchmarks.md) và [bài đo với microservice Spring](docs/benchmarks-msa.md).

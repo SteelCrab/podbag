@@ -37,6 +37,7 @@
 - **Docker 도구와 함께 씁니다.** Docker·OCI 이미지, `docker` CLI, Compose, buildx를 지원합니다.
 - **root 없이도, root로도.** 같은 프로그램이 두 방식으로 동작합니다.
 - **Linux, macOS, Windows.** x86_64와 arm64를 지원합니다. Windows 지원은 실험 단계입니다.
+- **TUI와 데스크톱 앱이 있습니다.** 터미널에서는 `podbag tui`, 데스크톱에서는 메뉴 막대 아이콘이 있는 창으로 컨테이너, 이미지, 볼륨, 네트워크를 다룹니다.
 
 ### 레이어와 파일
 
@@ -172,7 +173,7 @@ docker compose up -d
 
 아래 문서는 영문입니다.
 
-- [사용법](docs/usage.md): 명령, 볼륨, 네트워크, 제한, Docker API, macOS, Windows.
+- [사용법](docs/usage.md): 명령, 볼륨, 네트워크, 제한, Docker API, TUI와 GUI, macOS, Windows.
 - [구조](docs/architecture.md): podbag과 Docker의 차이.
 - [소스에서 빌드](docs/build.md): Linux, macOS, Windows.
 - [벤치마크](docs/benchmarks.md)와 [Spring 마이크로서비스 벤치마크](docs/benchmarks-msa.md).

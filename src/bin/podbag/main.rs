@@ -8,6 +8,8 @@ mod network;
 mod run;
 #[cfg(unix)]
 mod service;
+#[cfg(unix)]
+mod tui;
 mod volume;
 
 use args::{Cli, Cmd};
@@ -127,6 +129,9 @@ fn macos_front(args: Vec<String>) -> Option<i32> {
         Some("__vm-standby") => Some(podbag::macos::standby::standby_main()),
         Some("vm") => Some(podbag::macos::cli::vm_command(&args[1..])),
         None | Some("-h" | "--help" | "help" | "-V" | "--version") => None,
+        // Clients of the Docker API: they use the Mac's docker.sock, which starts the VM.
+        Some("tui") => None,
+        Some("system") if args.get(1).is_some_and(|a| a == "dial-stdio") => None,
         // Helpers the library starts on this Mac (`__store`, `__shim`, …) run here.
         Some(helper) if helper.starts_with("__") => None,
         // Checked here first: help and wrong arguments need no VM.
@@ -267,6 +272,10 @@ fn dispatch(cmd: Cmd) -> i32 {
                     print_units,
                 },
         } => service::service(socket, timeout, print_units),
+        Cmd::System {
+            cmd: args::SystemCmd::DialStdio,
+        } => service::dial_stdio(),
+        Cmd::Tui { once } => tui::run(once),
         Cmd::System { cmd } => image::system(cmd),
         Cmd::Ps { all, quiet } => container::ps(all, quiet),
         Cmd::Inspect { container: c } => container::inspect(&c),

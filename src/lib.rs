@@ -11,6 +11,8 @@ pub mod archive;
 pub mod caps;
 #[doc(hidden)]
 pub mod cgroup;
+/// A client for the Docker API on podbag's socket (the TUI and the desktop app).
+pub mod client;
 #[doc(hidden)]
 pub mod config;
 pub(crate) mod container;

@@ -37,6 +37,7 @@
 - **Docker のツールと一緒に使えます。** Docker・OCI イメージ、`docker` CLI、Compose、buildx に対応しています。
 - **root なしでも、root でも。** 同じプログラムが両方の方式で動きます。
 - **Linux、macOS、Windows。** x86_64 と arm64 に対応しています。Windows 対応は実験段階です。
+- **TUI とデスクトップアプリがあります。** ターミナルでは `podbag tui`、デスクトップではメニューバー項目つきのウィンドウで、コンテナ、イメージ、ボリューム、ネットワークを扱えます。
 
 ### レイヤーとファイル
 
@@ -172,7 +173,7 @@ docker compose up -d
 
 以下のドキュメントは英語です。
 
-- [使い方](docs/usage.md): コマンド、ボリューム、ネットワーク、制限、Docker API、macOS、Windows。
+- [使い方](docs/usage.md): コマンド、ボリューム、ネットワーク、制限、Docker API、TUI と GUI、macOS、Windows。
 - [アーキテクチャ](docs/architecture.md): podbag と Docker の違い。
 - [ソースからビルド](docs/build.md): Linux、macOS、Windows。
 - [ベンチマーク](docs/benchmarks.md) と [Spring マイクロサービスのベンチマーク](docs/benchmarks-msa.md)。
