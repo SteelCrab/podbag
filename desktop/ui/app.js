@@ -1556,7 +1556,7 @@ async function showFirstLaunchStarPrompt() {
     text: t("star.text"),
     buttons: [
       { value: "", label: t("star.skip") },
-      { value: "open", label: t("star.open"), cls: "primary", icon: "star" },
+      { value: "open", label: t("star.open"), cls: "primary star-prompt-action", icon: "star" },
     ],
   });
   if (answer === "open") {
