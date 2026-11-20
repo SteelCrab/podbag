@@ -459,13 +459,12 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     entries.push(&items.quit);
     let menu = Menu::with_items(app, &entries)?;
     let icon = if cfg!(target_os = "macos") {
-        tauri::image::Image::from_bytes(include_bytes!("../icons/tray-template-44.png"))?
+        tauri::image::Image::from_bytes(include_bytes!("../icons/tray-44.png"))?
     } else {
         tauri::image::Image::from_bytes(include_bytes!("../icons/64x64.png"))?
     };
     TrayIconBuilder::with_id("podbag")
         .icon(icon)
-        .icon_as_template(cfg!(target_os = "macos"))
         .tooltip("podbag")
         .menu(&menu)
         .show_menu_on_left_click(true)
@@ -500,7 +499,10 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
 }
 
 fn main() {
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(target_os = "macos")]
+    let builder = builder.append_invoke_initialization_script("window.podbagWindowToolbar = true;");
+    let app = builder
         .manage(AppState::new())
         .invoke_handler(tauri::generate_handler![
             engine,

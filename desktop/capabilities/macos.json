@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "macos-window-toolbar",
+  "platforms": ["macOS"],
+  "windows": ["main"],
+  "permissions": ["core:window:allow-start-dragging"]
+}
