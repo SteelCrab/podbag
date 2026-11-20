@@ -1,12 +1,5 @@
-// Make podbag's app icons from the logo (docs/images/logo.png), on Apple's macOS app icon
-// grid: a 1024 px canvas, a rounded square of 824 px in the middle (continuous corners),
-// a soft shadow in the margin, a light blue background and the bag in the middle.
-//
-//   swift desktop/icons/make-icons.swift <logo.png> <out-dir> [preview.png]
-//
-// Writes <out-dir>/icon.iconset (every size iconutil wants), 32x32.png, 64x64.png,
-// 128x128.png, 128x128@2x.png, icon.png (512) and icon.ico. With a third argument, also a
-// picture of the icon at 1024, 128, 32 and 16 px on light and dark backgrounds.
+// Render the flat lilac desktop icon from its transparent white bag artwork.
+//   swift desktop/icons/make-icons.swift <bag.png> <out-dir> [preview.png]
 
 import AppKit
 import Foundation
@@ -53,39 +46,14 @@ func icon(_ size: Int) -> CGImage {
   let shapeSide = (size <= 32 ? 900 : 824) * unit
   let shape = CGRect(x: (s - shapeSide) / 2, y: (s - shapeSide) / 2, width: shapeSide, height: shapeSide)
   let path = squircle(in: shape)
-  // The soft shadow below the shape, in the margin.
-  if size > 32 {
-    ctx.saveGState()
-    ctx.setShadow(offset: CGSize(width: 0, height: -10 * unit), blur: 28 * unit,
-                  color: CGColor(gray: 0, alpha: 0.30))
-    ctx.addPath(path)
-    ctx.setFillColor(CGColor(gray: 1, alpha: 1))
-    ctx.fillPath()
-    ctx.restoreGState()
-  }
-  // The background: a calm light blue, lighter at the top.
-  ctx.saveGState()
   ctx.addPath(path)
-  ctx.clip()
-  let colors = [
-    CGColor(srgbRed: 0.965, green: 0.976, blue: 1.0, alpha: 1),
-    CGColor(srgbRed: 0.808, green: 0.863, blue: 0.976, alpha: 1),
-  ] as CFArray
-  let gradient = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB)!, colors: colors,
-                            locations: [0, 1])!
-  ctx.drawLinearGradient(gradient, start: CGPoint(x: 0, y: shape.maxY),
-                         end: CGPoint(x: 0, y: shape.minY), options: [])
-  // A thin edge, so the light shape keeps its outline on a light desktop.
-  ctx.addPath(path)
-  ctx.setStrokeColor(CGColor(srgbRed: 0.10, green: 0.25, blue: 0.65, alpha: 0.18))
-  ctx.setLineWidth(max(1, 4 * unit))
-  ctx.strokePath()
-  // The bag, centered, with breathing room (more of the shape at small sizes).
-  let share: CGFloat = size <= 16 ? 0.86 : size <= 32 ? 0.80 : 0.70
-  let glyph = shapeSide * share
-  let rect = CGRect(x: (s - glyph) / 2, y: (s - glyph) / 2 - glyph * 0.01, width: glyph, height: glyph)
-  ctx.draw(logoCG, in: rect)
-  ctx.restoreGState()
+  ctx.setFillColor(CGColor(srgbRed: 139.0 / 255, green: 101.0 / 255, blue: 191.0 / 255, alpha: 1))
+  ctx.fillPath()
+
+  let share: CGFloat = size <= 16 ? 0.86 : size <= 32 ? 0.82 : 0.78
+  let width = shapeSide * share
+  let height = width * CGFloat(logoCG.height) / CGFloat(logoCG.width)
+  ctx.draw(logoCG, in: CGRect(x: (s - width) / 2, y: (s - height) / 2, width: width, height: height))
   return ctx.makeImage()!
 }
 
@@ -107,9 +75,9 @@ for base in [16, 32, 128, 256, 512] {
   write(png(icon(base)), iconset.appendingPathComponent("icon_\(base)x\(base).png"))
   write(png(icon(base * 2)), iconset.appendingPathComponent("icon_\(base)x\(base)@2x.png"))
 }
-// What Tauri reads (the window icon on Linux and Windows, the bundle's lists).
+// Launcher, system tray and in-app image sizes.
 for (name, size) in [("32x32.png", 32), ("64x64.png", 64), ("128x128.png", 128),
-                     ("128x128@2x.png", 256), ("icon.png", 512)] {
+                     ("128x128@2x.png", 256), ("icon.png", 512), ("tray-44.png", 44), ("logo-small.png", 192)] {
   write(png(icon(size)), out.appendingPathComponent(name))
 }
 // icon.ico: PNG entries of 16, 24, 32, 48, 64 and 256 px.
