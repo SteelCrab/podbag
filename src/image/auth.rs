@@ -419,13 +419,13 @@ impl Credentials {
                 ),
             )
         };
-        let mut child = Command::new(&path)
+        let mut command = Command::new(&path);
+        command
             .arg(action)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| fail(e.to_string()))?;
+            .stderr(Stdio::piped());
+        let mut child = spawn_retrying(&mut command).map_err(|e| fail(e.to_string()))?;
         if let Some(mut stdin) = child.stdin.take() {
             let _ = stdin.write_all(input);
         }
@@ -587,6 +587,26 @@ fn private_file(path: &Path) -> std::io::Result<std::fs::File> {
         .open(path)
 }
 
+/// Start `command`. A helper that was just written can be busy for a moment ("Text file
+/// busy"): a child that another thread forked still holds it open until that child execs.
+/// Try again a few times (0.6 s in all) before giving up.
+fn spawn_retrying(command: &mut Command) -> std::io::Result<std::process::Child> {
+    #[cfg(unix)]
+    {
+        let mut wait = std::time::Duration::from_millis(10);
+        for _ in 0..6 {
+            match command.spawn() {
+                Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => {
+                    std::thread::sleep(wait);
+                    wait *= 2;
+                }
+                other => return other,
+            }
+        }
+    }
+    command.spawn()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -610,6 +630,29 @@ mod tests {
         assert_eq!(registry_of("https://ghcr.io"), "ghcr.io");
         assert_eq!(registry_of("http://localhost:5000/v2/"), "localhost:5000");
         assert_eq!(key_of("localhost:5000"), "localhost:5000");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_helper_still_open_for_writing_starts_once_it_is_closed() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("helper");
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Still open for writing, as in a child that another test forked and that has not
+        // reached exec yet: exec fails with "Text file busy" meanwhile.
+        let held = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        let closer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            drop(held);
+        });
+        let status = spawn_retrying(&mut Command::new(&path))
+            .unwrap()
+            .wait()
+            .unwrap();
+        closer.join().unwrap();
+        assert!(status.success());
     }
 
     #[test]
