@@ -51,6 +51,17 @@ impl Default for Settings {
     }
 }
 
+/// An older installation may have a webview profile even if no preferences were saved.
+pub fn take_star_prompt(dir: &Path, webview_data: &Path) -> bool {
+    if webview_data.try_exists().unwrap_or(true)
+        || dir.join("settings.json").try_exists().unwrap_or(true)
+    {
+        return false;
+    }
+    std::fs::create_dir_all(dir).is_ok()
+        && std::fs::File::create_new(dir.join("star-prompt-shown")).is_ok()
+}
+
 impl Settings {
     /// The saved settings; the defaults when there are none or they cannot be read.
     pub fn load(file: &Path) -> Settings {
@@ -83,6 +94,34 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_one_first_launch_gets_the_star_prompt() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("desktop");
+        let profile = temp.path().join("webview");
+        let shown = std::thread::scope(|s| {
+            let other = s.spawn(|| take_star_prompt(&dir, &profile));
+            usize::from(take_star_prompt(&dir, &profile)) + usize::from(other.join().unwrap())
+        });
+        assert_eq!(shown, 1);
+        assert!(!take_star_prompt(&dir, &profile));
+    }
+
+    #[test]
+    fn an_existing_webview_skips_the_prompt_even_without_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!take_star_prompt(&dir.path().join("desktop"), dir.path()));
+    }
+
+    #[test]
+    fn existing_settings_skip_the_star_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        std::fs::write(&file, r#"{"language":"ko"}"#).unwrap();
+        assert!(!take_star_prompt(dir.path(), &dir.path().join("webview")));
+        assert_eq!(Settings::load(&file).language, "ko");
+    }
 
     #[test]
     fn native_theme_matches_saved_preference() {

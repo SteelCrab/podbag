@@ -68,6 +68,7 @@ struct AppState {
     docker: Mutex<Option<dockercmd::DockerCommand>>,
     /// The window and tray share the same Docker CLI configuration.
     docker_switch: Mutex<()>,
+    star_prompt: AtomicBool,
     settings: Mutex<Settings>,
     settings_file: Mutex<Option<PathBuf>>,
     visible: AtomicBool,
@@ -115,6 +116,7 @@ impl AppState {
             version_asked: AtomicBool::new(false),
             docker: Mutex::new(None),
             docker_switch: Mutex::new(()),
+            star_prompt: AtomicBool::new(false),
             settings: Mutex::new(Settings::default()),
             settings_file: Mutex::new(None),
             visible: AtomicBool::new(true),
@@ -757,6 +759,16 @@ fn upgrade(app: AppHandle, state: State<'_, AppState>) -> cli::Upgraded {
 }
 
 #[tauri::command]
+fn take_star_prompt(state: State<'_, AppState>) -> bool {
+    state.star_prompt.swap(false, Ordering::SeqCst)
+}
+
+#[tauri::command(async)]
+fn open_repository() -> Result<(), String> {
+    open::that_detached(env!("CARGO_PKG_REPOSITORY")).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn get_settings(state: State<'_, AppState>) -> Settings {
     lock(&state.settings).clone()
 }
@@ -1113,12 +1125,27 @@ fn main() {
             docker_images,
             import_images,
             vm_resources,
+            take_star_prompt,
+            open_repository,
             get_settings,
             set_settings,
         ])
         .setup(|app| {
             let state = app.state::<AppState>();
             if let Ok(dir) = app.path().app_config_dir() {
+                // Check for an existing profile before the webview creates its data directory.
+                #[cfg(target_os = "macos")]
+                let profile = app.path().home_dir().map(|home| {
+                    home.join("Library/WebKit")
+                        .join(&app.config().identifier)
+                        .join("WebsiteData")
+                });
+                #[cfg(not(target_os = "macos"))]
+                let profile = app.path().app_local_data_dir();
+                state.star_prompt.store(
+                    profile.is_ok_and(|path| settings::take_star_prompt(&dir, &path)),
+                    Ordering::SeqCst,
+                );
                 let file = dir.join("settings.json");
                 *lock(&state.settings) = Settings::load(&file);
                 *lock(&state.settings_file) = Some(file);

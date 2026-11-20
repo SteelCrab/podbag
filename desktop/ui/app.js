@@ -1537,8 +1537,8 @@ function chooseDialog({ title, text, buttons }) {
       h("h2", { id: "choose-title", text: title }),
       h("p", { text }),
       h("div", { class: "buttons" }, buttons.map((b, i) => h("button", {
-        value: b.value, class: `button ${b.cls || ""}`, autofocus: i === 0, text: b.label,
-      })))));
+        value: b.value, class: `button ${b.cls || ""}`, autofocus: i === 0,
+      }, b.icon ? icon(b.icon) : null, b.label)))));
   document.body.append(d);
   d.showModal();
   return new Promise((resolve) => {
@@ -1547,6 +1547,25 @@ function chooseDialog({ title, text, buttons }) {
       d.remove();
     }, { once: true });
   });
+}
+
+async function showFirstLaunchStarPrompt() {
+  if (!(await API.takeStarPrompt().catch(() => false))) return;
+  const answer = await chooseDialog({
+    title: t("star.title"),
+    text: t("star.text"),
+    buttons: [
+      { value: "", label: t("star.skip") },
+      { value: "open", label: t("star.open"), cls: "primary star-prompt-action", icon: "star" },
+    ],
+  });
+  if (answer === "open") {
+    try {
+      await API.openRepository();
+    } catch {
+      toast(t("star.openFailed"), true);
+    }
+  }
 }
 
 // ---- settings: updates ----
@@ -1772,6 +1791,7 @@ async function init() {
   setInterval(() => {
     if (!S.live && !document.hidden && S.engine && S.engine.reachable) refresh();
   }, 3000);
+  showFirstLaunchStarPrompt();
   pollVm(true);
   loadUpdates("due");
   await connect(false);
