@@ -412,6 +412,7 @@ function engineState() {
 }
 
 function renderEngine() {
+  syncVmSettings();
   const el = document.getElementById("engine");
   if (!el) return;
   const [cls, text] = engineState();
@@ -775,8 +776,93 @@ function onLogs(batch) {
 
 // ---- settings ----
 
+let vmActionPending = false;
+
+function syncVmSettings() {
+  const card = document.getElementById("vm-settings");
+  if (!card) return;
+  if (S.engine) card.hidden = S.engine.platform !== "macos" || !S.engine.vm;
+  if (card.hidden) return;
+  if (!card.childElementCount) {
+    const form = h("div", {});
+    const toggle = button(null, "", async () => {
+      if (vmActionPending || !S.engine) return;
+      const action = S.engine.vm === "running" ? "stop" : "start";
+      vmActionPending = true;
+      syncVmSettings();
+      try {
+        await API.vm(action);
+      } catch (err) {
+        toast(String(err), true);
+      } finally {
+        vmActionPending = false;
+        syncVmSettings();
+      }
+    });
+    toggle.id = "vm-toggle";
+    card.append(
+      h("div", { class: "vm-row" },
+        h("div", {}, h("h2", { class: "setting-label", text: "Linux VM" }),
+          h("p", { id: "vm-status", role: "status" })), toggle), form);
+    loadVmResources(form);
+  }
+  const vm = S.engine?.vm;
+  const toggle = card.querySelector("#vm-toggle");
+  toggle.disabled = !vm || vmActionPending;
+  toggle.textContent = t(vm === "running" ? "tray.stopVm" : "tray.startVm");
+  card.querySelector("#vm-status").textContent = vm ? t(vm === "running" ? "engine.vmRunning" : "engine.vmStopped") : t("engine.checking");
+}
+
+async function loadVmResources(form) {
+  try {
+    const { values, limits, envOverride } = await API.vmResources();
+    let saved = values;
+    const draft = { ...saved };
+    const save = button(null, t("action.save"), async () => {
+      fields.disabled = true;
+      try {
+        saved = (await API.vmResources(draft)).values;
+        toast(t("vm.saved"));
+      } catch (err) {
+        toast(String(err), true);
+      } finally {
+        fields.disabled = false;
+        updateSave();
+      }
+    }, "primary");
+    function updateSave() {
+      save.disabled = draft.cpus === saved.cpus && draft.memoryMib === saved.memoryMib;
+    }
+    function slider(key, label, min, max, step, format) {
+      const id = "vm-" + key;
+      const value = h("output", { for: id, text: format(draft[key]) });
+      const input = h("input", {
+        id, type: "range", min, max, step, value: draft[key], "aria-valuetext": value.textContent,
+        oninput: () => {
+          draft[key] = input.valueAsNumber;
+          value.textContent = format(draft[key]);
+          input.setAttribute("aria-valuetext", value.textContent);
+          updateSave();
+        },
+      });
+      return h("div", { class: "vm-slider" }, h("label", { for: id, text: label }), input, value);
+    }
+    const fields = h("fieldset", {}, h("legend", { class: "visually-hidden", text: t("detail.usage") }),
+      slider("cpus", "CPU", limits.minCpus, limits.maxCpus, 1, (n) => n.toLocaleString(I18N.lang)),
+      slider("memoryMib", t("vm.memory"), limits.minMemoryMib, limits.maxMemoryMib, limits.memoryStepMib,
+        (n) => n < 1024 ? n + " MiB" : (n / 1024).toLocaleString(I18N.lang) + " GiB"),
+      h("div", { class: "vm-row vm-footer" }, h("p", { text: t(envOverride ? "vm.envOverride" : "vm.nextBoot") }), save));
+    updateSave();
+    form.replaceChildren(fields);
+  } catch (err) {
+    form.replaceChildren(h("p", { class: "error-text", text: String(err) }),
+      button(null, t("action.retry"), () => loadVmResources(form)));
+  }
+}
+
 async function renderSettings(main) {
   if (!S.languageNames) S.languageNames = await I18N.names();
+  if (S.view !== "settings") return;
   const lang = h("select", {
     id: "language",
     onchange: async (e) => { S.settings.language = e.target.value; await saveSettings(); },
@@ -790,6 +876,7 @@ async function renderSettings(main) {
   main.replaceChildren(
     h("header", { class: "toolbar" }, h("h1", { text: t("settings.title") })),
     h("div", { class: "content settings" },
+      h("section", { id: "vm-settings", class: "card", hidden: true }),
       h("section", { class: "card" },
         h("label", { class: "setting-label", for: "language", text: t("settings.language") }), lang),
       h("section", { class: "card" },
@@ -802,6 +889,7 @@ async function renderSettings(main) {
       h("section", { class: "card" },
         h("h2", { class: "setting-label", text: t("settings.about") }),
         h("p", { text: t("settings.aboutText") }))));
+  syncVmSettings();
 }
 
 async function saveSettings() {
@@ -841,6 +929,22 @@ async function init() {
   API.on("logs", onLogs);
   API.on("pull-progress", (line) => { if (pullLine) pullLine(line); });
   API.on("shown", () => connect(false));
+  API.on("vm-status", (vm) => {
+    if (S.engine?.platform !== "macos" || !S.engine.vm || S.engine.vm === vm) return;
+    S.engine.vm = vm;
+    if (vm === "stopped") {
+      S.engine.reachable = false;
+      S.loaded = false;
+      clearTimeout(refreshTimer);
+      API.watch(false);
+      renderNav();
+    } else if (!S.engine.reachable && !document.hidden && !vmActionPending) {
+      connect(false);
+      return;
+    }
+    renderEngine();
+    renderMain();
+  });
   API.on("engine-changed", () => connect(false));
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) return API.watch(false);

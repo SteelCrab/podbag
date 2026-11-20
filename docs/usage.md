@@ -12,6 +12,7 @@ The [README](../README.md) shows how to install podbag. This page shows what it 
 - [Checks](#checks)
 - [Volumes](#volumes)
 - [Limits and security](#limits-and-security)
+- [Watch and change containers](#watch-and-change-containers)
 - [Networks](#networks)
 - [Docker API](#docker-api)
 - [TUI and GUI](#tui-and-gui)
@@ -38,6 +39,11 @@ podbag exec api ping -c1 db                  # containers find each other by nam
 podbag ps -a
 podbag logs -f web
 podbag exec -it web sh
+podbag stats --no-stream                     # CPU, memory, network and disk use
+podbag top web                               # the container's processes
+podbag pause web && podbag unpause web       # freeze and continue
+podbag rename web front                      # a new name, also while it runs
+podbag update -m 1g --restart always front   # new limits, at once and for later starts
 podbag stop web && podbag rm web
 podbag pull alpine | podbag images | podbag rmi alpine
 podbag save -o app.tar myapp:1 && podbag load -i app.tar   # image archives
@@ -398,6 +404,57 @@ podbag build -t myapp - < Dockerfile               # only a Dockerfile, no conte
   - no host device is passed in.
 - As root, the container has the host's root powers.
 
+## Watch and change containers
+
+### stats
+
+- `podbag stats [--no-stream] [-a] [CONTAINER...]` prints the table of `docker stats`.
+  Without `--no-stream`, it draws it again every second.
+- The numbers come from the container's cgroup:
+  - CPU: `cpu.stat`, against the host's CPU time,
+  - memory: `memory.current` without the inactive file cache, against the lowest limit:
+    its own, the memory budget, or the host's memory,
+  - block I/O: `io.stat`; processes: `pids.current`.
+- Network use comes from the container's network namespace (`/proc/<pid>/net/dev`).
+- A container without a cgroup (rootless without a systemd user session) shows its
+  processes and network only. podbag says why.
+
+### top
+
+- `podbag top CONTAINER` lists the container's processes with the columns of `ps -ef`.
+- The processes come from the container's cgroup, or from its PID namespace.
+- `podbag top CONTAINER -o pid,comm`: other options go to the host's `ps`, as separate
+  arguments. Only the container's rows stay. The output needs a PID column.
+
+### pause and unpause
+
+- `podbag pause` freezes every process of the container with the cgroup freezer
+  (`cgroup.freeze`). `unpause` lets them run again.
+- `ps` shows `Up … (Paused)`.
+- `exec` and `start` are refused while it is paused.
+- `stop`, `kill` and `rm -f` still work: podbag sends the signal, then thaws the container,
+  so its processes can handle the signal (as Docker does).
+- Pausing needs a cgroup.
+
+### rename
+
+- `podbag rename OLD NEW` works while the container runs, too.
+- The other containers on its networks find it by the new name at once: podbag rewrites
+  their `/etc/hosts`.
+- A name in use is refused.
+
+### update
+
+- `podbag update [OPTIONS] CONTAINER...` changes limits and the restart policy:
+  `-m`, `--memory-swap`, `--memory-reservation`, `--cpus`, `--cpu-quota`,
+  `--cpu-period`, `-c/--cpu-shares`, `--cpuset-cpus`, `--cpuset-mems`, `--pids-limit`,
+  `--blkio-weight`, `--restart`.
+- A running container gets the new values in its cgroup at once. Later starts keep them.
+- CPU shares become `cpu.weight`, and the block I/O weight becomes `io.weight`, as runc
+  converts them.
+- Values are checked like Docker checks them.
+- A container without a cgroup can change its restart policy only.
+
 ## Networks
 
 ### Options
@@ -471,7 +528,7 @@ docker context create podbag --docker host=$DOCKER_HOST         # or keep it as 
   `restart`, `kill`, `wait`, `rm`, `logs` (`-f`, `--tail`, `-t`, `--since`), `attach`,
   `ps` (filters `label`, `name`, `id`, `status`), `inspect`, `port`,
   `exec` (`-i`, `-t`, `-d`, `-e`, `-w`, `-u`), `cp`, `commit`, `export`, `diff`,
-  `container prune`.
+  `container prune`, `stats`, `top`, `pause`, `unpause`, `rename`, `update`.
 - Volumes and networks: `create`, `ls`, `inspect`, `rm`, `prune`.
 
 ### What does not work
@@ -481,7 +538,7 @@ docker context create podbag --docker host=$DOCKER_HOST         # or keep it as 
 - Accepted with a warning, because ignoring them is safe: `--dns`, `--add-host`, ulimits,
   log drivers, fixed addresses.
 - Answered with 501 and what to do instead: BuildKit's build API (use buildx with the
-  `docker-container` driver), `top`, `stats`, `pause`, `rename`, `update`, swarm and
+  `docker-container` driver), `image history`, swarm and
   plugins.
 
 ### cp, save and load
@@ -610,6 +667,8 @@ docker compose build --builder podbag
 - With no containers, the window shows how to start one.
 - The tray item shows the engine's state and how many containers run. It has Open podbag
   and Quit. On macOS, it also has Start VM or Stop VM.
+- On macOS, open **Settings → Linux VM** to start or stop the local VM and choose its
+  CPU count and memory. Save applies the values at the next boot, including a wake from idle.
 - Closing the window keeps the tray item. Quit ends the app.
 - While the window is closed, the app asks the engine nothing. So it keeps no VM or
   service awake. On macOS, the tray still shows the VM's state: it reads it from files.
@@ -743,7 +802,10 @@ sudo k3s server --container-runtime-endpoint unix:///run/podbag/cri.sock
 
 ### Resources
 
-- Memory: 2 GiB (`PODBAG_VM_MEMORY`, in MiB). CPUs: the Mac's, up to 8 (`PODBAG_VM_CPUS`).
+- The VM defaults to 2 GiB of memory and up to 8 of the Mac's CPUs. To read its settings,
+  run `podbag vm resources`. For example, `podbag vm resources 2 4096` saves 2 CPUs and
+  4 GiB in `~/.podbag/vm-resources.json`. The VM host's `PODBAG_VM_MEMORY` (MiB) and
+  `PODBAG_VM_CPUS` environment variables override the corresponding saved values.
 - Containers get 1048576 open files and `vm.max_map_count` 262144, as in Docker Desktop.
 - A container that needs more memory than the VM has is stopped with exit code 137. The VM
   keeps running.

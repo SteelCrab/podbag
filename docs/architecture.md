@@ -143,5 +143,5 @@ base, with the same jars:
   profiles or seccomp profile files yet: see [usage.md](usage.md#kubernetes).
 - **Builds.** podbag builds Dockerfiles itself, with the classic builder's features. For
   BuildKit's (`RUN --mount`, secrets, other platforms), use buildx.
-- **Docker API.** No `top`, `stats`, `pause`, `rename`, `update`, swarm or plugins.
+- **Docker API.** No `image history`, swarm or plugins.
 - **Windows.** Not yet tried on a Windows machine.

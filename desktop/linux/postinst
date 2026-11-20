@@ -1,0 +1,17 @@
+#!/bin/sh
+set -eu
+
+profile=/usr/share/podbag-desktop/podbag-desktop-engine
+link=/etc/apparmor.d/podbag-desktop-engine
+# Older AppArmor releases cannot parse the userns rule.
+if [ "$1" = configure ] && command -v apparmor_parser >/dev/null &&
+   apparmor_parser --skip-kernel-load --skip-cache "$profile" >/dev/null 2>&1; then
+    if [ ! -e "$link" ] && [ ! -L "$link" ]; then
+        ln -s "$profile" "$link"
+    fi
+    if [ "$(readlink "$link" || true)" = "$profile" ] &&
+       [ ! -e /etc/apparmor.d/disable/podbag-desktop-engine ] &&
+       [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || true)" = 1 ]; then
+        apparmor_parser -r "$link" || echo "Podbag Desktop: could not load $link" >&2
+    fi
+fi

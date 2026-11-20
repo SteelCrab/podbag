@@ -119,6 +119,7 @@ podbag run -d --name web -p 8080:80 nginx:alpine  # chạy ở chế độ nền
 podbag ps                                         # liệt kê container
 podbag logs -f web                                # theo dõi log
 podbag exec -it web sh                            # mở shell trong container
+podbag stats --no-stream                          # mức dùng CPU, bộ nhớ và mạng
 podbag stop web && podbag rm web                  # dừng và xóa
 podbag images                                     # liệt kê image
 podbag build -t myapp .                           # build image từ Dockerfile

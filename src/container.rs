@@ -338,7 +338,7 @@ impl Container {
             memory: self.memory,
             cpu_quota: self.cpus.map(crate::cgroup::cpus_to_quota).transpose()?,
             pids: self.pids_limit.and_then(crate::cgroup::pids_max),
-            files: Default::default(),
+            ..Default::default()
         })
     }
 
