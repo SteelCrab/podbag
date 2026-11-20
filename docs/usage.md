@@ -17,6 +17,7 @@ The [README](../README.md) shows how to install podbag. This page shows what it 
 - [TUI and GUI](#tui-and-gui)
 - [macOS](#macos)
 - [Windows (experimental)](#windows-experimental)
+- [Upgrades on Linux](#upgrades-on-linux)
 - [Requirements on Linux](#requirements-on-linux)
 - [AppArmor](#apparmor)
 
@@ -738,6 +739,22 @@ docker buildx build --load -t app .
   without limits, with a warning.
 - Not yet: the Docker API for Windows programs (the docker CLI on Windows).
 
+## Upgrades on Linux
+
+- From a .deb or .rpm: install the newer package with apt or dnf. It replaces the old one.
+
+  ```sh
+  sudo apt install ./podbag_<ver>_amd64.deb
+  sudo dnf install ./podbag-<ver>-1.x86_64.rpm
+  ```
+
+- The package manager owns `/usr/bin/podbag`. Do not replace it by hand or with the
+  install script.
+- From the install script or a downloaded file: run the install script again, or replace
+  the file.
+- To move from the install script to a package, first remove what the script added:
+  `sudo rm /usr/local/bin/podbag /etc/apparmor.d/podbag`.
+
 ## Requirements on Linux
 
 - Linux 5.12 or later, with cgroup v2 at `/sys/fs/cgroup`.
@@ -767,5 +784,5 @@ docker buildx build --load -t app .
 
 - `podbag check --apparmor-profile` fills in podbag's path. If you move podbag, add the
   profile again.
-- The [install script](../install.sh) does this for you.
+- The [install script](../install.sh) and the .deb package do this for you.
 - After this, podbag runs without sudo.
