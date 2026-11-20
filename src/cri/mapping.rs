@@ -366,6 +366,7 @@ pub fn container_spec(
         network,
         publish: Vec::new(),
         aliases: Vec::new(),
+        stop_timeout: None,
         restart: Default::default(),
         health: None,
         console_size: None,

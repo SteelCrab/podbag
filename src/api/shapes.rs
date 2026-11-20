@@ -168,6 +168,7 @@ pub fn inspect(f: &Facts) -> Value {
             "Tty": f.spec.tty,
             "OpenStdin": f.spec.interactive,
             "StdinOnce": false,
+            "StopTimeout": f.spec.stop_timeout,
             "Env": f.spec.env.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>(),
             "Cmd": f.spec.command,
             "Image": f.image,

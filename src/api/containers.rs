@@ -370,9 +370,15 @@ fn start(ctx: &Ctx, name: &str) -> Reply {
     }
 }
 
-fn seconds(req: &Request) -> Duration {
-    let t = req.query.int_param("t").filter(|t| *t >= 0).unwrap_or(10);
-    Duration::from_secs(t as u64)
+fn stop_timeout(req: &Request) -> crate::Result<Option<i64>> {
+    req.query.get("t").map(str::parse).transpose().map_err(|_| {
+        crate::Error::new(
+            ErrorKind::InvalidInput,
+            "invalid stop timeout",
+            "expected an integer",
+            "give t in seconds",
+        )
+    })
 }
 
 /// `POST /containers/{id}/stop?t=…`.
@@ -381,14 +387,16 @@ fn stop(req: &Request, name: &str) -> Reply {
     if status(&handle) != Some(Status::Running) {
         return Reply::Empty(304);
     }
-    ok_or_reply!(handle.stop(seconds(req)));
+    let timeout = ok_or_reply!(stop_timeout(req));
+    ok_or_reply!(handle.stop_configured(timeout));
     Reply::Empty(204)
 }
 
 /// `POST /containers/{id}/restart?t=…`.
 fn restart(req: &Request, name: &str) -> Reply {
     let handle = found!(find(name));
-    ok_or_reply!(handle.restart(seconds(req)));
+    let timeout = ok_or_reply!(stop_timeout(req));
+    ok_or_reply!(handle.restart_configured(timeout));
     Reply::Empty(204)
 }
 
