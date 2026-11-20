@@ -9,10 +9,13 @@ use crate::{Error, ErrorKind, Result};
 /// process that started them has: in the macOS VM the agent keeps -1000 so that an OOM kill
 /// never takes it, and a child inherits the value. Raising it needs no privilege; a failure
 /// leaves the inherited value, which is 0 outside the VM.
-fn reset_oom_score() {
+/// A caller (the kubelet) may ask for another value; lowering it below the inherited one
+/// needs CAP_SYS_RESOURCE, which root mode has here.
+fn set_oom_score(wanted: Option<i32>) {
     let path = "/proc/self/oom_score_adj";
-    if std::fs::read_to_string(path).is_ok_and(|v| v.trim() != "0") {
-        let _ = std::fs::write(path, "0");
+    let value = wanted.unwrap_or(0).clamp(-1000, 1000).to_string();
+    if std::fs::read_to_string(path).is_ok_and(|v| v.trim() != value) {
+        let _ = std::fs::write(path, value);
     }
 }
 
@@ -20,7 +23,7 @@ fn reset_oom_score() {
 /// asked, and install the seccomp filter unless it is off. Runs as root of the container,
 /// which holds CAP_SETPCAP and CAP_SYS_ADMIN (seccomp needs one of that or no_new_privs).
 pub(super) fn apply(sec: &Security) -> Result<()> {
-    reset_oom_score();
+    set_oom_score(sec.oom_score_adj);
     // Privileged: every capability the kernel has, whatever else was asked.
     let keep = if sec.privileged {
         u64::MAX

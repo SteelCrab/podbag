@@ -16,6 +16,7 @@ The [README](../README.md) shows how to install podbag. This page shows what it 
 - [Networks](#networks)
 - [Docker API](#docker-api)
 - [TUI and GUI](#tui-and-gui)
+- [Kubernetes](#kubernetes)
 - [macOS](#macos)
 - [Windows (experimental)](#windows-experimental)
 - [Update podbag](#update-podbag)
@@ -898,6 +899,72 @@ open target/release/podbag.app
 
 - The API has no `pause`, `rename`, `stats` or `top` yet. Both UIs ask the engine when they
   start, and hide what it does not have.
+
+## Kubernetes
+
+### Start it
+
+- `podbag cri serve` makes podbag the container runtime of a Kubernetes node. A kubelet
+  talks to it over the CRI (the Container Runtime Interface), on a Unix socket.
+- It runs as root, on Linux, for as long as the kubelet uses it. It is the one part of
+  podbag that is a long-lived process.
+- Containers do not depend on it: they keep running when it stops, and it finds them
+  again when it starts.
+
+```sh
+sudo podbag cri serve \
+  --socket /run/podbag/cri.sock \
+  --cni-conf-dir /etc/cni/net.d --cni-bin-dir /opt/cni/bin \
+  --cgroup-driver cgroupfs                      # or systemd: as the kubelet's driver
+kubelet --container-runtime-endpoint unix:///run/podbag/cri.sock ...
+```
+
+- With k3s: start podbag first, with k3s's CNI folders, then k3s:
+
+```sh
+sudo podbag cri serve \
+  --cni-conf-dir /var/lib/rancher/k3s/agent/etc/cni/net.d \
+  --cni-bin-dir /var/lib/rancher/k3s/data/current/bin &
+sudo k3s server --container-runtime-endpoint unix:///run/podbag/cri.sock
+```
+
+- `crictl` works too: `crictl --runtime-endpoint unix:///run/podbag/cri.sock ps`.
+
+### How pods run
+
+- A pod has no pause container. Its network, IPC and UTS namespaces are kept by bind mounts
+  in `/run/podbag/cri/ns/<pod>`.
+- A pod that shares one PID namespace (`shareProcessNamespace`) gets a tiny init process
+  (`podbag __pause`) for it.
+- The network comes from the CNI plugins: the first configuration file in
+  `--cni-conf-dir`, with its whole plugin list (port mappings included).
+- Each container is a podbag container: `podbag ps` lists them, with names like
+  `k8s_<container>_<pod>_<namespace>_<uid>_<attempt>`.
+- Images are podbag's images: `podbag images` lists what the node pulled.
+- Logs go where the kubelet says, in its format, so `kubectl logs` works.
+
+### What works
+
+- Pods and containers: create, start, stop, remove, status and lists, with filters.
+- `kubectl logs`, `exec`, `attach` and `port-forward` (over SPDY, as the kubelet sends them).
+- Probes: exec probes (ExecSync, with a timeout), and HTTP and TCP probes.
+- Resources: CPU, memory, swap, cpusets, huge pages, and live updates of them.
+- The reason `OOMKilled` when a container ran out of memory.
+- Statistics of containers and pods, from their cgroups (`crictl stats`, `crictl statsp`).
+- Security: users and groups, a read-only root, privileged containers, capabilities,
+  `allowPrivilegeEscalation: false`, the default seccomp filter, masked and read-only
+  paths, kernel settings (sysctls), devices.
+- Mounts, with host-to-container propagation.
+- Container events (GetContainerEvents).
+
+### What does not work
+
+- User namespaces for pods (`hostUsers: false`).
+- SELinux labels, AppArmor profiles, and seccomp profiles from files (`Localhost`).
+- Mounts that propagate from the container back to the host (`Bidirectional`).
+- Image volumes, checkpoints, runtime classes other than the default one.
+- Input to a container that has a terminal, through `kubectl attach`. Input works without
+  a terminal (`stdin: true`, `tty: false`).
 
 ## macOS
 

@@ -92,6 +92,10 @@ fn shim_reports_unsupported_and_removes_the_container_directory() {
         health: None,
         console_size: None,
         extra_networks: Vec::new(),
+        namespaces: Default::default(),
+        devices: Vec::new(),
+        cri_log: None,
+        stdin_fifo: None,
     };
     state::write_config(&dirs, &spec).unwrap();
     let mut h = helper::spawn_shim(

@@ -37,17 +37,25 @@ pub(super) fn mount_all(rootless: bool, root: &Path, mounts: &[Mount]) -> Result
 
 fn mount_one(root: BorrowedFd<'_>, m: &Mount) -> std::io::Result<()> {
     match &m.source {
-        MountSource::Bind { path } => {
+        MountSource::Bind {
+            path,
+            propagation,
+            shallow_ro,
+        } => {
             let is_file = !std::fs::metadata(path)?.is_dir();
             let target = open_target(root, &m.target, is_file)?;
-            bind(Path::new(path), target.as_fd(), m.read_only)
+            if propagation.is_private() {
+                bind(Path::new(path), target.as_fd(), m.read_only, !shallow_ro)
+            } else {
+                bind_propagated(Path::new(path), target.as_fd(), m.read_only, !shallow_ro)
+            }
         }
         MountSource::Volume { path, .. } => {
             let target = open_target(root, &m.target, false)?;
             if m.copy_up {
                 copy_up(target.as_fd(), Path::new(path))?;
             }
-            bind(Path::new(path), target.as_fd(), m.read_only)
+            bind(Path::new(path), target.as_fd(), m.read_only, true)
         }
         MountSource::Tmpfs { options } => {
             let target = open_target(root, &m.target, false)?;
@@ -178,7 +186,12 @@ fn open_resolved(root: BorrowedFd<'_>, parts: &[String], dir: bool) -> std::io::
 }
 
 /// Bind `source` (recursively) onto the target descriptor, read-only if asked.
-fn bind(source: &Path, target: BorrowedFd<'_>, read_only: bool) -> std::io::Result<()> {
+fn bind(
+    source: &Path,
+    target: BorrowedFd<'_>,
+    read_only: bool,
+    recursive: bool,
+) -> std::io::Result<()> {
     let tree = rustix::mount::open_tree(
         rustix::fs::CWD,
         source,
@@ -187,9 +200,34 @@ fn bind(source: &Path, target: BorrowedFd<'_>, read_only: bool) -> std::io::Resu
             | OpenTreeFlags::AT_RECURSIVE,
     )?;
     if read_only {
-        set_read_only(tree.as_fd())?;
+        set_read_only(tree.as_fd(), recursive)?;
     }
     attach(tree.as_fd(), target)
+}
+
+/// A bind mount that keeps receiving the host's mounts below `source`: made with
+/// mount(2), so the new mount is a slave of the host's mount (the root is a slave, see
+/// `enter_rootfs`), not a private copy as with `open_tree`. The target descriptor names the
+/// place; it was resolved inside the root.
+fn bind_propagated(
+    source: &Path,
+    target: BorrowedFd<'_>,
+    read_only: bool,
+    recursive: bool,
+) -> std::io::Result<()> {
+    let at = format!("/proc/self/fd/{}", target.as_raw_fd());
+    // Where the descriptor is, before the mount covers it: reopened below for the new mount.
+    let place = std::fs::read_link(&at)?;
+    rustix::mount::mount_bind_recursive(source, at.as_str())?;
+    if read_only {
+        let mounted = rustix::fs::open(
+            &place,
+            OFlags::PATH | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+        )?;
+        set_read_only(mounted.as_fd(), recursive)?;
+    }
+    Ok(())
 }
 
 /// A new tmpfs with `options` (file system options and mount flags), attached to the target.
@@ -233,7 +271,8 @@ fn attach(mount: BorrowedFd<'_>, target: BorrowedFd<'_>) -> std::io::Result<()> 
 }
 
 /// mount_setattr(AT_EMPTY_PATH | AT_RECURSIVE, MOUNT_ATTR_RDONLY) on a detached tree.
-fn set_read_only(tree: BorrowedFd<'_>) -> std::io::Result<()> {
+fn set_read_only(tree: BorrowedFd<'_>, recursive: bool) -> std::io::Result<()> {
+    let recursive = if recursive { libc::AT_RECURSIVE } else { 0 };
     #[repr(C)]
     struct MountAttr {
         attr_set: u64,
@@ -253,7 +292,7 @@ fn set_read_only(tree: BorrowedFd<'_>) -> std::io::Result<()> {
             libc::SYS_mount_setattr,
             tree.as_raw_fd(),
             c"".as_ptr(),
-            (libc::AT_EMPTY_PATH | libc::AT_RECURSIVE) as libc::c_uint,
+            (libc::AT_EMPTY_PATH | recursive) as libc::c_uint,
             &attr as *const MountAttr,
             std::mem::size_of::<MountAttr>(),
         )

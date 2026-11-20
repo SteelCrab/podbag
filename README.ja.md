@@ -38,6 +38,7 @@
 - **速い。** Linux ではコンテナが約 4 ms で起動します。
 - **Docker のツールと一緒に使えます。** Docker・OCI イメージ、`docker` CLI、Compose、buildx に対応しています。
 - **Dockerfile をビルドします。** `podbag build` と、クラシックビルダーの `docker build` が使えます。BuildKit もデーモンも要りません。
+- **Kubernetes。** `podbag cri serve` が、kubelet や k3s のためのノードのコンテナランタイムになります。
 - **root なしでも、root でも。** 同じプログラムが両方の方式で動きます。
 - **Linux、macOS、Windows。** x86_64 と arm64 に対応しています。Windows 対応は実験段階です。
 - **TUI とデスクトップアプリがあります。** ターミナルでは `podbag tui`、デスクトップではメニューバー項目つきのウィンドウで、コンテナ、イメージ、ボリューム、ネットワークを扱えます。
@@ -166,6 +167,7 @@ docker compose up -d
 - Linux VM 1台で測った中央値です: 4 CPU、3.8 GiB、arm64。
 - バージョン: podbag 0.1.0、Podman 5.7.0、Docker 29.1.3、Kiri 0.2.1。
 - すべての数値と測り方: [docs/benchmarks.md](docs/benchmarks.md)、[docs/benchmarks-msa.md](docs/benchmarks-msa.md)（英語）。
+- k3s のノードのランタイムとして pod を 30 個動かすと、podbag はプロセス 2 個で 3.5 MiB です。containerd は 63 個（276 MiB）、CRI-O は 32 個（85 MiB）です。[docs/benchmarks-k8s.md](docs/benchmarks-k8s.md)（英語）。
 
 ## 他のツールとの比較
 

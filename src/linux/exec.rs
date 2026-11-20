@@ -272,7 +272,7 @@ fn child_setup(
         &std::fs::read_to_string("/etc/group").unwrap_or_default(),
     )?;
     super::security::apply(&spec.security)?;
-    switch_user(&creds)?;
+    switch_user(&super::init::with_groups(creds.clone(), &spec.security))?;
     die_with_parent(status_fd);
     let workdir = opts
         .workdir

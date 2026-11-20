@@ -12,11 +12,11 @@ mod group;
 pub mod resources;
 pub mod stats;
 #[cfg(target_os = "linux")]
-pub use devices::restrict as restrict_devices;
+pub use devices::{Rule as DeviceRule, device_rules, restrict as restrict_devices};
 #[cfg(target_os = "linux")]
 pub use group::{
-    Group, ROOT, apply_live, choose_placement, create, enable_controllers, own_cgroup, parent_name,
-    remove_dir, slice_budget, systemd_run, try_remove_dir, user_manager,
+    Group, ROOT, apply_live, choose_placement, create, enable_controllers, kill_all, own_cgroup,
+    parent_name, remove_dir, slice_budget, systemd_run, try_remove_dir, user_manager, write_files,
 };
 
 /// Where a container's cgroup goes. The library decides; the shim creates it.
@@ -30,6 +30,9 @@ pub enum Placement {
     Direct { parent: String },
     /// Rootless: the shim runs in a systemd scope in `slice` and creates the group there.
     Scope { slice: String },
+    /// Root mode: the shim creates the group at this path (a kubelet's choice), and its
+    /// parents when missing. No memory budget goes on the parents: they are not podbag's.
+    Exact { path: String },
 }
 
 /// Rootless: the container's cgroup lives in a systemd scope, which needs `systemd-run`,
@@ -118,11 +121,30 @@ pub struct Limits {
     /// Docker's block I/O weight, 10 to 1000 (`--blkio-weight`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blkio_weight: Option<u16>,
+    /// Further cgroup files and their values (`cpu.weight`, `cpuset.cpus`, …), written
+    /// after the ones above.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub files: std::collections::BTreeMap<String, String>,
 }
 
 impl Limits {
     pub fn is_empty(&self) -> bool {
         *self == Limits::default()
+    }
+
+    /// The controllers the limits need, beyond podbag's usual ones: from the names of the
+    /// further files (`cpuset.cpus` needs `cpuset`).
+    pub fn controllers(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for name in self.files.keys() {
+            if let Some((controller, _)) = name.split_once('.')
+                && controller != "cgroup"
+                && !out.iter().any(|c| c == controller)
+            {
+                out.push(controller.to_string());
+            }
+        }
+        out
     }
 }
 

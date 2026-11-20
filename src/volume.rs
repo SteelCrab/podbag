@@ -442,6 +442,12 @@ impl MountRequest {
 pub enum MountSource {
     Bind {
         path: String,
+        /// Whether mounts made later below it pass between the host and the container.
+        #[serde(default, skip_serializing_if = "Propagation::is_private")]
+        propagation: Propagation,
+        /// With `read_only`: only this mount is read-only, not the mounts below it.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        shallow_ro: bool,
     },
     Volume {
         name: String,
@@ -452,6 +458,25 @@ pub enum MountSource {
     Tmpfs {
         options: String,
     },
+}
+
+/// How mounts made later below a bind mount pass between the host and the container.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Propagation {
+    /// Neither way.
+    #[default]
+    Private,
+    /// From the host into the container (rslave).
+    HostToContainer,
+    /// Both ways (rshared).
+    Bidirectional,
+}
+
+impl Propagation {
+    pub fn is_private(&self) -> bool {
+        *self == Propagation::Private
+    }
 }
 
 /// A mount in a container's settings.
