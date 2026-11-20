@@ -70,7 +70,7 @@ curl -fsSL https://podbag.dev/install.sh | sh
 - 下载适合你系统的文件，并校验 SHA-256。
 - 安装到 `/usr/local/bin`，需要时使用 `sudo`。
 - 在 Ubuntu 24.04 及以上版本，添加 rootless 容器需要的 AppArmor 配置文件。
-- 设置： `PODBAG_VERSION=v0.1.0`, `PODBAG_INSTALL_DIR=$HOME/.local/bin`,
+- 设置： `PODBAG_VERSION=v0.2.0`, `PODBAG_INSTALL_DIR=$HOME/.local/bin`,
   `PODBAG_SKIP_APPARMOR=1`.
 
 ### 下载

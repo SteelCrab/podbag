@@ -70,7 +70,7 @@ curl -fsSL https://podbag.dev/install.sh | sh
 - 시스템에 맞는 파일을 받고 SHA-256 값을 확인합니다.
 - `/usr/local/bin`에 설치합니다. 필요하면 `sudo`를 씁니다.
 - Ubuntu 24.04 이상에서는 rootless 컨테이너에 필요한 AppArmor 프로필을 추가합니다.
-- 설정: `PODBAG_VERSION=v0.1.0`, `PODBAG_INSTALL_DIR=$HOME/.local/bin`,
+- 설정: `PODBAG_VERSION=v0.2.0`, `PODBAG_INSTALL_DIR=$HOME/.local/bin`,
   `PODBAG_SKIP_APPARMOR=1`.
 
 ### 직접 내려받기

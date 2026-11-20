@@ -70,7 +70,7 @@ curl -fsSL https://podbag.dev/install.sh | sh
 - Descarga el archivo para tu sistema y comprueba su SHA-256.
 - Lo instala en `/usr/local/bin`, con `sudo` si hace falta.
 - En Ubuntu 24.04 y posteriores, añade el perfil de AppArmor que necesitan los contenedores sin root.
-- Opciones: `PODBAG_VERSION=v0.1.0`, `PODBAG_INSTALL_DIR=$HOME/.local/bin`,
+- Opciones: `PODBAG_VERSION=v0.2.0`, `PODBAG_INSTALL_DIR=$HOME/.local/bin`,
   `PODBAG_SKIP_APPARMOR=1`.
 
 ### Descarga

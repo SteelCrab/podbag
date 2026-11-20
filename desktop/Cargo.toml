@@ -1,6 +1,6 @@
 [package]
 name = "podbag-desktop"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "podbag in a window: containers, images, volumes and networks, and a menu bar item"
 license = "Apache-2.0"

@@ -1,20 +1,54 @@
 # Changelog
 
-## Unreleased
+## v0.2.0 (2026-11-20)
 
-### Added
+### Containers and images
 
 - Build images from a Dockerfile with `podbag build` or the classic Docker builder.
 - Save container changes as an image with `podbag commit`, list changed files with
   `podbag diff`, or export the container filesystem as a tar archive with `podbag export`.
 - Log in to registries, pull private images, push images, and search Docker Hub.
   Registry commands can use existing Docker credentials.
-- Manage containers, images, volumes, and networks with `podbag tui` or
-  `podbag-desktop`. The macOS dashboard includes a window toolbar.
+- View resource use with `podbag stats` and running processes with `podbag top`.
+  Pause, resume, or rename a container. Use `podbag update` to change resource
+  limits and restart policies.
 - Check stored files for corruption with `podbag system verify`. The command lists
   the images that use each damaged file.
-- Install podbag on Linux and macOS with a script that checks the download's SHA-256 sum.
-- Build the Android arm64 CLI in CI.
+
+### Kubernetes, Swarm, and migration
+
+- Use `podbag cri serve` as the container runtime on a Linux Kubernetes node.
+  It supports the kubelet and k3s, including exec, attach, and port forwarding.
+- Run Docker Swarm services and stacks on a single node. Services support rolling
+  updates and rollbacks.
+- Copy single-platform images, stopped containers, and local volumes between engines with
+  `podbag migrate` or Podbag Desktop. The source stays in place.
+- Browse and copy standalone Pods, Services, Deployments, and filesystem
+  persistent volume claims between Kubernetes contexts in Podbag Desktop.
+  Bound claims include their data. The [migration guide](docs/usage.md#migrate-between-engines-or-kubernetes-clusters)
+  lists the storage requirements.
+
+### Terminal and desktop
+
+- Manage containers, images, volumes, and networks in `podbag tui` or
+  Podbag Desktop. Connect to Podbag, Docker, Podman, Kiri, or a Docker context.
+  Pull images using registry presets or a custom host.
+- Switch the Docker CLI to Podbag and restore the previous context from either
+  interface or with `podbag system docker`.
+- Set the macOS VM's CPU count, memory, and idle shutdown time in Desktop or
+  with `podbag vm set`.
+- Set Desktop to open at login. The window follows the selected theme.
+  The macOS app includes a window toolbar and a monochrome menu bar icon.
+- The READMEs and project videos use the same bag icon as Podbag Desktop.
+
+### Installation and updates
+
+- Install podbag on Linux and macOS with a script that checks the download's
+  SHA-256 sum. Use `podbag upgrade --check` to check for updates or
+  `podbag upgrade` to install the latest release.
+- Install Podbag Desktop and its engine from DEB or RPM packages on amd64 and
+  arm64. See the [Linux desktop package instructions](docs/build.md#linux-desktop-packages).
+- Download the Android arm64 CLI from CI for image commands.
 
 ### Fixed
 
