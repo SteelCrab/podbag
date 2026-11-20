@@ -27,12 +27,17 @@ pub struct Registration {
 
 impl Registration {
     pub fn open(library: &Path, root: &Path) -> io::Result<Self> {
+        fs::write(root.join("run/gui"), [])?;
+        Self::open_for(library, root, ACTIVE)
+    }
+
+    pub fn open_for(library: &Path, root: &Path, active: &str) -> io::Result<Self> {
         let lock = fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
-            .open(library.join("volume-session.lock"))?;
+            .open(library.join("practice-session.lock"))?;
         lock.try_lock().map_err(|_| {
             io::Error::other("A practice shell is already open. Type exit in that shell first.")
         })?;
@@ -42,8 +47,7 @@ impl Registration {
             .ok_or_else(|| io::Error::other("Invalid practice directory."))?;
         let mut tmp = tempfile::NamedTempFile::new_in(library)?;
         tmp.write_all(id.as_bytes())?;
-        let file = library.join(ACTIVE);
-        fs::write(root.join("run/gui"), [])?;
+        let file = library.join(active);
         tmp.persist(&file)?;
         Ok(Self { file, _lock: lock })
     }
@@ -55,19 +59,20 @@ impl Drop for Registration {
     }
 }
 
-pub fn view(
+pub(super) fn session_root(
     library: &Path,
+    active: &str,
+    prefix: &str,
     action: &str,
     expected: Option<&str>,
-    name: &str,
-) -> io::Result<Option<Snapshot>> {
-    let id = match fs::read_to_string(library.join(ACTIVE)) {
+) -> io::Result<Option<(String, PathBuf)>> {
+    let id = match fs::read_to_string(library.join(active)) {
         Ok(id) => id,
         Err(e) if e.kind() == io::ErrorKind::NotFound && action == "status" => return Ok(None),
         Err(e) => return Err(e),
     };
     if !id
-        .strip_prefix("podbag-volume-")
+        .strip_prefix(prefix)
         .is_some_and(|s| !s.is_empty() && s.bytes().all(|c| c.is_ascii_alphanumeric()))
     {
         return Err(io::Error::other("Invalid practice session."));
@@ -78,6 +83,19 @@ pub fn view(
         ));
     }
     let root = Path::new("/tmp").join(&id);
+    Ok(Some((id, root)))
+}
+
+pub fn view(
+    library: &Path,
+    action: &str,
+    expected: Option<&str>,
+    name: &str,
+) -> io::Result<Option<Snapshot>> {
+    let Some((id, root)) = session_root(library, ACTIVE, "podbag-volume-", action, expected)?
+    else {
+        return Ok(None);
+    };
     let run = root.join("run");
     if !run.join("gui").is_file() {
         return if action == "status" {

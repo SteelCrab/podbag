@@ -353,7 +353,10 @@ pub enum NetworkCmd {
 pub enum LabCmd {
     #[cfg(unix)]
     #[command(hide = true)]
-    Workspace,
+    Workspace {
+        #[arg(long)]
+        containers: bool,
+    },
     #[cfg(unix)]
     #[command(hide = true)]
     DesktopView {
@@ -361,18 +364,23 @@ pub enum LabCmd {
         action: String,
         session: Option<String>,
         name: Option<String>,
+        #[arg(long)]
+        containers: bool,
     },
     /// Install the downloaded .podbag module
     Install { file: std::path::PathBuf },
+    /// List installed practice modules
+    List,
     /// Open a shell in a new temporary practice store
     Start {
+        module: Option<String>,
         #[arg(long)]
         lang: Option<String>,
         #[arg(long, hide = true)]
         library: Option<std::path::PathBuf>,
     },
     /// Remove the installed module and its progress
-    Remove,
+    Remove { module: Option<String> },
 }
 
 #[derive(Subcommand)]

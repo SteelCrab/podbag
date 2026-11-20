@@ -1,4 +1,5 @@
 //! Installed instructions and completion records for hands-on volume lessons. Lessons can include a small offline animation.
+pub mod containers;
 pub mod gui;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -12,6 +13,45 @@ use tempfile::NamedTempFile;
 pub const SCOPE: &str = "PODBAG_VOLUME_LAB";
 pub const FORMAT: &str = "podbag-cli-tui-volumes-v1";
 pub const LIMIT: usize = 65_536;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Module {
+    Containers,
+    Volumes,
+    Tui,
+}
+
+impl Module {
+    pub const ALL: [Self; 3] = [Self::Containers, Self::Volumes, Self::Tui];
+
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Containers => "container-basics",
+            Self::Volumes => "volume-basics",
+            Self::Tui => "tui-volumes",
+        }
+    }
+
+    pub fn parse(id: &str) -> io::Result<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|m| m.id() == id)
+            .ok_or_else(|| io::Error::other("Unknown practice module. Run podbag lab list."))
+    }
+
+    pub fn for_format(format: &str) -> io::Result<Self> {
+        match format {
+            containers::FORMAT => Ok(Self::Containers),
+            gui::FORMAT => Ok(Self::Volumes),
+            FORMAT => Ok(Self::Tui),
+            _ => Err(io::Error::other("Unsupported practice module.")),
+        }
+    }
+
+    fn path(self, dir: &Path) -> PathBuf {
+        dir.join(format!("{}.json", self.id()))
+    }
+}
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Introduction {
@@ -54,8 +94,8 @@ pub fn directory() -> io::Result<PathBuf> {
         .ok_or_else(|| io::Error::other("Cannot locate the tutorial library."))
 }
 
-pub fn read(dir: &Path) -> io::Result<Option<Installed>> {
-    match fs::read(dir.join("cli-tui-volumes.json")) {
+fn read_file(path: &Path) -> io::Result<Option<Installed>> {
+    match fs::read(path) {
         Ok(bytes) => {
             let record: Installed = serde_json::from_slice(&bytes)?;
             if !record.package.translations.contains_key("en") {
@@ -70,6 +110,42 @@ pub fn read(dir: &Path) -> io::Result<Option<Installed>> {
     }
 }
 
+fn read_legacy(dir: &Path, module: Module) -> io::Result<Option<Installed>> {
+    if module == Module::Containers {
+        return Ok(None);
+    }
+    Ok(read_file(&dir.join("cli-tui-volumes.json"))?
+        .filter(|r| Module::for_format(&r.package.format).ok() == Some(module)))
+}
+
+pub fn read(dir: &Path, module: Module) -> io::Result<Option<Installed>> {
+    match read_file(&module.path(dir))? {
+        Some(record) => Ok(Some(record)),
+        None => read_legacy(dir, module),
+    }
+}
+
+pub fn list(dir: &Path) -> io::Result<Vec<Installed>> {
+    let mut items = Vec::new();
+    for module in Module::ALL {
+        items.extend(read(dir, module)?);
+    }
+    Ok(items)
+}
+
+pub fn selected(dir: &Path, id: Option<&str>) -> io::Result<Module> {
+    if let Some(id) = id {
+        return Module::parse(id);
+    }
+    match list(dir)?.as_slice() {
+        [] => Err(io::Error::other(
+            "Install a module with podbag lab install FILE first.",
+        )),
+        [record] => Module::for_format(&record.package.format),
+        _ => Err(io::Error::other("Choose a module ID from podbag lab list.")),
+    }
+}
+
 fn locked(dir: &Path) -> io::Result<fs::File> {
     fs::create_dir_all(dir)?;
     let file = fs::OpenOptions::new()
@@ -77,28 +153,28 @@ fn locked(dir: &Path) -> io::Result<fs::File> {
         .truncate(false)
         .read(true)
         .write(true)
-        .open(dir.join("cli-tui-volumes.lock"))?;
+        .open(dir.join("modules.lock"))?;
     file.lock()?;
     Ok(file)
 }
 
-fn write(dir: &Path, record: &Installed) -> io::Result<()> {
+fn write(dir: &Path, module: Module, record: &Installed) -> io::Result<()> {
     let mut tmp = NamedTempFile::new_in(dir)?;
     serde_json::to_writer(tmp.as_file_mut(), record)?;
     tmp.flush()?;
-    tmp.persist(dir.join("cli-tui-volumes.json"))?;
+    tmp.persist(module.path(dir))?;
     Ok(())
 }
 
-pub fn install(dir: &Path, text: &str) -> io::Result<()> {
+pub fn install(dir: &Path, text: &str) -> io::Result<Module> {
     if text.len() > LIMIT {
         return Err(io::Error::other("The module is too large."));
     }
     let package: Package = serde_json::from_str(text)?;
+    let module = Module::for_format(&package.format)?;
     let valid_text =
         |s: &str| !s.trim().is_empty() && !s.chars().any(|c| c.is_control() && c != '\n');
-    if (package.format != FORMAT && package.format != gui::FORMAT)
-        || !package.translations.contains_key("en")
+    if !package.translations.contains_key("en")
         || package.animation.as_ref().is_some_and(|a| {
             package.translations["en"].intro.is_none()
                 || [&a.mp4, &a.webp].into_iter().any(|s| {
@@ -127,23 +203,28 @@ pub fn install(dir: &Path, text: &str) -> io::Result<()> {
         .unwrap()
         .to_string_lossy()
         .into_owned();
-    let completed = read(dir)
+    let completed = read(dir, module)
         .ok()
         .flatten()
         .is_some_and(|r| r.package.format == package.format && r.completed);
     write(
         dir,
+        module,
         &Installed {
             package,
             generation,
             completed,
         },
-    )
+    )?;
+    Ok(module)
 }
 
-pub fn remove(dir: &Path) -> io::Result<()> {
+pub fn remove(dir: &Path, module: Module) -> io::Result<()> {
     let _lock = locked(dir)?;
-    match fs::remove_file(dir.join("cli-tui-volumes.json")) {
+    if read_legacy(dir, module)?.is_some() {
+        fs::remove_file(dir.join("cli-tui-volumes.json"))?;
+    }
+    match fs::remove_file(module.path(dir)) {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         result => result,
     }
@@ -152,12 +233,13 @@ pub fn remove(dir: &Path) -> io::Result<()> {
 impl Installed {
     pub fn finish(&self, dir: &Path) -> io::Result<()> {
         let _lock = locked(dir)?;
-        if let Some(mut current) = read(dir)?
+        let module = Module::for_format(&self.package.format)?;
+        if let Some(mut current) = read(dir, module)?
             && current.generation == self.generation
             && !current.completed
         {
             current.completed = true;
-            write(dir, &current)?;
+            write(dir, module, &current)?;
         }
         Ok(())
     }
@@ -180,21 +262,32 @@ mod tests {
         let dir = dir.path();
         let package = r#"{"format":"podbag-cli-tui-volumes-v1","translations":{"en":{"title":"Volumes","guide":"Open a terminal."}}}"#;
         install(dir, package).unwrap();
-        let previous = read(dir).unwrap().unwrap();
-        remove(dir).unwrap();
+        let previous = read(dir, Module::Tui).unwrap().unwrap();
+        remove(dir, Module::Tui).unwrap();
         previous.finish(dir).unwrap();
-        assert!(read(dir).unwrap().is_none());
+        assert!(read(dir, Module::Tui).unwrap().is_none());
         install(dir, package).unwrap();
         previous.finish(dir).unwrap();
-        let current = read(dir).unwrap().unwrap();
+        let current = read(dir, Module::Tui).unwrap().unwrap();
         assert!(!current.completed);
         assert_eq!(current.words("ko").title, "Volumes");
         current.finish(dir).unwrap();
-        assert!(read(dir).unwrap().unwrap().completed);
+        assert!(read(dir, Module::Tui).unwrap().unwrap().completed);
         install(dir, package).unwrap();
-        assert!(read(dir).unwrap().unwrap().completed);
+        assert!(read(dir, Module::Tui).unwrap().unwrap().completed);
         install(dir, &package.replace(FORMAT, gui::FORMAT)).unwrap();
-        assert!(!read(dir).unwrap().unwrap().completed);
+        install(dir, &package.replace(FORMAT, containers::FORMAT)).unwrap();
+        assert_eq!(list(dir).unwrap().len(), 3);
+        assert!(selected(dir, None).is_err());
+        assert!(!read(dir, Module::Volumes).unwrap().unwrap().completed);
+        read(dir, Module::Containers)
+            .unwrap()
+            .unwrap()
+            .finish(dir)
+            .unwrap();
+        remove(dir, Module::Containers).unwrap();
+        assert!(read(dir, Module::Tui).unwrap().unwrap().completed);
+        assert!(!read(dir, Module::Volumes).unwrap().unwrap().completed);
         assert!(install(dir, "{}").is_err());
     }
 }

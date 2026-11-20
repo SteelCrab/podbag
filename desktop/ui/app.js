@@ -546,6 +546,7 @@ function renderNav() {
   updateMigrationNav();
   nav.replaceChildren(...KINDS.map(k => item(k, t(`nav.${k}`), S.loaded && !S.listErrors[k] ? S.lists[k].length : null)),
     item("tutorials", t("nav.tutorials"), null),
+    ...(S.practiceContainers ? [item("lab-containers", t("training.containers"), null, "containers")] : []),
     ...(S.practiceInstalled ? [item("lab-volumes", t("practice.volumes"), null, "volumes")] : []));
   updateKubeNav();
   if (windowBar) {
@@ -886,6 +887,11 @@ function renderMain(fresh) {
   kubePanel = null;
   if (S.view === "migration") {
     if (fresh || shownView !== S.view) migrationPanel = renderMigration(main);
+    shownView = S.view;
+    return;
+  }
+  if (S.view === "lab-containers") {
+    if (fresh || shownView !== S.view) renderPracticeContainers(main);
     shownView = S.view;
     return;
   }
@@ -1760,8 +1766,8 @@ async function init() {
   } catch { /* the defaults */ }
   applyTheme();
   await I18N.load(S.settings.language);
-  try { S.practiceInstalled = (await API.volumeToolsLab("summary"))?.package.format === GUI_VOLUME_FORMAT; }
-  catch { S.practiceInstalled = false; }
+  try { setInstalledPractice(await API.volumeToolsLab("summary")); }
+  catch { /* The Training page can retry the library. */ }
   setupWindowBar();
   setupKubeNav();
   setupSidebar();

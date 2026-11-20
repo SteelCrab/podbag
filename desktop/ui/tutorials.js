@@ -25,10 +25,21 @@ function lessonIntroduction(pack, lesson) {
     h("h3", { text: intro.title }), h("p", { text: intro.text }), video);
 }
 
+const CONTAINER_FORMAT = "podbag-container-basics-v1";
+
+function setInstalledPractice(records) {
+  const volumes = records.some(r => r.id === volumePractice.id);
+  const containers = records.some(r => r.id === containerPractice.id);
+  const changed = S.practiceInstalled !== volumes || S.practiceContainers !== containers;
+  S.practiceInstalled = volumes;
+  S.practiceContainers = containers;
+  return changed;
+}
+
 function renderTutorials(main) {
   const card = h("section", { class: "card tutorial-card", "aria-labelledby": "tutorial-heading" });
   const status = h("p", { role: "status", class: "tutorial-status" });
-  const tools = h("section", { class: "card tutorial-card", hidden: true });
+  const tools = h("div", { class: "training-library", hidden: true });
   put(main, h("header", { class: "toolbar" }, h("h1", { text: t("nav.tutorials") })),
     h("div", { class: "content tutorial" }, tools, card));
   let installed;
@@ -58,30 +69,40 @@ function renderTutorials(main) {
       return false;
     }
   }
-  async function toolsAction(action, pack = null) {
+  async function toolsAction(action, pack = null, id = null) {
     try {
-      const record = await API.volumeToolsLab(action, pack);
+      const records = await API.volumeToolsLab(action, pack, id);
       if (!tools.isConnected) return;
-      tools.hidden = !record;
-      const gui = record?.package.format === GUI_VOLUME_FORMAT;
-      if (S.practiceInstalled !== gui) { S.practiceInstalled = gui; renderNav(); }
-      if (!record) {
-        tools.replaceChildren();
-        return true;
+      if (action === "start") return true;
+      tools.hidden = records.length === 0;
+      if (setInstalledPractice(records)) renderNav();
+      const cards = records.map(record => {
+        const lesson = words(record.package);
+        const container = record.id === containerPractice.id;
+        const practice = container ? containerPractice : record.id === volumePractice.id ? volumePractice : null;
+        const progress = practice ? h("section", { class: "practice-progress" }) : null;
+        const resource = container ? ["containers", "training.containers", "lab-containers"]
+          : ["volumes", "practice.volumes", "lab-volumes"];
+        return { record, practice, progress, card: h("section", { class: "card tutorial-card" },
+          h("div", { class: "tutorial-title" }, icon("shell"), h("h2", { tabindex: "-1", text: lesson.title })),
+          practice ? null : h("p", { class: "tutorial-progress", text: t(record.completed ? "tutorial.complete" : "tutorial.installed") }),
+          lessonIntroduction(record.package, lesson),
+          practice ? progress : h("p", { class: "lab-guide", text: lesson.guide }),
+          practice ? null : codeLine("podbag lab start " + record.id),
+          h("div", { class: "buttons-row" },
+            button("shell", t("status.terminal"), () => toolsAction("start", null, record.id), "primary"),
+            practice ? button(resource[0], t(resource[1]), () => go(resource[2]))
+              : button("refresh", t("action.refresh"), () => toolsAction("status")),
+            button("remove", t("tutorial.uninstall"), async () => {
+              if (await confirmDialog(t("tutorial.removeNote"), t("tutorial.uninstall"))) {
+                await toolsAction("remove", null, record.id);
+              }
+            }))) };
+      });
+      tools.replaceChildren(...cards.map(item => item.card));
+      for (const {record, practice, progress} of cards) {
+        if (practice) watchPractice(progress, record.completed, null, practice);
       }
-      const lesson = words(record.package);
-      const progress = gui ? h("section", { class: "practice-progress" }) : null;
-      put(tools, h("div", { class: "tutorial-title" }, icon("shell"), h("h2", { tabindex: "-1", text: lesson.title })),
-        gui ? null : h("p", { class: "tutorial-progress", text: t(record.completed ? "tutorial.complete" : "tutorial.installed") }),
-        lessonIntroduction(record.package, lesson),
-        gui ? progress : h("p", { class: "lab-guide", text: lesson.guide }), gui ? null : codeLine("podbag lab start"),
-        h("div", { class: "buttons-row" },
-          button("shell", t("status.terminal"), () => toolsAction("start"), "primary"),
-          gui ? button("volumes", t("practice.volumes"), () => go("lab-volumes")) : button("refresh", t("action.refresh"), () => toolsAction("status")),
-          button("remove", t("tutorial.uninstall"), async () => {
-            if (await confirmDialog(t("tutorial.removeNote"), t("tutorial.uninstall"))) await toolsAction("remove");
-          })));
-      if (gui) watchPractice(progress, record.completed);
       return true;
     } catch (error) {
       status.textContent = String(error);
@@ -100,7 +121,7 @@ function renderTutorials(main) {
       try {
         if (file.size > TUTORIAL_LIMIT) throw Error();
         const pack = JSON.parse(await file.text());
-        const cliLab = [GUI_VOLUME_FORMAT, "podbag-cli-tui-volumes-v1"].includes(pack?.format);
+        const cliLab = [CONTAINER_FORMAT, GUI_VOLUME_FORMAT, "podbag-cli-tui-volumes-v1"].includes(pack?.format);
         if (cliLab ? !pack.translations?.en?.title : !validTutorial(pack)) throw Error();
         if (!input.isConnected) return;
         show("tutorials", titleOf(words(pack)), h("p", { class: "mono", text: file.name }),

@@ -27,7 +27,7 @@ async function test() {
   };
   try {
     win.localStorage.removeItem(key);
-    btn("Tutorials").click();
+    btn("Training").click();
     check(!btn("Start lab"), "The lab needs installation");
     await select("broken");
     check(doc.querySelector(".tutorial-status").textContent, "Explain an invalid package");
@@ -40,7 +40,7 @@ async function test() {
     await new Promise(resolve => setTimeout(resolve, 0));
     check(!!btn("Start lab"), "Installed lab is available");
     win.podbag.go("containers");
-    btn("Tutorials").click();
+    btn("Training").click();
     await new Promise(resolve => setTimeout(resolve, 0));
     check(doc.getElementById("tutorial-heading").textContent === "Lab · My HTTP lab", "Show an unnumbered title after reopening the installed module");
     btn("Install module").click();

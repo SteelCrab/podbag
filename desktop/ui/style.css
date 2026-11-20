@@ -641,7 +641,7 @@ dialog.import { width: min(520px, calc(100vw - 48px)); }
 .tutorial { padding-block-start: 20px; }
 .tutorial-card { max-width: 680px; padding: 22px; overflow-wrap: anywhere; }
 .tutorial-card + .tutorial-card { margin-top: 16px; }
-.tutorial-card[hidden] + .tutorial-card { margin-top: 0; }
+.training-library:not([hidden]) { margin-bottom: 16px; }
 .lesson-intro { margin: 0 0 18px; }
 .lesson-intro h3 { margin: 0 0 5px; font-size: 16px; }
 .lesson-intro video { display: block; width: 100%; height: auto; max-width: 530px;

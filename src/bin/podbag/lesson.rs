@@ -1,5 +1,7 @@
 use crate::args::LabCmd;
-use podbag::volume_lesson;
+use podbag::volume_lesson::{self, Module};
+#[cfg(unix)]
+mod containers;
 #[cfg(unix)]
 use std::path::Path;
 use std::{fs, io};
@@ -8,14 +10,27 @@ pub fn command(cmd: LabCmd) -> i32 {
     let result = (|| {
         match cmd {
             #[cfg(unix)]
-            LabCmd::Workspace => return workspace(),
+            LabCmd::Workspace { containers: true } => return containers::workspace(),
+            #[cfg(unix)]
+            LabCmd::Workspace { containers: false } => return workspace(),
             #[cfg(unix)]
             LabCmd::DesktopView {
                 library,
                 action,
                 session,
                 name,
+                containers,
             } => {
+                if containers {
+                    let snapshot = volume_lesson::containers::view(
+                        &library,
+                        &action,
+                        session.as_deref(),
+                        name.as_deref().unwrap_or(""),
+                    )?;
+                    println!("{}", serde_json::to_string(&snapshot)?);
+                    return Ok(());
+                }
                 let snapshot = volume_lesson::gui::view(
                     &library,
                     &action,
@@ -30,18 +45,39 @@ pub fn command(cmd: LabCmd) -> i32 {
                 fs::File::open(file)?
                     .take(volume_lesson::LIMIT as u64 + 1)
                     .read_to_string(&mut text)?;
-                volume_lesson::install(&volume_lesson::directory()?, &text)?;
-                println!("Installed. Run podbag lab start.");
+                let module = volume_lesson::install(&volume_lesson::directory()?, &text)?;
+                println!("Installed. Run podbag lab start {}.", module.id());
             }
-            LabCmd::Remove => {
-                volume_lesson::remove(&volume_lesson::directory()?)?;
+            LabCmd::List => {
+                for record in volume_lesson::list(&volume_lesson::directory()?)? {
+                    let module = Module::for_format(&record.package.format)?;
+                    println!(
+                        "{}	{}	{}",
+                        module.id(),
+                        if record.completed {
+                            "Complete"
+                        } else {
+                            "Installed"
+                        },
+                        record.words("en").title
+                    );
+                }
+            }
+            LabCmd::Remove { module } => {
+                let dir = volume_lesson::directory()?;
+                volume_lesson::remove(&dir, volume_lesson::selected(&dir, module.as_deref())?)?;
                 println!("Module removed.");
             }
-            LabCmd::Start { lang, library } => {
+            LabCmd::Start {
+                module,
+                lang,
+                library,
+            } => {
                 let dir = match library {
                     Some(dir) => dir,
                     None => volume_lesson::directory()?,
                 };
+                let module = volume_lesson::selected(&dir, module.as_deref())?;
                 let lang = lang
                     .or_else(|| std::env::var("LANG").ok())
                     .unwrap_or_else(|| "en".into());
@@ -53,6 +89,7 @@ pub fn command(cmd: LabCmd) -> i32 {
                         &[
                             "lab".into(),
                             "start".into(),
+                            module.id().into(),
                             "--lang".into(),
                             lang,
                             "--library".into(),
@@ -66,14 +103,10 @@ pub fn command(cmd: LabCmd) -> i32 {
                 }
                 #[cfg(unix)]
                 {
-                    let installed = volume_lesson::read(&dir)?.ok_or_else(|| {
+                    let installed = volume_lesson::read(&dir, module)?.ok_or_else(|| {
                         io::Error::other("Install the module with podbag lab install FILE first.")
                     })?;
-                    if session(
-                        installed.words(&lang),
-                        (installed.package.format == volume_lesson::gui::FORMAT)
-                            .then_some(dir.as_path()),
-                    )? {
+                    if session(installed.words(&lang), &dir, module)? {
                         installed.finish(&dir)?;
                     }
                 }
@@ -164,15 +197,25 @@ fn workspace() -> io::Result<()> {
 }
 
 #[cfg(unix)]
-fn session(words: &volume_lesson::Words, library: Option<&Path>) -> io::Result<bool> {
+fn session(words: &volume_lesson::Words, library: &Path, module: Module) -> io::Result<bool> {
     use std::io::{BufRead, BufReader, IsTerminal};
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
     if !io::stdin().is_terminal() {
         return Err(io::Error::other("Open the lab in an interactive terminal."));
     }
-    let mut owner = Command::new(std::env::current_exe()?)
-        .args(["lab", "workspace"])
+    let container_lab = module == Module::Containers;
+    let prompt = if container_lab {
+        "container-lab $ "
+    } else {
+        "volume-lab $ "
+    };
+    let mut command = Command::new(std::env::current_exe()?);
+    command.args(["lab", "workspace"]);
+    if container_lab {
+        command.arg("--containers");
+    }
+    let mut owner = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .process_group(0)
@@ -184,9 +227,15 @@ fn session(words: &volume_lesson::Words, library: Option<&Path>) -> io::Result<b
             return Err(io::Error::other("The practice engine did not start."));
         }
         let dir = Path::new(line.trim_end());
-        if let Some(library) = library {
-            registration = Some(volume_lesson::gui::Registration::open(library, dir)?);
-        }
+        registration = match module {
+            Module::Containers => Some(volume_lesson::gui::Registration::open_for(
+                library,
+                dir,
+                volume_lesson::containers::ACTIVE,
+            )?),
+            Module::Volumes => Some(volume_lesson::gui::Registration::open(library, dir)?),
+            Module::Tui => None,
+        };
         if let Some(intro) = &words.intro {
             println!("\n{}\n{}", intro.title, intro.text);
         }
@@ -196,10 +245,10 @@ fn session(words: &volume_lesson::Words, library: Option<&Path>) -> io::Result<b
                 .arg("-i")
                 .env("ENV", "/dev/null")
                 .env("HISTFILE", "/dev/null")
-                .env("PS1", "volume-lab $ ")
+                .env("PS1", prompt)
                 .status()?;
         } else {
-            terminal_without_shell(dir)?;
+            terminal_without_shell(dir, prompt)?;
         }
         Ok(dir.join("verified").is_file())
     })();
@@ -225,11 +274,11 @@ fn session(words: &volume_lesson::Words, library: Option<&Path>) -> io::Result<b
 /// The Podbag WSL distribution contains just the engine. Run each command as a real
 /// child on the attached console so the normal TUI can take over the terminal.
 #[cfg(unix)]
-fn terminal_without_shell(dir: &Path) -> io::Result<()> {
+fn terminal_without_shell(dir: &Path, prompt: &str) -> io::Result<()> {
     use std::io::Write;
     let exe = std::env::current_exe()?;
     loop {
-        print!("volume-lab $ ");
+        print!("{prompt}");
         io::stdout().flush()?;
         let mut line = String::new();
         if io::stdin().read_line(&mut line)? == 0 || line.trim() == "exit" {
@@ -243,7 +292,9 @@ fn terminal_without_shell(dir: &Path) -> io::Result<()> {
             Some((name, args)) if name == "podbag" => {
                 practice_command(&exe, dir)?.args(args).status()?;
             }
-            Some(_) => eprintln!("Run podbag volume, podbag tui, or exit."),
+            Some(_) => {
+                eprintln!("Run the podbag commands shown in the practice guide, or type exit.")
+            }
             None => {}
         }
     }
@@ -264,6 +315,15 @@ pub fn scoped(root: &Path, cmd: crate::args::Cmd) -> i32 {
     {
         eprintln!("podbag: this lab session is closed or its environment has changed.");
         return 1;
+    }
+    if root.join("run/container-lab").is_file() {
+        return match containers::scoped(root, cmd) {
+            Ok(code) => code,
+            Err(e) => {
+                eprintln!("podbag: {e}");
+                1
+            }
+        };
     }
     match cmd {
         Cmd::System {

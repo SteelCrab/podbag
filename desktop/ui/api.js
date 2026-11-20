@@ -11,8 +11,8 @@ const API = (() => {
   const listen = (name, fn) => tauri.event.listen(events.has(name) ? `${name}-${token}` : name, (e) => fn(e.payload));
 
   return {
-    practiceVolumes: (action = "status", session = null, name = null) => invoke("practice_volumes", { action, session, name }),
-    volumeToolsLab: (action, pack = null) => invoke("volume_tools_lab", { action, package: pack, lang: I18N.lang }),
+    practiceVolumes: (action = "status", session = null, name = null, containers = false) => invoke("practice_volumes", { action, session, name, containers }),
+    volumeToolsLab: (action, pack = null, id = null) => invoke("volume_tools_lab", { action, package: pack, lang: I18N.lang, id }),
     tutorialLab: (action, value = null) => invoke("tutorial_lab", { action, value }),
     async connection() {
       const [id, name, local] = await invoke("connection");

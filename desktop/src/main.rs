@@ -1085,37 +1085,57 @@ fn practice_volumes(
     action: String,
     session: Option<String>,
     name: Option<String>,
-) -> Result<Option<podbag::volume_lesson::gui::Snapshot>, String> {
-    use podbag::volume_lesson::{directory, gui};
-    let dir = directory().map_err(|e| e.to_string())?;
+    containers: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    use podbag::volume_lesson as lesson;
+    let dir = lesson::directory().map_err(|e| e.to_string())?;
+    let containers = containers.unwrap_or(false);
     #[cfg(unix)]
     {
-        gui::view(
+        if containers {
+            let view = lesson::containers::view(
+                &dir,
+                &action,
+                session.as_deref(),
+                name.as_deref().unwrap_or(""),
+            );
+            return serde_json::to_value(view.map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string());
+        }
+        let view = lesson::gui::view(
             &dir,
             &action,
             session.as_deref(),
             name.as_deref().unwrap_or(""),
-        )
-        .map_err(|e| e.to_string())
+        );
+        serde_json::to_value(view.map_err(|e| e.to_string())?).map_err(|e| e.to_string())
     }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        if !dir.join(gui::ACTIVE).exists() && action == "status" {
-            return Ok(None);
+        let active = if containers {
+            lesson::containers::ACTIVE
+        } else {
+            lesson::gui::ACTIVE
+        };
+        if !dir.join(active).exists() && action == "status" {
+            return Ok(serde_json::Value::Null);
         }
         let path = podbag::wsl::wsl_path(&dir.to_string_lossy())?;
-        let out = std::process::Command::new("wsl.exe")
-            .args([
-                "-d",
-                podbag::wsl::DISTRO,
-                "--exec",
-                podbag::wsl::ENGINE,
-                "lab",
-                "desktop-view",
-                &path,
-                &action,
-            ])
+        let mut command = std::process::Command::new("wsl.exe");
+        command.args([
+            "-d",
+            podbag::wsl::DISTRO,
+            "--exec",
+            podbag::wsl::ENGINE,
+            "lab",
+            "desktop-view",
+        ]);
+        if containers {
+            command.arg("--containers");
+        }
+        let out = command
+            .args([&path, &action])
             .args(session)
             .args(name)
             .creation_flags(0x08000000)
@@ -1134,22 +1154,31 @@ fn volume_tools_lab(
     action: &str,
     package: Option<String>,
     lang: Option<String>,
-) -> Result<Option<podbag::volume_lesson::Installed>, String> {
+    id: Option<String>,
+) -> Result<Vec<LessonRecord>, String> {
     use podbag::volume_lesson as lesson;
     let dir = lesson::directory().map_err(|e| e.to_string())?;
+    let module = || lesson::selected(&dir, id.as_deref()).map_err(|e| e.to_string());
     match action {
         "status" | "summary" => {}
-        "install" => lesson::install(&dir, package.as_deref().ok_or("Choose a module file.")?)
-            .map_err(|e| e.to_string())?,
-        "remove" => lesson::remove(&dir).map_err(|e| e.to_string())?,
+        "install" => {
+            lesson::install(&dir, package.as_deref().ok_or("Choose a module file.")?)
+                .map_err(|e| e.to_string())?;
+        }
+        "remove" => lesson::remove(&dir, module()?).map_err(|e| e.to_string())?,
         "start" => {
-            if lesson::read(&dir).map_err(|e| e.to_string())?.is_none() {
+            let module = module()?;
+            if lesson::read(&dir, module)
+                .map_err(|e| e.to_string())?
+                .is_none()
+            {
                 return Err("Install the module first.".into());
             }
             let argv = [
                 state.podbag.to_string_lossy().into_owned(),
                 "lab".into(),
                 "start".into(),
+                module.id().into(),
                 "--lang".into(),
                 lang.unwrap_or_else(|| "en".into()),
                 "--library".into(),
@@ -1160,19 +1189,39 @@ fn volume_tools_lab(
             #[cfg(not(target_os = "macos"))]
             let opened = commands::open_terminal(Some(&argv));
             if !opened {
-                return Err("Open a terminal and run podbag lab start.".into());
+                return Err(format!(
+                    "Open a terminal and run podbag lab start {}.",
+                    module.id()
+                ));
             }
+            return Ok(Vec::new());
         }
         _ => return Err("Unknown lesson action.".into()),
     }
-    let mut record = lesson::read(&dir).map_err(|e| e.to_string())?;
-    // Progress polling and sidebar discovery only need the installation state.
-    if action == "summary"
-        && let Some(record) = &mut record
-    {
-        record.package.animation = None;
+    let mut records = Vec::new();
+    for mut record in lesson::list(&dir).map_err(|e| e.to_string())? {
+        let key = lesson::Module::for_format(&record.package.format)
+            .map_err(|e| e.to_string())?
+            .id();
+        if id
+            .as_deref()
+            .is_some_and(|id| action == "summary" && id != key)
+        {
+            continue;
+        }
+        if action == "summary" {
+            record.package.animation = None;
+        }
+        records.push(LessonRecord { id: key, record });
     }
-    Ok(record)
+    Ok(records)
+}
+
+#[derive(serde::Serialize)]
+struct LessonRecord {
+    id: &'static str,
+    #[serde(flatten)]
+    record: podbag::volume_lesson::Installed,
 }
 
 #[tauri::command]
