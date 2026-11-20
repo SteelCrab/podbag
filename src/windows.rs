@@ -71,7 +71,12 @@ pub fn vm_command(args: &[String]) -> i32 {
             .and_then(|()| run_quiet(&["-d", DISTRO, "--exec", ENGINE, "--version"]))
             .map(|()| println!("running"))
     };
+    const USAGE: &str = "usage: podbag vm start|status [--json]|stop|restart|rm";
     let done = match args.first().map(String::as_str) {
+        Some("--help" | "-h" | "help") => {
+            println!("{USAGE}");
+            Ok(())
+        }
         Some("start") => start(),
         Some("status") if json => status().map(|s| println!("{}", status_json(s))),
         Some("status") => status().map(|s| println!("{s}")),
@@ -85,7 +90,7 @@ pub fn vm_command(args: &[String]) -> i32 {
                 .into(),
         ),
         _ => {
-            eprintln!("usage: podbag vm start|status [--json]|stop|restart|rm");
+            eprintln!("{USAGE}");
             return 2;
         }
     };

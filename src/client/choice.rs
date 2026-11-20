@@ -87,7 +87,12 @@ impl Target {
             None => {
                 let endpoint = Endpoint::find(podbag)?;
                 let choice = match &endpoint {
-                    Endpoint::Socket { path, own: false } => Choice::Socket(path.clone()),
+                    Endpoint::Socket { path, own: false } => {
+                        return Ok(Target {
+                            choice: Choice::Socket(path.clone()),
+                            endpoint: socket_endpoint(path, podbag),
+                        });
+                    }
                     _ => Choice::Podbag,
                 };
                 Ok(Target { choice, endpoint })
@@ -119,10 +124,7 @@ impl Target {
             }
             Some(Choice::Socket(p)) => Ok(Target {
                 choice: Choice::Socket(p.clone()),
-                endpoint: Endpoint::Socket {
-                    path: p.clone(),
-                    own: false,
-                },
+                endpoint: socket_endpoint(p, podbag),
             }),
         }
     }
@@ -131,6 +133,17 @@ impl Target {
     pub fn cli(&self, podbag: &Path, docker: Option<&Path>) -> Option<Vec<OsString>> {
         if self.choice == Choice::Podbag {
             return Some(vec![podbag.as_os_str().into()]);
+        }
+        #[cfg(windows)]
+        if let Choice::Socket(path) = &self.choice {
+            return Some(vec![
+                "wsl.exe".into(),
+                "--distribution".into(),
+                crate::wsl::DISTRO.into(),
+                "--exec".into(),
+                "docker".into(),
+                format!("--host=unix://{}", path.display()).into(),
+            ]);
         }
         if let Endpoint::Socket { .. } = &self.endpoint {
             let host = self.endpoint.describe();
@@ -161,7 +174,8 @@ impl Target {
 
     /// A registry login may be sent to Podbag or a local API socket.
     pub fn allows_registry_auth(&self) -> bool {
-        self.choice == Choice::Podbag || matches!(self.endpoint, Endpoint::Socket { .. })
+        matches!(self.choice, Choice::Podbag | Choice::Socket(_))
+            || matches!(self.endpoint, Endpoint::Socket { .. })
     }
 
     pub fn is_docker(&self) -> bool {
@@ -179,6 +193,25 @@ impl Target {
             _ => self.endpoint.ensure_running(podbag, start_vm),
         }
     }
+}
+
+#[cfg(unix)]
+fn socket_endpoint(path: &Path, _podbag: &Path) -> Endpoint {
+    Endpoint::Socket {
+        path: path.to_path_buf(),
+        own: false,
+    }
+}
+
+#[cfg(windows)]
+fn socket_endpoint(path: &Path, podbag: &Path) -> Endpoint {
+    Endpoint::Command(vec![
+        podbag.as_os_str().into(),
+        "system".into(),
+        "dial-stdio".into(),
+        "--socket".into(),
+        path.as_os_str().into(),
+    ])
 }
 
 fn docker_proxy(flag: String) -> Endpoint {
@@ -226,6 +259,13 @@ fn runtime_endpoint(choice: &Choice) -> Result<Endpoint, String> {
         };
         Ok(Endpoint::Socket { path, own: false })
     }
+}
+
+/// Engine presets and the user's Docker contexts.
+pub fn engine_choices() -> Vec<Choice> {
+    let mut choices = vec![Choice::Podbag, Choice::Docker, Choice::Podman, Choice::Kiri];
+    choices.extend(docker_contexts().into_iter().map(Choice::Context));
+    choices
 }
 
 /// Local Docker contexts, as reported by the host CLI.

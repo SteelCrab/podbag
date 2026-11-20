@@ -16,16 +16,9 @@ use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Table
 
 const ACCENT: Color = Color::Blue;
 
-fn title(kind: Kind) -> &'static str {
-    match kind {
-        Kind::Containers => "Containers",
-        Kind::Images => "Images",
-        Kind::Volumes => "Volumes",
-        Kind::Networks => "Networks",
-    }
-}
-
 pub fn draw(f: &mut Frame, app: &mut App) {
+    let area = f.area();
+    f.buffer_mut().set_style(area, app.appearance.style());
     app.areas = Areas::default();
     let [header, tabs, body, message, keys] = Layout::vertical([
         Constraint::Length(1),
@@ -37,6 +30,19 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     .areas(f.area());
     draw_header(f, app, header);
     draw_tabs(f, app, tabs);
+    let body = if app.appearance.sidebar && body.width >= 56 {
+        let width = app
+            .appearance
+            .sidebar_width
+            .clamp(14, 36)
+            .min(body.width / 3);
+        let [nav, body] =
+            Layout::horizontal([Constraint::Length(width), Constraint::Fill(1)]).areas(body);
+        draw_sidebar(f, app, nav);
+        body
+    } else {
+        body
+    };
     match &app.mode {
         Mode::Text { .. } => draw_text(f, app, body),
         _ => draw_list(f, app, body),
@@ -89,7 +95,10 @@ fn draw_header(f: &mut Frame, app: &mut App, area: Rect) {
                 .bg(ACCENT)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("  Engine ", dim),
+        Span::styled(
+            format!("  {} ", app.appearance.text("settings.engine")),
+            dim,
+        ),
         Span::styled(
             app.engine.clone(),
             Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
@@ -131,10 +140,11 @@ fn draw_header(f: &mut Frame, app: &mut App, area: Rect) {
 fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect) {
     let mut spans = Vec::new();
     for (n, k) in Kind::ALL.iter().enumerate() {
+        let label = app.appearance.text(&format!("nav.{}", k.segment()));
         let text = if app.loaded {
-            format!(" {} {} {} ", n + 1, title(*k), app.count(*k))
+            format!(" {} {} {} ", n + 1, label, app.count(*k))
         } else {
-            format!(" {} {} ", n + 1, title(*k))
+            format!(" {} {} ", n + 1, label)
         };
         let style = if *k == app.tab {
             Style::new()
@@ -155,10 +165,43 @@ fn draw_tabs(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
+fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
+    let block = Block::new().borders(Borders::RIGHT);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    for (index, kind) in Kind::ALL.into_iter().enumerate() {
+        let row = Rect::new(inner.x, inner.y + index as u16, inner.width, 1).intersection(inner);
+        let style = if kind == app.tab {
+            Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        let name = app.appearance.text(&format!("nav.{}", kind.segment()));
+        f.render_widget(
+            Paragraph::new(format!("{} {name}", index + 1)).style(style),
+            row,
+        );
+        app.areas.tabs.push((row, kind));
+    }
+    for (index, page) in super::dashboard::Page::ALL.into_iter().enumerate() {
+        let row =
+            Rect::new(inner.x, inner.y + 5 + index as u16, inner.width, 1).intersection(inner);
+        f.render_widget(
+            Paragraph::new(format!(
+                "F{} {}",
+                index + 6,
+                app.appearance.text(page.label())
+            )),
+            row,
+        );
+        app.areas.pages.push((row, page));
+    }
+}
+
 fn headers(kind: Kind) -> (Vec<&'static str>, Vec<Constraint>) {
     match kind {
         Kind::Containers => (
-            vec!["NAME", "IMAGE", "STATUS", "PORTS"],
+            vec!["col.name", "col.image", "detail.status", "col.ports"],
             vec![
                 Constraint::Fill(2),
                 Constraint::Fill(3),
@@ -167,7 +210,7 @@ fn headers(kind: Kind) -> (Vec<&'static str>, Vec<Constraint>) {
             ],
         ),
         Kind::Images => (
-            vec!["NAME", "ID", "SIZE", "CREATED"],
+            vec!["col.name", "col.id", "col.size", "col.created"],
             vec![
                 Constraint::Fill(4),
                 Constraint::Length(12),
@@ -176,7 +219,7 @@ fn headers(kind: Kind) -> (Vec<&'static str>, Vec<Constraint>) {
             ],
         ),
         Kind::Volumes => (
-            vec!["NAME", "DRIVER", "CREATED"],
+            vec!["col.name", "col.driver", "col.created"],
             vec![
                 Constraint::Fill(3),
                 Constraint::Length(8),
@@ -184,7 +227,7 @@ fn headers(kind: Kind) -> (Vec<&'static str>, Vec<Constraint>) {
             ],
         ),
         Kind::Networks => (
-            vec!["NAME", "DRIVER", "SUBNET", "ID"],
+            vec!["col.name", "col.driver", "col.subnet", "col.id"],
             vec![
                 Constraint::Fill(2),
                 Constraint::Length(8),
@@ -197,20 +240,21 @@ fn headers(kind: Kind) -> (Vec<&'static str>, Vec<Constraint>) {
 
 /// What an empty list says.
 fn empty_text(app: &App) -> Vec<Line<'static>> {
+    if let Some(error) = &app.lists.errors[super::app::tab_index(app.tab)] {
+        return vec![
+            Line::styled(error.clone(), Style::new().fg(Color::Red)),
+            Line::from(format!("F5 · {}", app.appearance.text("action.retry"))),
+        ];
+    }
     if !app.loaded {
-        return vec![Line::from("Loading…")];
+        return vec![Line::from(app.appearance.text("engine.checking"))];
     }
     if !app.search.is_empty() {
-        return vec![Line::from(format!(
-            "Nothing matches \"{}\". Press Esc to clear the search.",
-            app.search
-        ))];
-    }
-    if !matches!(app.engine.as_str(), "podbag" | "Docker") && app.tab != Kind::Images {
-        return vec![Line::from(format!(
-            "No {} on this engine.",
-            app.tab.segment()
-        ))];
+        return vec![Line::from(
+            app.appearance
+                .text("empty.search")
+                .replace("{q}", &app.search),
+        )];
     }
     let hint = Style::new().fg(ACCENT);
     // The command of the engine shown.
@@ -221,21 +265,21 @@ fn empty_text(app: &App) -> Vec<Line<'static>> {
     };
     match app.tab {
         Kind::Containers => vec![
-            Line::from("No containers yet. Start one in another terminal:"),
+            Line::from(app.appearance.text("empty.containers.title")),
             Line::from(""),
             Line::styled(
                 format!("  {cli} run -d --name web -p 8080:80 nginx:alpine"),
                 hint,
             ),
         ],
-        Kind::Images => vec![Line::from("No images yet. Press p to pull one.")],
+        Kind::Images => vec![Line::from(app.appearance.text("empty.images.title"))],
         Kind::Volumes => vec![
-            Line::from("No volumes yet. Create one:"),
+            Line::from(app.appearance.text("empty.volumes.title")),
             Line::from(""),
             Line::styled(format!("  {cli} volume create data"), hint),
         ],
         Kind::Networks => vec![
-            Line::from("No networks yet. Create one:"),
+            Line::from(app.appearance.text("empty.networks.title")),
             Line::from(""),
             Line::styled(format!("  {cli} network create app"), hint),
         ],
@@ -245,7 +289,7 @@ fn empty_text(app: &App) -> Vec<Line<'static>> {
 fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
     let rows = app.rows(app.tab);
     let (list_area, details_area) = if area.height >= 14 && !rows.is_empty() {
-        let [a, b] = Layout::vertical([Constraint::Min(5), Constraint::Length(6)]).areas(area);
+        let [a, b] = Layout::vertical([Constraint::Min(5), Constraint::Length(7)]).areas(area);
         (a, Some(b))
     } else {
         (area, None)
@@ -255,14 +299,22 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
             .borders(Borders::TOP)
             .border_style(Style::new().fg(Color::DarkGray))
             .title(Span::styled(
-                format!(" {} ", title(app.tab)),
+                format!(
+                    " {} ",
+                    app.appearance.text(&format!("nav.{}", app.tab.segment()))
+                ),
                 Style::new().add_modifier(Modifier::BOLD),
             ));
         f.render_widget(Paragraph::new(empty_text(app)).block(block), list_area);
         return;
     }
     let (names, widths) = headers(app.tab);
-    let header = Row::new(names.into_iter().map(Cell::from)).style(
+    let header = Row::new(
+        names
+            .into_iter()
+            .map(|key| Cell::from(app.appearance.text(key).to_uppercase())),
+    )
+    .style(
         Style::new()
             .add_modifier(Modifier::BOLD)
             .fg(Color::DarkGray),
@@ -304,6 +356,7 @@ fn draw_list(f: &mut Frame, app: &mut App, area: Rect) {
 /// The selected object's summary, under the list.
 fn draw_details(f: &mut Frame, app: &App, id: &str, name: &str, area: Rect) {
     let field = |k: &str, v: String| {
+        let k = app.appearance.text(k);
         Line::from(vec![
             Span::styled(format!("{k:<9}"), Style::new().fg(Color::DarkGray)),
             Span::raw(v),
@@ -315,11 +368,11 @@ fn draw_details(f: &mut Frame, app: &App, id: &str, name: &str, area: Rect) {
                 return;
             };
             vec![
-                field("ID", short_id(&c.id).to_string()),
-                field("Image", c.image.clone()),
-                field("Command", c.command.clone()),
+                field("col.id", short_id(&c.id).to_string()),
+                field("col.image", c.image.clone()),
+                field("detail.command", c.command.clone()),
                 field(
-                    "Created",
+                    "col.created",
                     format!(
                         "{}   Ports: {}",
                         super::app::ago(app.now, c.created),
@@ -337,10 +390,20 @@ fn draw_details(f: &mut Frame, app: &App, id: &str, name: &str, area: Rect) {
                 return;
             };
             vec![
-                field("ID", i.id.clone()),
-                field("Tags", i.repo_tags.join(", ")),
-                field("Size", super::app::size(i.size)),
-                field("Created", super::app::ago(app.now, i.created)),
+                field("col.id", i.id.clone()),
+                field("detail.tags", i.repo_tags.join(", ")),
+                field(
+                    "detail.used",
+                    app.lists
+                        .containers
+                        .iter()
+                        .filter(|c| c.image == i.id || i.repo_tags.contains(&c.image))
+                        .map(|c| c.name())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ),
+                field("col.size", super::app::size(i.size)),
+                field("col.created", super::app::ago(app.now, i.created)),
             ]
         }
         Kind::Volumes => {
@@ -348,10 +411,10 @@ fn draw_details(f: &mut Frame, app: &App, id: &str, name: &str, area: Rect) {
                 return;
             };
             vec![
-                field("Name", v.name.clone()),
-                field("Driver", v.driver.clone()),
-                field("Path", v.mountpoint.clone()),
-                field("Created", v.created_at.clone()),
+                field("col.name", v.name.clone()),
+                field("col.driver", v.driver.clone()),
+                field("detail.path", v.mountpoint.clone()),
+                field("col.created", v.created_at.clone()),
             ]
         }
         Kind::Networks => {
@@ -359,10 +422,18 @@ fn draw_details(f: &mut Frame, app: &App, id: &str, name: &str, area: Rect) {
                 return;
             };
             vec![
-                field("ID", n.id.clone()),
-                field("Driver", n.driver.clone()),
-                field("Subnet", n.subnet().to_string()),
-                field("Scope", n.scope.clone()),
+                field("col.id", n.id.clone()),
+                field("col.driver", n.driver.clone()),
+                field("col.subnet", n.subnet().to_string()),
+                field(
+                    "detail.gateway",
+                    n.ipam
+                        .config
+                        .first()
+                        .map(|c| c.gateway.clone())
+                        .unwrap_or_default(),
+                ),
+                field("detail.scope", n.scope.clone()),
             ]
         }
     };
@@ -399,7 +470,7 @@ fn draw_text(f: &mut Frame, app: &mut App, area: Rect) {
     let start = if *follow { last } else { (*scroll).min(last) };
     let shown: Vec<Line> = if lines.is_empty() && *logs {
         vec![Line::styled(
-            "No output yet.",
+            app.appearance.text("detail.noLogs"),
             Style::new().fg(Color::DarkGray),
         )]
     } else {
@@ -433,7 +504,12 @@ fn draw_message(f: &mut Frame, app: &App, area: Rect) {
         ])
     } else if let Some(v) = &app.update {
         Line::styled(
-            format!("Update {v} available: podbag upgrade"),
+            format!(
+                "{} · a",
+                app.appearance
+                    .text("update.available")
+                    .replace("{version}", v)
+            ),
             Style::new().fg(Color::Yellow),
         )
     } else {
@@ -447,13 +523,13 @@ fn draw_keys(f: &mut Frame, app: &mut App, area: Rect) {
     let hints = app.key_help();
     for (n, (k, what)) in hints.iter().enumerate() {
         if n > 0 {
-            spans.push(Span::raw("  "));
+            spans.push(Span::raw(" "));
         }
         spans.push(Span::styled(
             *k,
             Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
         ));
-        spans.push(Span::raw(format!(" {what}")));
+        spans.push(Span::raw(format!(" {}", app.appearance.hint(what))));
     }
     let places = place(area, &spans);
     // Each hint is a gap (but the first), its key and its words.
@@ -477,6 +553,13 @@ fn draw_keys(f: &mut Frame, app: &mut App, area: Rect) {
 fn draw_pull(f: &mut Frame, app: &App, form: &PullForm) {
     let dim = Style::new().fg(Color::DarkGray);
     let cursor = Span::styled(" ", Style::new().add_modifier(Modifier::REVERSED));
+    let local = |english: &str, key: &str| {
+        if app.appearance.lang() == "en" {
+            english.to_owned()
+        } else {
+            app.appearance.text(key)
+        }
+    };
     let label = |t: &str| Span::styled(format!("{t:<7}"), dim);
     let field = |name: &str, text: &str, typing: bool| {
         let mut spans = vec![label(name), Span::raw(text.to_string())];
@@ -487,31 +570,39 @@ fn draw_pull(f: &mut Frame, app: &App, form: &PullForm) {
     };
     let place = form.place();
     let login = match app.logins.get(&place) {
-        None => Span::styled("Checking the login…", dim),
-        Some(None) => Span::styled("Not logged in", dim),
+        None => Span::styled(local("Checking the login…", "engine.checking"), dim),
+        Some(None) => Span::styled(local("Not logged in", "terminal.noAccount"), dim),
         Some(Some(user)) => Span::styled(
-            format!("Logged in as {user}"),
+            local("Logged in as {user}", "terminal.account").replace("{user}", user),
             Style::new().fg(Color::Green),
         ),
     };
     let mut lines = vec![
         Line::from(vec![
-            label("From"),
+            label(&local("From", "pull.location")),
             Span::styled(
                 place.label(),
                 Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  (Tab: another)", dim),
+            Span::styled("  (Tab / F2)", dim),
         ]),
-        Line::from(vec![label("Login"), login]),
+        Line::from(vec![label(&local("Login", "pull.user")), login]),
     ];
     if place.needs_host() {
-        lines.push(field("Host", &form.host, form.on_host));
+        lines.push(field(
+            &local("Host", "settings.socket"),
+            &form.host,
+            form.on_host,
+        ));
     }
-    lines.push(field("Image", &form.name, !form.on_host));
+    lines.push(field(
+        &local("Image", "col.image"),
+        &form.name,
+        !form.on_host,
+    ));
     if let Some(hint) = place.login_hint() {
         lines.push(Line::from(""));
-        lines.push(Line::styled("To log in:", dim));
+        lines.push(Line::styled(app.appearance.text("pull.login"), dim));
         // `aws ecr … | docker login …` on two lines.
         for part in hint.split(" | ") {
             lines.push(Line::styled(format!("  {part}"), dim));
@@ -537,9 +628,12 @@ fn draw_pull(f: &mut Frame, app: &App, form: &PullForm) {
         }
     } else if app.can_search && place == podbag::client::Location::DockerHub {
         lines.push(Line::from(""));
-        lines.push(Line::styled("Type a name to search Docker Hub.", dim));
+        lines.push(Line::styled(
+            local("Type a name to search Docker Hub.", "pull.hint"),
+            dim,
+        ));
     }
-    popup(f, "Pull image", lines);
+    popup(f, &app.appearance.text("action.pull"), lines);
 }
 
 /// A question, with Yes and No to click.
@@ -550,13 +644,16 @@ fn draw_confirm(f: &mut Frame, app: &mut App, question: String) {
         .add_modifier(Modifier::BOLD);
     let buttons = vec![
         Span::raw("  "),
-        Span::styled(" Yes ", button),
+        Span::styled(format!(" {} ", app.appearance.text("terminal.yes")), button),
         Span::raw("   "),
-        Span::styled(" No ", Style::new().add_modifier(Modifier::REVERSED)),
+        Span::styled(
+            format!(" {} ", app.appearance.text("terminal.no")),
+            Style::new().add_modifier(Modifier::REVERSED),
+        ),
     ];
     let rect = popup(
         f,
-        "Are you sure?",
+        &app.appearance.text("confirm.title"),
         vec![
             Line::from(question),
             Line::from(""),
@@ -582,39 +679,69 @@ fn draw_help(f: &mut Frame, app: &App) {
             Span::raw(what.to_string()),
         ])
     };
-    let head = |t: &str| Line::styled(t.to_string(), Style::new().add_modifier(Modifier::BOLD));
+    let name = |key: &str| app.appearance.text(key);
     let mut lines = vec![
-        head("All lists"),
-        key("1-4 ←→ Tab", "switch list"),
-        key("↑↓ PgUp PgDn", "move"),
-        key("⏎ i", "inspect"),
-        key("/  Esc", "find, clear"),
-        key("c", "prune what is not used"),
-        key("F5", "refresh now"),
-        key("E", "podbag or Docker (saved)"),
-        key("m", "mouse on or off"),
-        key("q", "quit"),
-        head("Containers"),
-        key("s x r", "start, stop, restart"),
-        key("d", "remove"),
+        key(
+            "1–4, Tab",
+            &Kind::ALL
+                .map(|k| name(&format!("nav.{}", k.segment())))
+                .join(" / "),
+        ),
+        key(
+            "Alt+← / →",
+            &format!("{} / {}", name("action.back"), name("action.forward")),
+        ),
+        key("/  Esc", &name("search.placeholder")),
+        key("⏎ i", &name("action.inspect")),
+        key("a / F2", &name("col.actions")),
+        key("F5", &name("action.refresh")),
+        key(
+            "F6–F9",
+            &super::dashboard::Page::ALL
+                .map(|p| name(p.label()))
+                .join(" / "),
+        ),
+        key(
+            "b  [ ]",
+            &format!("{} / {}", name("sidebar.show"), name("sidebar.resize")),
+        ),
+        key(
+            "E",
+            &format!("{} · podbag / Docker", name("settings.engine")),
+        ),
+        key(
+            "s x r",
+            &["action.start", "action.stop", "action.restart"]
+                .map(name)
+                .join(" / "),
+        ),
+        key("l", &name("action.logs")),
+        key(
+            "p  d  c",
+            &["action.pull", "action.remove", "action.prune"]
+                .map(name)
+                .join(" / "),
+        ),
+        key("v", &name("volume.create")),
     ];
-    lines.push(if app.shell {
-        key("l  e", "logs, shell (sh)")
-    } else {
-        key("l", "logs")
-    });
+    if app.shell {
+        lines.push(key("e", &name("action.shell")));
+    }
     if app.features.pause {
-        lines.push(key("p", "pause or resume"));
+        lines.push(key(
+            "p",
+            &["action.pause", "action.resume"].map(name).join(" / "),
+        ));
     }
     if app.features.rename {
-        lines.push(key("n", "rename"));
+        lines.push(key("n", &name("action.rename")));
     }
     if app.docker.is_some() {
-        lines.insert(9, key("D", "the docker command: podbag or back"));
+        lines.push(key("D", &name("docker.command")));
     }
-    lines.push(head("Images"));
-    lines.push(key("p  d", "pull, remove"));
-    popup(f, "Keys", lines);
+    lines.push(key("m", &name("terminal.mouse")));
+    lines.push(key("q", &name("tray.quit")));
+    popup(f, &name("terminal.keys"), lines);
 }
 
 /// A box in the middle of the screen; where it is.
@@ -662,7 +789,7 @@ pub fn buffer_text(buf: &Buffer) -> String {
         .join("\n")
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::super::app::tests::{code, key, sample};
     use super::super::app::{Effect, Msg};
@@ -748,10 +875,10 @@ mod tests {
         app.on_key(key('?'));
         let s = screen(&mut app, 80, 24);
         assert!(
-            s.contains("Keys") && s.contains("start, stop, restart"),
+            s.contains("Keys") && s.contains("Start / Stop / Restart"),
             "{s}"
         );
-        assert!(!s.contains("pause or resume"), "{s}");
+        assert!(!s.contains("Pause / Resume"), "{s}");
         app.on_key(key('x'));
         app.on_key(key('2'));
         app.on_key(key('p'));
