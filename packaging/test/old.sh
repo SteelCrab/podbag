@@ -6,9 +6,13 @@
 #     packaging/test/old.sh dist/podbag-x86_64-linux-gnu dist/podbag-0.1.0-1.x86_64.rpm
 set -eu
 
-gnu=$1
 pkg=$2
 step() { printf '\n== %s\n' "$*"; }
+
+# podbag starts helpers from the program named podbag next to itself.
+mkdir -p /tmp/gnu
+install -m 0755 "$1" /tmp/gnu/podbag
+gnu=/tmp/gnu/podbag
 
 step "glibc program"
 ldd --version | head -n 1

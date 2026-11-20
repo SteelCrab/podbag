@@ -130,8 +130,9 @@ jobs:
         run: packaging/test/deb.sh dist/podbag_*_${{ matrix.pkg }}.deb
       - name: glibc program, rootless
         run: |
-          bin=dist/podbag-${{ matrix.arch }}-linux-gnu
-          chmod +x "$bin"
+          # podbag starts helpers from the program named podbag next to itself.
+          bin=$RUNNER_TEMP/gnu/podbag
+          install -D -m 0755 dist/podbag-${{ matrix.arch }}-linux-gnu "$bin"
           ldd "$bin"
           "$bin" --version
           # Without the package's profile, allow user namespaces to all programs.

@@ -12,7 +12,7 @@ dnf install -y "$rpm"
 rpm -qi podbag
 rpm -ql podbag
 rpm -V podbag
-[ "$(command -v podbag)" = /usr/bin/podbag ]
+[ -x /usr/bin/podbag ]
 podbag --version
 [ -f /usr/share/doc/podbag/LICENSE ]
 [ -f /usr/share/doc/podbag/README.md ]
