@@ -184,6 +184,9 @@ fn use_podbag_with(
     docker: &Path,
     podbag_socket: &Path,
 ) -> Result<(), String> {
+    if podbag_socket.as_os_str().is_empty() {
+        return Err("This host has no Podbag Unix socket for the Docker CLI. Use the Docker CLI inside WSL.".into());
+    }
     let want = format!("unix://{}", podbag_socket.display());
     let spec = format!("host={want}");
     let found = docker_cli(run, docker, &["context", "inspect", PODBAG_CONTEXT]).ok();

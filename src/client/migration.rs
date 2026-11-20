@@ -625,7 +625,7 @@ pub fn migrate(
     progress: impl Fn(&str),
 ) -> Result<(), String> {
     progress("prepare");
-    if from.endpoint.describe() == to.endpoint.describe() {
+    if from.endpoint.same_target(&to.endpoint) {
         return Err("Choose two different engines".into());
     }
     from.ping().map_err(|e| format!("Source: {e}"))?;

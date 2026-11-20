@@ -2913,6 +2913,7 @@ dependencies = [
 name = "podbag"
 version = "0.2.0"
 dependencies = [
+ "auto-launch",
  "block2",
  "clap",
  "dispatch2",
@@ -2924,6 +2925,7 @@ dependencies = [
  "objc2",
  "objc2-foundation",
  "objc2-virtualization",
+ "open",
  "prost",
  "ratatui",
  "rustix",
@@ -2931,8 +2933,10 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.1",
+ "sys-locale",
  "tar",
  "tempfile",
+ "tiny_http",
  "ureq",
 ]
 
@@ -2949,8 +2953,6 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-autostart",
  "tempfile",
- "tiny_http",
- "ureq",
 ]
 
 [[package]]

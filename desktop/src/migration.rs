@@ -62,7 +62,7 @@ pub fn migrate(
             },
             &request.kind,
             &request.name,
-            &request.uid,
+            Some(&request.uid),
             progress,
         ),
         _ => {
@@ -91,28 +91,8 @@ pub fn migrate(
 
 #[tauri::command(async)]
 pub fn migration_sources(state: State<'_, AppState>) -> Vec<String> {
-    let mut seen = std::collections::BTreeSet::new();
-    [Choice::Podbag, Choice::Podman, Choice::Kiri, Choice::Docker]
+    podbag::dashboard::local_engines(&state.podbag)
         .into_iter()
-        .filter_map(|choice| {
-            let target = Target::find(Some(&choice), &state.podbag).ok()?;
-            let identity = match &target.endpoint {
-                podbag::client::Endpoint::Socket { path, .. } => std::fs::canonicalize(path)
-                    .unwrap_or_else(|_| path.clone())
-                    .to_string_lossy()
-                    .into_owned(),
-                cmd => cmd.describe(),
-            };
-            if !seen.insert(identity) {
-                return None;
-            }
-            #[cfg(target_os = "macos")]
-            if choice == Choice::Podbag
-                && commands::vm_status(&state.podbag).as_deref() != Some("running")
-            {
-                return None;
-            }
-            target.endpoint.listening().then(|| choice.to_setting())
-        })
+        .map(|t| t.choice.to_setting())
         .collect()
 }

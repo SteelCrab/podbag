@@ -447,25 +447,66 @@ pub fn save_in(file: &Path, choice: &Choice) -> Result<(), String> {
     })
 }
 
+/// Lock a config path while reading or replacing its contents.
+pub(crate) fn with_json_lock<T>(
+    file: &Path,
+    f: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    use std::fs::{self, OpenOptions};
+    let directory = file
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    fs::create_dir_all(directory).map_err(|e| format!("{}: {e}", directory.display()))?;
+    let name = file.file_name().unwrap_or_default().to_string_lossy();
+    let lock_path = file.with_file_name(format!(".{name}.lock"));
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|e| format!("{}: {e}", lock_path.display()))?;
+    lock.lock()
+        .map_err(|e| format!("{}: {e}", lock_path.display()))?;
+    f()
+}
+
 /// Change a JSON object file in place: written beside it, then renamed over it.
 pub fn update_json(file: &Path, change: impl FnOnce(&mut serde_json::Value)) -> Result<(), String> {
-    let err = |p: &Path, e: std::io::Error| format!("{}: {e}", p.display());
-    let mut v: serde_json::Value = std::fs::read(file)
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .filter(serde_json::Value::is_object)
-        .unwrap_or_else(|| serde_json::json!({}));
-    change(&mut v);
-    if let Some(dir) = file.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| err(dir, e))?;
-    }
-    let name = file.file_name().unwrap_or_default().to_string_lossy();
-    let tmp = file.with_file_name(format!(".{name}.{}", std::process::id()));
-    let text = serde_json::to_vec_pretty(&v).map_err(|e| e.to_string())?;
-    std::fs::write(&tmp, text).map_err(|e| err(&tmp, e))?;
-    std::fs::rename(&tmp, file).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        err(file, e)
+    update_json_if(file, |value| {
+        change(value);
+        true
+    })
+}
+
+pub(crate) fn update_json_if(
+    file: &Path,
+    change: impl FnOnce(&mut serde_json::Value) -> bool,
+) -> Result<(), String> {
+    use std::io::Write;
+    with_json_lock(file, || {
+        let err = |e: std::io::Error| format!("{}: {e}", file.display());
+        let mut v: serde_json::Value = match std::fs::read(file) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .ok()
+                .filter(serde_json::Value::is_object)
+                .unwrap_or_else(|| serde_json::json!({})),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+            Err(e) => return Err(err(e)),
+        };
+        if !change(&mut v) {
+            return Ok(());
+        }
+        let text = serde_json::to_vec_pretty(&v).map_err(|e| e.to_string())?;
+        let dir = file
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(err)?;
+        tmp.write_all(&text).map_err(err)?;
+        tmp.persist(file).map_err(|e| err(e.error))?;
+        Ok(())
     })
 }
 
