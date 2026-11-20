@@ -28,6 +28,12 @@ contents:
     expand: true
     file_info:
       mode: 0755
+  # rpm removes only the directories that the package owns.
+  - dst: /usr/share/doc/podbag
+    type: dir
+    packager: rpm
+    file_info:
+      mode: 0755
   - src: README.md
     dst: /usr/share/doc/podbag/README.md
     file_info:

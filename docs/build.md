@@ -161,7 +161,8 @@ builds and tests, but publishes nothing.
 - The .deb on Ubuntu 26.04: install, a rootless container with AppArmor's restriction on,
   purge.
 - The .rpm in a Fedora 44 container: install, run, remove.
-- The glibc build and the packages on AlmaLinux 8 (glibc 2.28) and Debian 11.
+- The glibc build and the packages on AlmaLinux 8 (glibc 2.28) and Debian 12
+  (AppArmor 3.0).
 - `install.sh` with the new and the older file names.
 - All on x86_64 and arm64.
 
