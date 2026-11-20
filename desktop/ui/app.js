@@ -7,7 +7,7 @@ const KINDS = ["containers", "images", "volumes", "networks"];
 const t = (key, vars) => I18N.t(key, vars);
 
 const S = {
-  view: "containers", // a kind, or "settings"
+  view: "containers", // an engine resource, "kubernetes" or "settings"
   detail: null, // { kind, id, tab }
   lists: { containers: [], images: [], volumes: [], networks: [] },
   loaded: false,
@@ -346,7 +346,10 @@ function setupWindowBar() {
   const actions = document.getElementById("window-actions");
   windowBar.prepend(document.querySelector(".brand"));
   document.getElementById("engine").remove();
-  const reload = iconButton("refresh", "", () => S.engine?.reachable ? refresh() : connect(false));
+  const reload = iconButton("refresh", "", () => {
+    if (S.view === "kubernetes") return reloadKubernetes();
+    return S.engine?.reachable ? refresh() : connect(false);
+  });
   const settings = iconButton("settings", "", () => go("settings"));
   actions.append(reload, settings);
   document.getElementById("nav-bottom").remove();
@@ -381,10 +384,10 @@ function go(view) {
 
 function renderNav() {
   const nav = document.getElementById("nav");
-  nav.replaceChildren(...KINDS.map((k) =>
+  nav.replaceChildren(...[...KINDS, "kubernetes"].map((k) =>
     h("li", {}, h("button", {
       type: "button", class: "nav-item", "aria-current": S.view === k ? "page" : null, onclick: () => go(k),
-    }, icon(k), h("span", { class: "label", text: t(`nav.${k}`) }), S.loaded ? h("span", { class: "count", text: S.lists[k].length }) : null))));
+    }, icon(k), h("span", { class: "label", text: t(`nav.${k}`) }), S.loaded && S.lists[k] ? h("span", { class: "count", text: S.lists[k].length }) : null))));
   if (windowBar) {
     const [reload, settings] = document.getElementById("window-actions").children;
     for (const [button, label] of [[reload, t("action.refresh")], [settings, t("nav.settings")]]) {
@@ -423,9 +426,16 @@ function renderEngine() {
 // ---- the main area ----
 
 let shownView = null;
+let reloadKubernetes;
 
 function renderMain(fresh) {
   const main = document.getElementById("main");
+  if (S.view === "kubernetes") {
+    if (fresh || shownView !== S.view) reloadKubernetes = renderKubernetes(main);
+    shownView = S.view;
+    return;
+  }
+  reloadKubernetes = null;
   if (S.view === "settings") {
     if (fresh || shownView !== "settings") renderSettings(main);
     shownView = "settings";
@@ -777,6 +787,7 @@ function onLogs(batch) {
 
 async function renderSettings(main) {
   if (!S.languageNames) S.languageNames = await I18N.names();
+  if (S.view !== "settings") return;
   const lang = h("select", {
     id: "language",
     onchange: async (e) => { S.settings.language = e.target.value; await saveSettings(); },
