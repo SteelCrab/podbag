@@ -87,7 +87,12 @@ impl Target {
             None => {
                 let endpoint = Endpoint::find(podbag)?;
                 let choice = match &endpoint {
-                    Endpoint::Socket { path, own: false } => Choice::Socket(path.clone()),
+                    Endpoint::Socket { path, own: false } => {
+                        return Ok(Target {
+                            choice: Choice::Socket(path.clone()),
+                            endpoint: socket_endpoint(path, podbag),
+                        });
+                    }
                     _ => Choice::Podbag,
                 };
                 Ok(Target { choice, endpoint })
@@ -119,10 +124,7 @@ impl Target {
             }
             Some(Choice::Socket(p)) => Ok(Target {
                 choice: Choice::Socket(p.clone()),
-                endpoint: Endpoint::Socket {
-                    path: p.clone(),
-                    own: false,
-                },
+                endpoint: socket_endpoint(p, podbag),
             }),
         }
     }
@@ -131,6 +133,17 @@ impl Target {
     pub fn cli(&self, podbag: &Path, docker: Option<&Path>) -> Option<Vec<OsString>> {
         if self.choice == Choice::Podbag {
             return Some(vec![podbag.as_os_str().into()]);
+        }
+        #[cfg(windows)]
+        if let Choice::Socket(path) = &self.choice {
+            return Some(vec![
+                "wsl.exe".into(),
+                "--distribution".into(),
+                crate::wsl::DISTRO.into(),
+                "--exec".into(),
+                "docker".into(),
+                format!("--host=unix://{}", path.display()).into(),
+            ]);
         }
         if let Endpoint::Socket { .. } = &self.endpoint {
             let host = self.endpoint.describe();
@@ -161,7 +174,8 @@ impl Target {
 
     /// A registry login may be sent to Podbag or a local API socket.
     pub fn allows_registry_auth(&self) -> bool {
-        self.choice == Choice::Podbag || matches!(self.endpoint, Endpoint::Socket { .. })
+        matches!(self.choice, Choice::Podbag | Choice::Socket(_))
+            || matches!(self.endpoint, Endpoint::Socket { .. })
     }
 
     pub fn is_docker(&self) -> bool {
@@ -179,6 +193,25 @@ impl Target {
             _ => self.endpoint.ensure_running(podbag, start_vm),
         }
     }
+}
+
+#[cfg(unix)]
+fn socket_endpoint(path: &Path, _podbag: &Path) -> Endpoint {
+    Endpoint::Socket {
+        path: path.to_path_buf(),
+        own: false,
+    }
+}
+
+#[cfg(windows)]
+fn socket_endpoint(path: &Path, podbag: &Path) -> Endpoint {
+    Endpoint::Command(vec![
+        podbag.as_os_str().into(),
+        "system".into(),
+        "dial-stdio".into(),
+        "--socket".into(),
+        path.as_os_str().into(),
+    ])
 }
 
 fn docker_proxy(flag: String) -> Endpoint {
@@ -226,6 +259,13 @@ fn runtime_endpoint(choice: &Choice) -> Result<Endpoint, String> {
         };
         Ok(Endpoint::Socket { path, own: false })
     }
+}
+
+/// Engine presets and the user's Docker contexts.
+pub fn engine_choices() -> Vec<Choice> {
+    let mut choices = vec![Choice::Podbag, Choice::Docker, Choice::Podman, Choice::Kiri];
+    choices.extend(docker_contexts().into_iter().map(Choice::Context));
+    choices
 }
 
 /// Local Docker contexts, as reported by the host CLI.
@@ -447,25 +487,66 @@ pub fn save_in(file: &Path, choice: &Choice) -> Result<(), String> {
     })
 }
 
+/// Lock a config path while reading or replacing its contents.
+pub(crate) fn with_json_lock<T>(
+    file: &Path,
+    f: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    use std::fs::{self, OpenOptions};
+    let directory = file
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    fs::create_dir_all(directory).map_err(|e| format!("{}: {e}", directory.display()))?;
+    let name = file.file_name().unwrap_or_default().to_string_lossy();
+    let lock_path = file.with_file_name(format!(".{name}.lock"));
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|e| format!("{}: {e}", lock_path.display()))?;
+    lock.lock()
+        .map_err(|e| format!("{}: {e}", lock_path.display()))?;
+    f()
+}
+
 /// Change a JSON object file in place: written beside it, then renamed over it.
 pub fn update_json(file: &Path, change: impl FnOnce(&mut serde_json::Value)) -> Result<(), String> {
-    let err = |p: &Path, e: std::io::Error| format!("{}: {e}", p.display());
-    let mut v: serde_json::Value = std::fs::read(file)
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .filter(serde_json::Value::is_object)
-        .unwrap_or_else(|| serde_json::json!({}));
-    change(&mut v);
-    if let Some(dir) = file.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| err(dir, e))?;
-    }
-    let name = file.file_name().unwrap_or_default().to_string_lossy();
-    let tmp = file.with_file_name(format!(".{name}.{}", std::process::id()));
-    let text = serde_json::to_vec_pretty(&v).map_err(|e| e.to_string())?;
-    std::fs::write(&tmp, text).map_err(|e| err(&tmp, e))?;
-    std::fs::rename(&tmp, file).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        err(file, e)
+    update_json_if(file, |value| {
+        change(value);
+        true
+    })
+}
+
+pub(crate) fn update_json_if(
+    file: &Path,
+    change: impl FnOnce(&mut serde_json::Value) -> bool,
+) -> Result<(), String> {
+    use std::io::Write;
+    with_json_lock(file, || {
+        let err = |e: std::io::Error| format!("{}: {e}", file.display());
+        let mut v: serde_json::Value = match std::fs::read(file) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .ok()
+                .filter(serde_json::Value::is_object)
+                .unwrap_or_else(|| serde_json::json!({})),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+            Err(e) => return Err(err(e)),
+        };
+        if !change(&mut v) {
+            return Ok(());
+        }
+        let text = serde_json::to_vec_pretty(&v).map_err(|e| e.to_string())?;
+        let dir = file
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(err)?;
+        tmp.write_all(&text).map_err(err)?;
+        tmp.persist(file).map_err(|e| err(e.error))?;
+        Ok(())
     })
 }
 

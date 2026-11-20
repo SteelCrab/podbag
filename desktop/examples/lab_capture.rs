@@ -1,8 +1,7 @@
 //! Drive the native lab for documentation screenshots without opening a desktop window.
 //! Run with `cargo run -p podbag-desktop --example lab_capture`. Send one JSON
 //! object per line, e.g. `{"action":"start"}`. Closing stdin ends the lab.
-#[path = "../src/lab.rs"]
-mod lab;
+use podbag::dashboard::lab;
 
 use serde::Deserialize;
 use serde_json::{Value, json};

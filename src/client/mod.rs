@@ -12,6 +12,7 @@ pub mod migration;
 pub mod registries;
 mod registry_presets;
 mod run;
+pub mod time;
 mod wire;
 
 pub use choice::{Choice, Target, find_docker_cli, ui_dir};
@@ -401,6 +402,33 @@ impl Client {
 
     pub fn containers(&self) -> Result<Vec<ContainerSummary>> {
         self.get("/containers/json?all=1")
+    }
+
+    /// Create a named volume on this engine.
+    pub fn create_volume(&self, name: &str) -> Result<()> {
+        self.call(
+            "POST",
+            "/volumes/create",
+            Some(&serde_json::json!({"Name": name})),
+        )
+        .map(drop)
+    }
+
+    /// Stream the selected images directly from the source engine.
+    pub fn import_images(
+        &self,
+        from: &Client,
+        names: &[String],
+    ) -> std::result::Result<(), String> {
+        if self.endpoint.same_target(&from.endpoint) {
+            return Err("Choose two different engines".into());
+        }
+        if names.is_empty() {
+            return Err("no images chosen".into());
+        }
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let archive = from.export_images(&names).map_err(|e| e.message)?;
+        self.load_images(archive).map_err(|e| e.message)
     }
 
     pub fn images(&self) -> Result<Vec<ImageSummary>> {

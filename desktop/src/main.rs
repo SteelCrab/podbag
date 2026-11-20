@@ -4,13 +4,13 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod cli;
-mod cluster_migration;
+use podbag::dashboard::cli;
+use podbag::dashboard::cluster_migration;
 mod commands;
 mod dockercmd;
 mod images;
 mod kubernetes;
-mod lab;
+use podbag::dashboard::lab;
 mod migration;
 mod settings;
 mod strings;
@@ -297,15 +297,7 @@ fn remove(
 #[tauri::command(async)]
 fn create_volume(state: State<'_, AppState>, token: u64, name: String) -> Result<(), String> {
     let session = state.session(token)?;
-    session
-        .client
-        .call(
-            "POST",
-            "/volumes/create",
-            Some(&serde_json::json!({ "Name": name })),
-        )
-        .map(|_| ())
-        .map_err(|e| e.message)
+    session.client.create_volume(&name).map_err(|e| e.message)
 }
 
 #[tauri::command(async)]

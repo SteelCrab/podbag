@@ -4,8 +4,13 @@
 //! threads; the screen never waits for them.
 
 mod app;
+mod dashboard;
+mod dialog;
 mod mouse;
+mod preferences;
 mod pull;
+mod resources;
+mod tutorial;
 mod view;
 
 use app::{App, Effect, Lists, Msg, Verb};
@@ -16,7 +21,8 @@ use podbag::client::{
 };
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyEventKind,
 };
 use ratatui::crossterm::execute;
 use std::path::{Path, PathBuf};
@@ -56,11 +62,7 @@ pub fn run(once: bool, engine: Option<Choice>, mouse: bool) -> i32 {
         }
         return print_once(&target);
     }
-    // Docker is never started: the TUI says so, and E goes back to podbag.
-    if let (Err(e), false) = (&ready, target.is_docker()) {
-        eprintln!("podbag: {e}");
-        return 1;
-    }
+    // An unavailable browsing engine must not hide settings, labs or other engines.
     if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
         eprintln!("podbag: the TUI needs a terminal");
         return 1;
@@ -80,6 +82,10 @@ pub fn run(once: bool, engine: Option<Choice>, mouse: bool) -> i32 {
         Engines::real()
     };
     let mut runtime = Runtime::new(target, exe, engines);
+    runtime.app.appearance = preferences::Appearance::load();
+    if let Err(e) = ready {
+        runtime.app.message = Some((e, true));
+    }
     runtime.app.mouse = mouse;
     if !practice {
         runtime.app.update = podbag::upgrade::known_newer().map(|v| v.to_string());
@@ -94,14 +100,23 @@ pub fn run(once: bool, engine: Option<Choice>, mouse: bool) -> i32 {
     // ratatui's hook restores the terminal on a panic; the mouse must go back too.
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let _ = execute!(std::io::stdout(), DisableMouseCapture);
+        let _ = execute!(
+            std::io::stdout(),
+            DisableMouseCapture,
+            DisableBracketedPaste
+        );
         hook(info);
     }));
+    let _ = execute!(std::io::stdout(), EnableBracketedPaste);
     if mouse {
         let _ = execute!(std::io::stdout(), EnableMouseCapture);
     }
     let result = runtime.run(&mut terminal);
-    let _ = execute!(std::io::stdout(), DisableMouseCapture);
+    let _ = execute!(
+        std::io::stdout(),
+        DisableMouseCapture,
+        DisableBracketedPaste
+    );
     ratatui::restore();
     match result {
         Ok(()) => 0,
@@ -118,6 +133,10 @@ fn print_once(target: &Target) -> i32 {
     app.now = now();
     app.vm = vm_state(target);
     match load_text(&Client::new(target.endpoint.clone()), target.is_docker()) {
+        Ok(l) if l.errors[0].is_some() => {
+            eprintln!("podbag: {}", l.errors[0].as_deref().unwrap_or_default());
+            return 1;
+        }
         Ok(l) => app.set_lists(l),
         Err(e) => {
             eprintln!("podbag: {e}");
@@ -139,12 +158,25 @@ fn now() -> i64 {
 
 /// All four lists.
 fn load(client: &Client) -> Result<Lists, ApiError> {
-    Ok(Lists {
-        containers: client.containers()?,
-        images: client.images()?,
-        volumes: client.volumes()?,
-        networks: client.networks()?,
-    })
+    fn read<T>(
+        result: Result<Vec<T>, ApiError>,
+        error: &mut Option<String>,
+    ) -> Result<Vec<T>, ApiError> {
+        match result {
+            Ok(items) => Ok(items),
+            Err(e) if e.status != 0 => {
+                *error = Some(e.message);
+                Ok(Vec::new())
+            }
+            Err(e) => Err(e),
+        }
+    }
+    let mut lists = Lists::default();
+    lists.containers = read(client.containers(), &mut lists.errors[0])?;
+    lists.images = read(client.images(), &mut lists.errors[1])?;
+    lists.volumes = read(client.volumes(), &mut lists.errors[2])?;
+    lists.networks = read(client.networks(), &mut lists.errors[3])?;
+    Ok(lists)
 }
 
 /// All four lists, or what to show: when Docker does not answer, how to start it.
@@ -159,7 +191,7 @@ fn load_text(client: &Client, docker: bool) -> Result<Lists, String> {
 }
 
 /// The macOS VM's state, for podbag only. Elsewhere there is none to show (on Windows
-/// the TUI runs in the WSL distribution).
+/// Windows VM state is available in Settings).
 #[allow(unused_variables)]
 fn vm_state(target: &Target) -> Option<&'static str> {
     #[cfg(target_os = "macos")]
@@ -267,6 +299,7 @@ impl Engines {
         let docker_cli = choice::find_docker_cli();
         let podbag_socket = match Endpoint::podbag_default(&exe) {
             Ok(Endpoint::Socket { path, .. }) => Some(path),
+            _ if cfg!(windows) => Some(PathBuf::new()),
             _ => None,
         };
         Engines {
@@ -300,6 +333,8 @@ impl Tx {
 }
 
 struct Runtime {
+    lab: podbag::dashboard::lab::Lab,
+    vm_stopped: bool,
     target: Target,
     client: Client,
     exe: PathBuf,
@@ -336,6 +371,8 @@ impl Runtime {
             app.docker_previous = (d.previous)();
         }
         Runtime {
+            lab: Default::default(),
+            vm_stopped: false,
             client: Client::new(target.endpoint.clone()),
             target,
             exe,
@@ -371,6 +408,7 @@ impl Runtime {
             if event::poll(Duration::from_millis(100))? {
                 let effect = match event::read()? {
                     Event::Key(k) if k.kind != KeyEventKind::Release => self.app.on_key(k),
+                    Event::Paste(s) => self.app.paste(&s),
                     Event::Mouse(m) => self.app.on_mouse(m, Instant::now()),
                     _ => Effect::None,
                 };
@@ -381,13 +419,21 @@ impl Runtime {
                         return Ok(());
                     }
                     Effect::Shell { id, name } => self.shell(&id, &name, terminal)?,
+                    Effect::Dashboard
+                    | Effect::Page(_)
+                    | Effect::CreateVolume
+                    | Effect::ChooseRegistry
+                    | Effect::RegistryLogin(_) => self.open_dashboard(terminal, effect)?,
                     e => self.apply(e),
                 }
             }
             while let Ok((generation, msg)) = self.rx.try_recv() {
                 self.on_tagged(generation, msg);
             }
-            if !self.loading && self.next_refresh.is_some_and(|t| Instant::now() >= t) {
+            if !self.vm_stopped
+                && !self.loading
+                && self.next_refresh.is_some_and(|t| Instant::now() >= t)
+            {
                 self.refresh();
             }
             self.search_if_due();
@@ -400,6 +446,107 @@ impl Runtime {
                 }
             }
         }
+    }
+
+    fn open_dashboard(
+        &mut self,
+        terminal: &mut DefaultTerminal,
+        effect: Effect,
+    ) -> std::io::Result<()> {
+        use dashboard::Change;
+        if self.app.busy.is_some() {
+            return Ok(());
+        }
+        // A watch retry can wake a stopped VM. Stop watching before VM controls open.
+        self.generation += 1;
+        self.current.store(self.generation, Ordering::SeqCst);
+        self.close_events();
+        self.close_logs();
+        self.loading = false;
+        self.asked_features = false;
+        self.app.live = false;
+        let mut ui = dialog::Screen {
+            terminal,
+            look: &mut self.app.appearance,
+        };
+        let result = match effect {
+            Effect::CreateVolume => resources::volume(&mut ui, &self.client).map(|_| Change::None),
+            Effect::RegistryLogin(place) => {
+                resources::login(&mut ui, &self.exe, &place).map(|_| Change::None)
+            }
+            Effect::ChooseRegistry => resources::choose_registry(&mut ui).map(|place| {
+                if let app::Mode::Pull(form) = &mut self.app.mode {
+                    form.set_place(&place);
+                }
+                Change::None
+            }),
+            Effect::Page(page) => {
+                dashboard::page(&mut ui, &self.target, &self.exe, &mut self.lab, page)
+            }
+            _ => dashboard::open(&mut ui, &self.target, &self.exe, &mut self.lab),
+        };
+        match result {
+            Ok(Change::Engine(choice)) => {
+                if self.select_engine(choice) {
+                    return Ok(());
+                }
+            }
+            Ok(Change::Vm(on)) => {
+                self.vm_stopped = !on;
+                if !on {
+                    self.app.set_lists(Lists::default());
+                    self.app.live = false;
+                }
+                self.app.vm = (self.engines.vm)(&self.target);
+            }
+            #[cfg(unix)]
+            Ok(Change::UpgradeTerminal) => {
+                let mut command = std::process::Command::new("sudo");
+                command.arg(&self.exe).arg("upgrade");
+                self.run_shell(&mut command, "podbag upgrade", terminal)?;
+            }
+            Ok(Change::Terminal) => {
+                #[cfg(windows)]
+                let mut shell = std::process::Command::new("cmd.exe");
+                #[cfg(not(windows))]
+                let mut shell = std::process::Command::new(
+                    std::env::var_os("SHELL").unwrap_or_else(|| "/bin/sh".into()),
+                );
+                self.run_shell(&mut shell, "terminal", terminal)?;
+            }
+            Ok(Change::Pull) => {
+                let login = self.app.open_pull();
+                self.apply(login);
+            }
+            Ok(Change::Notice(text)) => self.app.message = Some((text, false)),
+            Ok(Change::None) => {
+                if let app::Mode::Pull(form) = &self.app.mode {
+                    self.apply(Effect::Login(form.place()));
+                }
+            }
+            Err(dialog::Error::Back) => {}
+            Err(dialog::Error::Failed(msg)) => {
+                let mut screen = dialog::Screen {
+                    terminal,
+                    look: &mut self.app.appearance,
+                };
+                let title = screen.t("error.title");
+                let message = screen.t(if msg == "kubectl-missing" {
+                    "kube.missing"
+                } else {
+                    &msg
+                });
+                if let Err(dialog::Error::Io(e)) = screen.message(&title, &message) {
+                    return Err(e);
+                }
+            }
+            Err(dialog::Error::Io(e)) => return Err(e),
+        }
+        if !self.vm_stopped {
+            self.watch_events();
+            self.soon(Duration::ZERO);
+        }
+        Ok(())
     }
 
     /// A message from a thread; dropped when it is of an older engine.
@@ -463,11 +610,13 @@ impl Runtime {
         std::thread::spawn(move || {
             while mine() {
                 if let Ok(events) = client.events() {
-                    *slot.lock().unwrap_or_else(|p| p.into_inner()) = Some(events.closer());
-                    // Switched while it opened: the switch may have missed this closer.
-                    if !mine() {
-                        events.closer().close();
-                        return;
+                    {
+                        let mut active = slot.lock().unwrap_or_else(|p| p.into_inner());
+                        if !mine() {
+                            events.closer().close();
+                            return;
+                        }
+                        *active = Some(events.closer());
                     }
                     if !tx.send(Msg::Live(true)) {
                         return;
@@ -520,13 +669,18 @@ impl Runtime {
             Choice::Podbag => Choice::Docker,
             _ => Choice::Podbag,
         };
+        self.select_engine(next);
+    }
+
+    fn select_engine(&mut self, next: Choice) -> bool {
         let target = match (self.engines.find)(&next) {
             Ok(t) => t,
             Err(e) => {
                 self.app.message = Some((format!("Cannot use {}: {e}", next.label()), true));
-                return;
+                return false;
             }
         };
+        self.vm_stopped = false;
         self.close_logs();
         self.generation += 1;
         self.current.store(self.generation, Ordering::SeqCst);
@@ -561,13 +715,33 @@ impl Runtime {
             tx.send(Msg::Lists(lists));
         });
         self.watch_events();
+        true
     }
 
     /// Run an effect in a thread (the shell, which takes the terminal, is not here).
     fn apply(&mut self, effect: Effect) {
         let (client, tx) = (self.client.clone(), self.sender());
         match effect {
-            Effect::None | Effect::Quit | Effect::Shell { .. } => {}
+            Effect::None
+            | Effect::Quit
+            | Effect::Shell { .. }
+            | Effect::Dashboard
+            | Effect::Page(_)
+            | Effect::CreateVolume
+            | Effect::RegistryLogin(_)
+            | Effect::ChooseRegistry => {}
+            Effect::SaveLayout => {
+                let look = &self.app.appearance;
+                match preferences::Appearance::set_sidebar(
+                    Some(look.sidebar),
+                    Some(look.sidebar_width),
+                ) {
+                    Ok(saved) => self.app.appearance = saved,
+                    Err(e) => {
+                        self.app.message = Some((e, true));
+                    }
+                }
+            }
             Effect::Refresh => self.soon(Duration::ZERO),
             Effect::CloseLogs => self.close_logs(),
             Effect::SwitchEngine => self.switch_engine(),
@@ -646,6 +820,14 @@ impl Runtime {
                 }
             }
             Effect::Login(location) => {
+                if matches!(&self.app.mode, app::Mode::Pull(form) if !form.on_host)
+                    && let Err(error) = resources::save_registry_host(&location)
+                {
+                    if let app::Mode::Pull(form) = &mut self.app.mode {
+                        form.error = Some(error);
+                    }
+                    return;
+                }
                 let login = self.engines.login.clone();
                 std::thread::spawn(move || {
                     let account = login(&location);
@@ -720,17 +902,31 @@ impl Runtime {
             self.app.message = Some(("No shell: the docker CLI is not installed".into(), true));
             return Ok(());
         };
+        self.run_shell(&mut command, name, terminal)
+    }
+
+    fn run_shell(
+        &mut self,
+        command: &mut std::process::Command,
+        name: &str,
+        terminal: &mut DefaultTerminal,
+    ) -> std::io::Result<()> {
         use ratatui::crossterm::terminal as term;
         execute!(
             std::io::stdout(),
             DisableMouseCapture,
+            DisableBracketedPaste,
             term::LeaveAlternateScreen
         )?;
         term::disable_raw_mode()?;
         terminal.show_cursor()?;
         let status = command.status();
         term::enable_raw_mode()?;
-        execute!(std::io::stdout(), term::EnterAlternateScreen)?;
+        execute!(
+            std::io::stdout(),
+            term::EnterAlternateScreen,
+            EnableBracketedPaste
+        )?;
         if self.app.mouse {
             execute!(std::io::stdout(), EnableMouseCapture)?;
         }
@@ -746,7 +942,7 @@ impl Runtime {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use podbag::client::fake::{FakeEngine, small_engine};

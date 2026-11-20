@@ -18,6 +18,7 @@ const WHEEL_LINES: usize = 3;
 #[derive(Debug, Clone, Default)]
 pub struct Areas {
     pub tabs: Vec<(Rect, Kind)>,
+    pub pages: Vec<(Rect, super::dashboard::Page)>,
     /// The engine's name in the header.
     pub engine: Option<Rect>,
     /// Where the `docker` command goes, in the header.
@@ -36,6 +37,8 @@ pub fn hint_key(hint: &str) -> Option<KeyEvent> {
         "⏎" | "Enter" => KeyCode::Enter,
         "Esc" | "any key" => KeyCode::Esc,
         "Tab" => KeyCode::Tab,
+        "F2" => KeyCode::F(2),
+        "F3" => KeyCode::F(3),
         _ => {
             let mut chars = hint.chars();
             match (chars.next(), chars.next()) {
@@ -97,6 +100,9 @@ impl App {
     }
 
     fn click_list(&mut self, p: Position, at: Instant) -> Effect {
+        if let Some((_, page)) = self.areas.pages.iter().find(|(r, _)| r.contains(p)) {
+            return Effect::Page(*page);
+        }
         if let Some((_, kind)) = self.areas.tabs.iter().find(|(r, _)| r.contains(p)) {
             let kind = *kind;
             self.mode = Mode::List;
@@ -135,7 +141,7 @@ impl App {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::super::app::tests::{code, key, sample};
     use super::super::app::{App, Effect, Mode, Verb};

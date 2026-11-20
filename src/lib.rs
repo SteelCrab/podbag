@@ -26,6 +26,8 @@ mod credentials;
 #[cfg(unix)]
 #[doc(hidden)]
 pub mod cri;
+#[cfg(feature = "dashboard")]
+pub mod dashboard;
 #[doc(hidden)]
 pub mod diagnose;
 #[doc(hidden)]

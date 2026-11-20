@@ -48,6 +48,48 @@ fn image_commands_exist() {
     }
 }
 
+#[test]
+fn dashboard_commands_are_visible_and_print_help_without_an_engine() {
+    let commands = ["engine", "import", "kube", "settings", "tutorial"];
+    let help = Command::new(BIN).arg("--help").output().unwrap();
+    let help = String::from_utf8_lossy(&help.stdout);
+    for command in commands {
+        assert!(
+            help.lines()
+                .any(|line| line.split_whitespace().next() == Some(command))
+        );
+    }
+    for args in [
+        ["engine", "prune", "--help"],
+        ["import", "images", "--help"],
+        ["kube", "migrate", "--help"],
+        ["settings", "startup", "--help"],
+        ["tutorial", "session", "--help"],
+    ] {
+        let out = Command::new(BIN).args(args).output().unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    #[cfg(any(target_os = "macos", windows))]
+    {
+        assert!(
+            help.lines()
+                .any(|line| line.split_whitespace().next() == Some("vm"))
+        );
+        assert!(
+            Command::new(BIN)
+                .args(["vm", "--help"])
+                .output()
+                .unwrap()
+                .status
+                .success()
+        );
+    }
+}
+
 // podbag as the first process of a PID namespace (a container's entry point, or
 // `unshare -pf`) is a CLI like any other: only the macOS VM's /init is an init.
 //
