@@ -156,18 +156,12 @@ body {
 /* The engine switch: "This window: podbag / Docker". */
 .engine-switch { display: grid; gap: 5px; padding: 0 4px 10px; }
 .switch-label { font-size: 11.5px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
-.segments { display: flex; padding: 2px; border-radius: 8px; background: var(--sunken); border: 1px solid var(--line); }
-.segment { flex: 1; display: block; cursor: pointer; }
-.segment span { display: block; padding: 3px 8px; border-radius: 6px; text-align: center; font-size: 13px; font-weight: 500; color: var(--ink-2); white-space: nowrap; }
-.segment input:checked + span { background: var(--surface); color: var(--ink); box-shadow: 0 1px 2px rgb(0 0 0 / 0.12); font-weight: 600; }
-.segment input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 1px; }
-.switch-note { font-size: 12px; color: var(--muted); }
 .icon-button.switch-rail { display: none; }
 
 /* The rail: icons only, with their names in tooltips. */
 .collapsed .sidebar { padding-inline: 8px; align-items: center; }
 .collapsed .brand span, .collapsed .nav-item .label, .collapsed .nav-item .count,
-.collapsed .switch-label, .collapsed .segments, .collapsed .switch-note,
+.collapsed .switch-label,
 .collapsed .engine .label, .collapsed .vm-card > :not(.vm-rail) { display: none; }
 .collapsed .brand { padding-inline: 0; }
 .collapsed .nav { width: 100%; }
@@ -241,6 +235,9 @@ button.status-item:hover { background: var(--hover); color: var(--ink); }
 .kube-subnav { margin: 2px 0 0 18px; padding-inline-start: 10px; border-inline-start: 1px solid var(--line); }
 .kube-subnav[hidden] { display: none; }
 .kube-subnav .nav-item { padding-block: 5px; }
+.engine-switch .engine-picker { width: 100%; min-width: 0; }
+.collapsed .engine-switch .engine-picker { display: none; }
+.sidebar { overflow-y: auto; }
 .spacer { flex: 1; }
 .engine { display: flex; align-items: center; gap: 8px; padding: 10px 10px 2px; margin-top: 6px; border-top: 1px solid var(--line); color: var(--ink-2); font-size: 13px; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
@@ -387,6 +384,8 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 /* Kubernetes resources */
 .kube-tabs { align-items: center; flex-wrap: wrap; }
 .kube-tabs .check { margin-inline-start: auto; padding-block: 6px; }
+.kube-cluster { display: flex; align-items: center; gap: 10px; margin: 12px 20px 0; font-size: 13px; }
+.kube-cluster select { min-width: 0; max-width: 75%; }
 .kube-scope { margin: 10px 20px 0; font-size: 12.5px; overflow-wrap: anywhere; }
 .kube-scope:empty { display: none; }
 .kube-list { min-width: 510px; }
@@ -416,7 +415,7 @@ select, input[type="text"] {
 }
 
 .setting-row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-bottom: 8px; }
-.setting-row .segments { min-width: 200px; }
+.setting-row .engine-picker { min-width: 0; max-width: 65%; }
 .hint { margin: 6px 0 0; color: var(--muted) !important; font-size: 12.5px; }
 .hint.warn { color: var(--amber) !important; }
 .card .fields { margin-top: 10px; }

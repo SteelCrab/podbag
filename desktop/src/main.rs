@@ -19,7 +19,7 @@ use serde_json::Value;
 use settings::Settings;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
@@ -56,8 +56,7 @@ struct TrayItems {
 
 struct AppState {
     /// The engine this window uses, and its client.
-    target: Mutex<Target>,
-    client: Mutex<Client>,
+    session: Mutex<Arc<Session>>,
     podbag: PathBuf,
     /// The engine's version (`podbag --version`), once asked.
     engine_version: Mutex<Option<String>>,
@@ -66,6 +65,17 @@ struct AppState {
     docker: Mutex<Option<dockercmd::DockerCommand>>,
     settings: Mutex<Settings>,
     settings_file: Mutex<Option<PathBuf>>,
+    visible: AtomicBool,
+    tray: Mutex<Option<TrayItems>>,
+    /// macOS: Settings… in the app menu.
+    app_settings: Mutex<Option<MenuItem<Wry>>>,
+}
+
+struct Session {
+    id: u64,
+    retired: AtomicBool,
+    target: Target,
+    client: Client,
     /// The events stream, while the window is open.
     watching: AtomicBool,
     watch_generation: AtomicU64,
@@ -73,13 +83,9 @@ struct AppState {
     /// The open log stream and its generation.
     logs: Mutex<Option<Closer>>,
     log_generation: AtomicU64,
-    visible: AtomicBool,
     engine: Mutex<EngineState>,
     /// Running containers, as last seen.
     running: Mutex<Option<usize>>,
-    tray: Mutex<Option<TrayItems>>,
-    /// macOS: Settings… in the app menu.
-    app_settings: Mutex<Option<MenuItem<Wry>>>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -97,37 +103,41 @@ impl AppState {
             },
         });
         AppState {
-            client: Mutex::new(Client::new(target.endpoint.clone())),
-            target: Mutex::new(target),
+            session: Mutex::new(Arc::new(Session::new(1, target))),
             podbag,
             engine_version: Mutex::new(None),
             version_asked: AtomicBool::new(false),
             docker: Mutex::new(None),
             settings: Mutex::new(Settings::default()),
             settings_file: Mutex::new(None),
-            watching: AtomicBool::new(false),
-            watch_generation: AtomicU64::new(0),
-            watch: Mutex::new(None),
-            logs: Mutex::new(None),
-            log_generation: AtomicU64::new(0),
             visible: AtomicBool::new(true),
-            engine: Mutex::new(EngineState::Unknown),
-            running: Mutex::new(None),
             tray: Mutex::new(None),
             app_settings: Mutex::new(None),
         }
     }
 
-    fn client(&self) -> Client {
-        lock(&self.client).clone()
+    fn current(&self) -> Arc<Session> {
+        lock(&self.session).clone()
     }
 
-    fn target(&self) -> Target {
-        lock(&self.target).clone()
+    fn session(&self, id: u64) -> Result<Arc<Session>, String> {
+        let session = self.current();
+        if session.id != id {
+            return Err("The engine has changed. Reopen this view.".into());
+        }
+        Ok(session)
     }
 
-    fn is_podbag(&self) -> bool {
-        lock(&self.target).choice == Choice::Podbag
+    fn switch(&self, token: u64, name: &str, file: &std::path::Path) -> Result<(), String> {
+        let mut current = lock(&self.session);
+        if current.id != token {
+            return Err("The engine has changed.".into());
+        }
+        let target = commands::choose(name, file, &self.podbag)?;
+        current.retired.store(true, Ordering::SeqCst);
+        current.stop_streams();
+        *current = Arc::new(Session::new(token + 1, target));
+        Ok(())
     }
 
     /// The engine's version, asked once (`podbag --version` needs no engine).
@@ -147,6 +157,33 @@ impl AppState {
 
     fn language(&self) -> &'static str {
         strings::resolve(&lock(&self.settings).language, sys_locale::get_locale())
+    }
+}
+
+impl Session {
+    fn new(id: u64, target: Target) -> Self {
+        Self {
+            id,
+            retired: AtomicBool::new(false),
+            client: Client::new(target.endpoint.clone()),
+            target,
+            watching: AtomicBool::new(false),
+            watch_generation: AtomicU64::new(0),
+            watch: Mutex::new(None),
+            logs: Mutex::new(None),
+            log_generation: AtomicU64::new(0),
+            engine: Mutex::new(EngineState::Unknown),
+            running: Mutex::new(None),
+        }
+    }
+
+    fn emit(
+        &self,
+        app: &AppHandle,
+        event: &str,
+        value: impl Serialize + Clone,
+    ) -> tauri::Result<()> {
+        app.emit(&format!("{event}-{}", self.id), value)
     }
 
     fn stop_watch(&self) {
@@ -168,62 +205,134 @@ impl AppState {
 
 // The window's commands. They run off the main thread: requests may take a while.
 
+#[tauri::command]
+fn connection(state: State<'_, AppState>) -> (u64, String, bool) {
+    let current = state.current();
+    (
+        current.id,
+        current.target.choice.to_setting(),
+        current.target.choice == Choice::Podbag,
+    )
+}
+
 #[tauri::command(async)]
-fn engine(app: AppHandle, state: State<'_, AppState>, start: bool) -> EngineStatus {
-    let status = commands::engine(&state.target(), &state.client(), &state.podbag, start);
-    *lock(&state.engine) = match (status.vm.as_deref(), status.reachable) {
+fn contexts() -> Vec<String> {
+    podbag::client::choice::docker_contexts()
+}
+
+#[tauri::command(async)]
+fn engine(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    token: u64,
+    start: bool,
+) -> Result<EngineStatus, String> {
+    let session = state.session(token)?;
+    let status = commands::engine(&session.target, &session.client, &state.podbag, start);
+    *lock(&session.engine) = match (status.vm.as_deref(), status.reachable) {
         (Some("running"), _) => EngineState::VmRunning,
         (Some(_), false) => EngineState::VmStopped,
         (_, true) => EngineState::Ready,
         (_, false) => EngineState::Down,
     };
     update_tray(&app);
-    status
+    Ok(status)
 }
 
 #[tauri::command(async)]
-fn list(app: AppHandle, state: State<'_, AppState>, kind: String) -> Result<Value, String> {
-    let v = commands::list(&state.client(), &kind)?;
+fn list(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    token: u64,
+    kind: String,
+) -> Result<Value, String> {
+    let session = state.session(token)?;
+    let v = commands::list(&session.client, &kind)?;
     if kind == "containers" {
-        *lock(&state.running) = Some(commands::running(&v));
+        *lock(&session.running) = Some(commands::running(&v));
         update_tray(&app);
     }
     Ok(v)
 }
 
 #[tauri::command(async)]
-fn inspect(state: State<'_, AppState>, kind: String, id: String) -> Result<Value, String> {
-    commands::inspect(&state.client(), &kind, &id)
+fn inspect(
+    state: State<'_, AppState>,
+    token: u64,
+    kind: String,
+    id: String,
+) -> Result<Value, String> {
+    let session = state.session(token)?;
+    commands::inspect(&session.client, &kind, &id)
 }
 
 #[tauri::command(async)]
-fn act(state: State<'_, AppState>, id: String, action: String) -> Result<(), String> {
-    commands::act(&state.client(), &id, &action)
+fn act(state: State<'_, AppState>, token: u64, id: String, action: String) -> Result<(), String> {
+    let session = state.session(token)?;
+    commands::act(&session.client, &id, &action)
 }
 
 #[tauri::command(async)]
-fn remove(state: State<'_, AppState>, kind: String, id: String, force: bool) -> Result<(), String> {
-    commands::remove(&state.client(), &kind, &id, force)
+fn remove(
+    state: State<'_, AppState>,
+    token: u64,
+    kind: String,
+    id: String,
+    force: bool,
+) -> Result<(), String> {
+    let session = state.session(token)?;
+    commands::remove(&session.client, &kind, &id, force)
 }
 
 #[tauri::command(async)]
-fn prune(state: State<'_, AppState>, kind: String) -> Result<podbag::client::Pruned, String> {
-    commands::prune(&state.client(), &kind)
+fn create_volume(state: State<'_, AppState>, token: u64, name: String) -> Result<(), String> {
+    let session = state.session(token)?;
+    session
+        .client
+        .call(
+            "POST",
+            "/volumes/create",
+            Some(&serde_json::json!({ "Name": name })),
+        )
+        .map(|_| ())
+        .map_err(|e| e.message)
 }
 
 #[tauri::command(async)]
-fn rename(state: State<'_, AppState>, id: String, name: String) -> Result<(), String> {
-    commands::rename(&state.client(), &id, &name)
+fn prune(
+    state: State<'_, AppState>,
+    token: u64,
+    kind: String,
+) -> Result<podbag::client::Pruned, String> {
+    let session = state.session(token)?;
+    commands::prune(&session.client, &kind)
 }
 
 #[tauri::command(async)]
-fn container_json(state: State<'_, AppState>, id: String, what: String) -> Result<Value, String> {
-    commands::container_json(&state.client(), &id, &what)
+fn rename(state: State<'_, AppState>, token: u64, id: String, name: String) -> Result<(), String> {
+    let session = state.session(token)?;
+    commands::rename(&session.client, &id, &name)
 }
 
 #[tauri::command(async)]
-fn features(state: State<'_, AppState>, sample: Option<String>) -> Features {
-    state.client().features(sample.as_deref())
+fn container_json(
+    state: State<'_, AppState>,
+    token: u64,
+    id: String,
+    what: String,
+) -> Result<Value, String> {
+    let session = state.session(token)?;
+    commands::container_json(&session.client, &id, &what)
+}
+
+#[tauri::command(async)]
+fn features(
+    state: State<'_, AppState>,
+    token: u64,
+    sample: Option<String>,
+) -> Result<Features, String> {
+    let session = state.session(token)?;
+    Ok(session.client.features(sample.as_deref()))
 }
 
 #[tauri::command(async)]
@@ -232,22 +341,24 @@ fn features(state: State<'_, AppState>, sample: Option<String>) -> Features {
 fn pull(
     app: AppHandle,
     state: State<'_, AppState>,
+    token: u64,
     image: String,
     location: Option<String>,
     host: Option<String>,
 ) -> Result<String, String> {
+    let session = state.session(token)?;
     let location = match &location {
         Some(id) => Some(images::location(id, host.as_deref().unwrap_or(""))?),
         None => None,
     };
     let reference = images::reference(&image, location.as_ref())?;
     images::pull(
-        &state.client(),
-        &state.target(),
+        &session.client,
+        &session.target,
         &reference,
         podbag::client::registry_auth,
         |line| {
-            let _ = app.emit("pull-progress", line);
+            let _ = session.emit(&app, "pull-progress", line);
         },
     )?;
     Ok(reference)
@@ -255,8 +366,8 @@ fn pull(
 
 /// Search Docker Hub through the engine.
 #[tauri::command(async)]
-fn search(state: State<'_, AppState>, term: String) -> images::Search {
-    images::search(&state.client(), &term)
+fn search(state: State<'_, AppState>, token: u64, term: String) -> Result<images::Search, String> {
+    Ok(images::search(&state.session(token)?.client, &term))
 }
 
 /// The pull locations and who is logged in there (account names only).
@@ -355,12 +466,13 @@ fn docker_images(
 
 /// Copy images from Docker to podbag (this window must use podbag).
 #[tauri::command(async)]
-fn import_images(state: State<'_, AppState>, names: Vec<String>) -> Result<(), String> {
-    if !state.is_podbag() {
+fn import_images(state: State<'_, AppState>, token: u64, names: Vec<String>) -> Result<(), String> {
+    let session = state.session(token)?;
+    if session.target.choice != Choice::Podbag {
         return Err("this window does not use podbag".into());
     }
     let from = docker_client(&state.podbag)?;
-    images::import(&from, &state.client(), &names)
+    images::import(&from, &session.client, &names)
 }
 
 #[derive(Clone, Serialize)]
@@ -371,88 +483,114 @@ struct LogBatch {
 
 /// Follow a container's log: `logs` events with this generation, until `logs_stop`.
 #[tauri::command(async)]
-fn logs_start(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<u64, String> {
-    if let Some(c) = lock(&state.logs).take() {
+fn logs_start(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    token: u64,
+    id: String,
+) -> Result<u64, String> {
+    let session = state.session(token)?;
+    if let Some(c) = lock(&session.logs).take() {
         c.close();
     }
-    let generation = state.log_generation.fetch_add(1, Ordering::SeqCst) + 1;
-    let lines = state.client().logs(&id, 500, true).map_err(|e| e.message)?;
-    *lock(&state.logs) = Some(lines.closer());
+    let generation = session.log_generation.fetch_add(1, Ordering::SeqCst) + 1;
+    let lines = session.client.logs(&id, 500, true).map_err(|e| e.message)?;
+    {
+        let mut active = lock(&session.logs);
+        if session.retired.load(Ordering::SeqCst)
+            || generation != session.log_generation.load(Ordering::SeqCst)
+        {
+            lines.closer().close();
+            return Err("The log view has closed.".into());
+        }
+        *active = Some(lines.closer());
+    }
     let handle = app.clone();
     std::thread::spawn(move || {
         commands::follow_logs(lines, move |lines| {
-            let current = handle
-                .state::<AppState>()
-                .log_generation
-                .load(Ordering::SeqCst);
-            current == generation && handle.emit("logs", LogBatch { generation, lines }).is_ok()
+            let current = session.log_generation.load(Ordering::SeqCst);
+            current == generation
+                && session
+                    .emit(&handle, "logs", LogBatch { generation, lines })
+                    .is_ok()
         });
     });
     Ok(generation)
 }
 
 #[tauri::command(async)]
-fn logs_stop(state: State<'_, AppState>) {
-    state.log_generation.fetch_add(1, Ordering::SeqCst);
-    if let Some(c) = lock(&state.logs).take() {
+fn logs_stop(state: State<'_, AppState>, token: u64) -> Result<(), String> {
+    let session = state.session(token)?;
+    session.log_generation.fetch_add(1, Ordering::SeqCst);
+    if let Some(c) = lock(&session.logs).take() {
         c.close();
     }
+    Ok(())
 }
 
 /// Watch the engine's events while `on`: a `changed` event for each change.
 #[tauri::command(async)]
-fn watch(app: AppHandle, state: State<'_, AppState>, on: bool) {
+fn watch(app: AppHandle, state: State<'_, AppState>, token: u64, on: bool) -> Result<(), String> {
+    let session = state.session(token)?;
     if !on {
-        state.stop_watch();
-        return;
+        session.stop_watch();
+        return Ok(());
     }
-    if state.watching.swap(true, Ordering::SeqCst) {
-        return;
+    if session.watching.swap(true, Ordering::SeqCst) {
+        return Ok(());
     }
     // A thread of an earlier watch that still sleeps sees another generation and ends.
-    let generation = state.watch_generation.fetch_add(1, Ordering::SeqCst) + 1;
+    let generation = session.watch_generation.fetch_add(1, Ordering::SeqCst) + 1;
     std::thread::spawn(move || {
-        let state = app.state::<AppState>();
         let current = || {
-            state.watching.load(Ordering::SeqCst)
-                && state.watch_generation.load(Ordering::SeqCst) == generation
+            !session.retired.load(Ordering::SeqCst)
+                && session.watching.load(Ordering::SeqCst)
+                && session.watch_generation.load(Ordering::SeqCst) == generation
         };
         while current() {
-            if let Ok(events) = state.client().events() {
-                *lock(&state.watch) = Some(events.closer());
-                // Stopped meanwhile: the stream is closed at once.
-                if !current() {
-                    events.closer().close();
+            if let Ok(events) = session.client.events() {
+                {
+                    let mut stream = lock(&session.watch);
+                    if !current() {
+                        events.closer().close();
+                        break;
+                    }
+                    *stream = Some(events.closer());
                 }
-                let _ = app.emit("live", true);
+                let _ = session.emit(&app, "live", true);
                 for e in events {
                     let Ok(e) = e else { break };
                     let quiet = e.action.starts_with("exec_")
                         || matches!(e.action.as_str(), "attach" | "detach" | "resize");
                     if !quiet {
-                        let _ = app.emit("changed", e.kind);
+                        let _ = session.emit(&app, "changed", e.kind);
                     }
                 }
             }
-            let _ = app.emit("live", false);
+            let _ = session.emit(&app, "live", false);
             std::thread::sleep(Duration::from_secs(2));
         }
     });
+    Ok(())
 }
 
 #[tauri::command(async)]
-fn open_shell(state: State<'_, AppState>, id: String) -> Result<(), String> {
+fn open_shell(state: State<'_, AppState>, token: u64, id: String) -> Result<(), String> {
+    let session = state.session(token)?;
     let docker = podbag::client::choice::docker_cli();
-    let shell = commands::shell_command(&state.target(), &state.podbag, &docker, &id)?;
+    let shell = commands::shell_command(&session.target, &state.podbag, &docker, &id)?;
     commands::open_shell(&shell)
 }
 
 /// Query the companion CLI so preferences and boot always use the same VM home.
 #[tauri::command(async)]
-fn vm_resources(state: State<'_, AppState>, values: Option<VmResources>) -> Result<Value, String> {
-    if !cfg!(target_os = "macos")
-        || !matches!(state.client().endpoint, Endpoint::Socket { own: true, .. })
-    {
+fn vm_resources(
+    state: State<'_, AppState>,
+    token: u64,
+    values: Option<VmResources>,
+) -> Result<Value, String> {
+    let session = state.session(token)?;
+    if !cfg!(target_os = "macos") || session.target.choice != Choice::Podbag {
         return Err("VM resources require the local macOS engine".into());
     }
     let mut command = std::process::Command::new(&state.podbag);
@@ -500,25 +638,34 @@ fn open_terminal(state: State<'_, AppState>, what: String) -> Result<(), String>
 
 /// `podbag vm start`, `stop` or `restart` (macOS and Windows).
 #[tauri::command(async)]
-fn vm(app: AppHandle, action: String) -> Result<(), String> {
-    run_vm(&app, &action)
+fn vm(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    token: u64,
+    action: String,
+) -> Result<(), String> {
+    let session = state.session(token)?;
+    run_vm(&app, &session, &action)
 }
 
-fn run_vm(app: &AppHandle, action: &str) -> Result<(), String> {
+fn run_vm(app: &AppHandle, session: &Session, action: &str) -> Result<(), String> {
     let state = app.state::<AppState>();
+    if session.target.choice != Choice::Podbag {
+        return Err("VM controls require Podbag".into());
+    }
     if matches!(action, "stop" | "restart") {
-        state.stop_streams();
+        session.stop_streams();
     }
     let done = cli::vm_action(&state.podbag, action);
     refresh_tray(app, false);
-    let _ = app.emit("engine-changed", action);
+    let _ = session.emit(app, "engine-changed", action);
     done
 }
 
 /// `podbag vm status --json`: null when the engine is not podbag, or on Linux (no VM).
 #[tauri::command(async)]
-fn vm_status(state: State<'_, AppState>) -> Result<Value, String> {
-    if !state.is_podbag() || commands::platform() == "linux" {
+fn vm_status(state: State<'_, AppState>, token: u64) -> Result<Value, String> {
+    if state.session(token)?.target.choice != Choice::Podbag || commands::platform() == "linux" {
         return Ok(Value::Null);
     }
     cli::vm_status(&state.podbag)
@@ -526,31 +673,35 @@ fn vm_status(state: State<'_, AppState>) -> Result<Value, String> {
 
 /// `podbag vm set`: what it printed. With `restart`, the VM restarts now.
 #[tauri::command(async)]
-fn vm_set(app: AppHandle, settings: cli::VmSettings) -> Result<String, String> {
+fn vm_set(app: AppHandle, token: u64, settings: cli::VmSettings) -> Result<String, String> {
     let state = app.state::<AppState>();
+    let session = state.session(token)?;
+    if session.target.choice != Choice::Podbag {
+        return Err("VM controls require Podbag".into());
+    }
     if settings.restart {
-        state.stop_streams();
+        session.stop_streams();
     }
     let done = cli::vm_set(&state.podbag, &settings);
     if settings.restart {
         refresh_tray(&app, false);
-        let _ = app.emit("engine-changed", "restart");
+        let _ = session.emit(&app, "engine-changed", "restart");
     }
     done
 }
 
 /// Switch this window to `podbag` or `docker`; saved for the TUI too.
 #[tauri::command(async)]
-fn set_engine(app: AppHandle, state: State<'_, AppState>, engine: String) -> Result<(), String> {
+fn set_engine(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    token: u64,
+    engine: String,
+) -> Result<(), String> {
     let file = podbag::client::ui_dir()
         .ok_or("cannot find the folder for ui.json")?
         .join("ui.json");
-    let target = commands::choose(&engine, &file, &state.podbag)?;
-    state.stop_streams();
-    *lock(&state.client) = Client::new(target.endpoint.clone());
-    *lock(&state.target) = target;
-    *lock(&state.engine) = EngineState::Unknown;
-    *lock(&state.running) = None;
+    state.switch(token, &engine, &file)?;
     update_tray(&app);
     Ok(())
 }
@@ -635,10 +786,11 @@ fn open_settings(app: &AppHandle) {
 
 fn update_tray(app: &AppHandle) {
     let state = app.state::<AppState>();
+    let session = state.current();
     let lang = state.language();
-    let engine = *lock(&state.engine);
-    let running = *lock(&state.running);
-    let target = state.target();
+    let engine = *lock(&session.engine);
+    let running = *lock(&session.running);
+    let target = &session.target;
     let update = state.known_update();
     let docker = lock(&state.docker).clone();
     if let Some(item) = lock(&state.app_settings).as_ref() {
@@ -725,12 +877,13 @@ fn update_tray(app: &AppHandle) {
 /// the tray), so a hidden app keeps no VM or service awake.
 fn refresh_tray(app: &AppHandle, asked: bool) {
     let state = app.state::<AppState>();
+    let session = state.current();
     // Once: `podbag --version` needs no engine and wakes nothing.
     let _ = state.engine_version();
     // The docker CLI's files only.
     *lock(&state.docker) = Some(dockercmd::current(&podbag_socket(&state.podbag)));
-    let own =
-        state.is_podbag() && matches!(state.client().endpoint, Endpoint::Socket { own: true, .. });
+    let own = session.target.choice == Choice::Podbag
+        && matches!(session.client.endpoint, Endpoint::Socket { own: true, .. });
     let ask_api = asked || state.visible.load(Ordering::SeqCst);
     let vm = if own && cfg!(target_os = "macos") {
         commands::vm_status(&state.podbag)
@@ -741,25 +894,25 @@ fn refresh_tray(app: &AppHandle, asked: bool) {
         Some("running") => EngineState::VmRunning,
         Some(_) => EngineState::VmStopped,
         None if ask_api => {
-            if state.client().ping().is_ok() {
+            if session.client.ping().is_ok() {
                 EngineState::Ready
             } else {
                 EngineState::Down
             }
         }
-        None => *lock(&state.engine),
+        None => *lock(&session.engine),
     };
-    let previous = std::mem::replace(&mut *lock(&state.engine), engine);
+    let previous = std::mem::replace(&mut *lock(&session.engine), engine);
     if previous != engine
         && let Some(vm) = vm
     {
-        let _ = app.emit("vm-status", vm);
+        let _ = session.emit(app, "vm-status", vm);
     }
     if ask_api
         && matches!(engine, EngineState::Ready | EngineState::VmRunning)
-        && let Ok(list) = state.client().containers()
+        && let Ok(list) = session.client.containers()
     {
-        *lock(&state.running) = Some(list.iter().filter(|c| c.state == "running").count());
+        *lock(&session.running) = Some(list.iter().filter(|c| c.state == "running").count());
     }
     update_tray(app);
 }
@@ -843,14 +996,15 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
                 });
             }
             "quit" => {
-                app.state::<AppState>().stop_streams();
+                app.state::<AppState>().current().stop_streams();
                 app.exit(0);
             }
             "vm" => {
                 let app = app.clone();
                 std::thread::spawn(move || {
-                    let running = *lock(&app.state::<AppState>().engine) == EngineState::VmRunning;
-                    let _ = run_vm(&app, if running { "stop" } else { "start" });
+                    let session = app.state::<AppState>().current();
+                    let running = *lock(&session.engine) == EngineState::VmRunning;
+                    let _ = run_vm(&app, &session, if running { "stop" } else { "start" });
                 });
             }
             _ => {}
@@ -905,6 +1059,10 @@ fn main() {
             engine,
             list,
             kubernetes::kube_list,
+            kubernetes::kube_contexts,
+            connection,
+            contexts,
+            create_volume,
             inspect,
             act,
             remove,
@@ -960,7 +1118,7 @@ fn main() {
                 let _ = window.hide();
                 let state = window.state::<AppState>();
                 state.visible.store(false, Ordering::SeqCst);
-                state.stop_streams();
+                state.current().stop_streams();
             }
         })
         .build(tauri::generate_context!())
@@ -976,4 +1134,39 @@ fn main() {
         }
         let _ = (app, event);
     });
+}
+
+#[cfg(all(unix, test))]
+mod connection_tests {
+    use super::*;
+    use podbag::client::fake::{FakeEngine, small_engine};
+
+    #[test]
+    fn switching_rejects_stale_actions_even_when_resource_names_match() {
+        let first = FakeEngine::start(small_engine);
+        let second = FakeEngine::start(small_engine);
+        let state = AppState::new();
+        let file =
+            std::env::temp_dir().join(format!("podbag-engine-test-{}.json", std::process::id()));
+        state
+            .switch(1, &first.client.endpoint.describe(), &file)
+            .unwrap();
+        let pending = state.session(2).unwrap();
+        state
+            .switch(2, &second.client.endpoint.describe(), &file)
+            .unwrap();
+        assert!(pending.retired.load(Ordering::SeqCst));
+        assert!(state.session(2).is_err());
+        assert!(state.switch(2, "podbag", &file).is_err());
+        commands::remove(
+            &state.session(3).unwrap().client,
+            "volumes",
+            "pgdata",
+            false,
+        )
+        .unwrap();
+        assert!(first.requests().is_empty());
+        assert_eq!(second.requests(), ["DELETE /volumes/pgdata"]);
+        std::fs::remove_file(file).unwrap();
+    }
 }

@@ -5,36 +5,47 @@
 const API = (() => {
   const tauri = window.__TAURI__;
   const invoke = (cmd, args) => tauri.core.invoke(cmd, args);
-  const listen = (name, fn) => tauri.event.listen(name, (e) => fn(e.payload));
+  let token;
+  const scoped = (cmd, args) => invoke(cmd, { ...args, token });
+  const events = new Set(["changed", "live", "logs", "pull-progress", "engine-changed", "vm-status"]);
+  const listen = (name, fn) => tauri.event.listen(events.has(name) ? `${name}-${token}` : name, (e) => fn(e.payload));
 
   return {
-    engine: (start) => invoke("engine", { start: !!start }),
-    list: (kind) => invoke("list", { kind }),
-    kubeList: (kind, allNamespaces) => invoke("kube_list", { kind, allNamespaces }),
-    inspect: (kind, id) => invoke("inspect", { kind, id }),
-    act: (id, action) => invoke("act", { id, action }),
-    remove: (kind, id, force) => invoke("remove", { kind, id, force: !!force }),
-    prune: (kind) => invoke("prune", { kind }),
-    rename: (id, name) => invoke("rename", { id, name }),
-    containerJson: (id, what) => invoke("container_json", { id, what }),
-    features: (sample) => invoke("features", { sample: sample || null }),
-    pull: (image, location, host) => invoke("pull", { image, location: location || null, host: host || null }),
-    search: (term) => invoke("search", { term }),
+    async connection() {
+      const [id, name, local] = await invoke("connection");
+      token = id;
+      return { name, local };
+    },
+    contexts: () => invoke("contexts"),
+    kubeContexts: () => invoke("kube_contexts"),
+    createVolume: (name) => scoped("create_volume", { name }),
+    engine: (start) => scoped("engine", { start: !!start }),
+    list: (kind) => scoped("list", { kind }),
+    kubeList: (kind, allNamespaces, context) => invoke("kube_list", { kind, allNamespaces, context: context || null }),
+    inspect: (kind, id) => scoped("inspect", { kind, id }),
+    act: (id, action) => scoped("act", { id, action }),
+    remove: (kind, id, force) => scoped("remove", { kind, id, force: !!force }),
+    prune: (kind) => scoped("prune", { kind }),
+    rename: (id, name) => scoped("rename", { id, name }),
+    containerJson: (id, what) => scoped("container_json", { id, what }),
+    features: (sample) => scoped("features", { sample: sample || null }),
+    pull: (image, location, host) => scoped("pull", { image, location: location || null, host: host || null }),
+    search: (term) => scoped("search", { term }),
     registries: (hosts) => invoke("registries", { hosts }),
     registryLogin: (location, host, user, password) => invoke("registry_login", { location, host, user, password }),
     dockerCommand: () => invoke("docker_command"),
     dockerSwitch: (to) => invoke("docker_switch", { to }),
     dockerImages: (hosts) => invoke("docker_images", { hosts }),
-    importImages: (names) => invoke("import_images", { names }),
-    logsStart: (id) => invoke("logs_start", { id }),
-    logsStop: () => invoke("logs_stop"),
-    watch: (on) => invoke("watch", { on }),
-    openShell: (id) => invoke("open_shell", { id }),
-    vm: (action) => invoke("vm", { action }),
-    vmResources: (values) => invoke("vm_resources", { values: values || null }),
-    vmStatus: () => invoke("vm_status"),
-    vmSet: (settings) => invoke("vm_set", { settings }),
-    setEngine: (engine) => invoke("set_engine", { engine }),
+    importImages: (names) => scoped("import_images", { names }),
+    logsStart: (id) => scoped("logs_start", { id }),
+    logsStop: () => scoped("logs_stop"),
+    watch: (on) => scoped("watch", { on }),
+    openShell: (id) => scoped("open_shell", { id }),
+    vm: (action) => scoped("vm", { action }),
+    vmResources: (values) => scoped("vm_resources", { values: values || null }),
+    vmStatus: () => scoped("vm_status"),
+    vmSet: (settings) => scoped("vm_set", { settings }),
+    setEngine: (engine) => scoped("set_engine", { engine }),
     updates: (check) => invoke("updates", { check }),
     upgrade: () => invoke("upgrade"),
     openTerminal: (what) => invoke("open_terminal", { what }),

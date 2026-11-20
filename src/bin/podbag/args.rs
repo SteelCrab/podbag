@@ -176,7 +176,7 @@ pub enum Cmd {
         /// Draw one screen as text, without a terminal, and exit
         #[arg(long, hide = true)]
         once: bool,
-        /// The engine for this run: podbag, docker, or a socket (unix:///path)
+        /// The engine for this run: podbag, docker, podman, kiri, context:NAME or unix:///path
         #[arg(long, value_name = "ENGINE", value_parser = parse_engine)]
         engine: Option<podbag::client::Choice>,
         /// Leave the mouse to the terminal (press m to change it)
@@ -632,7 +632,7 @@ pub fn parse_env(arg: &str, lookup: impl Fn(&str) -> Option<String>) -> Option<(
 /// `--engine`: podbag, docker, or a socket.
 fn parse_engine(text: &str) -> Result<podbag::client::Choice, String> {
     podbag::client::Choice::parse(text)
-        .ok_or_else(|| "use podbag, docker, or a socket (unix:///path)".to_string())
+        .ok_or_else(|| "use podbag, docker, podman, kiri, context:NAME or unix:///path".to_string())
 }
 
 #[cfg(test)]

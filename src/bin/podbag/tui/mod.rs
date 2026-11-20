@@ -163,19 +163,16 @@ fn shell_command(
     docker: Option<&Path>,
     id: &str,
 ) -> Option<std::process::Command> {
-    let program = match (&target.choice, docker) {
-        (Choice::Podbag, _) | (Choice::Socket(_), None) => exe,
-        (_, Some(docker)) => docker,
-        (Choice::Docker, None) => return None,
-    };
-    let mut c = std::process::Command::new(program);
-    c.args(["exec", "-it", id, "sh"]);
-    if program != exe
-        && let Endpoint::Socket { path, .. } = &target.endpoint
+    if id.starts_with('-')
+        || !id
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"_.-".contains(&c))
     {
-        c.env("DOCKER_HOST", format!("unix://{}", path.display()));
-        c.env_remove("DOCKER_CONTEXT");
+        return None;
     }
+    let argv = target.cli(exe, docker)?;
+    let mut c = std::process::Command::new(&argv[0]);
+    c.args(&argv[1..]).args(["exec", "-it", id, "sh"]);
     Some(c)
 }
 
@@ -661,10 +658,11 @@ impl Runtime {
                 });
             }
             Effect::Pull(image) => {
+                let local = self.target.allows_registry_auth();
                 let auth = self.engines.auth.clone();
                 std::thread::spawn(move || {
                     // The login stays in this thread: it is sent to the engine only.
-                    let login = auth(&image);
+                    let login = if local { auth(&image) } else { None };
                     let done = client.pull_auth(&image, login.as_deref(), |line| {
                         tx.send(Msg::Progress(format!("Pulling {image}: {line}")));
                     });
@@ -1147,20 +1145,36 @@ mod tests {
         );
         assert_eq!(host(&c), None);
         let c = shell_command(&sock(Choice::Docker), exe, Some(docker), "web").unwrap();
-        assert_eq!(argv(&c), ["/usr/bin/docker", "exec", "-it", "web", "sh"]);
-        assert_eq!(host(&c).as_deref(), Some("unix:///run/d.sock"));
+        assert_eq!(
+            argv(&c),
+            [
+                "/usr/bin/docker",
+                "--host=unix:///run/d.sock",
+                "exec",
+                "-it",
+                "web",
+                "sh"
+            ]
+        );
+        assert!(argv(&c).contains(&"--host=unix:///run/d.sock".into()));
         // Without the docker CLI, Docker has no shell.
         assert!(shell_command(&sock(Choice::Docker), exe, None, "web").is_none());
         // Docker through `docker system dial-stdio`: the CLI finds it itself.
         let dial = Target {
             choice: Choice::Docker,
-            endpoint: podbag::client::Endpoint::Command(vec!["docker".into()]),
+            endpoint: podbag::client::Endpoint::Command(vec![
+                "docker".into(),
+                "--context=team".into(),
+                "system".into(),
+                "dial-stdio".into(),
+            ]),
         };
         let c = shell_command(&dial, exe, Some(docker), "web").unwrap();
+        assert!(argv(&c).contains(&"--context=team".into()));
         assert_eq!(host(&c), None);
         // Another socket: the docker CLI on it.
         let other = sock(Choice::Socket("/run/d.sock".into()));
         let c = shell_command(&other, exe, Some(docker), "web").unwrap();
-        assert_eq!(host(&c).as_deref(), Some("unix:///run/d.sock"));
+        assert!(argv(&c).contains(&"--host=unix:///run/d.sock".into()));
     }
 }

@@ -47,6 +47,18 @@ async function test() {
   check(current() !== pods && !children.hidden, "Leave Kubernetes with the submenu still available");
   byId("nav-kube-open").click();
   check(current() === pods && byId("kube-pods").getAttribute("aria-pressed") === "true", "Open Kubernetes from its parent");
+  const cluster = byId("kube-context");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  cluster.value = "staging";
+  cluster.dispatchEvent(new win.Event("change"));
+  byId("kube-claims").click();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  check(requests.at(-1).context === "staging" && requests.at(-1).kind === "claims", "Bind volume claims to the selected cluster");
+  check(doc.querySelector(".kube-list")?.textContent.includes("20Gi"), "Show claim capacity");
+  byId("kube-deployments").click();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  check(doc.querySelector(".kube-list")?.textContent.includes("3/3"), "Show ready deployment replicas");
+
 }
 
 // The preview loads its scripts and translations after the frame's load event.

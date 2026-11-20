@@ -566,7 +566,8 @@ impl Client {
     /// Ask which optional parts the engine has. Read-only requests where they exist (stats
     /// and top, on `sample`, a container); otherwise a container that does not exist.
     pub fn features(&self, sample: Option<&str>) -> Features {
-        let missing = "podbag-feature-check-0000";
+        // An exclamation mark cannot appear in a container name or ID.
+        let missing = "podbag-feature-check!";
         let has = |r: Result<Value>| !matches!(r, Err(e) if e.unsupported() || e.status == 0);
         let target = sample.unwrap_or(missing);
         Features {
@@ -575,7 +576,9 @@ impl Client {
             pause: has(self
                 .container_action(missing, "pause")
                 .map(|()| Value::Null)),
-            rename: has(self.rename(missing, missing).map(|()| Value::Null)),
+            rename: has(self
+                .rename(missing, "podbag-feature-check")
+                .map(|()| Value::Null)),
         }
     }
 }

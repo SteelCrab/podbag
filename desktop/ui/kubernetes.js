@@ -1,12 +1,16 @@
 // The Kubernetes view reads only the selected resource and namespace scope.
 "use strict";
 
-const KUBE_KINDS = ["pods", "services"];
+const KUBE_COLUMNS = {
+  pods: ["kube.phase", "kube.ready", "kube.node"],
+  services: ["kube.type", "kube.address", "col.ports"],
+  deployments: ["kube.ready", "col.image"],
+  claims: ["kube.phase", "kube.capacity", "kube.storageClass"],
+};
+const KUBE_KINDS = Object.keys(KUBE_COLUMNS);
 
 function kubeColumns(kind) {
-  return kind === "pods"
-    ? ["col.name", "kube.namespace", "kube.phase", "kube.ready", "kube.node"]
-    : ["col.name", "kube.namespace", "kube.type", "kube.address", "col.ports"];
+  return ["col.name", "kube.namespace", ...KUBE_COLUMNS[kind]];
 }
 
 function kubeCells(kind, item) {
@@ -19,6 +23,13 @@ function kubeCells(kind, item) {
       .filter((c) => c.ready).map((c) => c.name));
     const count = containers.filter((c) => ready.has(c.name)).length;
     return [...identity, status.phase, `${count}/${containers.length}`, spec.nodeName];
+  }
+  if (kind === "deployments") {
+    const images = (spec.template?.spec?.containers || []).map((c) => c.image);
+    return [...identity, `${status.readyReplicas ?? 0}/${spec.replicas ?? 1}`, images.join(", ")];
+  }
+  if (kind === "claims") {
+    return [...identity, status.phase, status.capacity?.storage, spec.storageClassName];
   }
   const ports = (spec.ports || []).map((p) =>
     `${p.port}${p.nodePort ? ":" + p.nodePort : ""}/${p.protocol || "TCP"}`);
@@ -48,6 +59,22 @@ function renderKubernetes(main) {
   const search = h("input", { type: "search", class: "search", placeholder: t("search.placeholder"),
     "aria-label": t("search.placeholder"), oninput: renderRows });
   const all = h("input", { type: "checkbox", onchange: load });
+  const cluster = h("select", { id: "kube-context", onchange: () => {
+    S.kubeContext = cluster.value;
+    sessionStorage.setItem("kube-context", cluster.value);
+    load();
+  } });
+  function contexts(names) {
+    const options = [...new Set([...names, S.kubeContext].filter(Boolean))];
+    cluster.replaceChildren(h("option", { value: "", text: t("kube.current") }),
+      ...options.map((name) => h("option", { value: name, text: name })));
+    cluster.value = S.kubeContext;
+  }
+  contexts([]);
+  function reload() {
+    API.kubeContexts().then(contexts).catch(() => {});
+    return load();
+  }
   const tabs = KUBE_KINDS.map((kind) => h("button", {
     type: "button", class: "tab", id: `kube-${kind}`, "aria-pressed": String(kind === S.kubeKind),
     onclick: () => go("kubernetes", kind), text: t(`kube.${kind}`),
@@ -55,10 +82,10 @@ function renderKubernetes(main) {
   main.replaceChildren(
     h("header", { class: "toolbar" }, h("h1", { text: t("nav.kubernetes") }),
       h("label", { class: "search-box" }, icon("search"), search),
-      h("div", { class: "tools" }, windowBar ? null : iconButton("refresh", t("action.refresh"), load))),
+      h("div", { class: "tools" }, windowBar ? null : iconButton("refresh", t("action.refresh"), reload))),
     h("div", { class: "tabs kube-tabs", role: "group", "aria-label": t("nav.kubernetes") }, tabs,
       h("label", { class: "check" }, all, t("kube.allNamespaces"))),
-    scope, content);
+    h("label", { class: "kube-cluster" }, t("kube.cluster"), cluster), scope, content);
 
   function renderRows() {
     const kind = S.kubeKind;
@@ -89,7 +116,7 @@ function renderKubernetes(main) {
     scope.textContent = "";
     content.replaceChildren(h("p", { class: "loading", text: t("engine.checking") }));
     try {
-      const result = await API.kubeList(S.kubeKind, all.checked);
+      const result = await API.kubeList(S.kubeKind, all.checked, S.kubeContext);
       if (request !== generation || !content.isConnected) return;
       context = result.context;
       scope.textContent = [t("kube.context", { context }), all.checked ? t("kube.allNamespaces") : result.namespace].join(" · ");
@@ -101,13 +128,13 @@ function renderKubernetes(main) {
       const message = String(error) === "kubectl-missing" ? t("kube.missing") : String(error);
       content.replaceChildren(h("div", { class: "empty" },
         h("h2", { text: t("kube.error") }), h("p", { class: "error-text mono", text: message }),
-        button("refresh", t("action.retry"), load)));
+        button("refresh", t("action.retry"), reload)));
     }
   }
 
-  load();
+  reload();
   return {
-    reload: load,
+    reload,
     switchResource() {
       tabs.forEach((tab, i) => tab.setAttribute("aria-pressed", String(KUBE_KINDS[i] === S.kubeKind)));
       search.value = "";

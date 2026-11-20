@@ -635,9 +635,9 @@ docker compose build --builder podbag
 
 ### Which engine they use
 
-- They manage podbag, Docker (Docker Engine or Docker Desktop), or a socket you name.
+- Choose Podbag, Docker, Podman, Kiri, a named Docker context or a Docker API socket.
 - The order:
-  1. `podbag tui --engine podbag|docker|unix:///path`, for one run.
+  1. `podbag tui --engine podbag|docker|podman|kiri|context:NAME|unix:///path`, for one run.
   2. The saved choice. Both UIs read and write it in `ui.json`: `~/.podbag/ui.json` on
      macOS, `~/.config/podbag/ui.json` on Linux, `%LOCALAPPDATA%\podbag\ui.json` on
      Windows.
@@ -646,6 +646,19 @@ docker compose build --builder podbag
 - Docker is found as the docker CLI finds it: `DOCKER_HOST`, the current context, then the
   usual sockets.
 - Docker is never started. When it does not answer, the UIs say how to start it.
+- The Podman preset uses its default machine on macOS and Windows. On Linux, enable
+  the rootless Podman API with `systemctl --user start podman.socket`. Root uses
+  `/run/podman/podman.sock`. The Kiri preset uses Kiri's standard socket or Windows pipe.
+- For OrbStack, Colima and other Docker API engines, select their Docker context.
+  Use a custom Unix socket for an alternate machine or socket path. SSH, TLS and Windows
+  pipe connections use the Docker CLI. The Windows TUI sees resources available in WSL.
+
+```sh
+podbag tui --engine podman
+podbag tui --engine context:orbstack
+podbag tui --engine unix:///run/kiri/docker.sock
+```
+
 - podbag's own socket:
   - Linux: `$XDG_RUNTIME_DIR/podbag/docker.sock` (as root: `/run/podbag/docker.sock`).
     When nothing answers, they start `podbag system service`. It stops a minute after the
@@ -736,13 +749,16 @@ docker compose build --builder podbag
 ### podbag-desktop
 
 - A window with Containers, Images, Volumes, Networks, Kubernetes and Settings.
-- Open Kubernetes in the sidebar, or expand it and select **Pods** or **Services**.
-  The sidebar and the page tabs show the same selection.
-- Install `kubectl` on the desktop host and
-  select a context with `kubectl config use-context`. The view starts in that context's
-  namespace. Select **All namespaces** to list resources across the cluster.
-- Search the Kubernetes list or select a name to inspect the object's JSON. Refresh
-  reads the active context again. These read-only views also work when the engine is off.
+- Open **Volumes → Create volume** to add a named volume on the selected engine.
+- Open **Kubernetes** and choose a **Cluster context** from the host's kubeconfig.
+  **Current context** follows the active kubectl context. The selector applies only to
+  Podbag and works while the selected container engine is offline.
+- Install `kubectl` on the desktop host. Browse Pods, Services, Deployments and
+  persistent volume claims in the context's namespace or select **All namespaces**.
+  Select a name to inspect its JSON. These Kubernetes views are read-only.
+
+![Podbag Desktop with the Kiri engine selected and a Kubernetes volume claim in the dev cluster](images/engine-kubernetes-en.png)
+
 - On macOS, the window toolbar has Refresh and Settings on the right.
   Drag the space between the title and the buttons to move the window.
 
@@ -765,7 +781,7 @@ docker compose build --builder podbag
 
 #### Engine switch
 
-- "This window: podbag / Docker" sits at the top of the sidebar and in Settings.
+- Choose the engine under **This window** in the sidebar or in Settings.
 - The choice is saved in `ui.json`. `podbag tui` uses the same choice.
 - Switching reloads the lists. The app never starts Docker. When Docker does not answer,
   it says so: "Docker is not running. Start Docker Desktop."

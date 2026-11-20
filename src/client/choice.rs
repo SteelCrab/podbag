@@ -13,6 +13,9 @@ pub enum Choice {
     Podbag,
     /// Docker's socket, found as the docker CLI finds it. Never started.
     Docker,
+    Podman,
+    Kiri,
+    Context(String),
     /// A socket given by path.
     Socket(PathBuf),
 }
@@ -24,7 +27,12 @@ impl Choice {
         match text.to_ascii_lowercase().as_str() {
             "podbag" => return Some(Choice::Podbag),
             "docker" => return Some(Choice::Docker),
+            "podman" => return Some(Choice::Podman),
+            "kiri" => return Some(Choice::Kiri),
             _ => {}
+        }
+        if let Some(name) = text.strip_prefix("context:") {
+            return (!name.is_empty()).then(|| Choice::Context(name.to_string()));
         }
         let path = text.strip_prefix("unix://").unwrap_or(text);
         // A Unix path also on Windows, where the socket is inside the WSL distribution.
@@ -37,6 +45,9 @@ impl Choice {
         match self {
             Choice::Podbag => "podbag".into(),
             Choice::Docker => "docker".into(),
+            Choice::Podman => "podman".into(),
+            Choice::Kiri => "kiri".into(),
+            Choice::Context(name) => format!("context:{name}"),
             Choice::Socket(p) => format!("unix://{}", p.display()),
         }
     }
@@ -46,6 +57,9 @@ impl Choice {
         match self {
             Choice::Podbag => "podbag".into(),
             Choice::Docker => "Docker".into(),
+            Choice::Podman => "Podman".into(),
+            Choice::Kiri => "Kiri".into(),
+            Choice::Context(name) => name.clone(),
             Choice::Socket(p) => p.display().to_string(),
         }
     }
@@ -86,6 +100,23 @@ impl Target {
                 choice: Choice::Docker,
                 endpoint: docker_endpoint(&env, home.as_deref(), &docker_cli()),
             }),
+            Some(choice @ (Choice::Kiri | Choice::Podman)) => Ok(Target {
+                endpoint: runtime_endpoint(choice)?,
+                choice: choice.clone(),
+            }),
+            Some(Choice::Context(name)) => {
+                // Keep local contexts usable without a CLI. The CLI supplies the
+                // SSH or TLS configuration for other transports.
+                let endpoint = docker_config_dir(&env, home.as_deref())
+                    .and_then(|dir| context_endpoint(&dir, name))
+                    .and_then(|host| Endpoint::from_docker_host(&host))
+                    .filter(|_| cfg!(unix))
+                    .unwrap_or_else(|| docker_proxy(format!("--context={name}")));
+                Ok(Target {
+                    endpoint,
+                    choice: Choice::Context(name.clone()),
+                })
+            }
             Some(Choice::Socket(p)) => Ok(Target {
                 choice: Choice::Socket(p.clone()),
                 endpoint: Endpoint::Socket {
@@ -94,6 +125,43 @@ impl Target {
                 },
             }),
         }
+    }
+
+    /// The CLI and flags that open a shell on this exact endpoint.
+    pub fn cli(&self, podbag: &Path, docker: Option<&Path>) -> Option<Vec<OsString>> {
+        if self.choice == Choice::Podbag {
+            return Some(vec![podbag.as_os_str().into()]);
+        }
+        if let Endpoint::Socket { .. } = &self.endpoint {
+            let host = self.endpoint.describe();
+            if self.choice == Choice::Podman
+                && let Some(bin) = find_tool("podman")
+            {
+                return Some(vec![
+                    bin.into(),
+                    "--remote".into(),
+                    format!("--url={host}").into(),
+                ]);
+            }
+            return Some(vec![docker?.into(), format!("--host={host}").into()]);
+        }
+        let Endpoint::Command(argv) = &self.endpoint else {
+            return None;
+        };
+        let [_, flags @ .., system, dial] = argv.as_slice() else {
+            return None;
+        };
+        if system != "system" || dial != "dial-stdio" {
+            return None;
+        }
+        let mut cmd = vec![docker?.as_os_str().to_owned()];
+        cmd.extend_from_slice(flags);
+        Some(cmd)
+    }
+
+    /// A registry login may be sent to Podbag or a local API socket.
+    pub fn allows_registry_auth(&self) -> bool {
+        self.choice == Choice::Podbag || matches!(self.endpoint, Endpoint::Socket { .. })
     }
 
     pub fn is_docker(&self) -> bool {
@@ -110,6 +178,73 @@ impl Target {
             (Choice::Docker, _) => Ok(()),
             _ => self.endpoint.ensure_running(podbag, start_vm),
         }
+    }
+}
+
+fn docker_proxy(flag: String) -> Endpoint {
+    Endpoint::Command(vec![
+        docker_cli().into(),
+        flag.into(),
+        "system".into(),
+        "dial-stdio".into(),
+    ])
+}
+
+fn runtime_endpoint(choice: &Choice) -> Result<Endpoint, String> {
+    #[cfg(windows)]
+    {
+        let pipe = if *choice == Choice::Kiri {
+            "kiri"
+        } else {
+            "podman-machine-default"
+        };
+        Ok(docker_proxy(format!("--host=npipe:////./pipe/{pipe}")))
+    }
+    #[cfg(unix)]
+    {
+        #[cfg(target_os = "macos")]
+        let path = if *choice == Choice::Kiri {
+            PathBuf::from(std::env::var_os("HOME").ok_or("HOME is not set")?)
+                .join(".kiri/run/docker.sock")
+        } else {
+            std::env::temp_dir().join("podman/podman-machine-default-api.sock")
+        };
+        #[cfg(not(target_os = "macos"))]
+        let path = if *choice == Choice::Kiri {
+            "/run/kiri/docker.sock".into()
+        } else {
+            // SAFETY: geteuid has no preconditions.
+            let uid = unsafe { libc::geteuid() };
+            if uid == 0 {
+                "/run/podman/podman.sock".into()
+            } else {
+                std::env::var_os("XDG_RUNTIME_DIR")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from(format!("/run/user/{uid}")))
+                    .join("podman/podman.sock")
+            }
+        };
+        Ok(Endpoint::Socket { path, own: false })
+    }
+}
+
+/// Local Docker contexts, as reported by the host CLI.
+pub fn docker_contexts() -> Vec<String> {
+    let mut cmd = std::process::Command::new(docker_cli());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000);
+    }
+    match cmd
+        .args(["context", "ls", "--format", "{{.Name}}"])
+        .output()
+    {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_owned)
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -352,6 +487,20 @@ mod tests {
             path: p.into(),
             own: false,
         }
+    }
+
+    #[test]
+    fn explicit_engines_round_trip_and_do_not_start_podbag() {
+        for name in ["podman", "kiri", "context:staging"] {
+            let choice = Choice::parse(name).unwrap();
+            assert_eq!(choice.to_setting(), name);
+            let target = Target::find(Some(&choice), Path::new("podbag")).unwrap();
+            assert!(!matches!(
+                target.endpoint,
+                Endpoint::Socket { own: true, .. }
+            ));
+        }
+        assert!(Choice::parse("context:").is_none());
     }
 
     #[test]

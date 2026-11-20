@@ -9,6 +9,10 @@ const t = (key, vars) => I18N.t(key, vars);
 const S = {
   view: "containers", // an engine resource, "kubernetes" or "settings"
   kubeKind: "pods",
+  kubeContext: sessionStorage.getItem("kube-context") || "",
+  connection: null,
+  contexts: [],
+  listErrors: {},
   kubeExpanded: false,
   detail: null, // { kind, id, tab }
   lists: { containers: [], images: [], volumes: [], networks: [] },
@@ -242,35 +246,27 @@ async function refreshVm() {
 
 // Switch this window to podbag or Docker; the TUI reads the same choice.
 async function switchEngine(name) {
-  if (S.engine && S.engine.engine === name) return;
-  try {
-    await API.setEngine(name);
-  } catch (e) {
-    toast(String(e), true);
-    renderSwitch();
-    return;
-  }
-  if (S.detail) closeDetail();
-  S.lists = { containers: [], images: [], volumes: [], networks: [] };
-  S.loaded = false;
-  S.featuresAsked = false;
-  S.features = { stats: false, top: false, pause: false, rename: false };
-  S.vm = null;
-  toast(t("switch.done", { name: name === "docker" ? "Docker" : "podbag" }));
-  await connect(false);
-  if (S.view === "settings") renderMain(true);
+  if (S.connection.name === name) return;
+  await API.setEngine(name);
+  sessionStorage.setItem("engine-view", S.view);
+  sessionStorage.setItem("engine-resource", S.kubeKind);
+  location.reload();
 }
 
 async function refresh() {
-  try {
-    const lists = await Promise.all(KINDS.map((k) => API.list(k)));
-    KINDS.forEach((k, i) => { S.lists[k] = lists[i] || []; });
-    S.loaded = true;
-  } catch (e) {
-    S.engine = { ...(S.engine || {}), reachable: false, error: String(e) };
+  const results = await Promise.allSettled(KINDS.map((k) => API.list(k)));
+  S.listErrors = {};
+  results.forEach((result, i) => {
+    const kind = KINDS[i];
+    S.lists[kind] = result.status === "fulfilled" ? result.value : [];
+    if (result.status === "rejected") S.listErrors[kind] = String(result.reason);
+  });
+  S.loaded = results.some((result) => result.status === "fulfilled");
+  if (!S.loaded) {
+    S.engine = { ...S.engine, reachable: false, error: S.listErrors.containers };
     renderEngine();
   }
-  if (!S.featuresAsked && S.loaded) {
+  if (!S.featuresAsked && S.loaded && !S.listErrors.containers) {
     S.featuresAsked = true;
     const sample = S.lists.containers.find((c) => c.State === "running");
     API.features(sample && sample.Id).then((f) => { S.features = f; renderMain(); }).catch(() => {});
@@ -560,35 +556,37 @@ function renderEngine() {
 
 // "This window: podbag / Docker". `where` names the radio group (sidebar or settings).
 function engineChoice(where) {
-  const current = S.engine ? S.engine.engine : "podbag";
-  const group = h("div", { class: "segments", role: "radiogroup", "aria-label": t("switch.label") });
-  for (const [value, label] of [["podbag", "podbag"], ["docker", "Docker"]]) {
-    const input = h("input", {
-      type: "radio", name: `engine-${where}`, value, class: "visually-hidden", checked: current === value,
-      onchange: () => switchEngine(value),
-    });
-    group.append(h("label", { class: "segment" }, input, h("span", { text: label })));
-  }
-  return group;
+  const name = S.connection.name;
+  const option = (value, text) => h("option", { value, text });
+  const select = h("select", { class: "engine-picker", id: where === "sidebar" ? "engine-picker" : "settings-engine-picker",
+    "aria-label": t("settings.engine") },
+    option("podbag", "podbag"), option("docker", "Docker"), option("podman", "Podman"), option("kiri", "Kiri"));
+  if (S.contexts.length) select.append(h("optgroup", { label: t("engine.contexts") },
+    S.contexts.map((context) => option("context:" + context, context))));
+  if (![...select.options].some((o) => o.value === name)) select.append(option(name, name));
+  if (S.engine?.platform !== "windows" && !navigator.userAgent.includes("Windows")) select.append(option("custom", t("engine.socket")));
+  select.value = name;
+  select.onchange = () => {
+    const next = select.value;
+    select.value = name;
+    if (next === "custom") {
+      askDialog({ title: t("engine.socket"), label: t("settings.socket"), placeholder: "unix:///path/to/docker.sock",
+        okLabel: t("engine.connect"), work: switchEngine });
+    } else {
+      switchEngine(next).catch((err) => toast(String(err), true));
+    }
+  };
+  return select;
 }
 
 function renderSwitch() {
-  const box = document.getElementById("engine-switch");
-  const current = S.engine ? S.engine.engine : "podbag";
-  const other = current === "docker" ? "podbag" : "docker";
-  const otherName = other === "docker" ? "Docker" : "podbag";
-  const name = (S.engine && S.engine.engineName) || "podbag";
-  // In the rail: one button that switches to the other engine.
-  const rail = h("button", {
-    type: "button", class: "icon-button switch-rail", onclick: () => switchEngine(other),
-    "aria-label": `${t("switch.current", { name })}. ${t("switch.to", { name: otherName })}`,
-    title: `${t("switch.current", { name })}\n${t("switch.to", { name: otherName })}`,
-  }, icon("engine"));
-  put(box,
-    h("span", { class: "switch-label", text: t("switch.label") }),
-    engineChoice("sidebar"),
-    current === "socket" ? h("span", { class: "switch-note truncate", text: name, title: name }) : null,
-    rail);
+  const name = S.engine?.engineName || S.connection.name;
+  const rail = iconButton("engine", t("switch.current", { name }), () => {
+    go("settings");
+    document.getElementById("settings-engine-picker")?.focus();
+  }, "switch-rail");
+  put(document.getElementById("engine-switch"),
+    h("label", { class: "switch-label", for: "engine-picker", text: t("switch.label") }), engineChoice("sidebar"), rail);
 }
 
 // ---- the sidebar's width, collapse and divider ----
@@ -885,6 +883,11 @@ function renderMain(fresh) {
   renderList();
 }
 
+function createVolume() {
+  askDialog({ title: t("volume.create"), label: t("col.name"), placeholder: "data", okLabel: t("volume.create"),
+    work: async (name) => { await API.createVolume(name); refreshSoon(); } });
+}
+
 function toolbar(kind) {
   const search = h("input", {
     type: "search", class: "search", placeholder: t("search.placeholder"), "aria-label": t("search.placeholder"),
@@ -900,6 +903,7 @@ function toolbar(kind) {
         h("span", { class: "dot", "aria-hidden": "true" }), h("span", { class: "live-text", text: S.live ? t("live.on") : "" })),
       kind === "images" && isPodbag() && S.docker && S.docker.installed ? button(registryIcon("dockerhub"), t("import.button"), importFromDocker) : null,
       kind === "images" ? button("pull", t("action.pull"), pull, "primary") : null,
+      kind === "volumes" ? button(null, t("volume.create"), createVolume, "primary") : null,
       button("prune", t("action.prune"), () => prune(kind)),
       windowBar ? null : iconButton("refresh", t("action.refresh"), refresh)));
 }
@@ -999,6 +1003,11 @@ function renderList() {
     content.replaceChildren(h("p", { class: "loading", text: t("engine.checking") }));
     return;
   }
+  if (S.listErrors[kind]) {
+    content.replaceChildren(h("p", { class: "error-text", text: S.listErrors[kind] }),
+      button("refresh", t("action.retry"), refresh));
+    return;
+  }
   const all = S.lists[kind];
   const q = S.search[kind].trim();
   const rows = all.filter((o) => matches(kind, o, q));
@@ -1041,8 +1050,8 @@ function emptyState(kind) {
   return h("div", { class: "empty" },
     h("div", { class: "empty-icon" }, icon(kind)),
     h("h2", { text: t(`empty.${kind}.title`) }),
-    h("p", { text: t(`empty.${kind}.text`) }),
-    commands[kind] ? codeLine(commands[kind]) : null,
+    isPodbag() || S.engine?.engine === "docker" || kind === "images" ? h("p", { text: t(`empty.${kind}.text`) }) : null,
+    (isPodbag() || S.engine?.engine === "docker") && commands[kind] ? codeLine(commands[kind]) : null,
     kind === "images" ? button("pull", t("action.pull"), pull, "primary") : null);
 }
 
@@ -1059,6 +1068,11 @@ function offline() {
       h("div", { class: "buttons-row" },
         button("refresh", t("action.retry"), () => connect(false), "primary"),
         button(null, t("switch.to", { name: "podbag" }), () => switchEngine("podbag"))));
+  }
+  if (!S.connection.local) {
+    return h("div", { class: "empty" }, h("h2", { text: t("engine.down") }),
+      h("p", { class: "error-text mono", text: e.error || e.endpoint }),
+      button("refresh", t("action.retry"), () => connect(false), "primary"));
   }
   const vmOff = e.error === "vm-stopped" || (e.vm && e.vm !== "running");
   if (vmOff) {
@@ -1612,6 +1626,21 @@ function onKey(e) {
 function extraKeys() {}
 
 async function init() {
+  S.connection = await API.connection();
+  const view = sessionStorage.getItem("engine-view");
+  if ([...KINDS, "settings", "kubernetes"].includes(view)) S.view = view;
+  const kind = sessionStorage.getItem("engine-resource");
+  if (KUBE_KINDS.includes(kind)) S.kubeKind = kind;
+  S.kubeExpanded = S.view === "kubernetes";
+  sessionStorage.removeItem("engine-view");
+  sessionStorage.removeItem("engine-resource");
+  API.contexts().then((names) => {
+    S.contexts = names;
+    if (document.getElementById("engine-picker")) {
+      renderSwitch();
+      if (S.view === "settings") renderMain(true);
+    }
+  }).catch(() => {});
   try {
     S.settings = { ...S.settings, ...(await API.getSettings()) };
   } catch { /* the defaults */ }
