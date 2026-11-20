@@ -383,6 +383,10 @@ pub(crate) fn overlay_options(
         options.push_str(&format!("::{data}"));
     }
     options.push_str(&format!(",upperdir={upper},workdir={work}"));
+    // Paths with the same content share an inode in the image. With the inode index, a
+    // copy-up would keep that link, and a write to one path would show at the others.
+    // Some kernels turn the index on by default; Docker and Podman turn it off too.
+    options.push_str(",index=off");
     if data.is_some() {
         options.push_str(",metacopy=on,redirect_dir=on");
     }
@@ -540,11 +544,11 @@ mod tests {
     fn overlay_options_for_both_methods() {
         assert_eq!(
             overlay_options("/s/img", None, "/c/upper", "/c/work", false),
-            "lowerdir=/s/img,upperdir=/c/upper,workdir=/c/work"
+            "lowerdir=/s/img,upperdir=/c/upper,workdir=/c/work,index=off"
         );
         assert_eq!(
             overlay_options("/s/img", None, "/c/upper", "/c/work", true),
-            "lowerdir=/s/img,upperdir=/c/upper,workdir=/c/work,userxattr"
+            "lowerdir=/s/img,upperdir=/c/upper,workdir=/c/work,index=off,userxattr"
         );
         assert_eq!(
             overlay_options(
@@ -554,8 +558,84 @@ mod tests {
                 "/c/work",
                 false
             ),
-            "lowerdir=/r/images/ab::/s/objects,upperdir=/c/upper,workdir=/c/work,\
+            "lowerdir=/r/images/ab::/s/objects,upperdir=/c/upper,workdir=/c/work,index=off,\
              metacopy=on,redirect_dir=on"
         );
+    }
+
+    /// The kernel's default for the overlay inode index, on for one test and put back when
+    /// the guard goes, even when the test panics.
+    struct IndexDefault(String);
+
+    impl IndexDefault {
+        const PARAM: &str = "/sys/module/overlay/parameters/index";
+
+        fn on() -> IndexDefault {
+            let old = std::fs::read_to_string(Self::PARAM).unwrap();
+            std::fs::write(Self::PARAM, "Y").unwrap();
+            IndexDefault(old.trim().to_string())
+        }
+    }
+
+    impl Drop for IndexDefault {
+        fn drop(&mut self) {
+            let _ = std::fs::write(Self::PARAM, &self.0);
+        }
+    }
+
+    /// Paths with the same content share an inode in the image. With the kernel's
+    /// `index=on`, a copy-up keeps such hard links, and a write to one path would change
+    /// the others: the mount must turn the index off.
+    #[test]
+    #[ignore = "needs root: dev/vm.sh test-root"]
+    fn a_write_changes_only_its_own_path_under_an_index_on_default_as_root() {
+        let _index = IndexDefault::on();
+        // Without index=off the write shows at the other path; else this file system
+        // cannot test it (the kernel falls back to no index).
+        let control = write_one_read_the_other(|lower, upper, work| {
+            format!("lowerdir={lower},upperdir={upper},workdir={work}")
+        });
+        if control == "same\n" {
+            eprintln!("the kernel does not use the inode index here: skipped");
+            return;
+        }
+        let seen = write_one_read_the_other(|lower, upper, work| {
+            overlay_options(lower, None, upper, work, false)
+        });
+        assert_eq!(seen, "same\n");
+    }
+
+    /// Mount an overlay whose lower directory holds `a` and `b`, one inode, with the
+    /// options made from the lower, upper and work directories; append to `a`; read `b`.
+    fn write_one_read_the_other(options: impl Fn(&str, &str, &str) -> String) -> String {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = |name: &str| tmp.path().join(name);
+        for name in ["lower", "upper", "work", "merged"] {
+            std::fs::create_dir(dir(name)).unwrap();
+        }
+        std::fs::write(dir("lower").join("a"), "same\n").unwrap();
+        std::fs::hard_link(dir("lower").join("a"), dir("lower").join("b")).unwrap();
+        let text = |p: std::path::PathBuf| p.to_string_lossy().into_owned();
+        let options = options(&text(dir("lower")), &text(dir("upper")), &text(dir("work")));
+        let merged = dir("merged");
+        let seen = crate::store::composefs::in_private_mount_ns(|| {
+            let options = std::ffi::CString::new(options).unwrap();
+            let mounted = rustix::mount::mount(
+                "overlay",
+                &merged,
+                "overlay",
+                MountFlags::empty(),
+                Some(options.as_c_str()),
+            );
+            mounted.map_err(|e| crate::Error::io("mount", &e.into(), ""))?;
+            use std::io::Write;
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(merged.join("a"))
+                .and_then(|mut f| f.write_all(b"changed\n"))
+                .map_err(|e| crate::Error::io("append", &e, ""))?;
+            std::fs::read_to_string(merged.join("b")).map_err(|e| crate::Error::io("read", &e, ""))
+        });
+        seen.unwrap()
     }
 }

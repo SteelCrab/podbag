@@ -1,6 +1,6 @@
-<img src="docs/images/logo.png" alt="podbag" width="120" align="right">
-
 # podbag
+
+<img src="docs/images/logo.png" alt="podbag" width="120" align="right">
 
 데몬 없는 컨테이너 엔진입니다. 정적 바이너리 하나로 동작합니다.
 이미지를 파일 단위로 저장합니다. 여러 이미지가 같은 파일을 쓰면 한 번만 저장합니다.
@@ -52,7 +52,7 @@
 ### 설치 스크립트 (Linux, macOS)
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/SteelCrab/podbag/main/install.sh | sh
+curl -fsSL https://podbag.dev/install.sh | sh
 ```
 
 - 시스템에 맞는 파일을 받고 SHA-256 값을 확인합니다.

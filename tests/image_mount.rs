@@ -167,10 +167,11 @@ fn rich_image(reg: &FakeRegistry) -> String {
 }
 
 /// What a container sees of its root: types, modes, owners, device numbers, sizes,
-/// symlink targets, contents, and which paths share an inode (by the group's first path).
+/// symlink targets, times (not of directories: those merge() made get the time the image
+/// was stored), contents, and which paths share an inode (by the group's first path).
 fn tree_listing(sb: &Sandbox, image: &str) -> String {
     let script = "cd / && { \
-        find . -xdev ! -type d -exec stat -c '%n|%f|%u|%g|%t:%T|%s|%i|%N' {} + ; \
+        find . -xdev ! -type d -exec stat -c '%n|%f|%u|%g|%t:%T|%s|%i|%N|%Y' {} + ; \
         find . -xdev -type d -exec stat -c '%n|%f|%u|%g' {} + ; \
         find . -xdev -type f -exec md5sum {} + ; }";
     let out = ok(&podbag(
@@ -203,7 +204,7 @@ fn tree_listing(sb: &Sandbox, image: &str) -> String {
     let mut first: BTreeMap<String, String> = BTreeMap::new();
     for l in &lines {
         let f: Vec<&str> = l.split('|').collect();
-        if f.len() == 8 {
+        if f.len() == 9 {
             first
                 .entry(f[6].to_string())
                 .or_insert_with(|| f[0].to_string());
@@ -213,7 +214,7 @@ fn tree_listing(sb: &Sandbox, image: &str) -> String {
         .iter()
         .map(|l| {
             let mut f: Vec<String> = l.split('|').map(String::from).collect();
-            if f.len() == 8 {
+            if f.len() == 9 {
                 f[6] = first[&f[6]].clone();
             }
             f.join("|")

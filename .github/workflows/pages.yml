@@ -6,7 +6,7 @@ name: Pages
 on:
   push:
     branches: [main]
-    paths: ["dev/docs/site.py", ".github/workflows/pages.yml"]
+    paths: ["dev/pages/**", ".github/workflows/pages.yml"]
   workflow_dispatch:
 
 permissions:
@@ -26,11 +26,9 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
-      - name: Pages that point to podbag.dev
-        run: python3 dev/docs/site.py --moved _site
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: _site
+          path: dev/pages
       - id: deployment
         uses: actions/deploy-pages@v4

@@ -1,6 +1,6 @@
-<img src="docs/images/logo.png" alt="podbag" width="120" align="right">
-
 # podbag
+
+<img src="docs/images/logo.png" alt="podbag" width="120" align="right">
 
 Un motor de contenedores sin daemon, en un solo binario estático.
 Guarda las imágenes archivo por archivo: un archivo que comparten muchas imágenes se guarda una sola vez.
@@ -52,7 +52,7 @@ Guarda las imágenes archivo por archivo: un archivo que comparten muchas imáge
 ### Script de instalación (Linux y macOS)
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/SteelCrab/podbag/main/install.sh | sh
+curl -fsSL https://podbag.dev/install.sh | sh
 ```
 
 - Descarga el archivo para tu sistema y comprueba su SHA-256.
