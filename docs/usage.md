@@ -891,8 +891,8 @@ open target/release/podbag.app
 
 #### Its icon
 
-- The app icon follows Apple's grid: a rounded square of 824 px on a 1024 px canvas, a
-  soft shadow, a light blue background, and the bag from `docs/images/logo.png`.
+- The desktop icon shows a wide white bulk bag with four short lifting loops on a flat
+  lilac background (`#8B65BF`). The bag artwork is in `desktop/icons/bulk-bag.png`.
 - At 16 and 32 px the bag takes more of the square, so it stays readable.
 - `desktop/icons/make-icons.sh` makes every icon file again (macOS: Swift and `iconutil`).
 
