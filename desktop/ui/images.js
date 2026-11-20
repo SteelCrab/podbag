@@ -221,14 +221,19 @@ function closeLocMenu() {
   b.focus();
 }
 
+const registryAliases = {
+  alibaba: "Alibaba ACR Aliyun 알리바바 클라우드 阿里云 阿里雲 アリババクラウド",
+  acr: "Microsoft Azure ACR 애저 에저",
+};
+
 function renderLocMenu() {
   const menu = P.dialog.querySelector(".loc-menu");
   const search = h("input", { type: "search", class: "loc-search", placeholder: t("search.placeholder"),
     "aria-label": t("pull.location"), autocomplete: "off", spellcheck: "false",
     oninput: () => {
-      const query = search.value.trim().toLowerCase();
+      const terms = search.value.trim().toLowerCase().split(/\s+/);
       for (const row of menu.querySelectorAll(".loc-row")) {
-        row.hidden = !row.dataset.search.includes(query) && row.dataset.id !== "custom";
+        row.hidden = !terms.every((term) => row.dataset.search.includes(term)) && row.dataset.id !== "custom";
       }
     },
     onkeydown: (event) => {
@@ -244,9 +249,9 @@ function renderLocMenu() {
     h("ul", {}, P.locations.map((l) => {
       const chosen = l.id === P.location;
       const label = l.needsHost && l.host ? `${l.label} (${l.host})` : l.id === "custom" ? t("pull.myRegistry") : l.label;
-      return h("li", { class: "loc-row", "data-id": l.id, "data-search": [label, l.id, l.host, l.hostExample].join(" ").toLowerCase() },
+      return h("li", { class: "loc-row", "data-id": l.id, "data-search": [label, l.id, l.host, l.hostExample, registryAliases[l.id]].join(" ").toLowerCase() },
         h("button", {
-          type: "button", class: "loc-choice", "aria-pressed": chosen ? "true" : "false",
+          type: "button", class: "loc-choice", title: label, "aria-pressed": chosen ? "true" : "false",
           onclick: () => {
             P.location = l.id;
             P.results = [];
@@ -512,7 +517,7 @@ async function importFromDocker() {
     return h("label", { class: "check import-row" },
       h("input", { type: "checkbox", value: name }),
       registryIcon(registry),
-      h("span", { class: "truncate", text: name }),
+      h("span", { class: "truncate", text: name, title: name }),
       h("span", { class: "secondary-text", text: have.has(name) ? t("import.have") : size(bytes) }));
   });
   const status = h("p", { class: "progress", "aria-live": "polite" });

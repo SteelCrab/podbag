@@ -574,6 +574,26 @@ mod tests {
     }
 
     #[test]
+    fn alibaba_recognizes_personal_enterprise_and_regional_login_servers() {
+        for host in [
+            "crpi-example.cn-hangzhou.personal.cr.aliyuncs.com",
+            "team-registry.cn-shanghai.cr.aliyuncs.com",
+            "team-registry-vpc.cn-shanghai.cr.aliyuncs.com",
+            "registry.cn-hangzhou.aliyuncs.com",
+            "registry-vpc.cn-hangzhou.aliyuncs.com",
+            "registry-intl.cn-hangzhou.aliyuncs.com",
+            "registry-intl-vpc.cn-hangzhou.aliyuncs.com",
+        ] {
+            let reference = format!("{host}/team/api:2");
+            let loc = Location::of(&reference);
+            assert!(matches!(&loc, Location::Preset(preset, _) if preset.id == "alibaba"));
+            assert_eq!(loc.qualify("team/api:2"), reference);
+        }
+        let other = "registry-intl.cn-hangzhou.aliyuncs.com.example.org";
+        assert_eq!(Location::of(other), Location::Custom(other.into()));
+    }
+
+    #[test]
     fn short_names_are_qualified() {
         assert_eq!(Location::DockerHub.qualify("nginx"), "nginx");
         assert_eq!(Location::DockerHub.qualify("me/app:1"), "me/app:1");

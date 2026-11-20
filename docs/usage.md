@@ -832,6 +832,9 @@ docker compose build --builder podbag
   NVIDIA NGC, Chainguard and Cloudsmith. Harbor, JFrog Artifactory, Sonatype Nexus and
   GitLab Self-Managed accept your installation's hostname. The Docker import list uses
   that hostname to identify its images.
+- For Alibaba Cloud, search for **Alibaba ACR** or **Aliyun**. Copy the login server
+  from your instance in the Alibaba Cloud console. Personal and Enterprise Edition
+  servers, including regional and VPC endpoints, are recognized in the import list.
 - Log in asks for a user and a password or token. The password goes only to the login
   program's stdin. The app does not keep it or show it. ECR, Google Artifact Registry
   and ACR show their cloud's login command. For ACR, enter the full login server

@@ -122,7 +122,7 @@
     { id: "ocir", label: "Oracle Cloud Infrastructure Registry", host: "", hostExample: "iad.ocir.io", needsHost: true },
     { id: "oracle", label: "Oracle Container Registry", host: "container-registry.oracle.com", hostExample: "container-registry.oracle.com", needsHost: false },
     { id: "ibm", label: "IBM Cloud Container Registry", host: "", hostExample: "us.icr.io", needsHost: true },
-    { id: "alibaba", label: "Alibaba Cloud Container Registry", host: "", hostExample: "registry.cn-hangzhou.aliyuncs.com", needsHost: true },
+    { id: "alibaba", label: "Alibaba Cloud Container Registry", host: "", hostExample: "crpi-example.cn-hangzhou.personal.cr.aliyuncs.com", needsHost: true },
     { id: "tencent", label: "Tencent Container Registry", host: "", hostExample: "example.tencentcloudcr.com", needsHost: true },
     { id: "huawei", label: "Huawei Cloud SWR", host: "", hostExample: "swr.cn-north-4.myhuaweicloud.com", needsHost: true },
     { id: "scaleway", label: "Scaleway Container Registry", host: "", hostExample: "rg.fr-par.scw.cloud", needsHost: true },
@@ -191,6 +191,7 @@
       { name: "nginx:alpine", size: 52_400_000, registry: "dockerhub" },
       { name: "mysql:8.4", size: 603_000_000, registry: "dockerhub" },
       { name: "ghcr.io/example/worker:1.4", size: 183_000_000, registry: "github" },
+      { name: "demo-registry.cn-shanghai.cr.aliyuncs.com/team/api:2", size: 76_000_000, registry: "alibaba" },
       { name: "contoso.azurecr.io/team/api:2", size: 84_000_000, registry: "acr" },
       { name: "registry.example.com/team/worker:1.4.2", size: 183_000_000, registry: "custom" },
     ],
@@ -228,6 +229,13 @@
       confirm: () => app.remove("containers", 0),
       pull: async () => { app.go("images"); await app.pull(); app.searchFor("nginx"); await new Promise((r) => setTimeout(r, 400)); },
       "pull-locations": async () => { app.go("images"); await app.pull(); document.querySelector(".loc-button").click(); },
+      "pull-alibaba": async () => {
+        app.go("images"); await app.pull();
+        document.querySelector(".loc-button").click();
+        const input = document.querySelector(".loc-search");
+        input.value = "Alibaba ACR";
+        input.dispatchEvent(new Event("input"));
+      },
       "pull-login": async () => { app.go("images"); await app.pull(); app.pullState.location = "quay"; app.pullState.step = "login"; app.render(); },
       banner: () => {},
       "settings-docker": () => app.go("settings"),

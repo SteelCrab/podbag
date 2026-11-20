@@ -91,8 +91,14 @@ pub(super) const PRESETS: &[RegistryPreset] = &[
     P::variable(
         "alibaba",
         "Alibaba Cloud Container Registry",
-        "registry.cn-hangzhou.aliyuncs.com",
-        &["registry.*.aliyuncs.com", "*.cr.aliyuncs.com"],
+        "crpi-example.cn-hangzhou.personal.cr.aliyuncs.com",
+        &[
+            "registry.*.aliyuncs.com",
+            "registry-vpc.*.aliyuncs.com",
+            "registry-intl.*.aliyuncs.com",
+            "registry-intl-vpc.*.aliyuncs.com",
+            "*.cr.aliyuncs.com",
+        ],
     ),
     P::variable(
         "tencent",
