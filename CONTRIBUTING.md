@@ -4,6 +4,7 @@ Thank you for helping. Bug reports, fixes and new features are all welcome.
 
 ## Contents
 
+- [Issue format](#issue-format)
 - [Report a problem](#report-a-problem)
 - [Build](#build)
 - [Test](#test)
@@ -11,6 +12,25 @@ Thank you for helping. Bug reports, fixes and new features are all welcome.
 - [Translations](#translations)
 - [Website](#website)
 - [License](#license)
+
+## Issue format
+
+Write every issue in English. Use these headings in order, with one short bullet under each.
+
+- `## Summary` describes the problem or requested change.
+- `## Architecture` names the components involved and how they interact.
+- `## Implementation` describes the proposed change or the steps to reproduce a bug.
+- `## Note` records a constraint, test result, or other relevant detail.
+
+Every issue must include a fenced `mermaid` diagram directly after the Architecture bullet.
+For example, an Android build issue can show how the CLI reaches the CI artifact.
+
+```mermaid
+flowchart LR
+    build["Cargo build for Android ARM64"] --> linker["Android NDK linker"]
+    linker --> cli["podbag CLI"]
+    cli --> artifact["CI artifact"]
+```
 
 ## Report a problem
 
