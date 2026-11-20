@@ -466,7 +466,10 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
 }
 
 fn main() {
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(target_os = "macos")]
+    let builder = builder.append_invoke_initialization_script("window.podbagWindowToolbar = true;");
+    let app = builder
         .manage(AppState::new())
         .invoke_handler(tauri::generate_handler![
             engine,

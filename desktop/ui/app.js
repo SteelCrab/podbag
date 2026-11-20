@@ -337,6 +337,39 @@ async function shell(c) {
   }
 }
 
+// ---- the macOS window toolbar ----
+
+const windowBar = window.podbagWindowToolbar && document.getElementById("window-bar");
+
+function setupWindowBar() {
+  if (!windowBar) return;
+  const actions = document.getElementById("window-actions");
+  windowBar.prepend(document.querySelector(".brand"));
+  document.getElementById("engine").remove();
+  const reload = iconButton("refresh", "", () => S.engine?.reachable ? refresh() : connect(false));
+  const settings = iconButton("settings", "", () => go("settings"));
+  actions.append(reload, settings);
+  document.getElementById("nav-bottom").remove();
+  windowBar.hidden = false;
+
+  // WebKit versions without focusgroup need one tab stop and arrow-key navigation.
+  if (!("focusGroup" in HTMLElement.prototype)) {
+    settings.tabIndex = -1;
+    actions.addEventListener("focusin", ({ target }) => {
+      reload.tabIndex = target === reload ? 0 : -1;
+      settings.tabIndex = target === settings ? 0 : -1;
+    });
+    actions.addEventListener("keydown", (event) => {
+      const { key, target } = event;
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(key)) return;
+      event.preventDefault();
+      if (key === "Home") reload.focus();
+      else if (key === "End") settings.focus();
+      else (target === reload ? settings : reload).focus();
+    });
+  }
+}
+
 // ---- the sidebar ----
 
 function go(view) {
@@ -352,6 +385,16 @@ function renderNav() {
     h("li", {}, h("button", {
       type: "button", class: "nav-item", "aria-current": S.view === k ? "page" : null, onclick: () => go(k),
     }, icon(k), h("span", { class: "label", text: t(`nav.${k}`) }), S.loaded ? h("span", { class: "count", text: S.lists[k].length }) : null))));
+  if (windowBar) {
+    const [reload, settings] = document.getElementById("window-actions").children;
+    for (const [button, label] of [[reload, t("action.refresh")], [settings, t("nav.settings")]]) {
+      button.title = label;
+      button.setAttribute("aria-label", label);
+    }
+    if (S.view === "settings") settings.setAttribute("aria-current", "page");
+    else settings.removeAttribute("aria-current");
+    return;
+  }
   document.getElementById("nav-bottom").replaceChildren(
     h("li", {}, h("button", {
       type: "button", class: "nav-item", "aria-current": S.view === "settings" ? "page" : null, onclick: () => go("settings"),
@@ -369,8 +412,9 @@ function engineState() {
 }
 
 function renderEngine() {
-  const [cls, text] = engineState();
   const el = document.getElementById("engine");
+  if (!el) return;
+  const [cls, text] = engineState();
   el.className = `engine engine-${cls}`;
   el.title = (S.engine && (S.engine.version || S.engine.error)) || "";
   el.replaceChildren(h("span", { class: "dot", "aria-hidden": "true" }), h("span", { text }));
@@ -419,7 +463,7 @@ function toolbar(kind) {
         h("span", { class: "dot", "aria-hidden": "true" }), h("span", { class: "live-text", text: S.live ? t("live.on") : "" })),
       kind === "images" ? button("pull", t("action.pull"), pull, "primary") : null,
       button("prune", t("action.prune"), () => prune(kind)),
-      iconButton("refresh", t("action.refresh"), refresh)));
+      windowBar ? null : iconButton("refresh", t("action.refresh"), refresh)));
 }
 
 function renderLive() {
@@ -788,6 +832,7 @@ async function init() {
   } catch { /* the defaults */ }
   applyTheme();
   await I18N.load(S.settings.language);
+  setupWindowBar();
   renderNav();
   renderEngine();
   renderMain(true);
