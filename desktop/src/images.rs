@@ -2,23 +2,23 @@
 //! in there, Docker Hub search, pulls with a login, and copies from one engine to
 //! another. No Tauri here, so it is tested against fake engines.
 
-use podbag::client::registries::config_dir;
-use podbag::client::{Choice, Client, Endpoint, Location, Target, logins};
+use podbag::client::registries::{config_dir, registry_host};
+use podbag::client::{Choice, Client, Endpoint, ImageSummary, Location, Target, logins};
 use serde::Serialize;
 
 /// A pull location, as the panel shows it. No secrets: only the account name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocationInfo {
-    /// `dockerhub`, `github`, `ecr`, `quay`, `gar`, `gitlab` or `custom`.
+    /// `dockerhub`, `github`, `ecr`, `quay`, `gar`, `gitlab`, `acr` or `custom`.
     pub id: &'static str,
     pub label: String,
     pub host: String,
-    /// The user gives the host (ECR, GAR, another registry).
+    /// The user gives the host (ECR, GAR, ACR, another registry).
     pub needs_host: bool,
     /// Who is logged in there.
     pub account: Option<String>,
-    /// The command to log in with, where a password is not enough (ECR, GAR).
+    /// The command to log in with, where a password is not enough (ECR, GAR, ACR).
     pub hint: Option<String>,
 }
 
@@ -30,6 +30,7 @@ pub fn location_id(l: &Location) -> &'static str {
         Location::Quay => "quay",
         Location::Gar(_) => "gar",
         Location::GitLab => "gitlab",
+        Location::Acr(_) => "acr",
         Location::Custom(_) => "custom",
     }
 }
@@ -54,7 +55,7 @@ fn info(l: &Location, logins: &[(String, String)]) -> LocationInfo {
     }
 }
 
-/// Every location with its login state. `hosts`: the hosts the user gave (ECR, GAR,
+/// Every location with its login state. `hosts`: the hosts the user gave (ECR, GAR, ACR,
 /// another registry), by id.
 pub fn locations(logins: &[(String, String)], hosts: &[(String, String)]) -> Vec<LocationInfo> {
     Location::all()
@@ -146,6 +147,29 @@ pub fn pull(
         .map_err(|e| e.message)
 }
 
+/// A tagged image as shown in the Docker import list.
+#[derive(Serialize)]
+pub struct ImportImage {
+    name: String,
+    size: i64,
+    registry: &'static str,
+}
+
+impl ImportImage {
+    pub fn from_image(image: ImageSummary) -> Option<Self> {
+        let name = image
+            .repo_tags
+            .into_iter()
+            .find(|tag| tag != "<none>:<none>")?;
+        let registry = location_id(&Location::of(&registry_host(&name)));
+        Some(Self {
+            name,
+            size: image.size,
+            registry,
+        })
+    }
+}
+
 /// Copy images from one engine to another (`GET /images/get` into `POST
 /// /images/load`). Only read from `from`.
 pub fn import(from: &Client, to: &Client, names: &[String]) -> Result<(), String> {
@@ -187,6 +211,7 @@ mod tests {
                 "quay",
                 "gar",
                 "gitlab",
+                "acr",
                 "custom"
             ]
         );
@@ -196,9 +221,22 @@ mod tests {
         assert_eq!(all[2].account.as_deref(), Some("AWS"));
         assert!(all[2].needs_host && all[2].hint.as_deref().unwrap().contains("aws ecr"));
         assert!(all[4].hint.as_deref().unwrap().contains("gcloud"));
-        let given = locations(&logins, &[("custom".into(), "registry.example.com".into())]);
-        assert_eq!(given[6].host, "registry.example.com");
-        assert_eq!(given[6].account, None);
+        let acr_host = "contoso-hash.azurecr.io";
+        let logins = [(acr_host.into(), "azure-user".into())];
+        let given = locations(
+            &logins,
+            &[
+                ("acr".into(), acr_host.into()),
+                ("custom".into(), "registry.example.com".into()),
+            ],
+        );
+        let acr = given.iter().find(|l| l.id == "acr").unwrap();
+        assert_eq!(acr.host, acr_host);
+        assert_eq!(acr.account.as_deref(), Some("azure-user"));
+        assert_eq!(acr.hint.as_deref(), Some("az acr login --name contoso"));
+        let custom = given.iter().find(|l| l.id == "custom").unwrap();
+        assert_eq!(custom.host, "registry.example.com");
+        assert_eq!(custom.account, None);
         assert!(location("nowhere", "").is_err());
     }
 
@@ -278,6 +316,25 @@ mod tests {
                 "POST /images/create?fromImage=ghcr.io%2Fme%2Fapp&tag=1"
             ]
         );
+    }
+
+    #[test]
+    fn import_icons_follow_the_first_named_tag() {
+        for (name, registry) in [
+            ("redis:7", "dockerhub"),
+            ("ghcr.io/team/api:1", "github"),
+            ("contoso.azurecr.io/team/api:1", "acr"),
+            ("example.org/worker:1", "custom"),
+        ] {
+            let row = ImportImage::from_image(ImageSummary {
+                repo_tags: vec!["<none>:<none>".into(), name.into(), "other:2".into()],
+                ..Default::default()
+            })
+            .unwrap();
+            assert_eq!(row.name, name);
+            assert_eq!(row.registry, registry);
+        }
+        assert!(ImportImage::from_image(ImageSummary::default()).is_none());
     }
 
     #[test]

@@ -70,7 +70,7 @@ function iconButton(name, label, onclick, cls) {
 }
 
 function button(name, label, onclick, cls) {
-  return h("button", { type: "button", class: `button ${cls || ""}`, onclick }, name && icon(name), h("span", { text: label }));
+  return h("button", { type: "button", class: `button ${cls || ""}`, onclick }, typeof name === "string" ? icon(name) : name, h("span", { text: label }));
 }
 
 const shortId = (id) => String(id || "").replace(/^sha256:/, "").slice(0, 12);
@@ -795,7 +795,7 @@ function toolbar(kind) {
     h("div", { class: "tools" },
       h("span", { class: `live ${S.live ? "live-on" : ""}`, id: "live", title: S.live ? t("live.on") : t("live.off") },
         h("span", { class: "dot", "aria-hidden": "true" }), h("span", { class: "live-text", text: S.live ? t("live.on") : "" })),
-      kind === "images" && isPodbag() && S.docker && S.docker.installed ? button("import", t("import.button"), importFromDocker) : null,
+      kind === "images" && isPodbag() && S.docker && S.docker.installed ? button(registryIcon("dockerhub"), t("import.button"), importFromDocker) : null,
       kind === "images" ? button("pull", t("action.pull"), pull, "primary") : null,
       button("prune", t("action.prune"), () => prune(kind)),
       iconButton("refresh", t("action.refresh"), refresh)));

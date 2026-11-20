@@ -226,7 +226,7 @@ fn features(state: State<'_, AppState>, sample: Option<String>) -> Features {
 }
 
 #[tauri::command(async)]
-/// Pull `image` from `location` (with `host` for ECR, GAR or another registry), with the
+/// Pull `image` from `location` (with `host` for ECR, GAR, ACR or another registry), with the
 /// login for its registry when the engine is local. Gives the reference pulled.
 fn pull(
     app: AppHandle,
@@ -330,12 +330,16 @@ fn docker_client(podbag: &std::path::Path) -> Result<Client, String> {
 
 /// Docker's images, to copy to podbag. Only read; Docker is never started.
 #[tauri::command(async)]
-fn docker_images(state: State<'_, AppState>) -> Result<Value, String> {
+fn docker_images(state: State<'_, AppState>) -> Result<Vec<images::ImportImage>, String> {
     let client = docker_client(&state.podbag)?;
     if client.ping().is_err() {
         return Err(podbag::client::choice::docker_down().into());
     }
-    commands::list(&client, "images")
+    let images = client.images().map_err(|e| e.message)?;
+    Ok(images
+        .into_iter()
+        .filter_map(images::ImportImage::from_image)
+        .collect())
 }
 
 /// Copy images from Docker to podbag (this window must use podbag).

@@ -104,6 +104,7 @@
     { id: "quay", label: "Quay.io", host: "quay.io", needsHost: false, account: null, hint: null },
     { id: "gar", label: "Google Artifact Registry", host: "", needsHost: true, account: null, hint: "gcloud auth configure-docker <region>-docker.pkg.dev" },
     { id: "gitlab", label: "GitLab", host: "registry.gitlab.com", needsHost: false, account: null, hint: null },
+    { id: "acr", label: "Azure Container Registry", host: "", needsHost: true, account: null, hint: "az acr login --name <registry-name>" },
     { id: "custom", label: "Other registry", host: "", needsHost: true, account: null, hint: null },
   ];
   const elsewhere = ["banner", "settings-docker", "pull", "pull-locations"].includes(view);
@@ -134,11 +135,24 @@
     upgrade: () => ({ ok: false, code: 77, needsAdmin: true, command: "sudo /usr/local/bin/podbag upgrade", output: "podbag: cannot write to /usr/local/bin: it needs administrator rights" }),
     open_terminal: () => null,
     search: ({ term }) => ({ supported: true, error: null, results: hub.filter((r) => r.name.includes(term)) }),
-    registries: () => registries,
+    registries: ({ hosts }) => {
+      const saved = Object.fromEntries(hosts);
+      return registries.map((loc) => {
+        const host = saved[loc.id] || loc.host;
+        const hint = loc.id === "acr" && host ? `az acr login --name ${host.split(/[.-]/)[0]}` : loc.hint;
+        return { ...loc, host, hint };
+      });
+    },
     registry_login: () => null,
     docker_command: () => dockerCmd,
     docker_switch: () => ({ ...dockerCmd, name: "podbag", isPodbag: true }),
-    docker_images: () => images.concat([{ Id: "sha256:4e4f", RepoTags: ["mysql:8.4"], Created: now - 86400 * 7, Size: 603_000_000 }]),
+    docker_images: () => [
+      { name: "nginx:alpine", size: 52_400_000, registry: "dockerhub" },
+      { name: "mysql:8.4", size: 603_000_000, registry: "dockerhub" },
+      { name: "ghcr.io/example/worker:1.4", size: 183_000_000, registry: "github" },
+      { name: "contoso.azurecr.io/team/api:2", size: 84_000_000, registry: "acr" },
+      { name: "registry.example.com/team/worker:1.4.2", size: 183_000_000, registry: "custom" },
+    ],
     import_images: () => null,
     get_settings: () => ({
       language: params.get("lang") || "en", theme: params.get("theme") || "system",

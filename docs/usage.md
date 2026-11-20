@@ -649,11 +649,11 @@ docker compose build --builder podbag
 
 - `p` in Images opens the pull form.
 - `Tab` changes where from: Docker Hub, GitHub, Amazon ECR, Quay.io, Google Artifact
-  Registry, GitLab or another registry. `Shift+Tab` goes back.
+  Registry, GitLab, Azure Container Registry (ACR) or another registry. `Shift+Tab` goes back.
 - The form shows who is logged in there. It reads the docker CLI's logins. It never shows
   a password.
-- ECR, GAR and another registry need a host. Type it, then press `Enter`.
-- ECR and GAR also show the command to log in.
+- ECR, GAR, ACR and custom registries need a host. Type it, then press `Enter`.
+- ECR, GAR and ACR also show the command to log in.
 - A short name gets the registry's host: `me/app:1` from GitHub is `ghcr.io/me/app:1`.
 - From Docker Hub, typing searches Docker Hub, when the engine can search. `↑` `↓` choose
   a result. podbag cannot search yet, so there is no search with podbag.
@@ -748,11 +748,12 @@ docker compose build --builder podbag
   pulls, `Esc` closes.
 - A search result asks for the tag (`latest` first), then pulls.
 - When the engine cannot search (podbag today), the panel says so. Type the full name.
-- Pull from: Docker Hub, GitHub, Amazon ECR, Quay.io, Google Artifact Registry, GitLab or
-  your own registry. Each shows who is logged in.
+- Pull from: Docker Hub, GitHub, Amazon ECR, Quay.io, Google Artifact Registry, GitLab,
+  Azure Container Registry or your own registry. Each shows who is logged in.
 - Log in asks for a user and a password or token. The password goes only to the login
-  program's stdin. The app does not keep it or show it. ECR and Google Artifact Registry
-  show their cloud's login command.
+  program's stdin. The app does not keep it or show it. ECR, Google Artifact Registry
+  and ACR show their cloud's login command. For ACR, enter the full login server
+  (such as `contoso-hash.azurecr.io`). Sign in with `az acr login --name contoso`.
 - A private pull sends the login only to an engine on this computer.
 
 #### docker command

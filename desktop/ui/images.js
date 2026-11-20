@@ -7,7 +7,7 @@
 const P = {
   dialog: null,
   location: "dockerhub",
-  hosts: loadHosts(), // the hosts the user gave: ecr, gar, custom
+  hosts: loadHosts(), // user-supplied registry hosts
   locations: [],
   results: [],
   active: 0,
@@ -18,6 +18,16 @@ const P = {
   lines: [],
   busy: false,
 };
+
+function registryIcon(id) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", "registry-icon");
+  svg.setAttribute("aria-hidden", "true");
+  const use = document.createElementNS(svg.namespaceURI, "use");
+  use.setAttribute("href", `registry-icons.svg#${id}`);
+  svg.append(use);
+  return svg;
+}
 
 function loadHosts() {
   try {
@@ -108,7 +118,7 @@ function onPullInput() {
   searchTimer = setTimeout(async () => {
     try {
       const r = await API.search(q);
-      if (P.dialog.querySelector(".pull-input").value.trim() !== q) return;
+      if (P.location !== "dockerhub" || P.dialog.querySelector(".pull-input").value.trim() !== q) return;
       P.searchSupported = r.supported;
       P.searchError = r.error || null;
       P.results = r.results || [];
@@ -226,15 +236,19 @@ function renderLocMenu() {
             P.location = l.id;
             P.results = [];
             closeLocMenu();
-            renderPullPanel();
-            if (l.needsHost && !l.host) { P.step = "host"; renderPullPanel(); }
-            else onPullInput();
+            if (l.needsHost) {
+              P.afterHost = "search";
+              P.step = "host";
+              renderPullPanel();
+            } else {
+              onPullInput();
+            }
           },
         },
-        h("span", { class: "loc-label", text: label }),
-        l.account
-          ? h("span", { class: "loc-account" }, h("span", { class: "dot dot-on", "aria-hidden": "true" }), h("span", { text: l.account }))
-          : null,
+        registryIcon(l.id),
+        h("span", { class: "loc-details" },
+          h("span", { class: "loc-label", text: label }),
+          l.account ? h("span", { class: "loc-account" }, h("span", { class: "dot dot-on", "aria-hidden": "true" }), l.account) : null),
         chosen ? icon("check") : null),
         l.account ? null : h("button", {
           type: "button", class: "button small", text: t("pull.login"),
@@ -259,7 +273,7 @@ function renderPullPanel() {
   input.setAttribute("aria-label", input.placeholder);
   input.disabled = P.busy;
   const lb = P.dialog.querySelector(".loc-button");
-  put(lb, loc.account ? h("span", { class: "dot dot-on", "aria-hidden": "true" }) : null,
+  put(lb, registryIcon(loc.id), loc.account ? h("span", { class: "dot dot-on", "aria-hidden": "true" }) : null,
     h("span", { text: loc.id === "custom" && !loc.host ? t("pull.myRegistry") : loc.label }), icon("forward"));
   lb.setAttribute("aria-label", `${t("pull.location")}: ${loc.label}`);
   lb.disabled = P.busy;
@@ -322,7 +336,8 @@ function tagBody() {
 }
 
 function hostBody(loc) {
-  const host = h("input", { type: "text", id: "pull-host", "data-focus": "", autocomplete: "off", spellcheck: "false", placeholder: loc.id === "ecr" ? "123456789012.dkr.ecr.us-east-1.amazonaws.com" : loc.id === "gar" ? "us-docker.pkg.dev" : "registry.example.com" });
+  const examples = { ecr: "123456789012.dkr.ecr.us-east-1.amazonaws.com", gar: "us-docker.pkg.dev", acr: "contoso.azurecr.io" };
+  const host = h("input", { type: "text", id: "pull-host", value: loc.host, "data-focus": "", autocomplete: "off", spellcheck: "false", placeholder: examples[loc.id] || "registry.example.com" });
   return h("form", { class: "pull-form", onsubmit: async (e) => {
     e.preventDefault();
     const v = host.value.trim();
@@ -478,25 +493,24 @@ async function importFromDocker() {
     toast(String(e), true);
     return;
   }
-  const named = (list || []).filter((i) => (i.RepoTags || []).some((x) => x !== "<none>:<none>"));
   const have = new Set(S.lists.images.flatMap((i) => i.RepoTags || []));
-  const boxes = named.map((i) => {
-    const name = imageName(i);
+  const boxes = list.map(({ name, size: bytes, registry }) => {
     return h("label", { class: "check import-row" },
       h("input", { type: "checkbox", value: name }),
+      registryIcon(registry),
       h("span", { class: "truncate", text: name }),
-      h("span", { class: "secondary-text", text: have.has(name) ? t("import.have") : size(i.Size) }));
+      h("span", { class: "secondary-text", text: have.has(name) ? t("import.have") : size(bytes) }));
   });
   const status = h("p", { class: "progress", "aria-live": "polite" });
   const d = h("dialog", { class: "import", "aria-labelledby": "import-title" },
     h("form", { method: "dialog" },
-      h("h2", { id: "import-title", text: t("import.title") }),
+      h("h2", { id: "import-title" }, registryIcon("dockerhub"), t("import.title")),
       h("p", { text: t("import.text") }),
-      named.length ? h("div", { class: "import-list" }, boxes) : h("p", { text: t("import.none") }),
+      list.length ? h("div", { class: "import-list" }, boxes) : h("p", { text: t("import.none") }),
       status,
       h("div", { class: "buttons" },
         h("button", { value: "", class: "button", text: t("action.cancel") }),
-        h("button", { value: "copy", class: "button primary", text: t("import.copy"), disabled: !named.length }))));
+        h("button", { value: "copy", class: "button primary", text: t("import.copy"), disabled: !list.length }))));
   d.addEventListener("submit", async (e) => {
     if (!e.submitter || e.submitter.value !== "copy") return;
     e.preventDefault();

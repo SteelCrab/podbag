@@ -26,12 +26,14 @@ pub enum Location {
     Gar(String),
     /// GitLab, `registry.gitlab.com`.
     GitLab,
+    /// Azure Container Registry, at its login server.
+    Acr(String),
     /// Another registry, by host (`registry.example.com:5000`).
     Custom(String),
 }
 
 impl Location {
-    /// Every kind, in the order to show them. ECR, GAR and Custom have no host yet.
+    /// Every kind, in the order to show them. User-supplied hosts start empty.
     pub fn all() -> Vec<Location> {
         vec![
             Location::DockerHub,
@@ -40,24 +42,26 @@ impl Location {
             Location::Quay,
             Location::Gar(String::new()),
             Location::GitLab,
+            Location::Acr(String::new()),
             Location::Custom(String::new()),
         ]
     }
 
-    /// The user must give a host ([`Location::with_host`]): ECR, GAR, Custom.
+    /// The user must give a host ([`Location::with_host`]): ECR, GAR, ACR, Custom.
     pub fn needs_host(&self) -> bool {
         matches!(
             self,
-            Location::Ecr(_) | Location::Gar(_) | Location::Custom(_)
+            Location::Ecr(_) | Location::Gar(_) | Location::Acr(_) | Location::Custom(_)
         )
     }
 
-    /// The same kind at `host` (for ECR, GAR, Custom; the others keep their own).
+    /// The same kind at `host` (for ECR, GAR, ACR, Custom; the others keep their own).
     pub fn with_host(&self, host: &str) -> Location {
         let host = normalize(host);
         match self {
             Location::Ecr(_) => Location::Ecr(host),
             Location::Gar(_) => Location::Gar(host),
+            Location::Acr(_) => Location::Acr(host),
             Location::Custom(_) => Location::Custom(host),
             other => other.clone(),
         }
@@ -70,7 +74,9 @@ impl Location {
             Location::GitHub => "ghcr.io".into(),
             Location::Quay => "quay.io".into(),
             Location::GitLab => "registry.gitlab.com".into(),
-            Location::Ecr(h) | Location::Gar(h) | Location::Custom(h) => h.clone(),
+            Location::Ecr(h) | Location::Gar(h) | Location::Acr(h) | Location::Custom(h) => {
+                h.clone()
+            }
         }
     }
 
@@ -83,6 +89,7 @@ impl Location {
             Location::Quay => "Quay.io".into(),
             Location::Gar(_) => "Google Artifact Registry".into(),
             Location::GitLab => "GitLab".into(),
+            Location::Acr(_) => "Azure Container Registry".into(),
             Location::Custom(h) if h.is_empty() => "Other registry".into(),
             Location::Custom(h) => h.clone(),
         }
@@ -100,7 +107,7 @@ impl Location {
         format!("{host}/{short}")
     }
 
-    /// How to log in where a password is not enough: ECR and GAR give a command.
+    /// How to log in where a password is not enough: cloud registries give a command.
     pub fn login_hint(&self) -> Option<String> {
         match self {
             Location::Ecr(h) => {
@@ -121,6 +128,10 @@ impl Location {
                     h
                 };
                 Some(format!("gcloud auth configure-docker {host}"))
+            }
+            Location::Acr(host) => {
+                let name = acr_resource_name(host).unwrap_or("<registry-name>");
+                Some(format!("az acr login --name {name}"))
             }
             _ => None,
         }
@@ -148,11 +159,12 @@ impl Location {
             "registry.gitlab.com" => Location::GitLab,
             h if h.contains(".dkr.ecr.") && h.ends_with(".amazonaws.com") => Location::Ecr(host),
             h if h.ends_with("-docker.pkg.dev") => Location::Gar(host),
+            h if acr_resource_name(h).is_some() => Location::Acr(host),
             _ => Location::Custom(host),
         }
     }
 
-    /// The account logged in here, from [`logins`]. ECR or GAR with no host yet: any
+    /// The account logged in here, from [`logins`]. A cloud registry with no host yet: any
     /// login of that kind.
     pub fn account<'a>(&self, logins: &'a [(String, String)]) -> Option<&'a str> {
         let host = self.host();
@@ -167,6 +179,22 @@ impl Location {
             })
             .map(|(_, user)| user.as_str())
     }
+}
+
+/// Azure CLI takes the resource name. A protected login server adds a DNS hash.
+fn acr_resource_name(host: &str) -> Option<&str> {
+    let (label, suffix) = host.split_once('.')?;
+    if !matches!(suffix, "azurecr.io" | "azurecr.cn" | "azurecr.us") {
+        return None;
+    }
+    let (name, hash) = label.split_once('-').unwrap_or((label, ""));
+    if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return None;
+    }
+    if label != name && (hash.is_empty() || !hash.bytes().all(|b| b.is_ascii_alphanumeric())) {
+        return None;
+    }
+    Some(name)
 }
 
 /// The first part of `reference` is a registry host: it has a `.` or `:`, or is
@@ -465,7 +493,7 @@ mod tests {
     #[test]
     fn hosts_labels_and_all() {
         let all = Location::all();
-        assert_eq!(all.len(), 7);
+        assert_eq!(all.len(), 8);
         assert_eq!(all[0], Location::DockerHub);
         assert_eq!(Location::DockerHub.host(), "docker.io");
         assert_eq!(Location::GitHub.host(), "ghcr.io");
@@ -556,6 +584,35 @@ mod tests {
                 .contains("<region>")
         );
         assert_eq!(Location::GitHub.login_hint(), None);
+    }
+
+    #[test]
+    fn azure_uses_the_full_login_server_for_images_and_the_resource_name_for_login() {
+        let blank = Location::Acr(String::new());
+        assert!(blank.needs_host());
+        assert_eq!(
+            blank.login_hint().unwrap(),
+            "az acr login --name <registry-name>"
+        );
+        for host in [
+            "contoso.azurecr.io",
+            "contoso-a1b2.azurecr.io",
+            "contoso.azurecr.us",
+            "contoso.azurecr.cn",
+        ] {
+            let acr = blank.with_host(host);
+            let image = format!("{host}/team/app:1");
+            assert_eq!(Location::of(&image), acr);
+            assert_eq!(acr.qualify("team/app:1"), image);
+            assert_eq!(acr.login_hint().unwrap(), "az acr login --name contoso");
+        }
+        for host in [
+            "contoso.azurecr.io.example.org",
+            "contoso.eastus.data.azurecr.io",
+            "contoso-.azurecr.io",
+        ] {
+            assert_eq!(Location::of(host), Location::Custom(host.into()));
+        }
     }
 
     #[test]

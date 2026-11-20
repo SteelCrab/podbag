@@ -1,5 +1,5 @@
 //! The pull form (`p` in Images): where to pull from (Tab cycles the locations), the
-//! login there, a host for ECR, GAR and other registries, the image's name, and Docker
+//! login there, a host for ECR, GAR, ACR and other registries, the image's name, and Docker
 //! Hub search results when the engine can search.
 
 use super::app::{App, Effect, Mode};
@@ -291,6 +291,28 @@ mod tests {
         assert_eq!(
             app.on_key(code(KeyCode::Enter)),
             Effect::Pull(format!("{host}/app:1"))
+        );
+    }
+
+    #[test]
+    fn azure_login_and_pull_use_the_selected_server() {
+        let mut app = open();
+        app.on_key(code(KeyCode::BackTab)); // Custom registry
+        assert_eq!(
+            app.on_key(code(KeyCode::BackTab)),
+            Effect::Login(Location::Acr(String::new()))
+        );
+        let host = "contoso-a1b2.azurecr.io";
+        type_text(&mut app, host);
+        assert_eq!(
+            app.on_key(code(KeyCode::Enter)),
+            Effect::Login(Location::Acr(host.into()))
+        );
+        assert!(screen(&mut app).contains("az acr login --name contoso"));
+        type_text(&mut app, "team/api:2");
+        assert_eq!(
+            app.on_key(code(KeyCode::Enter)),
+            Effect::Pull(format!("{host}/team/api:2"))
         );
     }
 
