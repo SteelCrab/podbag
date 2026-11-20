@@ -19,7 +19,7 @@ pub const DEFAULT_CPUS_MAX: u32 = 8;
 #[serde(rename_all = "camelCase", default)]
 pub struct Saved {
     pub cpus: Option<u32>,
-    #[serde(rename = "memoryMiB")]
+    #[serde(rename = "memoryMiB", alias = "memoryMib")]
     pub memory_mib: Option<u64>,
     pub idle_seconds: Option<u64>,
 }
@@ -182,7 +182,11 @@ pub fn effective(
     let memory_mib = match number("PODBAG_VM_MEMORY") {
         Some(m) => m.max(1),
         None => s.memory_mib.map_or(DEFAULT_MEMORY_MIB, |m| {
-            m.clamp(MEMORY_MIN_MIB, mac.memory_max_mib())
+            if m > mac.memory_mib {
+                mac.memory_max_mib()
+            } else {
+                m.max(1)
+            }
         }),
     };
     let idle_seconds = number("PODBAG_VM_IDLE")
@@ -200,10 +204,22 @@ pub fn effective(
 
 /// The saved settings; none when there is no file or it cannot be read.
 pub fn load(home: &Path) -> Saved {
-    std::fs::read(home.join("vm.json"))
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default()
+    read(home).unwrap_or_default()
+}
+
+pub(super) fn read(home: &Path) -> Result<Saved, String> {
+    for file in ["vm.json", "vm-resources.json"] {
+        let path = home.join(file);
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                return serde_json::from_slice(&bytes)
+                    .map_err(|e| format!("{}: {e}", path.display()));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        }
+    }
+    Ok(Saved::default())
 }
 
 /// Save the settings (written beside the file, then renamed over it).

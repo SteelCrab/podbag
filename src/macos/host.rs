@@ -45,14 +45,18 @@ pub struct Paths {
     pub running: PathBuf,
 }
 
-pub fn paths() -> Result<Paths, String> {
-    let home = match std::env::var_os("PODBAG_MAC_HOME") {
+pub(super) fn home() -> Result<PathBuf, String> {
+    Ok(match std::env::var_os("PODBAG_MAC_HOME") {
         Some(h) => PathBuf::from(h),
         None => {
             let user = std::env::var_os("HOME").ok_or("HOME is not set")?;
             PathBuf::from(user).join(".podbag")
         }
-    };
+    })
+}
+
+pub fn paths() -> Result<Paths, String> {
+    let home = home()?;
     let run = home.join("run");
     Ok(Paths {
         guest: guest_dir(&home),
@@ -387,17 +391,21 @@ fn serve_vm(p: &Paths, lock: &std::fs::File, inherited: Option<&Inherited>) -> R
     make_disk(p)?;
     let env = |k: &str| std::env::var(k).ok();
     let (resources, _) =
-        settings::effective(&settings::load(&p.home), &env, &settings::Mac::this());
+        settings::effective(&settings::read(&p.home)?, &env, &settings::Mac::this());
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
+    let memory = resources
+        .memory_mib
+        .checked_mul(1 << 20)
+        .ok_or("VM memory is too large")?;
     let spec = VmSpec {
         kernel: p.guest.join("Image"),
         initrd: p.guest.join("initramfs.gz"),
         disk: p.disk.clone(),
         console: p.console.clone(),
         cpus: resources.cpus as usize,
-        memory: resources.memory_mib << 20,
+        memory,
         // After `--`: the argument of /init, which makes podbag the VM's init. The kernel
         // sizes its bounce buffers for the VM's whole memory (64 MB at 8 GiB, written at
         // boot, so the Mac holds them), and nothing uses them: virtio here does not go

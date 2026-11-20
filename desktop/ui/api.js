@@ -30,6 +30,7 @@ const API = (() => {
     watch: (on) => invoke("watch", { on }),
     openShell: (id) => invoke("open_shell", { id }),
     vm: (action) => invoke("vm", { action }),
+    vmResources: (values) => invoke("vm_resources", { values: values || null }),
     vmStatus: () => invoke("vm_status"),
     vmSet: (settings) => invoke("vm_set", { settings }),
     setEngine: (engine) => invoke("set_engine", { engine }),
@@ -39,7 +40,7 @@ const API = (() => {
     getSettings: () => invoke("get_settings"),
     setSettings: (settings) => invoke("set_settings", { settings }),
     // Events: changed, live, logs, pull-progress, shown, engine-changed, open-updates,
-    // open-settings, docker-changed.
+    // open-settings, docker-changed, vm-status.
     on: listen,
   };
 })();

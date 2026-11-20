@@ -127,7 +127,12 @@
     logs_stop: () => null,
     watch: () => { setTimeout(() => emit("live", true), 10); return null; },
     open_shell: () => null,
-    vm: () => null,
+    vm: ({ action }) => {
+      engine.vm = action !== "stop" ? "running" : "stopped";
+      engine.reachable = action !== "stop";
+      vmStatus.state = engine.vm;
+      emit("engine-changed", action);
+    },
     vm_status: () => (docker || engine.platform === "linux" ? null : vmStatus),
     vm_set: () => "Saved.",
     set_engine: () => null,

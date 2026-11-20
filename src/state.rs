@@ -138,6 +138,9 @@ pub struct State {
     /// Published ports, with the host ports in use.
     #[serde(default)]
     pub ports: Vec<crate::network::PortMapping>,
+    /// Its processes are frozen (`pause`). Only while it runs.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub paused: bool,
 }
 
 /// Seconds since the epoch.
@@ -173,6 +176,48 @@ pub fn write_state(dirs: &Dirs, id: &str, state: &State) -> Result<()> {
     let mut f = std::fs::File::create(&tmp).map_err(fail)?;
     f.write_all(&json).map_err(fail)?;
     std::fs::rename(&tmp, dir.join(STATE)).map_err(fail)
+}
+
+const STATE_LOCK: &str = "state.lock";
+
+/// Held while a state is read, changed and written back, so that two writers do not lose
+/// each other's change (a pause and the end of the run). Released when dropped.
+pub fn lock_state(dirs: &Dirs, id: &str) -> Result<std::fs::File> {
+    id::check(id)?;
+    let fail = |e: std::io::Error| {
+        Error::io(
+            format!("cannot lock the state of container {}", id::short_id(id)),
+            &e,
+            "check the permissions of the podbag data directory",
+        )
+    };
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dirs.container_dir(id).join(STATE_LOCK))
+        .map_err(fail)?;
+    file.lock().map_err(fail)?;
+    Ok(file)
+}
+
+/// Change the state of a running container under [`lock_state`]: `change` sees it only
+/// while it runs and says whether to write it. The state after the change, or None when
+/// it does not run (any more).
+pub fn change_running_state(
+    dirs: &Dirs,
+    id: &str,
+    change: impl FnOnce(&mut State) -> bool,
+) -> Result<Option<State>> {
+    let _lock = lock_state(dirs, id)?;
+    let mut state = read_state(dirs, id)?;
+    if state.status != Status::Running {
+        return Ok(None);
+    }
+    if change(&mut state) {
+        write_state(dirs, id, &state)?;
+    }
+    Ok(Some(state))
 }
 
 pub fn read_state(dirs: &Dirs, id: &str) -> Result<State> {
@@ -337,6 +382,33 @@ pub fn resolve(dirs: &Dirs, name_or_id: &str) -> Result<String> {
     }
 }
 
+/// The lock of the container names (and of settings changes that `rename` and `update`
+/// make): held, no other container can take a name meanwhile. Released when dropped.
+pub fn lock_names(dirs: &Dirs) -> Result<std::fs::File> {
+    let fail = |e: std::io::Error| {
+        Error::io(
+            "cannot lock the container list",
+            &e,
+            "check the permissions of the podbag data directory",
+        )
+    };
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dirs.data.join("containers.lock"))
+        .map_err(fail)?;
+    lock.lock().map_err(fail)?;
+    Ok(lock)
+}
+
+/// The container other than `id` that has `name`, if one does.
+pub fn named(dirs: &Dirs, name: &str, except: &str) -> Result<Option<String>> {
+    Ok(list_ids(dirs)?
+        .into_iter()
+        .find(|other| other != except && name_of(dirs, other).is_some_and(|n| n == name)))
+}
+
 /// Record a new container: check its name is free, then write its settings and a
 /// "created" state. Names are checked under a lock, so two creates cannot both win.
 pub fn create(dirs: &Dirs, spec: &ContainerSpec) -> Result<()> {
@@ -347,27 +419,8 @@ pub fn create(dirs: &Dirs, spec: &ContainerSpec) -> Result<()> {
             format!("check that {} is writable", dirs.data.display()),
         )
     })?;
-    let lock_path = dirs.data.join("containers.lock");
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&lock_path)
-        .map_err(|e| {
-            Error::io(
-                "cannot lock the container list",
-                &e,
-                "check the permissions of the podbag data directory",
-            )
-        })?;
-    // Released when `lock` is dropped.
-    lock.lock().map_err(|e| {
-        Error::io(
-            "cannot lock the container list",
-            &e,
-            "check the permissions of the podbag data directory",
-        )
-    })?;
+    // Released when dropped.
+    let _lock = lock_names(dirs)?;
     for other in list_ids(dirs)? {
         if name_of(dirs, &other).is_some_and(|name| name == spec.name) {
             return Err(Error::new(
@@ -395,6 +448,7 @@ pub fn create(dirs: &Dirs, spec: &ContainerSpec) -> Result<()> {
         oom: None,
         ip: None,
         ports: Vec::new(),
+        paused: false,
     };
     write_state(dirs, &spec.id, &state)
 }
@@ -567,6 +621,7 @@ fn settle(dirs: &Dirs, id: &str, seen: State) -> Result<State> {
     let mut state = read_state(dirs, id)?;
     if state.status == Status::Running {
         state.status = Status::Exited;
+        state.paused = false;
         state.exit_code = None;
         state.finished = Some(now());
         write_state(dirs, id, &state)?;
@@ -623,6 +678,7 @@ mod tests {
             oom: None,
             ip: None,
             ports: Vec::new(),
+            paused: false,
         };
         write_state(&dirs, &spec.id, &st).unwrap();
         assert_eq!(read_state(&dirs, &spec.id).unwrap(), st);
@@ -771,6 +827,7 @@ mod tests {
             oom: None,
             ip: None,
             ports: Vec::new(),
+            paused: false,
         };
         write_state(&dirs, &spec.id, &running).unwrap();
         let lock = hold_shim_lock(&dirs, &spec.id).unwrap();
@@ -800,6 +857,7 @@ mod tests {
             oom: None,
             ip: None,
             ports: Vec::new(),
+            paused: false,
         };
         let done = State {
             status: Status::Exited,
@@ -856,6 +914,7 @@ mod tests {
             oom: None,
             ip: None,
             ports: Vec::new(),
+            paused: false,
         };
         write_state(&dirs, &spec.id, &running).unwrap();
         let fixed = reconcile(&dirs, &spec.id).unwrap();

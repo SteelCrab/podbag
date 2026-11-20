@@ -380,6 +380,42 @@ async function shell(c) {
   }
 }
 
+// ---- the macOS window toolbar ----
+
+const windowBar = window.podbagWindowToolbar && document.getElementById("window-bar");
+
+function setupWindowBar() {
+  if (!windowBar) return;
+  const actions = document.getElementById("topbar-tools");
+  windowBar.prepend(document.querySelector(".brand"));
+  document.getElementById("engine").remove();
+  const reload = iconButton("refresh", "", () => S.engine?.reachable ? refresh() : connect(false));
+  const settings = iconButton("settings", "", () => go("settings"));
+  actions.append(reload, settings);
+  document.getElementById("nav-bottom").remove();
+  windowBar.querySelector(".topbar-space").setAttribute("data-tauri-drag-region", "");
+  windowBar.querySelector(".brand").setAttribute("data-tauri-drag-region", "deep");
+  windowBar.classList.add("native");
+  windowBar.setAttribute("data-tauri-drag-region", "");
+
+  // WebKit versions without focusgroup need one tab stop and arrow-key navigation.
+  if (!("focusGroup" in HTMLElement.prototype)) {
+    settings.tabIndex = -1;
+    actions.addEventListener("focusin", ({ target }) => {
+      reload.tabIndex = target === reload ? 0 : -1;
+      settings.tabIndex = target === settings ? 0 : -1;
+    });
+    actions.addEventListener("keydown", (event) => {
+      const { key, target } = event;
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(key)) return;
+      event.preventDefault();
+      if (key === "Home") reload.focus();
+      else if (key === "End") settings.focus();
+      else (target === reload ? settings : reload).focus();
+    });
+  }
+}
+
 // ---- the sidebar ----
 
 // Back and forward go through the pages seen (a list, a detail, the settings).
@@ -438,6 +474,16 @@ function renderNav() {
     title: label,
   }, icon(view), h("span", { class: "label", text: label }), count == null ? null : h("span", { class: "count", text: count })));
   nav.replaceChildren(...KINDS.map((k) => item(k, t(`nav.${k}`), S.loaded ? S.lists[k].length : null)));
+  if (windowBar) {
+    const [reload, settings] = document.getElementById("topbar-tools").children;
+    for (const [button, label] of [[reload, t("action.refresh")], [settings, t("nav.settings")]]) {
+      button.title = label;
+      button.setAttribute("aria-label", label);
+    }
+    if (S.view === "settings") settings.setAttribute("aria-current", "page");
+    else settings.removeAttribute("aria-current");
+    return;
+  }
   document.getElementById("nav-bottom").replaceChildren(item("settings", t("nav.settings"), null));
 }
 
@@ -452,8 +498,9 @@ function engineState() {
 }
 
 function renderEngine() {
-  const [cls, text] = engineState();
   const el = document.getElementById("engine");
+  if (!el) return;
+  const [cls, text] = engineState();
   const name = (S.engine && S.engine.engineName) || "podbag";
   el.className = `engine engine-${cls}`;
   el.title = `${name}: ${text}${S.engine && (S.engine.version || S.engine.error) ? `\n${S.engine.version || S.engine.error}` : ""}`;
@@ -798,7 +845,7 @@ function toolbar(kind) {
       kind === "images" && isPodbag() && S.docker && S.docker.installed ? button(registryIcon("dockerhub"), t("import.button"), importFromDocker) : null,
       kind === "images" ? button("pull", t("action.pull"), pull, "primary") : null,
       button("prune", t("action.prune"), () => prune(kind)),
-      iconButton("refresh", t("action.refresh"), refresh)));
+      windowBar ? null : iconButton("refresh", t("action.refresh"), refresh)));
 }
 
 function renderLive() {
@@ -1129,6 +1176,7 @@ function onLogs(batch) {
 
 async function renderSettings(main) {
   if (!S.languageNames) S.languageNames = await I18N.names();
+  if (S.view !== "settings") return;
   const lang = h("select", {
     id: "language",
     onchange: async (e) => { S.settings.language = e.target.value; await saveSettings(); },
@@ -1239,16 +1287,21 @@ const ENV_FIELD = { PODBAG_VM_CPUS: "cpus", PODBAG_VM_MEMORY: "memory", PODBAG_V
 function vmForm(vm) {
   const l = vm.limits || {};
   const over = new Map((vm.overriddenBy || []).map((name) => [ENV_FIELD[name], name]));
-  const input = (id, label, props, hint) => h("div", { class: "form-field" },
-    h("label", { for: id, text: label }),
-    h("input", { id, type: "number", inputmode: "decimal", required: true, oninput: () => { vmFormDirty = true; }, ...props }),
-    h("span", { class: "hint", text: hint }),
-    over.has(id.replace("vm-", "")) ? h("span", { class: "hint warn", text: t("settings.vmOverridden", { name: over.get(id.replace("vm-", "")) }) }) : null);
+  const input = (id, label, props, hint) => {
+    const value = h("input", { id, type: "number", inputmode: "decimal", required: true, ...props });
+    const slider = id === "vm-idle" ? null : h("input", { type: "range", "aria-label": label, ...props });
+    value.oninput = () => { vmFormDirty = true; if (slider) slider.value = value.value; };
+    if (slider) slider.oninput = () => { vmFormDirty = true; value.value = slider.value; };
+    const variable = over.get(id.slice(3));
+    return h("div", { class: "form-field" }, h("label", { for: id, text: label }), value, slider,
+      h("span", { class: "hint", text: hint }),
+      variable ? h("span", { class: "hint warn", text: t("settings.vmOverridden", { name: variable }) }) : null);
+  };
   const form = h("form", { class: "vm-form", novalidate: true, onsubmit: (e) => { e.preventDefault(); applyVm(form); } },
     h("div", { class: "form-grid" },
       input("vm-cpus", t("settings.cpus"), { min: l.cpusMin || 1, max: l.cpusMax || 64, step: 1 },
         t("settings.limits", { min: l.cpusMin || 1, max: l.cpusMax || "?" })),
-      input("vm-memory", t("settings.memory"), { min: (l.memoryMinMiB || 1024) / 1024, max: (l.memoryMaxMiB || 65536) / 1024, step: 0.5 },
+      input("vm-memory", t("settings.memory"), { min: (l.memoryMinMiB || 1024) / 1024, max: (l.memoryMaxMiB || 65536) / 1024, step: 0.25 },
         t("settings.limits", { min: mib(l.memoryMinMiB || 1024), max: mib(l.memoryMaxMiB) })),
       input("vm-idle", t("settings.idle"), { min: 0, max: 1440, step: 1 }, t("settings.idleHint"))),
     h("p", { class: "hint vm-pending", text: t("settings.vmPending"), hidden: !vm.pending }),
@@ -1262,7 +1315,8 @@ function fillVmForm(form, vm) {
   if (!form) return;
   const next = vm.next || vm.inUse || {};
   form.querySelector("#vm-cpus").value = next.cpus ?? "";
-  form.querySelector("#vm-memory").value = next.memoryMiB != null ? String(Math.round((next.memoryMiB / 1024) * 2) / 2) : "";
+  form.querySelector("#vm-memory").value = next.memoryMiB != null ? String(next.memoryMiB / 1024) : "";
+  for (const range of form.querySelectorAll('input[type="range"]')) range.value = range.previousElementSibling.value;
   form.querySelector("#vm-idle").value = next.idleSeconds != null ? String(Math.round(next.idleSeconds / 60)) : "";
 }
 
@@ -1459,7 +1513,7 @@ function renderBanner() {
 // Tools at the right of the top bar.
 function renderTopbar() {
   const box = document.getElementById("topbar-tools");
-  if (!box) return;
+  if (!box || windowBar) return;
   const settings = iconButton("settings", t("nav.settings"), () => go("settings"));
   box.replaceChildren(settings);
 }
@@ -1506,6 +1560,7 @@ async function init() {
   } catch { /* the defaults */ }
   applyTheme();
   await I18N.load(S.settings.language);
+  setupWindowBar();
   setupSidebar();
   renderAll();
   remember();
@@ -1514,6 +1569,22 @@ async function init() {
   API.on("logs", onLogs);
   API.on("pull-progress", (line) => { if (pullLine) pullLine(line); });
   API.on("shown", () => { connect(false); loadUpdates("due"); });
+  API.on("vm-status", (vm) => {
+    if (S.engine?.platform !== "macos" || !S.engine.vm || S.engine.vm === vm) return;
+    S.engine.vm = vm;
+    if (vm === "stopped") {
+      S.engine.reachable = false;
+      S.loaded = false;
+      clearTimeout(refreshTimer);
+      API.watch(false);
+      renderNav();
+    } else if (!S.engine.reachable && !document.hidden && !vmBusy) {
+      connect(false);
+      return;
+    }
+    refreshVm();
+    renderMain();
+  });
   API.on("engine-changed", () => connect(false));
   API.on("open-updates", openUpdates);
   API.on("open-settings", () => go("settings"));

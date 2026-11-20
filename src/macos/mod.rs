@@ -3,6 +3,7 @@
 pub mod cli;
 pub mod embedded;
 pub mod host;
+mod resources;
 pub mod settings;
 pub mod standby;
 pub mod vm;

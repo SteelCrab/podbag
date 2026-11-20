@@ -9,6 +9,12 @@ use crate::{Error, ErrorKind, Result};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+pub(crate) mod pause;
+mod rename;
+pub mod stats;
+pub mod top;
+pub mod update;
+
 /// Settings for [`ContainerHandle::exec`]. Unset values come from the container.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 pub struct ExecOptions {
@@ -215,7 +221,11 @@ impl ContainerHandle {
             Some(Duration::from_secs(10)),
         )? {
             Response::Failed { error } => Err(error),
-            _ => Ok(()),
+            _ => {
+                // A paused container handles the signal once it runs again.
+                pause::thaw_after_signal(dirs, &self.id);
+                Ok(())
+            }
         }
     }
 
@@ -248,21 +258,41 @@ impl ContainerHandle {
     /// SIGTERM, then SIGKILL if the container still runs after `timeout`.
     /// Returns its exit code. Stopping a container that has ended just returns its code.
     pub fn stop(&self, timeout: Duration) -> Result<i32> {
-        self.stop_in(&paths::dirs()?, timeout)
+        self.stop_in(&paths::dirs()?, Some(timeout))
     }
 
-    fn stop_in(&self, dirs: &Dirs, timeout: Duration) -> Result<i32> {
+    /// Stop using an override in seconds, or the container's configured grace period.
+    pub fn stop_configured(&self, seconds: Option<i64>) -> Result<i32> {
+        let dirs = paths::dirs()?;
+        self.stop_in(&dirs, self.stop_timeout(&dirs, seconds)?)
+    }
+
+    fn stop_timeout(&self, dirs: &Dirs, seconds: Option<i64>) -> Result<Option<Duration>> {
+        let seconds = match seconds {
+            Some(value) => value,
+            None => state::read_config(dirs, &self.id)?
+                .stop_timeout
+                .unwrap_or(10),
+        };
+        Ok(u64::try_from(seconds).ok().map(Duration::from_secs))
+    }
+
+    fn stop_in(&self, dirs: &Dirs, timeout: Option<Duration>) -> Result<i32> {
         if self.kill_in(dirs, libc::SIGTERM).is_err() && !self.signal_a_start(dirs, libc::SIGTERM) {
             // Already ended, or ending: the shim (if still there) or the state has the code.
             return self.wait_in(dirs);
         }
-        match control::send(dirs, &self.id, &Request::Wait, Some(timeout)) {
-            Ok(Response::Exited { exit_code }) => Ok(exit_code),
-            Ok(_) | Err(_) => {
-                let _ = self.kill_in(dirs, libc::SIGKILL);
-                self.wait_in(dirs)
-            }
+        if timeout.is_none() {
+            return self.wait_in(dirs);
         }
+        if timeout != Some(Duration::ZERO)
+            && let Ok(Response::Exited { exit_code }) =
+                control::send(dirs, &self.id, &Request::Wait, timeout)
+        {
+            return Ok(exit_code);
+        }
+        let _ = self.kill_in(dirs, libc::SIGKILL);
+        self.wait_in(dirs)
     }
 
     /// Run another command in the running container and collect its output.
@@ -382,6 +412,14 @@ impl ContainerHandle {
     #[cfg(target_os = "linux")]
     fn refuse_running(&self) -> Result<()> {
         let info = self.info()?;
+        if info.state.paused {
+            return Err(Error::new(
+                ErrorKind::Conflict,
+                format!("cannot start container {}", info.name),
+                "it is paused",
+                "run `podbag unpause` instead",
+            ));
+        }
         if info.state.status == Status::Running {
             return Err(Error::new(
                 ErrorKind::Conflict,
@@ -395,8 +433,18 @@ impl ContainerHandle {
 
     /// Stop the container if it runs (like [`ContainerHandle::stop`]), then start it.
     pub fn restart(&self, timeout: Duration) -> Result<()> {
+        self.restart_in(&paths::dirs()?, Some(timeout))
+    }
+
+    /// Restart using an override in seconds, or the container's configured grace period.
+    pub fn restart_configured(&self, seconds: Option<i64>) -> Result<()> {
+        let dirs = paths::dirs()?;
+        self.restart_in(&dirs, self.stop_timeout(&dirs, seconds)?)
+    }
+
+    fn restart_in(&self, dirs: &Dirs, timeout: Option<Duration>) -> Result<()> {
         if self.info()?.state.status == Status::Running {
-            self.stop(timeout)?;
+            self.stop_in(dirs, timeout)?;
         }
         self.start()
     }
@@ -467,6 +515,9 @@ impl ContainerHandle {
                 "exec needs a running container",
                 "start a new container, or run `podbag ps -a` to see its state",
             ));
+        }
+        if info.state.paused {
+            return Err(pause::exec_refused(&self.id));
         }
         let req = crate::linux::exec::ExecRequest {
             command: command.iter().map(|c| c.as_ref().to_string()).collect(),
@@ -1022,12 +1073,16 @@ mod tests {
             oom: None,
             ip: None,
             ports: Vec::new(),
+            paused: false,
         };
         state::write_state(&dirs, &id, &running).unwrap();
         let _shim_alive = state::hold_shim_lock(&dirs, &id).unwrap();
         let shim = exiting_shim(&dirs, &id, 3);
         let handle = ContainerHandle::from_id(id);
-        assert_eq!(handle.stop_in(&dirs, Duration::from_secs(1)).unwrap(), 3);
+        assert_eq!(
+            handle.stop_in(&dirs, Some(Duration::from_secs(1))).unwrap(),
+            3
+        );
         shim.join().unwrap();
     }
 }

@@ -69,6 +69,16 @@ pub fn map_create(
     if let Some(hostname) = non_empty(&body["Hostname"]) {
         c = c.hostname(hostname);
     }
+    if !body["StopTimeout"].is_null() {
+        let seconds = body["StopTimeout"].as_i64().ok_or_else(|| {
+            invalid(
+                "invalid StopTimeout",
+                "expected an integer",
+                "give the grace period in seconds",
+            )
+        })?;
+        c = c.stop_timeout(seconds);
+    }
     c = c.tty(body["Tty"].as_bool().unwrap_or(false));
     c = c.interactive(body["OpenStdin"].as_bool().unwrap_or(false));
     if let Some(labels) = body["Labels"].as_object() {
@@ -294,7 +304,6 @@ fn ignored(body: &Value) -> Vec<String> {
     }
     for (key, what) in [
         ("StopSignal", "stop signal"),
-        ("StopTimeout", "stop timeout"),
         ("Domainname", "domain name"),
         ("MacAddress", "mac address"),
     ] {
@@ -1002,6 +1011,22 @@ mod tests {
                 Ok(_) => panic!("{mode} {endpoints} was accepted"),
             }
         }
+    }
+
+    #[test]
+    fn create_keeps_integer_stop_timeouts() {
+        for value in [json!(null), json!(0), json!(2), json!(-1)] {
+            let (container, warnings) =
+                map_create(&json!({"StopTimeout": value}), None, &image()).unwrap();
+            assert!(warnings.is_empty());
+            assert_eq!(fields(&container)["stop_timeout"], value);
+        }
+        assert_eq!(
+            map_create(&json!({"StopTimeout": "2"}), None, &image())
+                .unwrap_err()
+                .kind,
+            ErrorKind::InvalidInput
+        );
     }
 
     #[test]

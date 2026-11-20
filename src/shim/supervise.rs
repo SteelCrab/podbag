@@ -529,6 +529,7 @@ pub(super) fn run(
         oom: None,
         ip: addresses.first().map(|(_, ip)| ip.to_string()),
         ports: published.iter().map(|(m, _)| *m).collect(),
+        paused: false,
     };
     let _ = state::write_state(dirs, id, &st);
     super::net::announce(dirs, spec);
@@ -639,10 +640,15 @@ pub(crate) fn finish(
     waiters: &[UnixStream],
 ) {
     st.status = Status::Exited;
+    st.paused = false;
     st.exit_code = Some(code);
     st.oom = oom;
     st.finished = Some(state::now());
-    let _ = state::write_state(dirs, &spec.id, &st);
+    {
+        // Under the state lock: a pause that read "running" cannot write it back now.
+        let _lock = state::lock_state(dirs, &spec.id);
+        let _ = state::write_state(dirs, &spec.id, &st);
+    }
     // Give the address back before anyone hears of the exit: they may reuse it at once.
     super::net::detach(dirs, spec, session);
     // Answer waiters only after the state says "exited": they may act on it at once.

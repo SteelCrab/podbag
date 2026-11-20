@@ -4,6 +4,7 @@
 
 - [What you need](#what-you-need)
 - [Linux](#linux)
+- [Android](#android)
 - [macOS](#macos)
 - [Windows](#windows)
 - [Check your build](#check-your-build)
@@ -43,6 +44,50 @@ CC_x86_64_unknown_linux_musl=musl-gcc cargo build --release --target x86_64-unkn
 
 - The program is `target/x86_64-unknown-linux-musl/release/podbag`.
 - It needs no other library. It runs on Linux 5.12 or later.
+
+### Linux desktop packages
+
+Download the `podbag-desktop-amd64` or `podbag-desktop-arm64` artifact from
+[Linux desktop packages](https://github.com/SteelCrab/podbag/actions/workflows/desktop-packages.yml).
+Extract the ZIP, then install the package for your distribution from that directory:
+
+```sh
+sudo apt install ./podbag-desktop_*.deb     # Debian 12 or compatible Ubuntu
+sudo dnf install ./podbag-desktop-*.rpm     # Fedora 44
+```
+
+Open **Podbag Desktop** from the applications menu. The package includes the
+engine used by the GUI. To remove it, run `sudo apt purge podbag-desktop` or
+`sudo dnf remove podbag-desktop`.
+
+To build both packages on Debian 12, install Rust, nFPM, jq, a C compiler,
+pkg-config, libwebkit2gtk-4.1-dev, libayatana-appindicator3-dev, librsvg2-dev
+and libxdo-dev. Run `desktop/linux/package.sh` on the target architecture.
+The packages are written to `packages/` in Cargo's target directory.
+
+## Android
+
+Build the CLI for 64-bit ARM devices with Android 7.0 (API 24) or later.
+The Android build includes image commands. Running containers locally requires
+the Linux build.
+
+Install the [Android NDK](https://developer.android.com/ndk/downloads) and set
+`ANDROID_NDK_HOME` to its directory. From the repository root, run:
+
+```sh
+rustup target add aarch64-linux-android
+# On macOS (including Apple silicon), use darwin-x86_64 instead of linux-x86_64.
+export PATH="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+cargo build --locked --release --target aarch64-linux-android --bin podbag
+```
+
+To check the binary on a connected device:
+
+```sh
+adb push target/aarch64-linux-android/release/podbag /data/local/tmp/podbag
+adb shell chmod 755 /data/local/tmp/podbag
+adb shell /data/local/tmp/podbag --version
+```
 
 ## macOS
 

@@ -43,12 +43,12 @@
 </svg>
 
 <div class="app" id="app">
-  <header class="topbar">
+  <header class="topbar" id="window-bar">
     <button type="button" class="icon-button" id="sidebar-toggle" aria-controls="sidebar" aria-expanded="true"></button>
     <button type="button" class="icon-button" id="nav-back" disabled></button>
     <button type="button" class="icon-button" id="nav-forward" disabled></button>
     <div class="topbar-space"></div>
-    <div class="topbar-tools" id="topbar-tools"></div>
+    <div class="topbar-tools" id="topbar-tools" role="toolbar" aria-label="podbag" focusgroup="toolbar wrap"></div>
   </header>
   <nav class="sidebar" id="sidebar" aria-label="podbag">
     <div class="brand"><img src="logo-small.png" alt="" width="28" height="28"><span>podbag</span></div>

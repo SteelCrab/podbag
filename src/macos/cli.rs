@@ -144,10 +144,10 @@ fn error_since(log: &Path, at: u64) -> String {
     }
 }
 
-const VM_USAGE: &str = "usage: podbag vm start|stop|restart [--yes]|status [--json]|logs\n       \
+const VM_USAGE: &str = "usage: podbag vm start|stop|restart [--yes]|status [--json]|logs|resources [CPUS MEMORY_MIB]\n       \
                         podbag vm set [--cpus N] [--memory SIZE] [--idle TIME] [--restart] [--yes]";
 
-/// `podbag vm start|stop|restart|status|set|logs`.
+/// `podbag vm start|stop|restart|status|set|logs|resources`.
 pub fn vm_command(args: &[String]) -> i32 {
     let rest = args.get(1..).unwrap_or_default();
     let result = match args.first().map(String::as_str) {
@@ -160,6 +160,9 @@ pub fn vm_command(args: &[String]) -> i32 {
         },
         Some("status") if rest.iter().any(|a| a == "--json") => {
             paths().map(|p| println!("{}", status_json(&p)))
+        }
+        Some("resources") => {
+            super::host::home().and_then(|home| super::resources::command(&home, &args[1..]))
         }
         Some("status") => paths().map(|p| println!("{}", status(&p))),
         Some("stop") => stop(),
@@ -328,7 +331,8 @@ pub fn restart(yes: bool) -> Result<(), String> {
 /// (`--restart`: now).
 fn set(args: &[String]) -> Result<(), String> {
     let p = paths()?;
-    let mut saved = settings::load(&p.home);
+    let mut saved = settings::read(&p.home)?;
+    let mut changes = settings::Saved::default();
     let (mut restart_now, mut yes, mut changed) = (false, false, false);
     let mut i = 0;
     while i < args.len() {
@@ -353,15 +357,15 @@ fn set(args: &[String]) -> Result<(), String> {
                     .trim()
                     .parse()
                     .map_err(|_| format!("--cpus: {v:?} is not a number"))?;
-                saved.cpus = Some(n);
+                changes.cpus = Some(n);
                 changed = true;
             }
             "--memory" => {
-                saved.memory_mib = Some(settings::parse_memory(&value()?)?);
+                changes.memory_mib = Some(settings::parse_memory(&value()?)?);
                 changed = true;
             }
             "--idle" => {
-                saved.idle_seconds = Some(settings::parse_idle(&value()?)?);
+                changes.idle_seconds = Some(settings::parse_idle(&value()?)?);
                 changed = true;
             }
             "--restart" => restart_now = true,
@@ -374,7 +378,10 @@ fn set(args: &[String]) -> Result<(), String> {
         return Err(format!("nothing to set\n{VM_USAGE}"));
     }
     let mac = settings::Mac::this();
-    settings::validate(&saved, &mac)?;
+    settings::validate(&changes, &mac)?;
+    saved.cpus = changes.cpus.or(saved.cpus);
+    saved.memory_mib = changes.memory_mib.or(saved.memory_mib);
+    saved.idle_seconds = changes.idle_seconds.or(saved.idle_seconds);
     // Asked before anything is saved: a "no" changes nothing.
     if restart_now && state(&p) == "running" {
         confirm_restart(&p, yes)?;

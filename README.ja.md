@@ -118,6 +118,7 @@ podbag run -d --name web -p 8080:80 nginx:alpine  # バックグラウンドで�
 podbag ps                                         # コンテナの一覧
 podbag logs -f web                                # ログを追いかけて表示します
 podbag exec -it web sh                            # コンテナの中でシェルを開きます
+podbag stats --no-stream                          # CPU、メモリ、ネットワークの使用量
 podbag stop web && podbag rm web                  # 停止して削除します
 podbag images                                     # イメージの一覧
 podbag build -t myapp .                           # Dockerfile からイメージをビルドします

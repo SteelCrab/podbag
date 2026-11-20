@@ -209,17 +209,16 @@ pub fn start(targets: &[String], attach: bool, interactive: bool) -> i32 {
 }
 
 /// `podbag restart`.
-pub fn restart(targets: &[String], seconds: u64) -> i32 {
+pub fn restart(targets: &[String], seconds: Option<i64>) -> i32 {
     each(targets, |h| {
-        h.restart(Duration::from_secs(seconds))
+        h.restart_configured(seconds)
             .map(|()| println!("{}", h.id()))
     })
 }
 
-pub fn stop(targets: &[String], seconds: u64) -> i32 {
+pub fn stop(targets: &[String], seconds: Option<i64>) -> i32 {
     each(targets, |h| {
-        h.stop(Duration::from_secs(seconds))
-            .map(|_| println!("{}", h.id()))
+        h.stop_configured(seconds).map(|_| println!("{}", h.id()))
     })
 }
 
@@ -334,7 +333,11 @@ fn status(c: &ContainerInfo, now: u64) -> String {
         Status::Running => format!(
             "Up {}{}",
             human_duration(now.saturating_sub(c.state.started.unwrap_or(now))),
-            c.health.as_ref().map_or("", |h| h.status.ps_suffix())
+            if c.state.paused {
+                " (Paused)"
+            } else {
+                c.health.as_ref().map_or("", |h| h.status.ps_suffix())
+            }
         ),
         Status::Exited => {
             let code = c.state.exit_code.map_or("?".to_string(), |c| c.to_string());
