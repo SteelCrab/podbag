@@ -18,11 +18,20 @@ const S = {
   live: false,
   features: { stats: false, top: false, pause: false, rename: false },
   featuresAsked: false,
-  settings: { language: "system", theme: "system" },
+  settings: { language: "system", theme: "system", sidebarWidth: 216, sidebarCollapsed: false },
   busy: new Set(),
   logs: { generation: 0, lines: [], follow: true },
   languageNames: null,
+  vm: null, // podbag vm status --json, or null
+  updates: null, // versions and the last update check
+  upgrade: null, // what the last "Update podbag" did
+  history: { stack: [], index: -1 },
+  autoCollapsed: false, // the window is too narrow for the sidebar
+  docker: null, // where the docker command goes
 };
+
+const IS_MAC = /Mac/.test(navigator.platform || navigator.userAgent);
+const SIDEBAR = { width: 216, min: 160, max: 360 };
 
 // ---- small helpers ----
 
@@ -42,6 +51,11 @@ function h(tag, props, ...kids) {
   return el;
 }
 
+// Replace an element's children; null and false are left out.
+function put(el, ...kids) {
+  el.replaceChildren(...kids.flat(Infinity).filter((k) => k != null && k !== false));
+}
+
 function icon(name) {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("class", "icon");
@@ -58,7 +72,7 @@ function iconButton(name, label, onclick, cls) {
 }
 
 function button(name, label, onclick, cls) {
-  return h("button", { type: "button", class: `button ${cls || ""}`, onclick }, name && icon(name), h("span", { text: label }));
+  return h("button", { type: "button", class: `button ${cls || ""}`, onclick }, typeof name === "string" ? icon(name) : name, h("span", { text: label }));
 }
 
 const shortId = (id) => String(id || "").replace(/^sha256:/, "").slice(0, 12);
@@ -193,13 +207,58 @@ async function connect(startVm) {
     S.engine = { reachable: false, error: String(e), platform: "linux", endpoint: "" };
   }
   renderEngine();
+  renderSwitch();
+  refreshVm();
+  refreshDocker();
   if (S.engine.reachable) {
     await refresh();
     API.watch(true);
   } else {
     S.loaded = false;
+    renderNav();
     renderMain();
   }
+  renderStatusbar();
+}
+
+const isPodbag = () => !S.engine || S.engine.engine === "podbag";
+const hasVm = () => isPodbag() && S.engine && S.engine.platform !== "linux";
+
+// The VM's state, from files (it wakes nothing). Only for podbag on macOS and Windows.
+async function refreshVm() {
+  if (!hasVm()) {
+    S.vm = null;
+  } else {
+    try {
+      S.vm = await API.vmStatus();
+    } catch (e) {
+      S.vm = { state: "unknown", error: String(e) };
+    }
+  }
+  renderVmCard();
+  renderStatusbar();
+  if (S.view === "settings") renderVmSettings();
+}
+
+// Switch this window to podbag or Docker; the TUI reads the same choice.
+async function switchEngine(name) {
+  if (S.engine && S.engine.engine === name) return;
+  try {
+    await API.setEngine(name);
+  } catch (e) {
+    toast(String(e), true);
+    renderSwitch();
+    return;
+  }
+  if (S.detail) closeDetail();
+  S.lists = { containers: [], images: [], volumes: [], networks: [] };
+  S.loaded = false;
+  S.featuresAsked = false;
+  S.features = { stats: false, top: false, pause: false, rename: false };
+  S.vm = null;
+  toast(t("switch.done", { name: name === "docker" ? "Docker" : "podbag" }));
+  await connect(false);
+  if (S.view === "settings") renderMain(true);
 }
 
 async function refresh() {
@@ -218,6 +277,7 @@ async function refresh() {
   }
   renderNav();
   renderMain();
+  renderStatusbar();
 }
 
 let refreshTimer = null;
@@ -286,26 +346,9 @@ async function prune(kind) {
   refreshSoon();
 }
 
+// Pull progress goes here while a pull runs; images.js opens the pull panel.
 let pullLine = null;
-function pull() {
-  askDialog({
-    title: t("pull.title"),
-    label: t("pull.label"),
-    placeholder: t("pull.placeholder"),
-    okLabel: t("action.pull"),
-    work: async (image, progress) => {
-      pullLine = progress;
-      progress(t("pull.working"));
-      try {
-        await API.pull(image);
-      } finally {
-        pullLine = null;
-      }
-      toast(t("done.pull", { name: image }));
-      refreshSoon();
-    },
-  });
-}
+function pull() {}
 
 function rename(c) {
   askDialog({
@@ -345,7 +388,7 @@ const windowBar = window.podbagWindowToolbar && document.getElementById("window-
 
 function setupWindowBar() {
   if (!windowBar) return;
-  const actions = document.getElementById("window-actions");
+  const actions = document.getElementById("topbar-tools");
   windowBar.prepend(document.querySelector(".brand"));
   document.getElementById("engine").remove();
   const reload = iconButton("refresh", "", () => {
@@ -355,7 +398,10 @@ function setupWindowBar() {
   const settings = iconButton("settings", "", () => go("settings"));
   actions.append(reload, settings);
   document.getElementById("nav-bottom").remove();
-  windowBar.hidden = false;
+  windowBar.querySelector(".topbar-space").setAttribute("data-tauri-drag-region", "");
+  windowBar.querySelector(".brand").setAttribute("data-tauri-drag-region", "deep");
+  windowBar.classList.add("native");
+  windowBar.setAttribute("data-tauri-drag-region", "");
 
   // WebKit versions without focusgroup need one tab stop and arrow-key navigation.
   if (!("focusGroup" in HTMLElement.prototype)) {
@@ -377,21 +423,65 @@ function setupWindowBar() {
 
 // ---- the sidebar ----
 
+// Back and forward go through the pages seen (a list, a detail, the settings).
+function remember() {
+  const h = S.history;
+  const entry = { view: S.view, detail: S.detail ? { kind: S.detail.kind, id: S.detail.id, tab: S.detail.tab } : null };
+  if (S.view === "kubernetes") entry.kubeKind = S.kubeKind;
+  const last = h.stack[h.index];
+  if (last && JSON.stringify(last) === JSON.stringify(entry)) return;
+  h.stack = h.stack.slice(0, h.index + 1);
+  h.stack.push(entry);
+  if (h.stack.length > 50) h.stack.shift();
+  h.index = h.stack.length - 1;
+  renderHistory();
+}
+
+function travel(step) {
+  const h = S.history;
+  const entry = h.stack[h.index + step];
+  if (!entry) return;
+  h.index += step;
+  if (S.detail && S.detail.tab === "logs") API.logsStop();
+  S.view = entry.view;
+  if (entry.kubeKind) { S.kubeKind = entry.kubeKind; S.kubeExpanded = true; }
+  S.detail = entry.detail ? { ...entry.detail, json: null, extra: null } : null;
+  renderNav();
+  renderMain(true);
+  renderHistory();
+}
+
+function renderHistory() {
+  const back = document.getElementById("nav-back");
+  const forward = document.getElementById("nav-forward");
+  const keys = IS_MAC ? ["⌘[", "⌘]"] : ["Alt+←", "Alt+→"];
+  for (const [el, icn, key, shortcut, on] of [
+    [back, "back", "action.back", keys[0], S.history.index > 0],
+    [forward, "forward", "action.forward", keys[1], S.history.index < S.history.stack.length - 1],
+  ]) {
+    if (!el.firstChild) el.append(icon(icn));
+    el.setAttribute("aria-label", t(key));
+    el.title = `${t(key)} (${shortcut})`;
+    el.disabled = !on;
+  }
+}
+
 function go(view, kind = S.kubeKind) {
-  if (S.detail) closeDetail();
+  if (S.detail) closeDetail(true);
   if (view === "kubernetes") {
     S.kubeExpanded = true;
     const changed = kind !== S.kubeKind;
     S.kubeKind = kind;
     if (S.view === view) {
       updateKubeNav();
-      if (changed) kubePanel.switchResource();
+      if (changed) { kubePanel.switchResource(); remember(); }
       return;
     }
   }
   S.view = view;
   renderNav();
   renderMain(true);
+  remember();
 }
 
 // Keep the disclosure and child buttons mounted when the engine refreshes its lists.
@@ -427,13 +517,14 @@ function updateKubeNav() {
 
 function renderNav() {
   const nav = document.getElementById("nav");
-  nav.replaceChildren(...KINDS.map((k) =>
-    h("li", {}, h("button", {
-      type: "button", class: "nav-item", "aria-current": S.view === k ? "page" : null, onclick: () => go(k),
-    }, icon(k), h("span", { class: "label", text: t(`nav.${k}`) }), S.loaded ? h("span", { class: "count", text: S.lists[k].length }) : null))));
+  const item = (view, label, count) => h("li", {}, h("button", {
+    type: "button", class: "nav-item", "aria-current": S.view === view ? "page" : null, onclick: () => go(view),
+    title: label,
+  }, icon(view), h("span", { class: "label", text: label }), count == null ? null : h("span", { class: "count", text: count })));
+  nav.replaceChildren(...KINDS.map((k) => item(k, t(`nav.${k}`), S.loaded ? S.lists[k].length : null)));
   updateKubeNav();
   if (windowBar) {
-    const [reload, settings] = document.getElementById("window-actions").children;
+    const [reload, settings] = document.getElementById("topbar-tools").children;
     for (const [button, label] of [[reload, t("action.refresh")], [settings, t("nav.settings")]]) {
       button.title = label;
       button.setAttribute("aria-label", label);
@@ -442,16 +533,13 @@ function renderNav() {
     else settings.removeAttribute("aria-current");
     return;
   }
-  document.getElementById("nav-bottom").replaceChildren(
-    h("li", {}, h("button", {
-      type: "button", class: "nav-item", "aria-current": S.view === "settings" ? "page" : null, onclick: () => go("settings"),
-    }, icon("settings"), h("span", { class: "label", text: t("nav.settings") }))));
-  document.querySelector(".sidebar").setAttribute("aria-label", "podbag");
+  document.getElementById("nav-bottom").replaceChildren(item("settings", t("nav.settings"), null));
 }
 
 function engineState() {
   const e = S.engine;
   if (!e) return ["checking", t("engine.checking")];
+  if (e.engine && e.engine !== "podbag") return e.reachable ? ["ok", t("engine.running")] : ["down", t("engine.down")];
   if (e.vm === "running") return ["ok", t("engine.vmRunning")];
   if (e.vm && !e.reachable) return ["off", t("engine.vmStopped")];
   if (e.reachable) return ["ok", t("engine.running")];
@@ -459,14 +547,308 @@ function engineState() {
 }
 
 function renderEngine() {
-  syncVmSettings();
   const el = document.getElementById("engine");
   if (!el) return;
   const [cls, text] = engineState();
+  const name = (S.engine && S.engine.engineName) || "podbag";
   el.className = `engine engine-${cls}`;
-  el.title = (S.engine && (S.engine.version || S.engine.error)) || "";
-  el.replaceChildren(h("span", { class: "dot", "aria-hidden": "true" }), h("span", { text }));
+  el.title = `${name}: ${text}${S.engine && (S.engine.version || S.engine.error) ? `\n${S.engine.version || S.engine.error}` : ""}`;
+  el.replaceChildren(h("span", { class: "dot", "aria-hidden": "true" }), h("span", { class: "label", text: `${name} · ${text}` }));
+  // The VM card shows the state instead, for podbag with a VM.
+  el.hidden = !!S.vm && hasVm();
 }
+
+// "This window: podbag / Docker". `where` names the radio group (sidebar or settings).
+function engineChoice(where) {
+  const current = S.engine ? S.engine.engine : "podbag";
+  const group = h("div", { class: "segments", role: "radiogroup", "aria-label": t("switch.label") });
+  for (const [value, label] of [["podbag", "podbag"], ["docker", "Docker"]]) {
+    const input = h("input", {
+      type: "radio", name: `engine-${where}`, value, class: "visually-hidden", checked: current === value,
+      onchange: () => switchEngine(value),
+    });
+    group.append(h("label", { class: "segment" }, input, h("span", { text: label })));
+  }
+  return group;
+}
+
+function renderSwitch() {
+  const box = document.getElementById("engine-switch");
+  const current = S.engine ? S.engine.engine : "podbag";
+  const other = current === "docker" ? "podbag" : "docker";
+  const otherName = other === "docker" ? "Docker" : "podbag";
+  const name = (S.engine && S.engine.engineName) || "podbag";
+  // In the rail: one button that switches to the other engine.
+  const rail = h("button", {
+    type: "button", class: "icon-button switch-rail", onclick: () => switchEngine(other),
+    "aria-label": `${t("switch.current", { name })}. ${t("switch.to", { name: otherName })}`,
+    title: `${t("switch.current", { name })}\n${t("switch.to", { name: otherName })}`,
+  }, icon("engine"));
+  put(box,
+    h("span", { class: "switch-label", text: t("switch.label") }),
+    engineChoice("sidebar"),
+    current === "socket" ? h("span", { class: "switch-note truncate", text: name, title: name }) : null,
+    rail);
+}
+
+// ---- the sidebar's width, collapse and divider ----
+
+const narrowWindow = window.matchMedia("(max-width: 720px)");
+
+function sidebarCollapsed() {
+  return S.settings.sidebarCollapsed || S.autoCollapsed;
+}
+
+function applySidebar() {
+  const app = document.getElementById("app");
+  const collapsed = sidebarCollapsed();
+  const width = clampWidth(S.settings.sidebarWidth);
+  app.style.setProperty("--sidebar-w", `${width}px`);
+  app.classList.toggle("collapsed", collapsed);
+  const splitter = document.getElementById("splitter");
+  splitter.setAttribute("aria-valuenow", String(width));
+  splitter.setAttribute("aria-label", t("sidebar.resize"));
+  splitter.hidden = collapsed;
+  const toggle = document.getElementById("sidebar-toggle");
+  const label = collapsed ? t("sidebar.show") : t("sidebar.hide");
+  if (!toggle.firstChild) toggle.append(icon("sidebar"));
+  toggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  toggle.setAttribute("aria-label", label);
+  toggle.title = `${label} (${IS_MAC ? "⌃⌘S" : "Ctrl+B"})`;
+}
+
+const clampWidth = (w) => Math.min(SIDEBAR.max, Math.max(SIDEBAR.min, Math.round(Number(w) || SIDEBAR.width)));
+
+let saveSidebarTimer = null;
+function saveSidebarSoon() {
+  clearTimeout(saveSidebarTimer);
+  saveSidebarTimer = setTimeout(() => API.setSettings(S.settings).catch(() => {}), 300);
+}
+
+function setSidebarWidth(w, save) {
+  S.settings.sidebarWidth = clampWidth(w);
+  applySidebar();
+  if (save) saveSidebarSoon();
+}
+
+function toggleSidebar() {
+  if (sidebarCollapsed()) {
+    S.autoCollapsed = false;
+    S.settings.sidebarCollapsed = false;
+  } else if (narrowWindow.matches) {
+    // Too narrow: hide it for now, without changing the saved choice.
+    S.autoCollapsed = true;
+  } else {
+    S.settings.sidebarCollapsed = true;
+  }
+  applySidebar();
+  saveSidebarSoon();
+}
+
+function setupSidebar() {
+  const splitter = document.getElementById("splitter");
+  const app = document.getElementById("app");
+  let drag = null;
+  splitter.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    splitter.setPointerCapture(e.pointerId);
+    drag = { x: e.clientX, width: clampWidth(S.settings.sidebarWidth) };
+    app.classList.add("resizing");
+  });
+  splitter.addEventListener("pointermove", (e) => {
+    if (!drag || !splitter.hasPointerCapture(e.pointerId)) return;
+    const dir = document.documentElement.dir === "rtl" ? -1 : 1;
+    setSidebarWidth(drag.width + (e.clientX - drag.x) * dir, false);
+  });
+  const end = (e) => {
+    if (!drag) return;
+    drag = null;
+    app.classList.remove("resizing");
+    if (splitter.hasPointerCapture(e.pointerId)) splitter.releasePointerCapture(e.pointerId);
+    saveSidebarSoon();
+  };
+  splitter.addEventListener("pointerup", end);
+  splitter.addEventListener("pointercancel", end);
+  splitter.addEventListener("lostpointercapture", end);
+  splitter.addEventListener("dblclick", () => setSidebarWidth(SIDEBAR.width, true));
+  splitter.addEventListener("keydown", (e) => {
+    const step = e.shiftKey ? 40 : 10;
+    const w = clampWidth(S.settings.sidebarWidth);
+    const keys = {
+      ArrowLeft: w - step, ArrowRight: w + step, ArrowUp: w + step, ArrowDown: w - step,
+      Home: SIDEBAR.min, End: SIDEBAR.max,
+    };
+    if (e.key === "Enter") {
+      e.preventDefault();
+      toggleSidebar();
+      document.getElementById("sidebar-toggle").focus();
+    } else if (e.key in keys) {
+      e.preventDefault();
+      setSidebarWidth(keys[e.key], true);
+    }
+  });
+  document.getElementById("sidebar-toggle").addEventListener("click", toggleSidebar);
+  document.getElementById("nav-back").addEventListener("click", () => travel(-1));
+  document.getElementById("nav-forward").addEventListener("click", () => travel(1));
+  // Narrow windows collapse it; it comes back when there is room.
+  const onWidth = () => {
+    S.autoCollapsed = narrowWindow.matches;
+    applySidebar();
+  };
+  narrowWindow.addEventListener("change", onWidth);
+  S.autoCollapsed = narrowWindow.matches;
+  applySidebar();
+  renderHistory();
+}
+
+// ---- the VM card ----
+
+// Memory in MiB as text: 512 MB, 1.5 GB.
+function mib(m) {
+  if (m == null) return "—";
+  const fmt = (n, unit) => new Intl.NumberFormat(I18N.lang, { style: "unit", unit, unitDisplay: "short", maximumFractionDigits: 1 }).format(n);
+  return m >= 1024 ? fmt(m / 1024, "gigabyte") : fmt(m, "megabyte");
+}
+
+function percent(p) {
+  return new Intl.NumberFormat(I18N.lang, { style: "percent", maximumFractionDigits: 1 }).format((p || 0) / 100);
+}
+
+// 2 h 5 min, 3 min, 2 days.
+function duration(secs) {
+  if (secs == null) return "—";
+  const fmt = (n, unit) => new Intl.NumberFormat(I18N.lang, { style: "unit", unit, unitDisplay: "short", maximumFractionDigits: 0 }).format(n);
+  if (secs >= 86400) return fmt(Math.floor(secs / 86400), "day");
+  if (secs >= 3600) return `${fmt(Math.floor(secs / 3600), "hour")} ${fmt(Math.floor((secs % 3600) / 60), "minute")}`;
+  return fmt(Math.max(1, Math.floor(secs / 60)), "minute");
+}
+
+function vmStateKey(state) {
+  const known = { running: "running", standby: "standby", starting: "starting", stopped: "stopped", "not set up": "notSetUp" };
+  return known[state] || "unknown";
+}
+
+function vmChip(state) {
+  const key = vmStateKey(state);
+  const cls = key === "running" ? "running" : key === "starting" ? "restarting" : "created";
+  return h("span", { class: `chip chip-${cls}` }, h("span", { class: "dot", "aria-hidden": "true" }), t(`vm.state.${key}`));
+}
+
+let vmBusy = false;
+async function vmAction(action) {
+  const n = (S.vm && S.vm.containers) || 0;
+  if ((action === "stop" || action === "restart") && n > 0) {
+    if (!(await confirmDialog(t(action === "stop" ? "confirm.stopVm" : "confirm.restartVm", { n }), t(action === "stop" ? "action.stopVm" : "action.restartVm")))) return;
+  }
+  vmBusy = true;
+  renderVmCard();
+  if (S.view === "settings") renderVmSettings();
+  try {
+    await API.vm(action);
+  } catch (e) {
+    toast(String(e), true);
+  }
+  vmBusy = false;
+  await refreshVm();
+}
+
+function renderVmCard() {
+  const card = document.getElementById("vm-card");
+  const vm = S.vm;
+  renderEngine();
+  if (!vm || !hasVm()) {
+    card.hidden = true;
+    return;
+  }
+  card.hidden = false;
+  const running = vm.state === "running";
+  const stoppable = running || vm.state === "standby" || vm.state === "starting";
+  const rows = [];
+  if (vm.containers != null || running) rows.push([t("vm.containers"), String(vm.containers ?? 0)]);
+  if (vm.cpuPercent != null || vm.inUse) {
+    const cpus = vm.inUse ? vm.inUse.cpus : null;
+    rows.push([t("vm.cpu"), [vm.cpuPercent != null ? percent(vm.cpuPercent) : null, cpus].filter((x) => x != null).join(" · ")]);
+  }
+  let bar = null;
+  if (vm.memoryTotalMiB) {
+    rows.push([t("vm.memory"), `${mib(vm.memoryUsedMiB || 0)} / ${mib(vm.memoryTotalMiB)}`]);
+    const used = Math.min(100, Math.round(((vm.memoryUsedMiB || 0) / vm.memoryTotalMiB) * 100));
+    bar = h("div", { class: "meter", role: "meter", "aria-label": t("vm.memory"), "aria-valuemin": "0", "aria-valuemax": "100", "aria-valuenow": String(used) },
+      h("span", { style: `width: ${used}%` }));
+  }
+  const stateText = t(`vm.state.${vmStateKey(vm.state)}`);
+  const btn = stoppable
+    ? button(null, t("action.stopVm"), () => vmAction("stop"), "vm-button")
+    : button(null, t("action.startVm"), () => vmAction("start"), "vm-button primary");
+  btn.disabled = vmBusy || vm.state === "not set up";
+  card.setAttribute("aria-label", t("vm.title"));
+  put(card,
+    h("div", { class: "vm-head", title: `${t("vm.title")}: ${stateText}` },
+      h("span", { class: `dot ${running ? "dot-on" : ""}`, "aria-hidden": "true" }),
+      h("span", { class: "vm-name", text: t("vm.title") }),
+      h("span", { class: "vm-state", text: stateText })),
+    rows.length ? h("dl", { class: "vm-rows" }, rows.map(([k, v]) => [h("dt", { text: k }), h("dd", { text: v })])) : null,
+    bar,
+    btn,
+    // The rail shows only this: the state as a dot, its text in the tooltip.
+    h("button", { type: "button", class: "icon-button vm-rail", title: `${t("vm.title")}: ${stateText}`, "aria-label": `${t("vm.title")}: ${stateText}`, onclick: () => go("settings") },
+      icon("vm"), h("span", { class: `dot ${running ? "dot-on" : ""}`, "aria-hidden": "true" })));
+}
+
+// ---- the status bar ----
+
+function renderStatusbar() {
+  const bar = document.getElementById("statusbar");
+  if (!bar) return;
+  const u = S.updates;
+  const left = [];
+  if (u && u.engine) {
+    left.push(h("button", { type: "button", class: "status-item", title: t("settings.updates"), onclick: openUpdates }, `podbag ${u.engine}`));
+  }
+  if (u && u.newer && u.latest) {
+    left.push(h("button", { type: "button", class: "status-item status-update", onclick: openUpdates },
+      icon("update"), t("status.available", { version: u.latest })));
+  }
+  left.push(h("button", { type: "button", class: "status-item", title: t("status.terminal"), onclick: openPlainTerminal }, icon("shell"), t("status.terminal")));
+  const right = [];
+  const [cls, text] = S.vm && hasVm() ? [S.vm.state === "running" ? "ok" : "off", `${t("vm.title")}: ${t(`vm.state.${vmStateKey(S.vm.state)}`)}`] : engineState();
+  const name = (S.engine && S.engine.engineName) || "podbag";
+  right.push(h("span", { class: `status-item engine-${cls}` }, h("span", { class: "dot", "aria-hidden": "true" }),
+    S.vm && hasVm() ? text : `${name}: ${text}`));
+  if (S.loaded) {
+    const total = S.lists.containers.length;
+    const running = S.lists.containers.filter((c) => c.State === "running").length;
+    right.push(h("span", { class: "status-item", text: t("status.running", { n: running, total }) }));
+  }
+  if (S.vm && S.vm.memoryTotalMiB) {
+    right.push(h("span", { class: "status-item", title: t("vm.memory"), text: `${mib(S.vm.memoryUsedMiB || 0)} / ${mib(S.vm.memoryTotalMiB)}` }));
+  }
+  const docker = dockerCommandItem();
+  if (docker) right.push(docker);
+  bar.replaceChildren(h("div", { class: "status-side" }, left), h("div", { class: "status-side status-right" }, right));
+}
+
+async function openPlainTerminal() {
+  try {
+    await API.openTerminal("plain");
+  } catch {
+    toast(t("terminal.none"), true);
+  }
+}
+
+function openUpdates() {
+  if (S.view !== "settings") go("settings");
+  // The settings page draws after the language names load.
+  const show = () => {
+    const el = document.getElementById("updates");
+    if (el) el.scrollIntoView({ block: "start", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+    else setTimeout(show, 50);
+  };
+  show();
+}
+
+function dockerCommandItem() { return null; }
 
 // ---- the main area ----
 
@@ -516,6 +898,7 @@ function toolbar(kind) {
     h("div", { class: "tools" },
       h("span", { class: `live ${S.live ? "live-on" : ""}`, id: "live", title: S.live ? t("live.on") : t("live.off") },
         h("span", { class: "dot", "aria-hidden": "true" }), h("span", { class: "live-text", text: S.live ? t("live.on") : "" })),
+      kind === "images" && isPodbag() && S.docker && S.docker.installed ? button(registryIcon("dockerhub"), t("import.button"), importFromDocker) : null,
       kind === "images" ? button("pull", t("action.pull"), pull, "primary") : null,
       button("prune", t("action.prune"), () => prune(kind)),
       windowBar ? null : iconButton("refresh", t("action.refresh"), refresh)));
@@ -649,10 +1032,11 @@ function renderList() {
 }
 
 function emptyState(kind) {
+  const cmd = isPodbag() ? "podbag" : "docker";
   const commands = {
-    containers: "podbag run -d --name web -p 8080:80 nginx:alpine",
-    volumes: "podbag volume create data",
-    networks: "podbag network create app",
+    containers: `${cmd} run -d --name web -p 8080:80 nginx:alpine`,
+    volumes: `${cmd} volume create data`,
+    networks: `${cmd} network create app`,
   };
   return h("div", { class: "empty" },
     h("div", { class: "empty-icon" }, icon(kind)),
@@ -664,6 +1048,18 @@ function emptyState(kind) {
 
 function offline() {
   const e = S.engine || {};
+  if (e.engine === "docker") {
+    // Docker is never started from here.
+    return h("div", { class: "empty" },
+      h("div", { class: "empty-icon" }, icon("engine")),
+      h("h2", { text: t("offline.dockerTitle") }),
+      e.platform === "linux"
+        ? [h("p", { text: t("offline.dockerLinux") }), codeLine("sudo systemctl start docker")]
+        : h("p", { text: t("offline.dockerText") }),
+      h("div", { class: "buttons-row" },
+        button("refresh", t("action.retry"), () => connect(false), "primary"),
+        button(null, t("switch.to", { name: "podbag" }), () => switchEngine("podbag"))));
+  }
   const vmOff = e.error === "vm-stopped" || (e.vm && e.vm !== "running");
   if (vmOff) {
     return h("div", { class: "empty" },
@@ -694,12 +1090,16 @@ function openDetail(kind, id, tab) {
   S.detail = { kind, id, tab, json: null, extra: null };
   renderNav();
   renderMain(true);
+  remember();
 }
 
-function closeDetail() {
+// quiet: another page comes next (it is the one remembered).
+function closeDetail(quiet) {
   if (S.detail && S.detail.tab === "logs") API.logsStop();
   S.detail = null;
+  if (quiet) return;
   renderMain(true);
+  remember();
 }
 
 function renderDetail(main, fresh) {
@@ -717,7 +1117,7 @@ function renderDetail(main, fresh) {
     S.features.rename ? iconButton("rename", t("action.rename"), () => rename(o)) : null,
   ] : [...rowActions(d.kind, o).children];
   const header = h("header", { class: "toolbar" },
-    iconButton("back", t("action.back"), closeDetail),
+    iconButton("back", t("action.back"), () => closeDetail()),
     h("h1", { class: "truncate", text: name, title: name }),
     d.kind === "containers" ? stateChip(o.State) : null,
     h("div", { class: "tools actions" }, actions));
@@ -830,90 +1230,6 @@ function onLogs(batch) {
 
 // ---- settings ----
 
-let vmActionPending = false;
-
-function syncVmSettings() {
-  const card = document.getElementById("vm-settings");
-  if (!card) return;
-  if (S.engine) card.hidden = S.engine.platform !== "macos" || !S.engine.vm;
-  if (card.hidden) return;
-  if (!card.childElementCount) {
-    const form = h("div", {});
-    const toggle = button(null, "", async () => {
-      if (vmActionPending || !S.engine) return;
-      const action = S.engine.vm === "running" ? "stop" : "start";
-      vmActionPending = true;
-      syncVmSettings();
-      try {
-        await API.vm(action);
-      } catch (err) {
-        toast(String(err), true);
-      } finally {
-        vmActionPending = false;
-        syncVmSettings();
-      }
-    });
-    toggle.id = "vm-toggle";
-    card.append(
-      h("div", { class: "vm-row" },
-        h("div", {}, h("h2", { class: "setting-label", text: "Linux VM" }),
-          h("p", { id: "vm-status", role: "status" })), toggle), form);
-    loadVmResources(form);
-  }
-  const vm = S.engine?.vm;
-  const toggle = card.querySelector("#vm-toggle");
-  toggle.disabled = !vm || vmActionPending;
-  toggle.textContent = t(vm === "running" ? "tray.stopVm" : "tray.startVm");
-  card.querySelector("#vm-status").textContent = vm ? t(vm === "running" ? "engine.vmRunning" : "engine.vmStopped") : t("engine.checking");
-}
-
-async function loadVmResources(form) {
-  try {
-    const { values, limits, envOverride } = await API.vmResources();
-    let saved = values;
-    const draft = { ...saved };
-    const save = button(null, t("action.save"), async () => {
-      fields.disabled = true;
-      try {
-        saved = (await API.vmResources(draft)).values;
-        toast(t("vm.saved"));
-      } catch (err) {
-        toast(String(err), true);
-      } finally {
-        fields.disabled = false;
-        updateSave();
-      }
-    }, "primary");
-    function updateSave() {
-      save.disabled = draft.cpus === saved.cpus && draft.memoryMib === saved.memoryMib;
-    }
-    function slider(key, label, min, max, step, format) {
-      const id = "vm-" + key;
-      const value = h("output", { for: id, text: format(draft[key]) });
-      const input = h("input", {
-        id, type: "range", min, max, step, value: draft[key], "aria-valuetext": value.textContent,
-        oninput: () => {
-          draft[key] = input.valueAsNumber;
-          value.textContent = format(draft[key]);
-          input.setAttribute("aria-valuetext", value.textContent);
-          updateSave();
-        },
-      });
-      return h("div", { class: "vm-slider" }, h("label", { for: id, text: label }), input, value);
-    }
-    const fields = h("fieldset", {}, h("legend", { class: "visually-hidden", text: t("detail.usage") }),
-      slider("cpus", "CPU", limits.minCpus, limits.maxCpus, 1, (n) => n.toLocaleString(I18N.lang)),
-      slider("memoryMib", t("vm.memory"), limits.minMemoryMib, limits.maxMemoryMib, limits.memoryStepMib,
-        (n) => n < 1024 ? n + " MiB" : (n / 1024).toLocaleString(I18N.lang) + " GiB"),
-      h("div", { class: "vm-row vm-footer" }, h("p", { text: t(envOverride ? "vm.envOverride" : "vm.nextBoot") }), save));
-    updateSave();
-    form.replaceChildren(fields);
-  } catch (err) {
-    form.replaceChildren(h("p", { class: "error-text", text: String(err) }),
-      button(null, t("action.retry"), () => loadVmResources(form)));
-  }
-}
-
 async function renderSettings(main) {
   if (!S.languageNames) S.languageNames = await I18N.names();
   if (S.view !== "settings") return;
@@ -927,23 +1243,293 @@ async function renderSettings(main) {
     h("input", { type: "radio", name: "theme", value: v, checked: S.settings.theme === v, onchange: async () => { S.settings.theme = v; applyTheme(); await saveSettings(); } }),
     h("span", { text: t(`settings.${v}`) })));
   const e = S.engine || {};
-  main.replaceChildren(
+  put(main,
     h("header", { class: "toolbar" }, h("h1", { text: t("settings.title") })),
     h("div", { class: "content settings" },
-      h("section", { id: "vm-settings", class: "card", hidden: true }),
       h("section", { class: "card" },
         h("label", { class: "setting-label", for: "language", text: t("settings.language") }), lang),
       h("section", { class: "card" },
         h("fieldset", {}, h("legend", { class: "setting-label", text: t("settings.theme") }), h("div", { class: "radios" }, themes))),
-      h("section", { class: "card" },
+      h("section", { class: "card", id: "engine-settings" },
         h("h2", { class: "setting-label", text: t("settings.engine") }),
+        h("div", { class: "setting-row" }, h("span", { class: "secondary-text", text: t("switch.label") }), engineChoice("settings")),
+        h("p", { class: "hint", text: t("settings.engineNote") }),
         h("dl", { class: "fields" },
           field(t("settings.socket"), e.endpoint, "mono"),
-          field(t("settings.version"), e.version))),
+          field(t("settings.version"), e.version)),
+        dockerSettings()),
+      h("section", { class: "card", id: "vm-settings", hidden: true }),
+      h("section", { class: "card", id: "updates" }),
       h("section", { class: "card" },
         h("h2", { class: "setting-label", text: t("settings.about") }),
         h("p", { text: t("settings.aboutText") }))));
-  syncVmSettings();
+  renderVmSettings(true);
+  renderUpdates();
+}
+
+// The parts of the docker command's settings (filled in when known).
+function dockerSettings() {
+  return null;
+}
+
+// ---- settings: the virtual machine ----
+
+let vmFormDirty = false;
+
+// The VM's section. `fresh`: build the form again (otherwise only the state changes,
+// so what the user types stays).
+function renderVmSettings(fresh) {
+  const box = document.getElementById("vm-settings");
+  if (!box) return;
+  const vm = S.vm;
+  if (!vm || !hasVm()) {
+    box.hidden = true;
+    box.replaceChildren();
+    return;
+  }
+  box.hidden = false;
+  const statusPart = vmStatusPart(vm);
+  const old = box.querySelector(".vm-status");
+  if (old && !fresh && box.querySelector(".vm-form, .vm-note")) {
+    old.replaceWith(statusPart);
+    const pending = box.querySelector(".vm-pending");
+    if (pending) pending.hidden = !vm.pending;
+    if (!vmFormDirty && vm.resourcesEditable) fillVmForm(box.querySelector(".vm-form"), vm);
+    return;
+  }
+  vmFormDirty = false;
+  put(box,
+    h("h2", { class: "setting-label", text: t("settings.vm") }),
+    statusPart,
+    vm.resourcesEditable ? vmForm(vm) : h("p", { class: "hint vm-note", text: t("settings.vmWsl") }));
+}
+
+function vmStatusPart(vm) {
+  const running = vm.state === "running";
+  const stoppable = running || vm.state === "standby" || vm.state === "starting";
+  const rows = [h("dt", { text: t("settings.vmState") }), h("dd", {}, vmChip(vm.state))];
+  if (vm.inUse) {
+    rows.push(...field(t("settings.vmInUse"), [
+      t("settings.cpusValue", { n: vm.inUse.cpus }),
+      mib(vm.inUse.memoryMiB),
+      idleText(vm.inUse.idleSeconds),
+    ].join(" · ")));
+  }
+  if (vm.uptimeSeconds != null) rows.push(...field(t("settings.vmUptime"), duration(vm.uptimeSeconds)));
+  if (vm.disk) {
+    rows.push(...field(t("settings.vmDisk"), t("settings.vmDiskValue", { used: size(vm.disk.allocatedBytes), size: size(vm.disk.sizeBytes) })));
+  }
+  const buttons = [
+    button("start", t("action.startVm"), () => vmAction("start"), stoppable ? "" : "primary"),
+    button("stop", t("action.stopVm"), () => vmAction("stop")),
+    button("restart", t("action.restartVm"), () => vmAction("restart")),
+  ];
+  buttons[0].disabled = vmBusy || stoppable || vm.state === "not set up";
+  buttons[1].disabled = vmBusy || !stoppable;
+  buttons[2].disabled = vmBusy || !running;
+  return h("div", { class: "vm-status" },
+    h("dl", { class: "fields" }, rows),
+    vm.error ? h("p", { class: "error-text", text: vm.error }) : null,
+    h("div", { class: "buttons-row" }, buttons));
+}
+
+function idleText(secs) {
+  if (!secs) return t("settings.idleNever");
+  return t("settings.idleAfter", { time: duration(secs) });
+}
+
+const ENV_FIELD = { PODBAG_VM_CPUS: "cpus", PODBAG_VM_MEMORY: "memory", PODBAG_VM_IDLE: "idle" };
+
+function vmForm(vm) {
+  const l = vm.limits || {};
+  const over = new Map((vm.overriddenBy || []).map((name) => [ENV_FIELD[name], name]));
+  const input = (id, label, props, hint) => {
+    const value = h("input", { id, type: "number", inputmode: "decimal", required: true, ...props });
+    const slider = id === "vm-idle" ? null : h("input", { type: "range", "aria-label": label, ...props });
+    value.oninput = () => { vmFormDirty = true; if (slider) slider.value = value.value; };
+    if (slider) slider.oninput = () => { vmFormDirty = true; value.value = slider.value; };
+    const variable = over.get(id.slice(3));
+    return h("div", { class: "form-field" }, h("label", { for: id, text: label }), value, slider,
+      h("span", { class: "hint", text: hint }),
+      variable ? h("span", { class: "hint warn", text: t("settings.vmOverridden", { name: variable }) }) : null);
+  };
+  const form = h("form", { class: "vm-form", novalidate: true, onsubmit: (e) => { e.preventDefault(); applyVm(form); } },
+    h("div", { class: "form-grid" },
+      input("vm-cpus", t("settings.cpus"), { min: l.cpusMin || 1, max: l.cpusMax || 64, step: 1 },
+        t("settings.limits", { min: l.cpusMin || 1, max: l.cpusMax || "?" })),
+      input("vm-memory", t("settings.memory"), { min: (l.memoryMinMiB || 1024) / 1024, max: (l.memoryMaxMiB || 65536) / 1024, step: 0.25 },
+        t("settings.limits", { min: mib(l.memoryMinMiB || 1024), max: mib(l.memoryMaxMiB) })),
+      input("vm-idle", t("settings.idle"), { min: 0, max: 1440, step: 1 }, t("settings.idleHint"))),
+    h("p", { class: "hint vm-pending", text: t("settings.vmPending"), hidden: !vm.pending }),
+    h("p", { class: "error-text vm-error", "aria-live": "polite" }),
+    h("div", { class: "buttons-row" }, h("button", { type: "submit", class: "button primary", text: t("settings.apply") })));
+  fillVmForm(form, vm);
+  return form;
+}
+
+function fillVmForm(form, vm) {
+  if (!form) return;
+  const next = vm.next || vm.inUse || {};
+  form.querySelector("#vm-cpus").value = next.cpus ?? "";
+  form.querySelector("#vm-memory").value = next.memoryMiB != null ? String(next.memoryMiB / 1024) : "";
+  for (const range of form.querySelectorAll('input[type="range"]')) range.value = range.previousElementSibling.value;
+  form.querySelector("#vm-idle").value = next.idleSeconds != null ? String(Math.round(next.idleSeconds / 60)) : "";
+}
+
+async function applyVm(form) {
+  const vm = S.vm || {};
+  const next = vm.next || {};
+  const error = form.querySelector(".vm-error");
+  error.textContent = "";
+  for (const el of form.querySelectorAll("input")) {
+    if (!el.checkValidity()) {
+      error.textContent = `${form.querySelector(`label[for="${el.id}"]`).textContent}: ${el.validationMessage}`;
+      el.focus();
+      return;
+    }
+  }
+  const cpus = Number(form.querySelector("#vm-cpus").value);
+  const memoryMiB = Math.round(Number(form.querySelector("#vm-memory").value) * 1024);
+  const idleSeconds = Math.round(Number(form.querySelector("#vm-idle").value) * 60);
+  const change = {};
+  if (cpus !== next.cpus) change.cpus = cpus;
+  if (memoryMiB !== next.memoryMiB) change.memoryMiB = memoryMiB;
+  if (idleSeconds !== next.idleSeconds) change.idleSeconds = idleSeconds;
+  if (!Object.keys(change).length && !vm.pending) {
+    toast(t("settings.vmSame"));
+    return;
+  }
+  if (!Object.keys(change).length) change.cpus = cpus; // only to restart with them
+  let restart = false;
+  const inUse = vm.inUse || {};
+  const differs = cpus !== inUse.cpus || memoryMiB !== inUse.memoryMiB || idleSeconds !== inUse.idleSeconds;
+  if (vm.state === "running" && differs) {
+    const n = vm.containers || 0;
+    const answer = await chooseDialog({
+      title: t("settings.vmApplyTitle"),
+      text: n > 0 ? `${t("settings.vmApplyText")}\n\n${t("settings.vmApplyWarn", { n })}` : t("settings.vmApplyText"),
+      buttons: [
+        { value: "", label: t("action.cancel") },
+        { value: "later", label: t("settings.nextStart") },
+        { value: "now", label: t("settings.restartNow"), cls: n > 0 ? "danger" : "primary" },
+      ],
+    });
+    if (!answer) return;
+    restart = answer === "now";
+  }
+  const submit = form.querySelector("button[type=submit]");
+  submit.disabled = true;
+  try {
+    await API.vmSet({ ...change, restart });
+    vmFormDirty = false;
+    toast(restart ? t("settings.vmRestarted") : t("settings.vmSaved"));
+  } catch (e) {
+    error.textContent = String(e);
+  }
+  submit.disabled = false;
+  await refreshVm();
+}
+
+// A dialog with several answers; resolves with the chosen value ("" for none).
+function chooseDialog({ title, text, buttons }) {
+  const d = h("dialog", { class: "choose", "aria-labelledby": "choose-title" },
+    h("form", { method: "dialog" },
+      h("h2", { id: "choose-title", text: title }),
+      h("p", { text }),
+      h("div", { class: "buttons" }, buttons.map((b, i) => h("button", {
+        value: b.value, class: `button ${b.cls || ""}`, autofocus: i === 0, text: b.label,
+      })))));
+  document.body.append(d);
+  d.showModal();
+  return new Promise((resolve) => {
+    d.addEventListener("close", () => {
+      resolve(d.returnValue || "");
+      d.remove();
+    }, { once: true });
+  });
+}
+
+// ---- settings: updates ----
+
+let checking = false;
+let upgrading = false;
+
+// When the window opens: the last check, and a new one when that is a day old.
+async function loadUpdates(check) {
+  if (check === "now") checking = true;
+  renderUpdates();
+  try {
+    S.updates = await API.updates(check);
+  } catch (e) {
+    S.updates = { ...(S.updates || {}), error: String(e) };
+  }
+  checking = false;
+  renderUpdates();
+  renderStatusbar();
+}
+
+function renderUpdates() {
+  const box = document.getElementById("updates");
+  if (!box) return;
+  const u = S.updates || {};
+  const status = checking ? t("update.checking")
+    : u.error ? u.error
+      : u.newer ? t("update.available", { version: u.latest })
+        : u.latest ? t("update.upToDate") : "";
+  const check = button("refresh", t("update.check"), () => loadUpdates("now"));
+  check.disabled = checking || upgrading;
+  const install = button("update", upgrading ? t("update.installing") : t("update.install"), runUpgrade, "primary");
+  install.disabled = !u.newer || checking || upgrading;
+  put(box,
+    h("h2", { class: "setting-label", text: t("settings.updates") }),
+    h("dl", { class: "fields" },
+      field(t("settings.engineVersion"), u.engine),
+      field(t("settings.appVersion"), u.app),
+      field(t("settings.latest"), u.latest),
+      field(t("settings.checked"), u.checked ? ago(u.checked) : t("settings.never"))),
+    status ? h("p", { class: u.error ? "error-text" : u.newer ? "update-note" : "hint", role: "status", text: status }) : null,
+    h("div", { class: "buttons-row" }, check, install),
+    upgradeResult(),
+    h("p", { class: "hint", text: t("update.appNote") }));
+}
+
+function upgradeResult() {
+  const r = S.upgrade;
+  if (!r || r.ok) return null;
+  if (r.needsAdmin) {
+    const windows = S.engine && S.engine.platform === "windows";
+    return h("div", { class: "upgrade-result" },
+      h("p", { text: windows ? t("update.needsAdminWindows") : t("update.needsAdmin") }),
+      codeLine(r.command),
+      windows ? null : h("div", { class: "buttons-row" }, button("shell", t("update.openTerminal"), async () => {
+        try {
+          await API.openTerminal("upgrade");
+        } catch {
+          toast(t("terminal.none"), true);
+        }
+      })));
+  }
+  return h("div", { class: "upgrade-result" },
+    h("p", { class: "error-text", text: t("update.failed") }),
+    r.output ? h("pre", { class: "json", text: r.output }) : null);
+}
+
+async function runUpgrade() {
+  upgrading = true;
+  S.upgrade = null;
+  renderUpdates();
+  try {
+    S.upgrade = await API.upgrade();
+  } catch (e) {
+    S.upgrade = { ok: false, output: String(e) };
+  }
+  upgrading = false;
+  if (S.upgrade.ok) {
+    toast(t("update.done"));
+    await loadUpdates("never");
+  } else {
+    renderUpdates();
+  }
 }
 
 async function saveSettings() {
@@ -954,8 +1540,19 @@ async function saveSettings() {
   }
   await I18N.load(S.settings.language);
   setupKubeNav();
+  renderAll();
+}
+
+function renderAll() {
   renderNav();
   renderEngine();
+  renderSwitch();
+  renderVmCard();
+  renderStatusbar();
+  renderBanner();
+  applySidebar();
+  renderHistory();
+  renderTopbar();
   renderMain(true);
 }
 
@@ -964,10 +1561,55 @@ function applyTheme() {
   document.querySelector('meta[name="color-scheme"]').content = v;
 }
 
+// The docker command banner (filled in when known).
+function renderBanner() {
+  const el = document.getElementById("banner");
+  if (el) el.hidden = true;
+}
+
+// Tools at the right of the top bar.
+function renderTopbar() {
+  const box = document.getElementById("topbar-tools");
+  if (!box || windowBar) return;
+  const settings = iconButton("settings", t("nav.settings"), () => go("settings"));
+  box.replaceChildren(settings);
+}
+
 // ---- start ----
 
 let readyDone;
 const ready = new Promise((r) => { readyDone = r; });
+
+// The VM card polls the VM's state, but only while the window shows.
+let vmTimer = null;
+function pollVm(on) {
+  clearInterval(vmTimer);
+  vmTimer = on ? setInterval(() => { if (!document.hidden && hasVm()) refreshVm(); }, 5000) : null;
+}
+
+function onKey(e) {
+  const mod = IS_MAC ? e.metaKey : e.ctrlKey;
+  const key = e.key.toLowerCase();
+  const inDialog = document.querySelector("dialog[open]");
+  if (IS_MAC ? (e.ctrlKey && e.metaKey && key === "s") : (e.ctrlKey && !e.shiftKey && key === "b")) {
+    e.preventDefault();
+    toggleSidebar();
+  } else if (mod && (key === "f" || key === "k") && !e.shiftKey) {
+    const s = document.querySelector(".search");
+    if (s) { e.preventDefault(); s.focus(); }
+  } else if ((IS_MAC && e.metaKey && e.key === "[") || (!IS_MAC && e.altKey && e.key === "ArrowLeft")) {
+    if (!inDialog) { e.preventDefault(); travel(-1); }
+  } else if ((IS_MAC && e.metaKey && e.key === "]") || (!IS_MAC && e.altKey && e.key === "ArrowRight")) {
+    if (!inDialog) { e.preventDefault(); travel(1); }
+  } else if (e.key === "Escape" && S.detail && !inDialog) {
+    closeDetail();
+  } else {
+    extraKeys(e);
+  }
+}
+
+// Shortcuts of later parts (the pull panel).
+function extraKeys() {}
 
 async function init() {
   try {
@@ -977,14 +1619,14 @@ async function init() {
   await I18N.load(S.settings.language);
   setupWindowBar();
   setupKubeNav();
-  renderNav();
-  renderEngine();
-  renderMain(true);
+  setupSidebar();
+  renderAll();
+  remember();
   API.on("changed", refreshSoon);
   API.on("live", (v) => { S.live = !!v; renderLive(); });
   API.on("logs", onLogs);
   API.on("pull-progress", (line) => { if (pullLine) pullLine(line); });
-  API.on("shown", () => connect(false));
+  API.on("shown", () => { connect(false); loadUpdates("due"); });
   API.on("vm-status", (vm) => {
     if (S.engine?.platform !== "macos" || !S.engine.vm || S.engine.vm === vm) return;
     S.engine.vm = vm;
@@ -994,35 +1636,42 @@ async function init() {
       clearTimeout(refreshTimer);
       API.watch(false);
       renderNav();
-    } else if (!S.engine.reachable && !document.hidden && !vmActionPending) {
+    } else if (!S.engine.reachable && !document.hidden && !vmBusy) {
       connect(false);
       return;
     }
-    renderEngine();
+    refreshVm();
     renderMain();
   });
   API.on("engine-changed", () => connect(false));
+  API.on("open-updates", openUpdates);
+  API.on("open-settings", () => go("settings"));
+  API.on("docker-changed", refreshDocker);
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) return API.watch(false);
     if (S.engine && S.engine.reachable) { API.watch(true); refresh(); }
+    refreshVm();
   });
-  document.addEventListener("keydown", (e) => {
-    if ((e.metaKey || e.ctrlKey) && e.key === "f") {
-      const s = document.querySelector(".search");
-      if (s) { e.preventDefault(); s.focus(); }
-    } else if (e.key === "Escape" && S.detail && !document.querySelector("dialog[open]")) {
-      closeDetail();
-    }
+  document.addEventListener("keydown", onKey);
+  // Mouse buttons 4 and 5: back and forward.
+  document.addEventListener("mouseup", (e) => {
+    if (e.button === 3) travel(-1);
+    else if (e.button === 4) travel(1);
   });
   // Without events, read the lists every few seconds while the window shows.
   setInterval(() => {
     if (!S.live && !document.hidden && S.engine && S.engine.reachable) refresh();
   }, 3000);
+  pollVm(true);
+  loadUpdates("due");
   await connect(false);
   readyDone();
 }
 
 // For the preview page (desktop/preview), which shows each view with a mocked API.
-window.podbag = { ready, go, openDetail, remove: (kind, i) => remove(kind, S.lists[kind][i]), pull, prune, state: S };
+window.podbag = {
+  ready, go, openDetail, remove: (kind, i) => remove(kind, S.lists[kind][i]), pull, prune, state: S,
+  toggleSidebar, openUpdates, switchEngine, applyVm: () => applyVm(document.querySelector(".vm-form")), runUpgrade,
+};
 
-init();
+// images.js starts the app, once its parts are in place.

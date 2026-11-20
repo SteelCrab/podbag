@@ -14,7 +14,7 @@
         "title": "podbag",
         "width": 1100,
         "height": 720,
-        "minWidth": 720,
+        "minWidth": 560,
         "minHeight": 480,
         "center": true,
         "titleBarStyle": "Overlay",

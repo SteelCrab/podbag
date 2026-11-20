@@ -1,12 +1,11 @@
 //! CPU and memory settings shared by all starts of a Mac home's Linux VM.
 
+use super::settings;
 use objc2_foundation::NSProcessInfo;
 use objc2_virtualization::VZVirtualMachineConfiguration as Vz;
 use serde::{Deserialize, Serialize};
-use std::io::ErrorKind;
 use std::path::Path;
 
-const FILE: &str = "vm-resources.json";
 const MIB: u64 = 1 << 20;
 const MEMORY_STEP: u64 = 256;
 
@@ -52,20 +51,15 @@ impl Limits {
     }
 
     fn read(&self, home: &Path) -> Result<Resources, String> {
-        let path = home.join(FILE);
-        let mut values = match std::fs::read(&path) {
-            Ok(bytes) => {
-                serde_json::from_slice(&bytes).map_err(|e| format!("{}: {e}", path.display()))?
-            }
-            Err(e) if e.kind() == ErrorKind::NotFound => Resources {
-                cpus: 8,
-                memory_mib: 2048,
-            },
-            Err(e) => return Err(format!("{}: {e}", path.display())),
+        let saved = settings::read(home)?;
+        let mut values = Resources {
+            cpus: saved.cpus.unwrap_or(settings::DEFAULT_CPUS_MAX) as usize,
+            memory_mib: saved.memory_mib.unwrap_or(settings::DEFAULT_MEMORY_MIB),
         };
         // A home copied from a larger Mac can still start here.
         values.cpus = values.cpus.clamp(self.min_cpus, self.max_cpus);
-        values.memory_mib = (values.memory_mib / MEMORY_STEP * MEMORY_STEP)
+        values.memory_mib = values
+            .memory_mib
             .clamp(self.min_memory_mib, self.max_memory_mib);
         Ok(values)
     }
@@ -85,35 +79,15 @@ impl Limits {
                 self.min_memory_mib, self.max_memory_mib
             ));
         }
-        let path = home.join(FILE);
-        let err = |e| format!("{}: {e}", path.display());
-        std::fs::create_dir_all(home).map_err(err)?;
-        let mut tmp = tempfile::NamedTempFile::new_in(home).map_err(err)?;
-        serde_json::to_writer_pretty(tmp.as_file_mut(), &values)
-            .map_err(|e| format!("{}: {e}", path.display()))?;
-        tmp.persist(path.as_path()).map_err(|e| err(e.error))?;
-        Ok(())
+        let mut saved = settings::read(home)?;
+        saved.cpus = Some(values.cpus as u32);
+        saved.memory_mib = Some(values.memory_mib);
+        settings::save(home, &saved)
     }
 }
 
 fn env_value(name: &str) -> Option<u64> {
     std::env::var(name).ok()?.trim().parse().ok()
-}
-
-/// Read on each boot, including a wake from standby. CLI environment overrides win.
-pub(super) fn for_boot(home: &Path) -> Result<Resources, String> {
-    let limits = Limits::host()?;
-    let mut values = limits.read(home)?;
-    if let Some(cpus) = env_value("PODBAG_VM_CPUS") {
-        values.cpus = (cpus as usize).clamp(limits.min_cpus, limits.max_cpus);
-    }
-    if let Some(memory) = env_value("PODBAG_VM_MEMORY") {
-        if memory > u64::MAX / MIB {
-            return Err("PODBAG_VM_MEMORY is too large".into());
-        }
-        values.memory_mib = memory;
-    }
-    Ok(values)
 }
 
 /// Read or save the pair without connecting to the VM.
@@ -144,6 +118,48 @@ pub(super) fn command(home: &Path, args: &[String]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn both_commands_share_existing_resources_and_idle_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        std::fs::write(
+            home.join("vm-resources.json"),
+            r#"{"cpus":2,"memoryMib":768}"#,
+        )
+        .unwrap();
+        let mut saved = settings::read(home).unwrap();
+        assert_eq!(saved.memory_mib, Some(768));
+        saved.idle_seconds = Some(90);
+        settings::save(home, &saved).unwrap();
+        let limits = Limits {
+            min_cpus: 1,
+            max_cpus: 8,
+            min_memory_mib: 256,
+            max_memory_mib: 8192,
+            memory_step_mib: MEMORY_STEP,
+        };
+        let updated = Resources {
+            cpus: 3,
+            memory_mib: 1280,
+        };
+        limits.save(home, updated).unwrap();
+        let saved = settings::read(home).unwrap();
+        assert_eq!(saved.idle_seconds, Some(90));
+        assert_eq!(limits.read(home).unwrap(), updated);
+        let (next, _) = settings::effective(
+            &saved,
+            &|_| None,
+            &settings::Mac {
+                cpus: 8,
+                memory_mib: 16384,
+            },
+        );
+        assert_eq!(
+            (next.cpus, next.memory_mib, next.idle_seconds),
+            (3, 1280, 90)
+        );
+    }
 
     #[test]
     fn defaults_saved_values_and_rejected_edits() {

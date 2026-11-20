@@ -19,7 +19,11 @@ pub struct FakeEngine {
     pub client: Client,
     /// What it got: method, path and body.
     pub seen: Arc<Mutex<Vec<(String, String, String)>>>,
+    /// The headers of each request, in the same order as `seen`.
+    heads: Arc<Mutex<Vec<Headers>>>,
 }
+
+type Headers = Vec<(String, String)>;
 
 impl Drop for FakeEngine {
     fn drop(&mut self) {
@@ -41,21 +45,33 @@ impl FakeEngine {
         let path = dir.join("docker.sock");
         let listener = UnixListener::bind(&path).expect("the fake engine's socket");
         let seen: Arc<Mutex<Vec<(String, String, String)>>> = Arc::default();
-        let log = seen.clone();
+        let heads: Arc<Mutex<Vec<Headers>>> = Arc::default();
+        let log = (seen.clone(), heads.clone());
         let answer: Arc<Handler> = Arc::new(answer);
         std::thread::spawn(move || {
             for conn in listener.incoming() {
                 let Ok(conn) = conn else { return };
                 let answer = answer.clone();
                 let log = log.clone();
-                std::thread::spawn(move || serve_one(conn, &*answer, &log));
+                std::thread::spawn(move || serve_one(conn, &*answer, &log.0, &log.1));
             }
         });
         FakeEngine {
             dir,
             client: Client::new(Endpoint::Socket { path, own: false }),
             seen,
+            heads,
         }
+    }
+
+    /// Header `name` of request `index` (counted from 0), if it was sent.
+    pub fn header(&self, index: usize, name: &str) -> Option<String> {
+        let heads = self.heads.lock().unwrap_or_else(|p| p.into_inner());
+        heads
+            .get(index)?
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.clone())
     }
 
     /// The requests so far, as `METHOD path`.
@@ -157,7 +173,12 @@ pub fn small_engine(method: &str, path: &str) -> Answer {
     }
 }
 
-fn serve_one(conn: UnixStream, answer: &Handler, seen: &Mutex<Vec<(String, String, String)>>) {
+fn serve_one(
+    conn: UnixStream,
+    answer: &Handler,
+    seen: &Mutex<Vec<(String, String, String)>>,
+    heads: &Mutex<Vec<Headers>>,
+) {
     let Ok(read_side) = conn.try_clone() else {
         return;
     };
@@ -169,25 +190,50 @@ fn serve_one(conn: UnixStream, answer: &Handler, seen: &Mutex<Vec<(String, Strin
     let mut parts = first.split_whitespace();
     let method = parts.next().unwrap_or("").to_string();
     let path = parts.next().unwrap_or("").to_string();
-    let mut length = 0;
+    let mut headers: Headers = Vec::new();
     loop {
         let mut line = String::new();
         if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
             break;
         }
-        if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-            length = v.trim().parse().unwrap_or(0);
+        if let Some((k, v)) = line.split_once(':') {
+            headers.push((k.trim().to_string(), v.trim().to_string()));
         }
     }
-    let mut body = vec![0; length];
-    if reader.read_exact(&mut body).is_err() {
-        return;
+    let find = |name: &str| {
+        headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.to_ascii_lowercase())
+    };
+    let body = if find("Transfer-Encoding").is_some_and(|v| v.contains("chunked")) {
+        match read_chunked(&mut reader) {
+            Some(b) => b,
+            None => return,
+        }
+    } else {
+        let length = find("Content-Length")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let mut body = vec![0; length];
+        if reader.read_exact(&mut body).is_err() {
+            return;
+        }
+        body
+    };
+    {
+        // One lock for both, so their order stays the same.
+        let mut seen = seen.lock().unwrap_or_else(|p| p.into_inner());
+        heads
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(headers);
+        seen.push((
+            method.clone(),
+            path.clone(),
+            String::from_utf8_lossy(&body).into(),
+        ));
     }
-    seen.lock().unwrap_or_else(|p| p.into_inner()).push((
-        method.clone(),
-        path.clone(),
-        String::from_utf8_lossy(&body).into(),
-    ));
     let (status, content_type, body) = answer(&method, &path);
     let mut out = conn;
     // Chunked, in small pieces, as the engine sends streams.
@@ -201,4 +247,28 @@ fn serve_one(conn: UnixStream, answer: &Handler, seen: &Mutex<Vec<(String, Strin
         let _ = out.write_all(b"\r\n");
     }
     let _ = out.write_all(b"0\r\n\r\n");
+}
+
+/// A chunked request body; None when it is cut off.
+fn read_chunked(reader: &mut impl BufRead) -> Option<Vec<u8>> {
+    let mut body = Vec::new();
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line).ok()?;
+        let size = usize::from_str_radix(line.trim().split(';').next()?, 16).ok()?;
+        if size == 0 {
+            // Trailers, up to the empty line.
+            loop {
+                let mut t = String::new();
+                if reader.read_line(&mut t).ok()? == 0 || t.trim().is_empty() {
+                    return Some(body);
+                }
+            }
+        }
+        let start = body.len();
+        body.resize(start + size, 0);
+        reader.read_exact(&mut body[start..]).ok()?;
+        let mut crlf = [0u8; 2];
+        reader.read_exact(&mut crlf).ok()?;
+    }
 }

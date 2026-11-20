@@ -2817,6 +2817,7 @@ dependencies = [
  "sys-locale",
  "tauri",
  "tauri-build",
+ "tempfile",
 ]
 
 [[package]]

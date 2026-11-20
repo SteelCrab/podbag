@@ -160,7 +160,7 @@ fn start_within(
     ];
     // A keeper that leaves between the connect and its answer is replaced once or twice.
     for _ in 0..3 {
-        let Some(conn) = connect(dirs) else {
+        let Some(conn) = connect(dirs, &request_build(&request)) else {
             return Asked::Unavailable;
         };
         if !super::peer_is_us(&conn) {
@@ -205,19 +205,26 @@ fn start_within(
     Asked::Unavailable
 }
 
-fn try_connect(dirs: &Dirs) -> std::io::Result<UnixStream> {
-    super::with_socket_path(&dirs.runtime, super::SOCKET, |p| UnixStream::connect(p))
+fn request_build(request: &Request) -> String {
+    match request {
+        Request::Start { build, .. } => build.clone(),
+    }
 }
 
-/// Connect to the keeper; start one when none answers.
-fn connect(dirs: &Dirs) -> Option<UnixStream> {
-    if let Ok(conn) = try_connect(dirs) {
+fn try_connect(dirs: &Dirs, build: &str) -> std::io::Result<UnixStream> {
+    let name = super::socket_name(build);
+    super::with_socket_path(&dirs.runtime, &name, |p| UnixStream::connect(p))
+}
+
+/// Connect to the keeper of this build; start one when none answers.
+fn connect(dirs: &Dirs, build: &str) -> Option<UnixStream> {
+    if let Ok(conn) = try_connect(dirs, build) {
         return Some(conn);
     }
     spawn(dirs).ok()?;
     let deadline = Instant::now() + START_LIMIT;
     loop {
-        if let Ok(conn) = try_connect(dirs) {
+        if let Ok(conn) = try_connect(dirs, build) {
             return Some(conn);
         }
         if Instant::now() >= deadline {
@@ -276,7 +283,8 @@ mod tests {
             std::fs::set_permissions(&dirs.runtime, private).unwrap();
         }
         // A keeper that takes requests and never answers.
-        let listener = UnixListener::bind(dirs.runtime.join(crate::keeper::SOCKET)).unwrap();
+        let listener =
+            UnixListener::bind(dirs.runtime.join(crate::keeper::socket_name("a build"))).unwrap();
         let requests = Arc::new(AtomicUsize::new(0));
         let seen = requests.clone();
         std::thread::spawn(move || {
@@ -321,7 +329,8 @@ mod tests {
             let private = std::fs::Permissions::from_mode(0o700);
             std::fs::set_permissions(&dirs.runtime, private).unwrap();
         }
-        let listener = UnixListener::bind(dirs.runtime.join(crate::keeper::SOCKET)).unwrap();
+        let listener =
+            UnixListener::bind(dirs.runtime.join(crate::keeper::socket_name("a build"))).unwrap();
         let requests = Arc::new(AtomicUsize::new(0));
         let seen = requests.clone();
         std::thread::spawn(move || {

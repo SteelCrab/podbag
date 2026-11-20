@@ -4,6 +4,7 @@ mod build;
 mod check;
 #[cfg(unix)]
 mod container;
+mod dockerctx;
 mod image;
 #[cfg(unix)]
 mod manage;
@@ -54,7 +55,10 @@ fn main() {
 fn windows_front(args: Vec<String>) -> Option<i32> {
     match args.first().map(String::as_str) {
         Some("vm") => Some(podbag::windows::vm_command(&args[1..])),
-        None | Some("-h" | "--help" | "help" | "-V" | "--version") => None,
+        // podbag.exe itself is replaced; the next command updates the engine in WSL.
+        None | Some("-h" | "--help" | "help" | "-V" | "--version" | "upgrade") => None,
+        // Windows' docker CLI and its contexts.
+        Some("system") if args.get(1).is_some_and(|a| a == "docker") => None,
         // Checked here first: help and wrong arguments need no WSL.
         Some(_) => match parse(&args) {
             Err(e) => e.exit(),
@@ -157,10 +161,13 @@ fn macos_front(args: Vec<String>) -> Option<i32> {
         Some("__vm-host") => Some(podbag::macos::host::host_main()),
         Some("__vm-standby") => Some(podbag::macos::standby::standby_main()),
         Some("vm") => Some(podbag::macos::cli::vm_command(&args[1..])),
-        None | Some("-h" | "--help" | "help" | "-V" | "--version") => None,
+        // The Mac's program is replaced; the VM runs the guest it carries.
+        None | Some("-h" | "--help" | "help" | "-V" | "--version" | "upgrade") => None,
         // Clients of the Docker API: they use the Mac's docker.sock, which starts the VM.
         Some("tui") => None,
         Some("system") if args.get(1).is_some_and(|a| a == "dial-stdio") => None,
+        // The Mac's docker CLI and its contexts.
+        Some("system") if args.get(1).is_some_and(|a| a == "docker") => None,
         // Helpers the library starts on this Mac (`__store`, `__shim`, …) run here.
         Some(helper) if helper.starts_with("__") => None,
         // Checked here first: help and wrong arguments need no VM.
@@ -382,7 +389,11 @@ fn dispatch(cmd: Cmd) -> i32 {
         Cmd::System {
             cmd: args::SystemCmd::DialStdio,
         } => service::dial_stdio(),
-        Cmd::Tui { once } => tui::run(once),
+        Cmd::Tui {
+            once,
+            engine,
+            no_mouse,
+        } => tui::run(once, engine, !no_mouse),
         Cmd::System { cmd } => image::system(cmd),
         Cmd::Ps { all, quiet } => container::ps(all, quiet),
         Cmd::Inspect { container: c } => container::inspect(&c),
@@ -443,7 +454,22 @@ fn dispatch(cmd: Cmd) -> i32 {
         Cmd::Restarter { id } => podbag::restart::restart_main(&id),
         Cmd::Probe { id, start_period } => podbag::health::probe_main(&id, start_period),
         Cmd::InstallSelf { dest } => install_self(&dest),
+        Cmd::Upgrade {
+            check,
+            version,
+            yes,
+            json,
+        } => upgrade(check, version, yes, json),
     }
+}
+
+fn upgrade(check: bool, version: Option<String>, yes: bool, json: bool) -> i32 {
+    podbag::upgrade::upgrade_main(podbag::upgrade::Options {
+        check,
+        version,
+        yes,
+        json,
+    })
 }
 
 #[cfg(unix)]
@@ -485,6 +511,12 @@ fn dispatch(cmd: Cmd) -> i32 {
         Cmd::System { cmd } => image::system(cmd),
         Cmd::Volume { cmd } => volume::run(cmd),
         Cmd::Network { cmd } => network::run(cmd),
+        Cmd::Upgrade {
+            check,
+            version,
+            yes,
+            json,
+        } => upgrade(check, version, yes, json),
         _ => unsupported(),
     }
 }
@@ -537,6 +569,37 @@ mod tests {
         let argv: Vec<String> = args.iter().map(|a| a.to_string()).collect();
         let cli = parse(&argv).expect("valid arguments");
         wsl_argv(&cli, argv)
+    }
+
+    #[test]
+    fn tui_takes_an_engine_and_no_mouse() {
+        use podbag::client::Choice;
+        let tui = |args: &[&str]| {
+            let argv: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            parse(&argv).map(|cli| match cli.cmd {
+                Cmd::Tui {
+                    engine, no_mouse, ..
+                } => (engine, no_mouse),
+                _ => panic!("not tui"),
+            })
+        };
+        assert_eq!(tui(&["tui"]).unwrap(), (None, false));
+        assert_eq!(
+            tui(&["tui", "--engine", "docker", "--no-mouse"]).unwrap(),
+            (Some(Choice::Docker), true)
+        );
+        assert_eq!(
+            tui(&["tui", "--engine=podbag"]).unwrap(),
+            (Some(Choice::Podbag), false)
+        );
+        assert_eq!(
+            tui(&["tui", "--engine", "unix:///run/x.sock"]).unwrap().0,
+            Some(Choice::Socket("/run/x.sock".into()))
+        );
+        let e = tui(&["tui", "--engine", "tcp://1.2.3.4:2375"])
+            .err()
+            .unwrap();
+        assert!(e.to_string().contains("podbag, docker"), "{e}");
     }
 
     #[test]
