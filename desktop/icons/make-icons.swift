@@ -75,11 +75,24 @@ for base in [16, 32, 128, 256, 512] {
   write(png(icon(base)), iconset.appendingPathComponent("icon_\(base)x\(base).png"))
   write(png(icon(base * 2)), iconset.appendingPathComponent("icon_\(base)x\(base)@2x.png"))
 }
-// Launcher, system tray and in-app image sizes.
+// Launcher and in-app image sizes.
 for (name, size) in [("32x32.png", 32), ("64x64.png", 64), ("128x128.png", 128),
-                     ("128x128@2x.png", 256), ("icon.png", 512), ("tray-44.png", 44), ("logo-small.png", 192)] {
+                     ("128x128@2x.png", 256), ("icon.png", 512), ("logo-small.png", 192)] {
   write(png(icon(size)), out.appendingPathComponent(name))
 }
+// The macOS menu bar draws an 18 pt template. Give the bag a 1 pt margin at 2x.
+let bagHeight: CGFloat = 32
+let bagWidth = bagHeight * CGFloat(logoCG.width) / CGFloat(logoCG.height)
+let trayWidth = Int(ceil(bagWidth)) + 4
+let tray = CGContext(data: nil, width: trayWidth, height: 36, bitsPerComponent: 8, bytesPerRow: 0,
+                     space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                     bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+let bagRect = CGRect(x: (CGFloat(trayWidth) - bagWidth) / 2, y: 2, width: bagWidth, height: bagHeight)
+tray.interpolationQuality = .high
+tray.clip(to: bagRect, mask: logoCG)
+tray.setFillColor(CGColor(gray: 0, alpha: 1))
+tray.fill(bagRect)
+write(png(tray.makeImage()!), out.appendingPathComponent("tray-template.png"))
 // icon.ico: PNG entries of 16, 24, 32, 48, 64 and 256 px.
 var ico = Data()
 let sizes = [16, 24, 32, 48, 64, 256]
