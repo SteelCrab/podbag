@@ -1,6 +1,6 @@
 //! The CRI runtime service: pod sandboxes and their containers, on podbag's containers.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -912,18 +912,22 @@ impl Runtime {
     pub fn container_stats(&self, given: &str) -> Answer<pb::ContainerStats> {
         let id = self.container_id(given)?;
         let (_, config) = self.records.container(&id).map_err(err)?;
-        let st = state::reconcile(&self.dirs, &id).ok();
+        Ok(self.stats_for_container(&id, config))
+    }
+
+    fn stats_for_container(&self, id: &str, config: pb::ContainerConfig) -> pb::ContainerStats {
+        let st = state::reconcile(&self.dirs, id).ok();
         let cgroup = st.as_ref().and_then(|s| s.cgroup.clone());
         let now = now_ns();
         let usage = cgroup
             .as_deref()
             .map(super::stats::read)
             .unwrap_or_default();
-        let upper = self.dirs.container_dir(&id).join("upper");
+        let upper = self.dirs.container_dir(id).join("upper");
         let (bytes, inodes) = super::stats::disk_usage(&upper);
-        Ok(pb::ContainerStats {
+        pb::ContainerStats {
             attributes: Some(pb::ContainerAttributes {
-                id: id.clone(),
+                id: id.to_owned(),
                 metadata: config.metadata,
                 labels: config.labels,
                 annotations: config.annotations,
@@ -940,7 +944,7 @@ impl Runtime {
             }),
             swap: Some(usage.swap(now)),
             io: None,
-        })
+        }
     }
 
     pub fn list_container_stats(
@@ -948,16 +952,18 @@ impl Runtime {
         filter: Option<pb::ContainerStatsFilter>,
     ) -> Answer<Vec<pb::ContainerStats>> {
         let filter = filter.unwrap_or_default();
-        let wanted = pb::ContainerFilter {
-            id: filter.id,
-            pod_sandbox_id: filter.pod_sandbox_id,
-            label_selector: filter.label_selector,
-            state: None,
-        };
         let mut out = Vec::new();
-        for c in self.list_containers(Some(wanted))? {
-            if let Ok(s) = self.container_stats(&c.id) {
-                out.push(s);
+        for id in self.records.container_ids() {
+            if !id.starts_with(&filter.id) {
+                continue;
+            }
+            let Ok((record, config)) = self.records.container(&id) else {
+                continue;
+            };
+            if record.sandbox.starts_with(&filter.pod_sandbox_id)
+                && mapping::matches_labels(&config.labels, &filter.label_selector)
+            {
+                out.push(self.stats_for_container(&id, config));
             }
         }
         Ok(out)
@@ -966,6 +972,19 @@ impl Runtime {
     pub fn pod_sandbox_stats(&self, given: &str) -> Answer<pb::PodSandboxStats> {
         let id = self.sandbox_id(given)?;
         let (s, config) = self.records.sandbox(&id).map_err(err)?;
+        let containers = self.list_container_stats(Some(pb::ContainerStatsFilter {
+            pod_sandbox_id: id,
+            ..Default::default()
+        }))?;
+        Ok(self.stats_for_sandbox(s, config, containers))
+    }
+
+    fn stats_for_sandbox(
+        &self,
+        s: records::Sandbox,
+        config: pb::PodSandboxConfig,
+        containers: Vec<pb::ContainerStats>,
+    ) -> pb::PodSandboxStats {
         let now = now_ns();
         let parent = config
             .linux
@@ -978,15 +997,10 @@ impl Runtime {
             .filter(|_| !parent.is_empty())
             .map(|p| super::stats::read(&p.display().to_string()))
             .unwrap_or_default();
-        let containers: Vec<pb::ContainerStats> = self
-            .containers_of(&id)
-            .iter()
-            .filter_map(|c| self.container_stats(c).ok())
-            .collect();
         let network = s.net.as_deref().map(|ns| super::stats::network(ns, now));
-        Ok(pb::PodSandboxStats {
+        pb::PodSandboxStats {
             attributes: Some(pb::PodSandboxAttributes {
-                id: id.clone(),
+                id: s.id,
                 metadata: config.metadata,
                 labels: config.labels,
                 annotations: config.annotations,
@@ -1003,7 +1017,7 @@ impl Runtime {
                 io: None,
             }),
             windows: None,
-        })
+        }
     }
 
     pub fn list_pod_sandbox_stats(
@@ -1011,18 +1025,33 @@ impl Runtime {
         filter: Option<pb::PodSandboxStatsFilter>,
     ) -> Answer<Vec<pb::PodSandboxStats>> {
         let filter = filter.unwrap_or_default();
-        let wanted = pb::PodSandboxFilter {
-            id: filter.id,
-            label_selector: filter.label_selector,
-            state: None,
-        };
-        let mut out = Vec::new();
-        for s in self.list_pod_sandbox(Some(wanted))? {
-            if let Ok(stats) = self.pod_sandbox_stats(&s.id) {
-                out.push(stats);
+        let mut pods = BTreeMap::new();
+        for id in self.records.sandbox_ids() {
+            if !id.starts_with(&filter.id) {
+                continue;
+            }
+            let Ok((pod, config)) = self.records.sandbox(&id) else {
+                continue;
+            };
+            if mapping::matches_labels(&config.labels, &filter.label_selector) {
+                pods.insert(id, (pod, config, Vec::new()));
             }
         }
-        Ok(out)
+        if pods.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Read each container once per request, even when kubelet asks about every pod.
+        for id in self.records.container_ids() {
+            if let Ok((record, config)) = self.records.container(&id)
+                && let Some((_, _, members)) = pods.get_mut(&record.sandbox)
+            {
+                members.push(self.stats_for_container(&id, config));
+            }
+        }
+        Ok(pods
+            .into_values()
+            .map(|(pod, config, members)| self.stats_for_sandbox(pod, config, members))
+            .collect())
     }
 
     /// The main process of a running container (for streaming).
