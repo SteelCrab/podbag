@@ -40,6 +40,7 @@ Use the command line or [Podbag Desktop](#podbag-desktop).
   and swarm stacks on one node.
 - **Builds Dockerfiles.** `podbag build`, and `docker build` with the classic builder,
   without BuildKit or a daemon.
+- **Kubernetes.** `podbag cri serve` is the container runtime of a node, for the kubelet or k3s.
 - **With or without root.** The same program works both ways.
 - **Linux, macOS and Windows.** x86_64 and arm64. Windows support is experimental.
 - **A TUI and a desktop app.** `podbag tui` in the terminal, and a window with a menu bar item, for containers, images, volumes and networks.
@@ -173,6 +174,8 @@ docker compose up -d
 - Versions: podbag 0.1.0, Podman 5.7.0, Docker 29.1.3, Kiri 0.2.1.
 - All numbers and how they were measured: [docs/benchmarks.md](docs/benchmarks.md) and
   [docs/benchmarks-msa.md](docs/benchmarks-msa.md).
+- As a Kubernetes node's runtime under k3s, with 30 pods: 2 processes in 3.5 MiB, against
+  containerd's 63 (276 MiB) and CRI-O's 32 (85 MiB): [docs/benchmarks-k8s.md](docs/benchmarks-k8s.md).
 
 ## Compared with other tools
 

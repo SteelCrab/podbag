@@ -38,6 +38,7 @@
 - **快。** 在 Linux 上，容器约 4 毫秒启动。
 - **兼容 Docker 工具。** 支持 Docker 和 OCI 镜像、`docker` CLI、Compose、buildx，以及单节点的 swarm stack。
 - **构建 Dockerfile。** 可以用 `podbag build`，也可以用经典构建器的 `docker build`，不需要 BuildKit 或守护进程。
+- **Kubernetes。** `podbag cri serve` 可以作为节点的容器运行时，供 kubelet 或 k3s 使用。
 - **有无 root 都可以。** 同一个程序两种方式都能用。
 - **Linux、macOS 和 Windows。** 支持 x86_64 和 arm64。Windows 支持处于实验阶段。
 - **有 TUI 和桌面应用。** 在终端里用 `podbag tui`，在桌面上用带菜单栏图标的窗口，管理容器、镜像、卷和网络。
@@ -166,6 +167,7 @@ docker compose up -d
 - 在一台 Linux 虚拟机上测得的中位数：4 个 CPU，3.8 GiB，arm64。
 - 版本：podbag 0.1.0，Podman 5.7.0，Docker 29.1.3，Kiri 0.2.1。
 - 所有数据和测量方法：[docs/benchmarks.md](docs/benchmarks.md)、[docs/benchmarks-msa.md](docs/benchmarks-msa.md)（英文）。
+- 作为 k3s 节点的运行时运行 30 个 pod：podbag 只有 2 个进程，共 3.5 MiB；containerd 有 63 个（276 MiB），CRI-O 有 32 个（85 MiB）。[docs/benchmarks-k8s.md](docs/benchmarks-k8s.md)（英文）。
 
 ## 与其他工具比较
 

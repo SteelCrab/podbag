@@ -1,7 +1,7 @@
 //! Create the container process and wait for it.
 
 use super::init::child_main;
-use crate::spec::ContainerSpec;
+use crate::spec::{ContainerSpec, Namespace, Namespaces};
 use crate::{Error, ErrorKind, Result, idmap};
 use rustix::pipe::{PipeFlags, pipe_with};
 use std::fs::File;
@@ -101,16 +101,27 @@ pub fn spawn(
     let (sync_read, sync_write) = pipe()?;
     let (status_read, status_write) = pipe()?;
 
-    let mut flags = libc::CLONE_NEWNS
-        | libc::CLONE_NEWPID
-        | libc::CLONE_NEWUTS
-        | libc::CLONE_NEWIPC
-        | libc::CLONE_NEWCGROUP;
+    let joins = Joins::open(&spec.namespaces)?;
+    let mut flags = libc::CLONE_NEWNS | libc::CLONE_NEWCGROUP;
     if userns == UserNs::New {
         flags |= libc::CLONE_NEWUSER;
     }
-    if spec.network != crate::network::NetworkMode::Host {
+    if spec.own_netns() {
         flags |= libc::CLONE_NEWNET;
+    }
+    for (ns, flag) in [
+        (&spec.namespaces.pid, libc::CLONE_NEWPID),
+        (&spec.namespaces.uts, libc::CLONE_NEWUTS),
+        (&spec.namespaces.ipc, libc::CLONE_NEWIPC),
+    ] {
+        if *ns == Namespace::Own {
+            flags |= flag;
+        }
+    }
+    // The PID namespace of a child is chosen before it exists: this process's namespace
+    // for its children becomes the one to join.
+    if let Some(pid_ns) = &joins.pid {
+        set_namespace(pid_ns, libc::CLONE_NEWPID)?;
     }
     let mut args = clone_args(flags as u64);
     if let Some(fd) = cgroup {
@@ -154,8 +165,9 @@ pub fn spawn(
     if ret == 0 {
         drop(sync_write);
         drop(status_read);
-        child_main(spec, rootless, sync_read, status_write, stdio);
+        child_main(spec, rootless, sync_read, status_write, stdio, &joins);
     }
+    drop(joins);
 
     let pid = ret as u32;
     drop(sync_read);
@@ -211,6 +223,64 @@ pub fn spawn(
             "report this bug",
         )
     }))
+}
+
+/// The namespaces a new container joins, opened before it is created: the files are
+/// host paths, out of reach once it entered its own root.
+#[derive(Default)]
+pub(super) struct Joins {
+    pub(super) net: Option<File>,
+    pub(super) ipc: Option<File>,
+    pub(super) uts: Option<File>,
+    pub(super) pid: Option<File>,
+}
+
+impl Joins {
+    fn open(ns: &Namespaces) -> Result<Joins> {
+        let open = |n: &Namespace| match n {
+            Namespace::Join { path } => File::open(path).map(Some).map_err(|e| {
+                Error::io(
+                    format!("cannot open the namespace {path}"),
+                    &e,
+                    "check that the pod the container belongs to still exists",
+                )
+            }),
+            _ => Ok(None),
+        };
+        Ok(Joins {
+            net: open(&ns.net)?,
+            ipc: open(&ns.ipc)?,
+            uts: open(&ns.uts)?,
+            pid: open(&ns.pid)?,
+        })
+    }
+
+    /// In the new container, before anything else: join the network, IPC and UTS
+    /// namespaces.
+    pub(super) fn enter(&self) -> Result<()> {
+        for (file, flag) in [
+            (&self.net, libc::CLONE_NEWNET),
+            (&self.ipc, libc::CLONE_NEWIPC),
+            (&self.uts, libc::CLONE_NEWUTS),
+        ] {
+            if let Some(file) = file {
+                set_namespace(file, flag)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn set_namespace(file: &File, flag: i32) -> Result<()> {
+    // SAFETY: setns on a namespace file we opened; the flag names its kind.
+    if unsafe { libc::setns(std::os::fd::AsRawFd::as_raw_fd(file), flag) } != 0 {
+        return Err(Error::io(
+            "cannot join the pod's namespace",
+            &std::io::Error::last_os_error(),
+            "check that the pod the container belongs to still exists",
+        ));
+    }
+    Ok(())
 }
 
 /// Fork with clone3, directly into `cgroup` when given. Returns 0 in the child and the

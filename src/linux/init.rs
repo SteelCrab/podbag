@@ -17,6 +17,7 @@ pub(super) fn child_main(
     sync_read: OwnedFd,
     status_write: OwnedFd,
     stdio: super::spawn::ContainerStdio,
+    joins: &super::spawn::Joins,
 ) -> ! {
     let mut sync = File::from(sync_read);
     let mut byte = [0u8; 1];
@@ -33,11 +34,12 @@ pub(super) fn child_main(
     } else {
         Ok(())
     };
-    let error =
-        match early.and_then(|()| setup_and_exec(spec, rootless, status_fd, stdio.tty_socket)) {
-            Err(e) => e,
-            Ok(never) => match never {},
-        };
+    let error = match early
+        .and_then(|()| setup_and_exec(spec, rootless, status_fd, stdio.tty_socket, joins))
+    {
+        Err(e) => e,
+        Ok(never) => match never {},
+    };
     let mut status = File::from(status_write);
     let _ = status.write_all(&serde_json::to_vec(&error).unwrap_or_default());
     // SAFETY: as above.
@@ -78,7 +80,10 @@ fn setup_and_exec(
     rootless: bool,
     status_fd: i32,
     tty_socket: Option<i32>,
+    joins: &super::spawn::Joins,
 ) -> Result<Infallible> {
+    // First, while the host's files are in view: the pod's namespaces.
+    joins.enter()?;
     if rootless {
         become_root().map_err(|e| {
             setup_error(
@@ -93,24 +98,26 @@ fn setup_and_exec(
     // SAFETY: prctl with these arguments has no memory preconditions.
     unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) };
 
-    rustix::system::sethostname(spec.hostname.as_bytes()).map_err(|e| {
-        setup_error(
-            rootless,
-            "cannot set the container hostname",
-            e.into(),
-            "use a hostname of at most 64 characters",
-        )
-    })?;
-    let own_netns = spec.network != crate::network::NetworkMode::Host;
-    if own_netns {
+    // A shared UTS namespace keeps its name: it is the pod's (or the host's).
+    if spec.namespaces.uts == crate::spec::Namespace::Own {
+        rustix::system::sethostname(spec.hostname.as_bytes()).map_err(|e| {
+            setup_error(
+                rootless,
+                "cannot set the container hostname",
+                e.into(),
+                "use a hostname of at most 64 characters",
+            )
+        })?;
+    }
+    if spec.own_netns() {
         loopback_up()?;
     }
     enter_rootfs(
         &spec.rootfs,
         &spec.mounts,
-        own_netns,
+        spec.network != crate::network::NetworkMode::Host,
         rootless,
-        spec.security.privileged,
+        &spec.security,
     )?;
     if let Some(sock) = tty_socket {
         // Open the terminal in the container's own /dev/pts, so the command can find it.
@@ -145,13 +152,16 @@ fn setup_and_exec(
     };
     // Created as root, then entered as the container user, like Docker.
     std::fs::create_dir_all(workdir).map_err(workdir_error)?;
+    if spec.security.read_only_rootfs {
+        super::rootfs::make_root_read_only(rootless)?;
+    }
     let creds = crate::credentials::resolve_user(
         spec.user.as_deref(),
         &std::fs::read_to_string("/etc/passwd").unwrap_or_default(),
         &std::fs::read_to_string("/etc/group").unwrap_or_default(),
     )?;
     super::security::apply(&spec.security)?;
-    switch_user(&creds)?;
+    switch_user(&with_groups(creds.clone(), &spec.security))?;
     die_with_parent(status_fd);
     std::env::set_current_dir(workdir).map_err(workdir_error)?;
 
@@ -232,6 +242,21 @@ pub(super) fn become_root() -> std::io::Result<()> {
     } else {
         Err(std::io::Error::last_os_error())
     }
+}
+
+/// The user's credentials with further supplementary groups (sorted, each once), and its
+/// own group among them when the settings ask (Kubernetes runtimes do that).
+pub(super) fn with_groups(
+    mut c: crate::credentials::Credentials,
+    security: &crate::spec::Security,
+) -> crate::credentials::Credentials {
+    c.groups.extend_from_slice(&security.groups);
+    if security.own_group_too {
+        c.groups.push(c.gid);
+    }
+    c.groups.sort_unstable();
+    c.groups.dedup();
+    c
 }
 
 /// Become the container user: supplementary groups, then group, then user.

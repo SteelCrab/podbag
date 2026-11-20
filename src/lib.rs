@@ -23,6 +23,9 @@ pub(crate) mod container;
 #[cfg(unix)]
 mod containers;
 mod credentials;
+#[cfg(unix)]
+#[doc(hidden)]
+pub mod cri;
 #[doc(hidden)]
 pub mod diagnose;
 #[doc(hidden)]

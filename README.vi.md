@@ -38,6 +38,7 @@ Bạn có thể dùng dòng lệnh hoặc [Podbag Desktop](#podbag-desktop).
 - **Nhanh.** Trên Linux, container khởi động trong khoảng 4 ms.
 - **Dùng được với công cụ của Docker.** Image Docker và OCI, CLI `docker`, Compose, buildx và swarm stack trên một node.
 - **Build Dockerfile.** `podbag build`, và `docker build` với trình build cổ điển, không cần BuildKit hay daemon.
+- **Kubernetes.** `podbag cri serve` là container runtime của một node, cho kubelet hoặc k3s.
 - **Có hoặc không có root.** Cùng một chương trình chạy được theo cả hai cách.
 - **Linux, macOS và Windows.** x86_64 và arm64. Hỗ trợ Windows đang ở giai đoạn thử nghiệm.
 - **Có TUI và ứng dụng desktop.** `podbag tui` trong terminal, và một cửa sổ có biểu tượng trên thanh menu, cho container, image, volume và mạng.
@@ -166,6 +167,7 @@ docker compose up -d
 - Giá trị trung vị trên một máy ảo Linux: 4 CPU, 3.8 GiB, arm64.
 - Phiên bản: podbag 0.1.0, Podman 5.7.0, Docker 29.1.3, Kiri 0.2.1.
 - Tất cả số liệu và cách đo: [docs/benchmarks.md](docs/benchmarks.md) và [docs/benchmarks-msa.md](docs/benchmarks-msa.md) (tiếng Anh).
+- Làm runtime cho một node Kubernetes trên k3s, với 30 pod: podbag có 2 tiến trình, 3,5 MiB; containerd có 63 (276 MiB) và CRI-O có 32 (85 MiB): [docs/benchmarks-k8s.md](docs/benchmarks-k8s.md) (tiếng Anh).
 
 ## So sánh với các công cụ khác
 

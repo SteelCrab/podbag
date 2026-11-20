@@ -2,8 +2,7 @@
 logs/
 /bench-results/
 __pycache__/
-site/node_modules/
-site/.cloudflare/
-_site/
+/dev/cri/gen/Cargo.lock
+/dev/cri/gen/target/
 /desktop/gen/
 /desktop/preview/out/

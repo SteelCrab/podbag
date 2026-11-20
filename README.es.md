@@ -38,6 +38,7 @@ Puedes usar la línea de comandos o [Podbag Desktop](#podbag-desktop).
 - **Rápido.** Un contenedor arranca en unos 4 ms en Linux.
 - **Funciona con las herramientas de Docker.** Imágenes Docker y OCI, el CLI `docker`, Compose, buildx y stacks de swarm en un solo nodo.
 - **Construye Dockerfiles.** `podbag build`, y `docker build` con el constructor clásico, sin BuildKit ni daemon.
+- **Kubernetes.** `podbag cri serve` es el runtime de contenedores de un nodo, para el kubelet o k3s.
 - **Con o sin root.** El mismo programa funciona de las dos formas.
 - **Linux, macOS y Windows.** x86_64 y arm64. El soporte de Windows es experimental.
 - **Una TUI y una aplicación de escritorio.** `podbag tui` en la terminal, y una ventana con un icono en la barra de menús, para contenedores, imágenes, volúmenes y redes.
@@ -166,6 +167,7 @@ docker compose up -d
 - Medianas en una VM Linux: 4 CPU, 3,8 GiB, arm64.
 - Versiones: podbag 0.1.0, Podman 5.7.0, Docker 29.1.3, Kiri 0.2.1.
 - Todos los números y cómo se midieron: [docs/benchmarks.md](docs/benchmarks.md) y [docs/benchmarks-msa.md](docs/benchmarks-msa.md) (en inglés).
+- Como runtime de un nodo de Kubernetes con k3s, con 30 pods: 2 procesos en 3,5 MiB, frente a los 63 de containerd (276 MiB) y los 32 de CRI-O (85 MiB): [docs/benchmarks-k8s.md](docs/benchmarks-k8s.md) (en inglés).
 
 ## Comparación con otras herramientas
 

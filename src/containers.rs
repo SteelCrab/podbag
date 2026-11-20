@@ -65,7 +65,7 @@ impl From<&crate::volume::Mount> for MountInfo {
     fn from(m: &crate::volume::Mount) -> Self {
         use crate::volume::MountSource;
         let (kind, source) = match &m.source {
-            MountSource::Bind { path } => ("bind", path.clone()),
+            MountSource::Bind { path, .. } => ("bind", path.clone()),
             MountSource::Volume { name, .. } => ("volume", name.clone()),
             MountSource::Tmpfs { .. } => ("tmpfs", "tmpfs".to_string()),
         };

@@ -139,7 +139,8 @@ base, with the same jars:
 - **Waking up on a Mac.** The first command after the VM powered off takes about 0.6 s
   (Kiri: 0.3 s).
 - **docker run on a Mac.** 14.4 ms (Kiri: 11.8 ms).
-- **Kubernetes.** There is no CRI, so Kubernetes cannot use podbag as a node's runtime.
+- **Kubernetes.** The CRI is new. Pods have no user namespaces, SELinux labels, AppArmor
+  profiles or seccomp profile files yet: see [usage.md](usage.md#kubernetes).
 - **Builds.** podbag builds Dockerfiles itself, with the classic builder's features. For
   BuildKit's (`RUN --mount`, secrets, other platforms), use buildx.
 - **Docker API.** Swarm mode runs on one node only. Image history and plugins are unsupported.
