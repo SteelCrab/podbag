@@ -91,6 +91,7 @@ Check it with `SHA256SUMS`.
 
 - Linux: `-musl` is static and runs on any distribution. `-gnu` uses the system's glibc
   (2.28 or later) and its host name lookup. If unsure, take `-musl`.
+- Save the file as `podbag` in your `PATH`: podbag finds its helpers by that name.
 
 Windows needs WSL 2 (run `wsl --install` once):
 
