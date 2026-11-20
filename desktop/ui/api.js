@@ -17,7 +17,14 @@ const API = (() => {
     rename: (id, name) => invoke("rename", { id, name }),
     containerJson: (id, what) => invoke("container_json", { id, what }),
     features: (sample) => invoke("features", { sample: sample || null }),
-    pull: (image) => invoke("pull", { image }),
+    pull: (image, location, host) => invoke("pull", { image, location: location || null, host: host || null }),
+    search: (term) => invoke("search", { term }),
+    registries: (hosts) => invoke("registries", { hosts }),
+    registryLogin: (location, host, user, password) => invoke("registry_login", { location, host, user, password }),
+    dockerCommand: () => invoke("docker_command"),
+    dockerSwitch: (to) => invoke("docker_switch", { to }),
+    dockerImages: () => invoke("docker_images"),
+    importImages: (names) => invoke("import_images", { names }),
     logsStart: (id) => invoke("logs_start", { id }),
     logsStop: () => invoke("logs_stop"),
     watch: (on) => invoke("watch", { on }),
@@ -31,7 +38,8 @@ const API = (() => {
     openTerminal: (what) => invoke("open_terminal", { what }),
     getSettings: () => invoke("get_settings"),
     setSettings: (settings) => invoke("set_settings", { settings }),
-    // Events: changed, live, logs, pull-progress, shown, engine-changed, open-updates.
+    // Events: changed, live, logs, pull-progress, shown, engine-changed, open-updates,
+    // open-settings, docker-changed.
     on: listen,
   };
 })();

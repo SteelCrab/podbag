@@ -432,3 +432,68 @@ dialog input[type="text"] { width: 100%; }
 @media (prefers-reduced-motion: no-preference) {
   .nav-item, .icon-button, .button, .tab { transition: background-color 0.12s, color 0.12s, border-color 0.12s; }
 }
+
+/* ---- the pull panel ---- */
+dialog.pull-panel {
+  width: min(560px, calc(100vw - 32px)); max-height: min(560px, calc(100vh - 64px));
+  margin: 72px 24px auto auto; padding: 0; overflow: visible;
+  display: none; flex-direction: column;
+}
+dialog.pull-panel[open] { display: flex; }
+.pull-head { display: flex; align-items: center; gap: 8px; padding: 10px 10px 10px 14px; border-bottom: 1px solid var(--line); color: var(--muted); }
+.pull-input { flex: 1; min-width: 0; height: 32px; border: 0; background: none; color: var(--ink); font: inherit; font-size: 15px; outline: none; }
+dialog.pull-panel input.pull-input { border: 0; min-width: 0; width: auto; height: 32px; padding: 0; background: none; }
+dialog.pull-panel input.pull-input:focus-visible { outline: none; }
+.loc-button {
+  display: inline-flex; align-items: center; gap: 6px; flex: none; height: 28px; padding: 0 8px 0 10px;
+  border: 1px solid var(--line); border-radius: 7px; background: var(--sunken); color: var(--ink); font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer;
+}
+.loc-button .icon { width: 13px; height: 13px; transform: rotate(90deg); }
+.loc-button:hover { background: var(--hover); }
+.loc-menu {
+  position: absolute; top: 50px; inset-inline-end: 10px; z-index: 2; width: min(330px, calc(100% - 20px));
+  padding: 6px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow);
+}
+.loc-menu ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 1px; }
+.loc-title { margin: 4px 8px 6px; font-size: 11.5px; font-weight: 600; color: var(--muted); }
+.loc-row { display: flex; align-items: center; gap: 6px; }
+.loc-choice {
+  flex: 1; min-width: 0; display: grid; grid-template-columns: 1fr auto; align-items: center; column-gap: 6px;
+  padding: 6px 8px; border: 0; border-radius: 7px; background: none; color: var(--ink); font: inherit; text-align: start; cursor: pointer;
+}
+.loc-choice:hover, .loc-choice[aria-pressed="true"] { background: var(--hover); }
+.loc-choice .icon { grid-row: 1 / span 2; grid-column: 2; width: 15px; height: 15px; color: var(--accent-text); }
+.loc-label { font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.loc-account { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--ink-2); grid-column: 1; }
+.loc-account .dot { width: 6px; height: 6px; }
+.button.small { height: 26px; padding: 0 9px; font-size: 12.5px; }
+.pull-body { flex: 1; min-height: 120px; overflow: auto; padding: 8px; }
+.pull-note { margin: 8px; padding: 10px 12px; border-radius: 8px; background: var(--sunken); color: var(--ink-2); font-size: 13px; white-space: normal !important; }
+.pull-results { list-style: none; margin: 0; padding: 0; display: grid; gap: 1px; }
+.pull-option { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 8px; cursor: pointer; color: var(--ink-2); }
+.pull-option[aria-selected="true"] { background: var(--accent-soft); color: var(--accent-text); }
+.pull-main { flex: 1; min-width: 0; display: grid; gap: 1px; }
+.pull-name { display: flex; align-items: center; gap: 6px; font-weight: 600; color: var(--ink); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pull-desc { font-size: 12.5px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pull-stars { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.pull-stars .icon { width: 13px; height: 13px; }
+.tag.official { margin: 0; background: var(--green-soft); color: var(--green); font-weight: 600; }
+.pull-form { display: grid; gap: 8px; padding: 8px 8px 4px; }
+.pull-form label { font-size: 13px; font-weight: 600; }
+.pull-form input { width: 100%; min-width: 0; }
+.pull-form p { margin: 0; color: var(--ink-2); }
+.pull-form-title { font-weight: 600; color: var(--ink) !important; overflow-wrap: anywhere; }
+.pull-log { margin: 0; padding: 10px 12px; max-height: 260px; overflow: auto; border-radius: 8px; background: var(--sunken); font: 12px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.pull-foot { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; padding: 8px 12px; border-top: 1px solid var(--line); font-size: 12px; color: var(--muted); }
+kbd {
+  display: inline-block; min-width: 20px; padding: 0 5px; margin-inline-end: 2px; border: 1px solid var(--line); border-bottom-width: 2px;
+  border-radius: 5px; background: var(--surface); font: 11.5px/1.5 var(--mono); color: var(--ink); text-align: center;
+}
+
+/* ---- import from Docker ---- */
+dialog.import { width: min(520px, calc(100vw - 48px)); }
+.import-list { display: grid; gap: 2px; max-height: 320px; overflow: auto; padding: 4px; border: 1px solid var(--line); border-radius: 8px; }
+.import-row { display: grid; grid-template-columns: auto 1fr auto; gap: 8px; padding: 6px 8px; border-radius: 6px; font-weight: 400 !important; }
+.import-row:hover { background: var(--hover); }
+.docker-settings { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+.docker-settings .fields { margin-top: 0; }

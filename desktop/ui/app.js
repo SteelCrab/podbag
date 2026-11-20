@@ -25,6 +25,7 @@ const S = {
   upgrade: null, // what the last "Update podbag" did
   history: { stack: [], index: -1 },
   autoCollapsed: false, // the window is too narrow for the sidebar
+  docker: null, // where the docker command goes
 };
 
 const IS_MAC = /Mac/.test(navigator.platform || navigator.userAgent);
@@ -206,6 +207,7 @@ async function connect(startVm) {
   renderEngine();
   renderSwitch();
   refreshVm();
+  refreshDocker();
   if (S.engine.reachable) {
     await refresh();
     API.watch(true);
@@ -342,26 +344,9 @@ async function prune(kind) {
   refreshSoon();
 }
 
+// Pull progress goes here while a pull runs; images.js opens the pull panel.
 let pullLine = null;
-function pull() {
-  askDialog({
-    title: t("pull.title"),
-    label: t("pull.label"),
-    placeholder: t("pull.placeholder"),
-    okLabel: t("action.pull"),
-    work: async (image, progress) => {
-      pullLine = progress;
-      progress(t("pull.working"));
-      try {
-        await API.pull(image);
-      } finally {
-        pullLine = null;
-      }
-      toast(t("done.pull", { name: image }));
-      refreshSoon();
-    },
-  });
-}
+function pull() {}
 
 function rename(c) {
   askDialog({
@@ -810,6 +795,7 @@ function toolbar(kind) {
     h("div", { class: "tools" },
       h("span", { class: `live ${S.live ? "live-on" : ""}`, id: "live", title: S.live ? t("live.on") : t("live.off") },
         h("span", { class: "dot", "aria-hidden": "true" }), h("span", { class: "live-text", text: S.live ? t("live.on") : "" })),
+      kind === "images" && isPodbag() && S.docker && S.docker.installed ? button("import", t("import.button"), importFromDocker) : null,
       kind === "images" ? button("pull", t("action.pull"), pull, "primary") : null,
       button("prune", t("action.prune"), () => prune(kind)),
       iconButton("refresh", t("action.refresh"), refresh)));
@@ -1530,6 +1516,8 @@ async function init() {
   API.on("shown", () => { connect(false); loadUpdates("due"); });
   API.on("engine-changed", () => connect(false));
   API.on("open-updates", openUpdates);
+  API.on("open-settings", () => go("settings"));
+  API.on("docker-changed", refreshDocker);
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) return API.watch(false);
     if (S.engine && S.engine.reachable) { API.watch(true); refresh(); }
@@ -1557,4 +1545,4 @@ window.podbag = {
   toggleSidebar, openUpdates, switchEngine, applyVm: () => applyVm(document.querySelector(".vm-form")), runUpgrade,
 };
 
-init();
+// images.js starts the app, once its parts are in place.
