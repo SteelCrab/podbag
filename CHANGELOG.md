@@ -39,6 +39,8 @@
   with `podbag vm set`.
 - Set Desktop to open at login. The window follows the selected theme.
   The macOS app includes a window toolbar and a monochrome menu bar icon.
+- On first launch, Desktop offers a link to star Podbag on GitHub. Choose Skip
+  to dismiss the prompt.
 - The READMEs and project videos use the same bag icon as Podbag Desktop.
 
 ### Installation and updates
