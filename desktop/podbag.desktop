@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=podbag
+Comment=Containers, images, volumes and networks
+Exec=podbag-desktop
+Icon=podbag
+Terminal=false
+Categories=Development;Utility;
+StartupWMClass=podbag-desktop

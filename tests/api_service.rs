@@ -56,6 +56,34 @@ fn the_service_waits_for_open_connections_before_exiting() {
     assert_eq!(service.exited_within(Duration::from_secs(6)), Some(0));
 }
 
+#[test]
+fn a_replaced_program_ends_its_idle_service() {
+    let sb = Sandbox::new();
+    let bin = sb.tmp.path().join("podbag-copy");
+    std::fs::copy(BIN, &bin).unwrap();
+    let mut service = Service::start_bin(&sb, bin.to_str().unwrap(), &["--timeout", "600"]);
+    assert_eq!(service.exited_within(Duration::from_secs(3)), None);
+    // An upgrade: a new file is renamed over the program.
+    let new = sb.tmp.path().join("podbag-new");
+    std::fs::copy(BIN, &new).unwrap();
+    std::fs::rename(&new, &bin).unwrap();
+    assert_eq!(service.exited_within(Duration::from_secs(10)), Some(0));
+    assert!(!service.socket.exists(), "the socket is removed");
+}
+
+#[test]
+fn a_service_without_timeout_stays_after_an_upgrade() {
+    let sb = Sandbox::new();
+    let bin = sb.tmp.path().join("podbag-copy");
+    std::fs::copy(BIN, &bin).unwrap();
+    let mut service = Service::start_bin(&sb, bin.to_str().unwrap(), &["--timeout", "0"]);
+    let new = sb.tmp.path().join("podbag-new");
+    std::fs::copy(BIN, &new).unwrap();
+    std::fs::rename(&new, &bin).unwrap();
+    assert_eq!(service.exited_within(Duration::from_secs(5)), None);
+    assert_eq!(curl(&service.socket, &["/_ping"]).0, "OK");
+}
+
 /// Connect to the socket in argv[1] and keep the connection open for 3 seconds.
 const HOLD: &str = "import socket, sys, time\ns = socket.socket(socket.AF_UNIX)\ns.connect(sys.argv[1])\ntime.sleep(3)\n";
 

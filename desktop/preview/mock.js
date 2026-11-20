@@ -38,14 +38,37 @@
   const lists = { containers, images, volumes, networks };
   if (view === "empty") { lists.containers = []; lists.volumes = []; }
 
+  const kube = {
+    pods: [
+      { metadata: { name: "web", namespace: "default" }, spec: { containers: [{ name: "nginx" }], nodeName: "worker-1" }, status: { phase: "Running", containerStatuses: [{ name: "nginx", ready: true }] } },
+      { metadata: { name: "web", namespace: "staging" }, spec: { containers: [{ name: "nginx" }] }, status: { phase: "Pending" } },
+    ],
+    services: [
+      { metadata: { name: "frontend", namespace: "default" }, spec: { type: "NodePort", clusterIP: "10.43.0.80", ports: [{ port: 80, nodePort: 30080, protocol: "TCP" }] } },
+    ],
+  };
+  const docker = view.startsWith("docker");
   const engine = {
     platform: "macos",
+    engine: docker ? "docker" : "podbag",
+    engineName: docker ? "Docker" : "podbag",
+    shell: true,
     endpoint: "unix:///Users/me/.podbag/run/docker.sock",
     reachable: !["offline", "vm"].includes(view),
     vm: view === "vm" ? "stopped" : "running",
     version: "podbag 0.1.0 (API 1.47)",
     error: view === "vm" ? "vm-stopped" : view === "offline" ? "cannot connect to unix:///Users/me/.podbag/run/docker.sock: No such file or directory" : null,
   };
+  if (docker) {
+    engine.endpoint = "unix:///Users/me/.docker/run/docker.sock";
+    engine.vm = null;
+    engine.version = "Docker Desktop 4.50.0 29.0.1 (API 1.52)";
+  }
+  if (view === "docker-down") {
+    engine.reachable = false;
+    engine.version = null;
+    engine.error = "Docker is not running. Start Docker Desktop.";
+  }
   if (view === "offline") { engine.platform = "linux"; engine.vm = null; engine.endpoint = "unix:///run/user/1000/podbag/docker.sock"; }
 
   const logLines = [
@@ -56,10 +79,82 @@
     ...Array.from({ length: 24 }, (_, i) => `10.77.0.1 - - [20/Nov/2026:03:${String(14 + i).padStart(2, "0")}:07 +0000] "GET /api/items?page=${i + 1} HTTP/1.1" 200 ${1200 + i * 37} "-" "curl/8.11.0"`),
   ];
 
-  let resources = { cpus: 4, memoryMib: 2048 };
+  // podbag vm status --json
+  const vmStatus = view === "vm" ? {
+    platform: "macos", state: "stopped", resourcesEditable: true, inUse: null,
+    next: { cpus: 4, memoryMiB: 4096, idleSeconds: 300 }, saved: { cpus: 4, memoryMiB: 4096, idleSeconds: null },
+    overriddenBy: [], pending: false,
+    limits: { cpusMin: 1, cpusMax: 10, memoryMinMiB: 1024, memoryMaxMiB: 20480, macMemoryMiB: 24576 },
+    uptimeSeconds: null, containers: null, cpuPercent: null, memoryUsedMiB: null, memoryTotalMiB: null,
+    disk: { path: "/Users/me/.podbag/vm/disk.img", allocatedBytes: 3_400_000_000, sizeBytes: 68_719_476_736 },
+  } : {
+    platform: "macos", state: "running", resourcesEditable: true,
+    inUse: { cpus: 4, memoryMiB: 4096, idleSeconds: 300 },
+    next: { cpus: 4, memoryMiB: 6144, idleSeconds: 300 }, saved: { cpus: null, memoryMiB: 6144, idleSeconds: null },
+    overriddenBy: view === "settings-vm" ? ["PODBAG_VM_CPUS"] : [], pending: true,
+    limits: { cpusMin: 1, cpusMax: 10, memoryMinMiB: 1024, memoryMaxMiB: 20480, macMemoryMiB: 24576 },
+    uptimeSeconds: 7560, containers: 3, cpuPercent: 12.5, memoryUsedMiB: 1350, memoryTotalMiB: 3900,
+    disk: { path: "/Users/me/.podbag/vm/disk.img", allocatedBytes: 5_800_000_000, sizeBytes: 68_719_476_736 },
+  };
+  const update = view.startsWith("settings") || view === "update-admin" || view === "collapsed"
+    ? { engine: "0.1.0", app: "0.1.0", latest: "0.2.0", newer: true, checked: now - 3600, error: null }
+    : { engine: "0.1.0", app: "0.1.0", latest: "0.1.0", newer: false, checked: now - 3600, error: null };
+
+  const hub = [
+    { name: "nginx", description: "Official build of Nginx.", star_count: 21034, is_official: true },
+    { name: "nginxinc/nginx-unprivileged", description: "Unprivileged NGINX Dockerfiles", star_count: 172, is_official: false },
+    { name: "nginx/nginx-ingress", description: "NGINX and NGINX Plus Ingress Controllers for Kubernetes", star_count: 109, is_official: false },
+    { name: "bitnami/nginx", description: "Bitnami container image for NGINX", star_count: 197, is_official: false },
+  ];
+  const registries = [
+    { id: "dockerhub", label: "Docker Hub", host: "docker.io", needsHost: false, account: null, hint: null },
+    { id: "github", label: "GitHub", host: "ghcr.io", needsHost: false, account: "octocat", hint: null },
+    { id: "ecr", hostExample: "123456789012.dkr.ecr.us-east-1.amazonaws.com", label: "Amazon ECR", host: "", needsHost: true, account: null, hint: "aws ecr get-login-password --region <region> | docker login --username AWS --password-stdin <account>.dkr.ecr.<region>.amazonaws.com" },
+    { id: "quay", label: "Quay.io", host: "quay.io", needsHost: false, account: null, hint: null },
+    { id: "gar", hostExample: "us-docker.pkg.dev", label: "Google Artifact Registry", host: "", needsHost: true, account: null, hint: "gcloud auth configure-docker <region>-docker.pkg.dev" },
+    { id: "gitlab", label: "GitLab", host: "registry.gitlab.com", needsHost: false, account: null, hint: null },
+    { id: "acr", hostExample: "contoso.azurecr.io", label: "Azure Container Registry", host: "", needsHost: true, account: null, hint: "az acr login --name <registry-name>" },
+    { id: "ecr-public", label: "Amazon ECR Public", host: "public.ecr.aws", hostExample: "public.ecr.aws", needsHost: false },
+    { id: "mcr", label: "Microsoft Artifact Registry", host: "mcr.microsoft.com", hostExample: "mcr.microsoft.com", needsHost: false },
+    { id: "dhi", label: "Docker Hardened Images", host: "dhi.io", hostExample: "dhi.io", needsHost: false },
+    { id: "gcr", label: "Google Artifact Registry (gcr.io)", host: "", hostExample: "gcr.io", needsHost: true },
+    { id: "digitalocean", label: "DigitalOcean Container Registry", host: "registry.digitalocean.com", hostExample: "registry.digitalocean.com", needsHost: false },
+    { id: "ocir", label: "Oracle Cloud Infrastructure Registry", host: "", hostExample: "iad.ocir.io", needsHost: true },
+    { id: "oracle", label: "Oracle Container Registry", host: "container-registry.oracle.com", hostExample: "container-registry.oracle.com", needsHost: false },
+    { id: "ibm", label: "IBM Cloud Container Registry", host: "", hostExample: "us.icr.io", needsHost: true },
+    { id: "alibaba", label: "Alibaba Cloud Container Registry", host: "", hostExample: "crpi-example.cn-hangzhou.personal.cr.aliyuncs.com", needsHost: true },
+    { id: "tencent", label: "Tencent Container Registry", host: "", hostExample: "example.tencentcloudcr.com", needsHost: true },
+    { id: "huawei", label: "Huawei Cloud SWR", host: "", hostExample: "swr.cn-north-4.myhuaweicloud.com", needsHost: true },
+    { id: "scaleway", label: "Scaleway Container Registry", host: "", hostExample: "rg.fr-par.scw.cloud", needsHost: true },
+    { id: "ovh", label: "OVHcloud Managed Private Registry", host: "", hostExample: "example.container-registry.ovh.net", needsHost: true },
+    { id: "redhat", label: "Red Hat Container Registry", host: "", hostExample: "registry.redhat.io", needsHost: true },
+    { id: "suse", label: "SUSE Registry", host: "registry.suse.com", hostExample: "registry.suse.com", needsHost: false },
+    { id: "kubernetes", label: "Kubernetes Registry", host: "registry.k8s.io", hostExample: "registry.k8s.io", needsHost: false },
+    { id: "ngc", label: "NVIDIA NGC", host: "nvcr.io", hostExample: "nvcr.io", needsHost: false },
+    { id: "chainguard", label: "Chainguard Registry", host: "cgr.dev", hostExample: "cgr.dev", needsHost: false },
+    { id: "cloudsmith", label: "Cloudsmith", host: "docker.cloudsmith.io", hostExample: "docker.cloudsmith.io", needsHost: false },
+    { id: "jfrog", label: "JFrog Artifactory", host: "", hostExample: "example.jfrog.io", needsHost: true },
+    { id: "harbor", label: "Harbor", host: "", hostExample: "harbor.example.com", needsHost: true },
+    { id: "nexus", label: "Sonatype Nexus Repository", host: "", hostExample: "nexus.example.com:5000", needsHost: true },
+    { id: "gitlab-self", label: "GitLab Self-Managed", host: "", hostExample: "registry.example.com", needsHost: true },
+    { id: "custom", label: "Other registry", host: "", needsHost: true, account: null, hint: null },
+  ];
+  const elsewhere = ["banner", "settings-docker", "pull", "pull-locations"].includes(view);
+  const dockerCmd = elsewhere
+    ? { installed: true, name: "Docker Desktop", isPodbag: false, fromEnv: false, context: "desktop-linux", previous: null }
+    : { installed: true, name: "podbag", isPodbag: true, fromEnv: false, context: "podbag", previous: "desktop-linux" };
+
+  let launchAtLogin = false;
   const commands = {
+    "plugin:autostart|is_enabled": () => launchAtLogin,
+    "plugin:autostart|enable": () => { launchAtLogin = true; },
+    "plugin:autostart|disable": () => { launchAtLogin = false; },
     engine: () => engine,
     list: ({ kind }) => lists[kind],
+    kube_list: ({ kind, allNamespaces }) => ({
+      context: "dev", namespace: "default",
+      items: kube[kind].filter((item) => allNamespaces || item.metadata.namespace === "default"),
+    }),
     inspect: ({ kind, id }) => ({ Id: id, Name: "/web", Created: "2026-11-20T01:12:00Z", State: { Status: "running", Running: true, Pid: 4182, StartedAt: "2026-11-20T01:12:01Z" }, Config: { Image: "nginx:alpine", Cmd: ["nginx", "-g", "daemon off;"], Env: ["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "NGINX_VERSION=1.27.3"], Tty: false }, HostConfig: { PortBindings: { "80/tcp": [{ HostIp: "", HostPort: "8080" }] }, RestartPolicy: { Name: "no" } }, NetworkSettings: { IPAddress: "10.77.0.2" }, Kind: kind }),
     act: () => null,
     remove: () => null,
@@ -73,15 +168,42 @@
     watch: () => { setTimeout(() => emit("live", true), 10); return null; },
     open_shell: () => null,
     vm: ({ action }) => {
-      engine.vm = action === "start" ? "running" : "stopped";
-      engine.reachable = action === "start";
+      engine.vm = action !== "stop" ? "running" : "stopped";
+      engine.reachable = action !== "stop";
+      vmStatus.state = engine.vm;
       emit("engine-changed", action);
     },
-    vm_resources: ({ values }) => {
-      if (values) resources = { ...values };
-      return { values: { ...resources }, limits: { minCpus: 1, maxCpus: 12, minMemoryMib: 256, maxMemoryMib: 24576, memoryStepMib: 256 }, envOverride: false };
+    vm_status: () => (docker || engine.platform === "linux" ? null : vmStatus),
+    vm_set: () => "Saved.",
+    set_engine: () => null,
+    updates: () => update,
+    upgrade: () => ({ ok: false, code: 77, needsAdmin: true, command: "sudo /usr/local/bin/podbag upgrade", output: "podbag: cannot write to /usr/local/bin: it needs administrator rights" }),
+    open_terminal: () => null,
+    search: ({ term }) => ({ supported: true, error: null, results: hub.filter((r) => r.name.includes(term)) }),
+    registries: ({ hosts }) => {
+      const saved = Object.fromEntries(hosts);
+      return registries.map((loc) => {
+        const host = saved[loc.id] || loc.host;
+        const hint = loc.id === "acr" && host ? `az acr login --name ${host.split(/[.-]/)[0]}` : loc.hint;
+        return { ...loc, host, hint };
+      });
     },
-    get_settings: () => ({ language: params.get("lang") || "en", theme: params.get("theme") || "system" }),
+    registry_login: () => null,
+    docker_command: () => dockerCmd,
+    docker_switch: () => ({ ...dockerCmd, name: "podbag", isPodbag: true }),
+    docker_images: () => [
+      { name: "nginx:alpine", size: 52_400_000, registry: "dockerhub" },
+      { name: "mysql:8.4", size: 603_000_000, registry: "dockerhub" },
+      { name: "ghcr.io/example/worker:1.4", size: 183_000_000, registry: "github" },
+      { name: "demo-registry.cn-shanghai.cr.aliyuncs.com/team/api:2", size: 76_000_000, registry: "alibaba" },
+      { name: "contoso.azurecr.io/team/api:2", size: 84_000_000, registry: "acr" },
+      { name: "registry.example.com/team/worker:1.4.2", size: 183_000_000, registry: "custom" },
+    ],
+    import_images: () => null,
+    get_settings: () => ({
+      language: params.get("lang") || "en", theme: params.get("theme") || "system",
+      sidebarWidth: 216, sidebarCollapsed: view === "collapsed",
+    }),
     set_settings: () => null,
   };
 
@@ -95,19 +217,43 @@
     const app = window.podbag;
     await app.ready;
     const scenes = {
+      pods: () => app.go("kubernetes"),
+      services: () => app.go("kubernetes", "services"),
       images: () => app.go("images"),
       volumes: () => app.go("volumes"),
       networks: () => app.go("networks"),
       settings: () => app.go("settings"),
+      "settings-vm": () => { app.go("settings"); scrollTo("vm-settings"); },
+      "settings-updates": () => { app.go("settings"); scrollTo("updates"); },
+      "update-admin": async () => { app.go("settings"); await app.runUpgrade(); scrollTo("updates"); },
+      "docker-settings": () => app.go("settings"),
       detail: () => app.openDetail("containers", containers[0].Id, "info"),
       logs: () => app.openDetail("containers", containers[0].Id, "logs"),
       inspect: () => app.openDetail("containers", containers[0].Id, "inspect"),
       confirm: () => app.remove("containers", 0),
-      pull: () => { app.go("images"); app.pull(); },
+      pull: async () => { app.go("images"); await app.pull(); app.searchFor("nginx"); await new Promise((r) => setTimeout(r, 400)); },
+      "pull-locations": async () => { app.go("images"); await app.pull(); document.querySelector(".loc-button").click(); },
+      "pull-alibaba": async () => {
+        app.go("images"); await app.pull();
+        document.querySelector(".loc-button").click();
+        const input = document.querySelector(".loc-search");
+        input.value = "Alibaba ACR";
+        input.dispatchEvent(new Event("input"));
+      },
+      "pull-login": async () => { app.go("images"); await app.pull(); app.pullState.location = "quay"; app.pullState.step = "login"; app.render(); },
+      banner: () => {},
+      "settings-docker": () => app.go("settings"),
+      import: async () => { app.go("images"); await app.importFromDocker(); },
       "empty-volumes": () => app.go("volumes"),
     };
+    // Scroll a settings section into view once it is drawn.
+    function scrollTo(id) {
+      const el = document.getElementById(id);
+      if (el && !el.hidden && el.childElementCount) el.scrollIntoView({ block: "start" });
+      else setTimeout(() => scrollTo(id), 30);
+    }
     if (view === "empty" && params.get("tab")) app.go(params.get("tab"));
-    (scenes[view] || (() => {}))();
+    await (scenes[view] || (() => {}))();
     document.documentElement.dataset.ready = "1";
   });
 })();

@@ -4,6 +4,7 @@
 
 Một container engine không có daemon, chỉ gồm một tệp nhị phân tĩnh.
 Image được lưu theo từng tệp: tệp mà nhiều image dùng chung chỉ được lưu một lần.
+Bạn có thể dùng dòng lệnh hoặc [Podbag Desktop](#podbag-desktop).
 
 [![CI](https://github.com/SteelCrab/podbag/actions/workflows/ci.yml/badge.svg)](https://github.com/SteelCrab/podbag/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/SteelCrab/podbag)](https://github.com/SteelCrab/podbag/releases/latest)
@@ -20,6 +21,7 @@ Image được lưu theo từng tệp: tệp mà nhiều image dùng chung chỉ
 ## Mục lục
 
 - [Tính năng](#tính-năng)
+- [Podbag Desktop](#podbag-desktop)
 - [Cài đặt](#cài-đặt)
 - [Sử dụng](#sử-dụng)
 - [Đo hiệu năng](#đo-hiệu-năng)
@@ -47,6 +49,14 @@ Image được lưu theo từng tệp: tệp mà nhiều image dùng chung chỉ
 - Kho lưu theo lớp (Docker, Podman, Kiri) chỉ lưu một lớp một lần khi cả lớp giống hệt. Chỉ cần một tệp khác, cả lớp được lưu lại, cùng với các tệp giống với lớp khác.
 - podbag lưu mỗi tệp một lần. Một image là danh sách đường dẫn trỏ tới các tệp đó.
 - Với 8 dịch vụ Spring ở 2 bản phát hành: 902 MiB đĩa so với 2.970 MiB của Docker, và 324 MiB page cache so với 982 MiB.
+
+## Podbag Desktop
+
+Quản lý container, image, volume và mạng trên Linux và macOS. Hỗ trợ Windows đang ở giai đoạn thử nghiệm và cần WSL 2. Bạn có thể khởi động, dừng hoặc khởi động lại container ngay trong danh sách. Mở một container để theo dõi nhật ký theo thời gian thực.
+
+![Podbag Desktop hiển thị ba container mẫu đang chạy và hai container đã dừng, cùng với image và các cổng được công bố](docs/images/desktop-containers-en.png)
+
+[Cài gói cho Linux](docs/build.md#linux-desktop-packages) hoặc [biên dịch ứng dụng desktop từ mã nguồn](docs/usage.md#build-the-desktop-app).
 
 ## Cài đặt
 

@@ -4,12 +4,13 @@
 //! proxies them: `vm.sock` takes a first line `PORT <n>` (answered `OK` once the guest's
 //! port n is connected, then bytes both ways) or `STOP` (the VM is powered off, then the
 //! connection closes); `docker.sock` goes straight to the Docker API. One host runs per
-//! user (a lock file). When no connection has been open for the idle time
-//! (`PODBAG_VM_IDLE`, seconds; 60) and the VM has no work, it powers the VM off and
+//! user (a lock file). When no connection has been open for the idle time (`podbag vm set`,
+//! or `PODBAG_VM_IDLE`; 60 s; 0: never) and the VM has no work, it powers the VM off and
 //! starts the standby (see [`super::standby`]) and ends: the sockets stay, and the next
 //! connection starts a VM again. When asked (`podbag vm stop`: SIGTERM, or `STOP`), and
 //! on SIGTERM, SIGINT or SIGHUP (a logout), it powers the VM off and ends.
 
+use super::settings;
 use super::vm::{Vm, VmSpec};
 use crate::vm::proto::{API_PORT, CLI_PORT, CliRequest, FORWARD_PORT, Frame};
 use std::io::{Read, Write};
@@ -39,6 +40,9 @@ pub struct Paths {
     pub state: PathBuf,
     /// The process id of the host, or of its standby (a new process at each idle stop).
     pub pid: PathBuf,
+    /// What the running VM started with, and its last counts (see
+    /// [`super::settings::Running`]).
+    pub running: PathBuf,
 }
 
 pub(super) fn home() -> Result<PathBuf, String> {
@@ -64,6 +68,7 @@ pub fn paths() -> Result<Paths, String> {
         log: run.join("host.log"),
         state: run.join("state"),
         pid: run.join("host.pid"),
+        running: run.join("vm.json"),
         run,
         home,
     })
@@ -267,6 +272,7 @@ pub fn write_whole(path: &Path, text: &str) {
 
 pub fn remove_files(p: &Paths) {
     remove_sockets(p);
+    let _ = std::fs::remove_file(&p.running);
     let _ = std::fs::remove_file(&p.state);
     let _ = std::fs::remove_file(&p.pid);
 }
@@ -383,17 +389,23 @@ fn serve_vm(p: &Paths, lock: &std::fs::File, inherited: Option<&Inherited>) -> R
         }
     }
     make_disk(p)?;
+    let env = |k: &str| std::env::var(k).ok();
+    let (resources, _) =
+        settings::effective(&settings::read(&p.home)?, &env, &settings::Mac::this());
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
-    let resources = super::resources::for_boot(&p.home)?;
+    let memory = resources
+        .memory_mib
+        .checked_mul(1 << 20)
+        .ok_or("VM memory is too large")?;
     let spec = VmSpec {
         kernel: p.guest.join("Image"),
         initrd: p.guest.join("initramfs.gz"),
         disk: p.disk.clone(),
         console: p.console.clone(),
-        cpus: resources.cpus,
-        memory: resources.memory_mib << 20,
+        cpus: resources.cpus as usize,
+        memory,
         // After `--`: the argument of /init, which makes podbag the VM's init. The kernel
         // sizes its bounce buffers for the VM's whole memory (64 MB at 8 GiB, written at
         // boot, so the Mac holds them), and nothing uses them: virtio here does not go
@@ -413,7 +425,20 @@ fn serve_vm(p: &Paths, lock: &std::fs::File, inherited: Option<&Inherited>) -> R
         power_off(&vm);
         return Err(e);
     }
-    note("started");
+    note(&format!(
+        "started: {} CPUs, {} memory",
+        resources.cpus,
+        settings::memory_text(resources.memory_mib)
+    ));
+    let monitor = Arc::new(Monitor {
+        file: p.running.clone(),
+        seen: Mutex::new(settings::Running {
+            started: now.as_secs(),
+            resources: Some(resources),
+            ..Default::default()
+        }),
+    });
+    monitor.write();
     write_whole(&p.state, "running");
     // wait_ready's request set the VM's clock.
     let clock = Arc::new(Mutex::new((std::time::SystemTime::now(), Instant::now())));
@@ -437,10 +462,15 @@ fn serve_vm(p: &Paths, lock: &std::fs::File, inherited: Option<&Inherited>) -> R
         std::thread::spawn(move || serve(&listener, &vm, &state, &wake, clock.as_ref(), &refresh));
     }
     {
-        let vm = vm.clone();
-        std::thread::spawn(move || watch_ports(&vm, &refreshed));
+        let (vm, monitor) = (vm.clone(), monitor.clone());
+        std::thread::spawn(move || watch_ports(&vm, &refreshed, &monitor));
     }
-    let idle = Duration::from_secs(env_number("PODBAG_VM_IDLE", 60));
+    {
+        let (vm, monitor) = (vm.clone(), monitor.clone());
+        std::thread::spawn(move || watch_use(&vm, &monitor));
+    }
+    // 0: the VM never powers off by itself.
+    let idle = (resources.idle_seconds > 0).then(|| Duration::from_secs(resources.idle_seconds));
     let mut askers = Vec::new();
     let mut tick = (std::time::SystemTime::now(), Instant::now());
     let standby = loop {
@@ -479,7 +509,10 @@ fn serve_vm(p: &Paths, lock: &std::fs::File, inherited: Option<&Inherited>) -> R
             break true;
         }
         let (quiet, generation) = state.idle(started);
-        if quiet >= idle && !busy(&vm) && state.stop_if_unchanged(generation) {
+        if idle.is_some_and(|idle| quiet >= idle)
+            && !busy(&vm)
+            && state.stop_if_unchanged(generation)
+        {
             break true;
         }
     };
@@ -494,6 +527,7 @@ fn serve_vm(p: &Paths, lock: &std::fs::File, inherited: Option<&Inherited>) -> R
     }
     power_off(&vm);
     note("stopped");
+    let _ = std::fs::remove_file(&p.running);
     drop(askers);
     // A stop asked meanwhile ends the host instead.
     if !standby || woken.try_recv().is_ok() {
@@ -582,11 +616,71 @@ fn make_disk(p: &Paths) -> Result<(), String> {
     std::fs::rename(&part, &p.disk).map_err(|e| err(&p.disk, e))
 }
 
-fn env_number(name: &str, default: u64) -> u64 {
-    std::env::var(name)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
+/// What the running VM started with and what it does, in `run/vm.json` for
+/// `podbag vm status` (which must not connect: a connection keeps the VM up).
+struct Monitor {
+    file: PathBuf,
+    seen: Mutex<settings::Running>,
+}
+
+impl Monitor {
+    fn write(&self) {
+        let seen = self.seen.lock().unwrap_or_else(|p| p.into_inner());
+        if let Ok(text) = serde_json::to_string(&*seen) {
+            write_whole(&self.file, &text);
+        }
+    }
+
+    fn update(&self, change: impl FnOnce(&mut settings::Running)) {
+        {
+            let mut seen = self.seen.lock().unwrap_or_else(|p| p.into_inner());
+            let before = seen.clone();
+            change(&mut seen);
+            if *seen == before {
+                return;
+            }
+        }
+        self.write();
+    }
+}
+
+/// The guest's CPU and memory use, every 2 seconds while the VM runs.
+fn watch_use(vm: &Arc<Vm>, monitor: &Monitor) {
+    let mut last: Option<(u64, u64)> = None;
+    while vm.running() {
+        if let Ok((0, text)) = guest_command(vm, "__vm-stats")
+            && let Ok(v) = serde_json::from_str::<serde_json::Value>(text.trim())
+        {
+            let (total, idle) = (
+                v["cpuTotal"].as_u64().unwrap_or(0),
+                v["cpuIdle"].as_u64().unwrap_or(0),
+            );
+            let percent = last.and_then(|(t0, i0)| cpu_percent((t0, i0), (total, idle)));
+            last = Some((total, idle));
+            let mem_total = v["memTotalKiB"].as_u64().unwrap_or(0) >> 10;
+            let mem_free = v["memAvailableKiB"].as_u64().unwrap_or(0) >> 10;
+            monitor.update(|r| {
+                if percent.is_some() {
+                    r.cpu_percent = percent;
+                }
+                r.memory_total_mib = Some(mem_total);
+                r.memory_used_mib = Some(mem_total.saturating_sub(mem_free));
+            });
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    }
+}
+
+/// The share of CPU time not idle between two samples (jiffies: all, idle), in percent
+/// of all the VM's CPUs, one decimal.
+fn cpu_percent(before: (u64, u64), after: (u64, u64)) -> Option<f64> {
+    let total = after.0.checked_sub(before.0)?;
+    let idle = after.1.checked_sub(before.1)?;
+    if total == 0 {
+        return None;
+    }
+    let busy = total.saturating_sub(idle) as f64 / total as f64 * 100.0;
+    Some((busy * 10.0).round() / 10.0)
 }
 
 fn start_error(why: String) -> String {
@@ -770,7 +864,7 @@ fn serve(
 /// closes (a `run -p` that just ended), the published TCP ports of the running
 /// containers, and a listener on the Mac's 127.0.0.1 for each (not on its
 /// network). A port the Mac does not give is reported once and tried again.
-fn watch_ports(vm: &Arc<Vm>, refresh: &mpsc::Receiver<()>) {
+fn watch_ports(vm: &Arc<Vm>, refresh: &mpsc::Receiver<()>, monitor: &Monitor) {
     use std::sync::atomic::{AtomicBool, Ordering};
     let mut open: std::collections::HashMap<u16, Arc<AtomicBool>> = Default::default();
     let mut reported = std::collections::HashSet::new();
@@ -782,9 +876,10 @@ fn watch_ports(vm: &Arc<Vm>, refresh: &mpsc::Receiver<()>) {
             std::thread::sleep(Duration::from_secs(1));
         }
         while refresh.try_recv().is_ok() {}
-        let Some((wanted, udp)) = published_ports(vm) else {
+        let Some((wanted, udp, running)) = published_ports(vm) else {
             continue;
         };
+        monitor.update(|r| r.containers = Some(running));
         for port in udp {
             if udp_reported.insert(port) {
                 note(&format!(
@@ -830,6 +925,7 @@ fn watch_ports(vm: &Arc<Vm>, refresh: &mpsc::Receiver<()>) {
 type Published = (
     std::collections::HashSet<u16>,
     std::collections::HashSet<u16>,
+    u64,
 );
 
 fn published_ports(vm: &Vm) -> Option<Published> {
@@ -840,6 +936,11 @@ fn published_ports(vm: &Vm) -> Option<Published> {
     s.read_to_end(&mut reply).ok()?;
     let reply = String::from_utf8_lossy(&reply);
     let list: serde_json::Value = serde_json::from_str(reply.split_once("\r\n\r\n")?.1).ok()?;
+    let running = list
+        .as_array()?
+        .iter()
+        .filter(|c| c["State"] == "running")
+        .count() as u64;
     let ports: Vec<serde_json::Value> = list
         .as_array()?
         .iter()
@@ -852,7 +953,7 @@ fn published_ports(vm: &Vm) -> Option<Published> {
             .filter_map(|p| u16::try_from(p["PublicPort"].as_u64()?).ok())
             .collect()
     };
-    Some((of("tcp"), of("udp")))
+    Some((of("tcp"), of("udp"), running))
 }
 
 /// One Mac port: each connection goes to the VM's forwarder, until `stop`.
@@ -1025,6 +1126,14 @@ mod tests {
             Path::new("/beside")
         );
         assert_eq!(choose_guest(None, || None, None, home), Path::new("/h/vm"));
+    }
+
+    #[test]
+    fn cpu_use_between_two_samples() {
+        assert_eq!(cpu_percent((1000, 800), (2000, 1550)), Some(25.0));
+        assert_eq!(cpu_percent((1000, 800), (1000, 800)), None);
+        assert_eq!(cpu_percent((1000, 800), (900, 700)), None);
+        assert_eq!(cpu_percent((0, 0), (3, 2)), Some(33.3));
     }
 
     #[test]

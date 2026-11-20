@@ -4,6 +4,7 @@
 
 A container engine with no daemon, in one static binary.
 It stores images file by file: a file that many images share is kept once.
+Use the command line or [Podbag Desktop](#podbag-desktop).
 
 [![CI](https://github.com/SteelCrab/podbag/actions/workflows/ci.yml/badge.svg)](https://github.com/SteelCrab/podbag/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/SteelCrab/podbag)](https://github.com/SteelCrab/podbag/releases/latest)
@@ -20,6 +21,7 @@ It stores images file by file: a file that many images share is kept once.
 ## Contents
 
 - [Features](#features)
+- [Podbag Desktop](#podbag-desktop)
 - [Install](#install)
 - [Use](#use)
 - [Benchmarks](#benchmarks)
@@ -49,6 +51,14 @@ It stores images file by file: a file that many images share is kept once.
 - podbag keeps each file once. An image is a list of paths that point to the files.
 - For 8 Spring services in 2 releases: 902 MiB on disk against Docker's 2,970 MiB, and 324 MiB of page cache against 982 MiB.
 
+## Podbag Desktop
+
+Manage containers, images, volumes and networks on Linux and macOS. Windows support is experimental and requires WSL 2. Start, stop or restart a container from the list. Open it to follow its logs.
+
+![Podbag Desktop showing three running and two stopped sample containers, their images and published ports](docs/images/desktop-containers-en.png)
+
+[Install a Linux package](docs/build.md#linux-desktop-packages) or [build the desktop app from source](docs/usage.md#build-the-desktop-app).
+
 ## Install
 
 ### Install script (Linux and macOS)
@@ -62,6 +72,8 @@ curl -fsSL https://podbag.dev/install.sh | sh
 - On Ubuntu 24.04 and later, adds the AppArmor profile that rootless containers need.
 - Settings: `PODBAG_VERSION=v0.1.0`, `PODBAG_INSTALL_DIR=$HOME/.local/bin`,
   `PODBAG_SKIP_APPARMOR=1`.
+- Later, `podbag upgrade` installs a newer release (`sudo podbag upgrade` in
+  `/usr/local/bin`).
 
 ### Download
 
