@@ -1,6 +1,8 @@
 // The Kubernetes view reads only the selected resource and namespace scope.
 "use strict";
 
+const KUBE_KINDS = ["pods", "services"];
+
 function kubeColumns(kind) {
   return kind === "pods"
     ? ["col.name", "kube.namespace", "kube.phase", "kube.ready", "kube.node"]
@@ -38,7 +40,6 @@ function inspectKubeObject(item, context) {
 }
 
 function renderKubernetes(main) {
-  let kind = "pods";
   let items = [];
   let context = "";
   let generation = 0;
@@ -47,16 +48,9 @@ function renderKubernetes(main) {
   const search = h("input", { type: "search", class: "search", placeholder: t("search.placeholder"),
     "aria-label": t("search.placeholder"), oninput: renderRows });
   const all = h("input", { type: "checkbox", onchange: load });
-  const tabs = ["pods", "services"].map((value) => h("button", {
-    type: "button", class: "tab", id: `kube-${value}`, "aria-pressed": String(value === kind),
-    onclick: () => {
-      if (kind === value) return;
-      kind = value;
-      tabs.forEach((tab) => tab.setAttribute("aria-pressed", String(tab.id === `kube-${value}`)));
-      search.value = "";
-      load();
-    },
-    text: t(`kube.${value}`),
+  const tabs = KUBE_KINDS.map((kind) => h("button", {
+    type: "button", class: "tab", id: `kube-${kind}`, "aria-pressed": String(kind === S.kubeKind),
+    onclick: () => go("kubernetes", kind), text: t(`kube.${kind}`),
   }));
   main.replaceChildren(
     h("header", { class: "toolbar" }, h("h1", { text: t("nav.kubernetes") }),
@@ -67,6 +61,7 @@ function renderKubernetes(main) {
     scope, content);
 
   function renderRows() {
+    const kind = S.kubeKind;
     const q = search.value.trim().toLowerCase();
     const rows = [];
     for (const item of items) {
@@ -94,7 +89,7 @@ function renderKubernetes(main) {
     scope.textContent = "";
     content.replaceChildren(h("p", { class: "loading", text: t("engine.checking") }));
     try {
-      const result = await API.kubeList(kind, all.checked);
+      const result = await API.kubeList(S.kubeKind, all.checked);
       if (request !== generation || !content.isConnected) return;
       context = result.context;
       scope.textContent = [t("kube.context", { context }), all.checked ? t("kube.allNamespaces") : result.namespace].join(" · ");
@@ -111,5 +106,12 @@ function renderKubernetes(main) {
   }
 
   load();
-  return load;
+  return {
+    reload: load,
+    switchResource() {
+      tabs.forEach((tab, i) => tab.setAttribute("aria-pressed", String(KUBE_KINDS[i] === S.kubeKind)));
+      search.value = "";
+      load();
+    },
+  };
 }

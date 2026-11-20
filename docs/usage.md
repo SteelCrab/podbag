@@ -657,7 +657,9 @@ docker compose build --builder podbag
 ### podbag-desktop
 
 - A window with Containers, Images, Volumes, Networks, Kubernetes and Settings.
-- Open Kubernetes to view Pods or Services. Install `kubectl` on the desktop host and
+- Open Kubernetes in the sidebar, or expand it and select **Pods** or **Services**.
+  The sidebar and the page tabs show the same selection.
+- Install `kubectl` on the desktop host and
   select a context with `kubectl config use-context`. The view starts in that context's
   namespace. Select **All namespaces** to list resources across the cluster.
 - Search the Kubernetes list or select a name to inspect the object's JSON. Refresh

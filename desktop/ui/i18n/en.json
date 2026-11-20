@@ -5,6 +5,7 @@
   "nav.volumes": "Volumes",
   "nav.networks": "Networks",
   "nav.kubernetes": "Kubernetes",
+  "kube.resources": "Kubernetes resources",
   "kube.pods": "Pods",
   "kube.services": "Services",
   "kube.namespace": "Namespace",

@@ -100,7 +100,7 @@
     await app.ready;
     const scenes = {
       pods: () => app.go("kubernetes"),
-      services: () => { app.go("kubernetes"); document.getElementById("kube-services").click(); },
+      services: () => app.go("kubernetes", "services"),
       images: () => app.go("images"),
       volumes: () => app.go("volumes"),
       networks: () => app.go("networks"),

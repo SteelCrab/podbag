@@ -5,6 +5,7 @@
   "nav.volumes": "볼륨",
   "nav.networks": "네트워크",
   "nav.kubernetes": "쿠버네티스",
+  "kube.resources": "쿠버네티스 리소스",
   "kube.pods": "파드",
   "kube.services": "서비스",
   "kube.namespace": "네임스페이스",

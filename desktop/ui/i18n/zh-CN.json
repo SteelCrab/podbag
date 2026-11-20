@@ -5,6 +5,7 @@
   "nav.volumes": "卷",
   "nav.networks": "网络",
   "nav.kubernetes": "Kubernetes",
+  "kube.resources": "Kubernetes 资源",
   "kube.pods": "Pod",
   "kube.services": "Service",
   "kube.namespace": "命名空间",

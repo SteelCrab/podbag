@@ -5,6 +5,7 @@
   "nav.volumes": "Mga volume",
   "nav.networks": "Mga network",
   "nav.kubernetes": "Kubernetes",
+  "kube.resources": "Mga resource ng Kubernetes",
   "kube.pods": "Mga Pod",
   "kube.services": "Mga Service",
   "kube.namespace": "Namespace",
