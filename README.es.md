@@ -121,6 +121,8 @@ podbag exec -it web sh                            # abre una shell en el contene
 podbag stop web && podbag rm web                  # detén y borra
 podbag images                                     # lista las imágenes
 podbag build -t myapp .                           # construye una imagen desde un Dockerfile
+podbag login ghcr.io                              # inicia sesión en un registro (compartida con docker login)
+podbag push ghcr.io/me/app:1                      # envía una imagen a un registro
 ```
 
 ### CLI docker, Compose y buildx

@@ -121,6 +121,8 @@ podbag exec -it web sh                            # mở shell trong container
 podbag stop web && podbag rm web                  # dừng và xóa
 podbag images                                     # liệt kê image
 podbag build -t myapp .                           # build image từ Dockerfile
+podbag login ghcr.io                              # đăng nhập registry (dùng chung với docker login)
+podbag push ghcr.io/me/app:1                      # gửi image lên registry
 ```
 
 ### CLI docker, Compose và buildx

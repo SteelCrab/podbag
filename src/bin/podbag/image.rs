@@ -210,7 +210,7 @@ fn short_digest(d: &str) -> String {
         .collect()
 }
 
-fn print_table<const N: usize>(header: &[&str; N], rows: &[[String; N]]) {
+pub fn print_table<const N: usize>(header: &[&str; N], rows: &[[String; N]]) {
     let mut widths: Vec<usize> = header.iter().map(|h| h.len()).collect();
     for row in rows {
         for (w, cell) in widths.iter_mut().zip(row) {

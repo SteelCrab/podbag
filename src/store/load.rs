@@ -192,6 +192,7 @@ impl Store {
                     config.config,
                     config.diff_ids,
                     Some(config_digest.clone()),
+                    false,
                     true,
                 )?;
             }

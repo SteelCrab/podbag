@@ -132,6 +132,7 @@ impl Store {
                 config,
                 diff_ids,
                 Some(digest.clone()),
+                false,
                 artifact,
                 created,
             )?;

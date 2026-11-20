@@ -107,21 +107,32 @@ impl Reference {
 
     /// The host that serves the registry API.
     pub fn api_host(&self) -> &str {
-        if self.registry == DOCKER_HUB {
-            "registry-1.docker.io"
-        } else {
-            &self.registry
-        }
+        api_host(&self.registry)
     }
 
     /// Local registries are reached over plain HTTP, like Docker does.
     pub fn insecure(&self) -> bool {
-        let host = match self.registry.strip_prefix('[') {
-            Some(v6) => v6.split(']').next().unwrap_or(""),
-            None => self.registry.split(':').next().unwrap_or(""),
-        };
-        matches!(host, "localhost" | "127.0.0.1" | "::1")
+        is_insecure(&self.registry)
     }
+}
+
+/// The host that serves a registry's API: Docker Hub's is `registry-1.docker.io`.
+pub fn api_host(registry: &str) -> &str {
+    if registry == DOCKER_HUB {
+        "registry-1.docker.io"
+    } else {
+        registry
+    }
+}
+
+/// Whether a registry is local (`localhost`, `127.0.0.1`, `::1`, any port), and so reached
+/// over plain HTTP, like Docker does.
+pub fn is_insecure(registry: &str) -> bool {
+    let host = match registry.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(""),
+        None => registry.split(':').next().unwrap_or(""),
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 /// `sha256:` followed by 64 lowercase hex characters.

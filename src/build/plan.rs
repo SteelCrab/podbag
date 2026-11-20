@@ -409,6 +409,7 @@ fn image_items(tree: &Tree, object: &dyn Fn(&str) -> PathBuf, path: &str) -> Vec
         uid: 0,
         gid: 0,
         xattrs: Vec::new(),
+        mtime: None,
     };
     let top = if path.is_empty() {
         Some(&root_dir)
@@ -867,6 +868,7 @@ mod tests {
             uid: 0,
             gid: 0,
             xattrs: vec![],
+            mtime: None,
         }
     }
 

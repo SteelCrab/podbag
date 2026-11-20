@@ -121,6 +121,8 @@ podbag exec -it web sh                            # 在容器里打开 shell
 podbag stop web && podbag rm web                  # 停止并删除
 podbag images                                     # 列出镜像
 podbag build -t myapp .                           # 用 Dockerfile 构建镜像
+podbag login ghcr.io                              # 登录镜像仓库（与 docker login 共用）
+podbag push ghcr.io/me/app:1                      # 把镜像推送到镜像仓库
 ```
 
 ### docker CLI、Compose 和 buildx
