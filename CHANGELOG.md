@@ -2,12 +2,30 @@
 
 ## v0.3.0 (2026-11-21)
 
+### Desktop and installation
+
 - Install Podbag Desktop on Windows with a native x86_64 or ARM64 MSI. Each
   installer includes the matching Podbag CLI and Linux engine. Enable WSL 2
   to run containers.
-- Import a `.podbag` lesson from Tutorials in Podbag Desktop. The volume lab
-  walks through creating a volume, saving a JSON file, and checking the
-  response from a local HTTP server. Ending the lab removes its temporary data.
+- The macOS Desktop bundle can include the signed CLI and its Linux VM guest.
+  Desktop can start its VM using the bundled engine.
+- Resize the Desktop sidebar and collapse it to icons.
+
+### Training and terminal workflows
+
+- Podbag Training adds four beginner modules for running containers, opening a
+  published web page, keeping files in a volume, and replacing a web service.
+  Desktop shows step progress and runs exercises in isolated practice sessions.
+- Import a `.podbag` volume lab to create a volume, save a JSON file, and check
+  the response from a local HTTP server. Ending the lab removes its temporary data.
+- Manage registries, volumes, images, Kubernetes resources, and settings from
+  the terminal dashboard. The CLI also provides `podbag engine`, `import`, `kube`,
+  `settings`, and `tutorial` commands.
+
+### Kubernetes
+
+- Read container records once per CRI stats request to reduce repeated work
+  when the kubelet collects stats for multiple containers.
 
 ## v0.2.0 (2026-11-20)
 
