@@ -67,25 +67,23 @@ dev/vm.sh static       # the static release binary, and a check of its size
 - `README.md` is the source. `README.<language>.md` files follow it.
 - When you change `README.md`, say so in the pull request, so that the translations can
   follow.
-- The website's words are in `site/i18n/<language>.json`. Every file needs every key that
-  `en.json` has: the build stops when one is missing.
+- The website's words are in the [podbag-page](https://github.com/SteelCrab/podbag-page)
+  repository, in `site/i18n/<language>.json`.
 - The words in the layers-and-files picture are in `dev/docs/storage.py` (`TEXT`).
 
 ## Website
 
-- The site is in `site/`: a page template (`page.html`), one string file per language
-  (`i18n/<language>.json`), the style and the script.
-- Build it, then look at it:
-
-```sh
-python3 dev/docs/site.py _site
-python3 -m http.server -d _site 8000    # then open http://localhost:8000
-```
-
-- A push to `main` deploys it to https://podbag.dev on Cloudflare
-  (`.github/workflows/site.yml`).
+- The website lives in its own repository:
+  [SteelCrab/podbag-page](https://github.com/SteelCrab/podbag-page).
+- When it builds, it takes these from this repository:
+  - the pictures (`docs/images`) and the videos (`docs/media`),
+  - `install.sh`, which https://podbag.dev/install.sh serves,
+  - the version (`Cargo.toml`) and the picture texts (`dev/docs/storage.py`).
+- A change to those files reaches the site at its next deploy: once a day, or by hand.
 - The pictures come from the scripts in `dev/docs/` and from `dev/bench/charts.py`. Run the
   script again after you change one.
+- The old address https://steelcrab.github.io/podbag/ sends visitors to podbag.dev
+  (`dev/pages/`, `.github/workflows/pages.yml`).
 
 ## License
 
