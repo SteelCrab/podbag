@@ -9,6 +9,7 @@ Thank you for helping. Bug reports, fixes and new features are all welcome.
 - [Build](#build)
 - [Test](#test)
 - [Pull requests](#pull-requests)
+- [Publish to crates.io](#publish-to-cratesio)
 - [Translations](#translations)
 - [Website](#website)
 - [License](#license)
@@ -96,6 +97,16 @@ In the VM: `dev/vm.sh run bash -c 'cargo build && PODBAG=$CARGO_TARGET_DIR/debug
   store's integration tests, the end-to-end tests and nginx, without root and as root.
 - Commit messages are one line: `type: what changed`. Types: `feat`, `fix`, `docs`,
   `test`, `refactor`, `chore`.
+
+## Publish to crates.io
+
+Publishing a stable GitHub release with a `vX.Y.Z` tag publishes the `podbag`
+CLI and library to crates.io. The workflow checks out the release tag and
+requires its Cargo version to match. The `crates-io` environment uses
+[Trusted Publishing](https://crates.io/docs/trusted-publishing).
+
+To publish an existing stable release, run **Publish to crates.io** from
+`main` in GitHub Actions and enter the release tag.
 
 ## Translations
 
