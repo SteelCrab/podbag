@@ -95,6 +95,32 @@ pub enum Cmd {
         #[arg(required = true)]
         images: Vec<String>,
     },
+    /// Build an image from a Dockerfile
+    Build(BuildArgs),
+    /// Make an image from a container's changes
+    Commit {
+        /// A Dockerfile instruction for the image's config (CMD, ENV, EXPOSE, …)
+        #[arg(short, long = "change")]
+        change: Vec<String>,
+        /// Ignored: podbag keeps no image history
+        #[arg(short, long)]
+        message: Option<String>,
+        /// Ignored: podbag keeps no image history
+        #[arg(short, long)]
+        author: Option<String>,
+        container: String,
+        /// The new image's name (REPOSITORY[:TAG])
+        image: Option<String>,
+    },
+    /// Write a container's files (without its volumes) as a tar archive
+    Export {
+        /// Write to this file instead of stdout
+        #[arg(short, long)]
+        output: Option<std::path::PathBuf>,
+        container: String,
+    },
+    /// List the files a container changed: A added, C changed, D deleted
+    Diff { container: String },
     /// List containers
     Ps {
         /// Show all containers (default: only running ones)
@@ -142,6 +168,15 @@ pub enum Cmd {
     },
     /// Run a command in a running container
     Exec(ExecArgs),
+    /// Manage containers, images, volumes and networks in the terminal
+    ///
+    /// A client of the Docker API on podbag's socket (or DOCKER_HOST, when it is a Unix
+    /// socket). Press ? for the keys.
+    Tui {
+        /// Draw one screen as text, without a terminal, and exit
+        #[arg(long, hide = true)]
+        once: bool,
+    },
     #[command(name = "__exec", hide = true)]
     ExecHelper { id: String, request: String },
     #[command(name = "__archive", hide = true)]
@@ -290,6 +325,11 @@ pub enum SystemCmd {
         #[arg(long)]
         print_units: bool,
     },
+    /// Connect stdin and stdout to the Docker API socket
+    ///
+    /// For programs that cannot reach the socket themselves, such as the desktop app on
+    /// Windows. It starts the service when none runs.
+    DialStdio,
 }
 
 #[derive(Args)]
@@ -312,6 +352,39 @@ pub struct ExecArgs {
     /// CONTAINER COMMAND...
     #[arg(required = true, num_args = 2.., trailing_var_arg = true, allow_hyphen_values = true, value_name = "CONTAINER COMMAND")]
     pub args: Vec<String>,
+}
+
+#[derive(Args)]
+pub struct BuildArgs {
+    /// Name the image (REPOSITORY[:TAG]); may be given more than once
+    #[arg(short, long = "tag")]
+    pub tag: Vec<String>,
+    /// The Dockerfile (default: CONTEXT/Dockerfile)
+    #[arg(short, long)]
+    pub file: Option<String>,
+    /// A build argument NAME=VALUE (NAME alone takes this environment's value)
+    #[arg(long = "build-arg")]
+    pub build_arg: Vec<String>,
+    /// The stage to build
+    #[arg(long)]
+    pub target: Option<String>,
+    /// Do not use the build cache
+    #[arg(long)]
+    pub no_cache: bool,
+    /// Pull base images even when they are stored
+    #[arg(long)]
+    pub pull: bool,
+    /// A label KEY=VALUE for the image
+    #[arg(long)]
+    pub label: Vec<String>,
+    /// The network of RUN steps: bridge (default), host, none, or a network's name
+    #[arg(long)]
+    pub network: Option<String>,
+    /// Print only the image ID
+    #[arg(short, long)]
+    pub quiet: bool,
+    /// A directory, or - for a tar archive (or a Dockerfile) on stdin
+    pub context: String,
 }
 
 #[derive(Args)]

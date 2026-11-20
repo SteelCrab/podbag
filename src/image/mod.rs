@@ -476,6 +476,21 @@ pub struct ImageConfig {
     /// Its health check (`HEALTHCHECK`). Images pulled before podbag read it have none.
     #[serde(default)]
     pub healthcheck: Option<crate::health::HealthSettings>,
+    /// `LABEL`s. Images stored before podbag kept them have none.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub labels: std::collections::BTreeMap<String, String>,
+    /// `EXPOSE`d ports, like `80/tcp`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exposed_ports: Vec<String>,
+    /// `STOPSIGNAL`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_signal: Option<String>,
+    /// `ONBUILD` instructions, run by builds that start from this image.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub onbuild: Vec<String>,
+    /// `SHELL`: the shell for shell-form commands; empty means `/bin/sh -c`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shell: Vec<String>,
 }
 
 #[cfg(test)]

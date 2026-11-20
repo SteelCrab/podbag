@@ -1,5 +1,7 @@
 //! The image store: content objects, layer indexes, image trees and names.
 
+#[cfg(unix)]
+mod build;
 #[cfg(target_os = "linux")]
 pub mod composefs;
 pub mod erofs;
@@ -14,6 +16,8 @@ mod push;
 #[cfg(unix)]
 mod save;
 pub mod tree;
+#[cfg(unix)]
+pub use build::{Committed, SharedLock, copy_all};
 pub mod zstd;
 
 use crate::config::ImageMount;
@@ -632,6 +636,7 @@ impl Store {
             resolved.config.diff_ids.clone(),
             Some(resolved.config_digest.clone()),
             resolved.oci,
+            true,
         )
     }
 
@@ -710,6 +715,8 @@ impl Store {
     }
 
     /// Merge stored layers into the image tree and write the image record.
+    /// Without `artifact`, only the record: [`Store::ensure_artifact`] builds the rest
+    /// when a container needs it (build steps that no `RUN` follows).
     fn assemble(
         &self,
         digest: &str,
@@ -717,6 +724,30 @@ impl Store {
         diff_ids: Vec<String>,
         config_digest: Option<String>,
         oci: bool,
+        artifact: bool,
+    ) -> Result<()> {
+        self.assemble_at(
+            digest,
+            config,
+            diff_ids,
+            config_digest,
+            oci,
+            artifact,
+            now(),
+        )
+    }
+
+    /// [`Store::assemble`] with the image's creation time.
+    #[allow(clippy::too_many_arguments)]
+    fn assemble_at(
+        &self,
+        digest: &str,
+        config: ImageConfig,
+        diff_ids: Vec<String>,
+        config_digest: Option<String>,
+        oci: bool,
+        artifact: bool,
+        created: u64,
     ) -> Result<()> {
         let mut layers = Vec::new();
         for id in &diff_ids {
@@ -742,12 +773,13 @@ impl Store {
         let _ = remove_tree(&staging);
         std::fs::create_dir(&staging).map_err(|e| io_error(&staging, e))?;
         let result = (|| {
-            let created = now();
             let want = match self.method {
                 MountMethod::Composefs => Artifact::Erofs,
                 MountMethod::Hardlink => Artifact::Tree,
             };
-            self.build_in(&staging, want, &tree, created)?;
+            if artifact {
+                self.build_in(&staging, want, &tree, created)?;
+            }
             let record = ImageRecord {
                 digest: digest.to_string(),
                 config_digest,
@@ -1179,6 +1211,8 @@ impl Store {
             }
         }
         let _ = remove_tree(&self.root.join("tmp"));
+        #[cfg(unix)]
+        self.sweep_build_cache();
         Ok(())
     }
 
@@ -1335,7 +1369,7 @@ impl Store {
             }
         }
         if !self.image_dir(&digest).exists() {
-            self.assemble(&digest, ImageConfig::default(), diff_ids, None, false)?;
+            self.assemble(&digest, ImageConfig::default(), diff_ids, None, false, true)?;
         } else {
             self.ensure_artifact(&digest)?;
         }
@@ -1349,6 +1383,9 @@ impl Store {
 enum Source<'a> {
     Registry(&'a Reference),
     Archive,
+    /// A layer a build step made.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    Build,
 }
 
 impl Source<'_> {
@@ -1356,6 +1393,7 @@ impl Source<'_> {
         match self {
             Source::Registry(r) => format!("cannot pull {}", r.name()),
             Source::Archive => "cannot load the image archive".to_string(),
+            Source::Build => "cannot store the build step's files".to_string(),
         }
     }
 
@@ -1363,6 +1401,7 @@ impl Source<'_> {
         match self {
             Source::Registry(_) => "the registry's blob",
             Source::Archive => "the archive's blob",
+            Source::Build => "the step's layer",
         }
     }
 
@@ -1370,6 +1409,7 @@ impl Source<'_> {
         match self {
             Source::Registry(_) => "the manifest",
             Source::Archive => "its record",
+            Source::Build => "its writer",
         }
     }
 
@@ -1381,6 +1421,12 @@ impl Source<'_> {
                 "cannot load the image archive",
                 format!("sha256 mismatch for {digest}: the archive's content is not what it names"),
                 "the archive is damaged or was changed; save it again",
+            ),
+            Source::Build => Error::new(
+                ErrorKind::Internal,
+                "cannot store the build step's files",
+                format!("sha256 mismatch for {digest}"),
+                "build again; if it keeps failing, report this bug",
             ),
         }
     }

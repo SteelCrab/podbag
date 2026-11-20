@@ -35,8 +35,10 @@ Image được lưu theo từng tệp: tệp mà nhiều image dùng chung chỉ
 - **Theo tệp, không theo lớp.** Tệp mà nhiều image dùng chung chỉ được lưu và cache một lần.
 - **Nhanh.** Trên Linux, container khởi động trong khoảng 4 ms.
 - **Dùng được với công cụ của Docker.** Image Docker và OCI, CLI `docker`, Compose và buildx.
+- **Build Dockerfile.** `podbag build`, và `docker build` với trình build cổ điển, không cần BuildKit hay daemon.
 - **Có hoặc không có root.** Cùng một chương trình chạy được theo cả hai cách.
 - **Linux, macOS và Windows.** x86_64 và arm64. Hỗ trợ Windows đang ở giai đoạn thử nghiệm.
+- **Có TUI và ứng dụng desktop.** `podbag tui` trong terminal, và một cửa sổ có biểu tượng trên thanh menu, cho container, image, volume và mạng.
 
 ### Lớp và tệp
 
@@ -118,6 +120,7 @@ podbag logs -f web                                # theo dõi log
 podbag exec -it web sh                            # mở shell trong container
 podbag stop web && podbag rm web                  # dừng và xóa
 podbag images                                     # liệt kê image
+podbag build -t myapp .                           # build image từ Dockerfile
 podbag login ghcr.io                              # đăng nhập registry (dùng chung với docker login)
 podbag push ghcr.io/me/app:1                      # gửi image lên registry
 ```
@@ -174,7 +177,7 @@ docker compose up -d
 
 Các tài liệu dưới đây bằng tiếng Anh.
 
-- [Sử dụng](docs/usage.md): lệnh, volume, mạng, giới hạn, Docker API, macOS, Windows.
+- [Sử dụng](docs/usage.md): lệnh, volume, mạng, giới hạn, Docker API, TUI và GUI, macOS, Windows.
 - [Kiến trúc](docs/architecture.md): podbag khác Docker thế nào.
 - [Biên dịch từ mã nguồn](docs/build.md): Linux, macOS, Windows.
 - [Đo hiệu năng](docs/benchmarks.md) và [bài đo với microservice Spring](docs/benchmarks-msa.md).

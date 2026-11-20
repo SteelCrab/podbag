@@ -79,27 +79,7 @@ impl Store {
         };
         match stored {
             Ok((report, digests, replaced)) => {
-                let _exclusive = self.lock(true)?;
-                let in_use = in_use();
-                // An image whose last name moved to a loaded one goes, as with `tag`, unless
-                // a container uses it.
-                let unnamed = self.unnamed_images()?;
-                let mut removed = false;
-                for old in replaced {
-                    if unnamed.contains(&old)
-                        && !in_use.contains_key(&old)
-                        && !digests.contains(&old)
-                    {
-                        self.delete_image(&old)?;
-                        removed = true;
-                    }
-                }
-                if removed {
-                    self.collect_garbage()?;
-                }
-                if let Some(last) = digests.last() {
-                    self.enforce_limit_locked(limit, &in_use, last)?;
-                }
+                self.after_naming(&replaced, &digests, limit, in_use)?;
                 Ok(report)
             }
             Err(e) => {
@@ -110,6 +90,34 @@ impl Store {
                 Err(e)
             }
         }
+    }
+
+    /// After names moved to the images `digests`: an image whose last name moved goes,
+    /// as with `tag`, unless a container uses it. Then the store limit.
+    pub(super) fn after_naming(
+        &self,
+        replaced: &[String],
+        digests: &[String],
+        limit: u64,
+        in_use: &dyn Fn() -> HashMap<String, String>,
+    ) -> Result<()> {
+        let _exclusive = self.lock(true)?;
+        let in_use = in_use();
+        let unnamed = self.unnamed_images()?;
+        let mut removed = false;
+        for old in replaced {
+            if unnamed.contains(old) && !in_use.contains_key(old) && !digests.contains(old) {
+                self.delete_image(old)?;
+                removed = true;
+            }
+        }
+        if removed {
+            self.collect_garbage()?;
+        }
+        if let Some(last) = digests.last() {
+            self.enforce_limit_locked(limit, &in_use, last)?;
+        }
+        Ok(())
     }
 
     /// Store the images; returns the report, their digests, and the digests the names
@@ -185,6 +193,7 @@ impl Store {
                     config.diff_ids,
                     Some(config_digest.clone()),
                     false,
+                    true,
                 )?;
             }
             for name in &image.names {

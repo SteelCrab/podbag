@@ -40,6 +40,32 @@ pub enum ArchiveOp {
     Get,
     /// Unpack the tar (gzip-compressed or not) on stdin into the directory.
     Put,
+    /// Report `done`, then write what changed since the image as a layer tar on stdout
+    /// (builds, `commit`). The path is not used.
+    Layer,
+    /// Report what changed since the image, as a list (`diff`).
+    Changes,
+    /// Report `done`, then write all files (no volumes) as a tar on stdout (`export`).
+    Export,
+}
+
+impl ArchiveOp {
+    /// Ops that read the container's own layer rather than a path in it.
+    fn reads_layer(self) -> bool {
+        matches!(
+            self,
+            ArchiveOp::Layer | ArchiveOp::Changes | ArchiveOp::Export
+        )
+    }
+}
+
+/// Where a container's changes are: its upper directory, the merged view, the image, and
+/// mounts to leave out of an export. `upper` is None for a plain folder (`--rootfs`).
+struct View {
+    upper: Option<String>,
+    merged: String,
+    lower: String,
+    skip: Vec<String>,
 }
 
 /// How long a start under way, or the cleanup of an ended run, may hold the container.
@@ -77,6 +103,29 @@ fn run(id: &str, json: &str, status: &mut StatusChannel) -> Result<()> {
             // Nothing runs it, and nothing starts it until this ends. Its image may need
             // mounting again (after a reboot).
             crate::store::ensure_image_mount(&dirs, &spec.rootfs)?;
+            if req.op.reads_layer() {
+                return crate::linux::userns::run_in_namespaces(libc::CLONE_NEWNS, || {
+                    let view = match &spec.rootfs {
+                        crate::spec::Rootfs::Dir { path } => View {
+                            upper: None,
+                            merged: path.clone(),
+                            lower: path.clone(),
+                            skip: Vec::new(),
+                        },
+                        crate::spec::Rootfs::Overlay { .. } => {
+                            let (upper, merged, lower) =
+                                super::rootfs::mount_changes(&spec, rootless)?;
+                            View {
+                                upper: Some(upper),
+                                merged,
+                                lower,
+                                skip: Vec::new(),
+                            }
+                        }
+                    };
+                    serve_layer(&req, &view, &spec.name, rootless, status)
+                });
+            }
             return crate::linux::userns::run_in_namespaces(libc::CLONE_NEWNS, || {
                 super::rootfs::enter_files(&spec, rootless)?;
                 serve(&req, status)
@@ -84,6 +133,10 @@ fn run(id: &str, json: &str, status: &mut StatusChannel) -> Result<()> {
         }
         let st = state::read_state(&dirs, id)?;
         if let (Status::Running, Some(pid)) = (st.status, st.pid) {
+            if req.op.reads_layer() {
+                let view = view_running(pid, rootless, &spec)?;
+                return serve_layer(&req, &view, &spec.name, rootless, status);
+            }
             enter_running(pid, rootless, &spec.name)?;
             return serve(&req, status);
         }
@@ -140,6 +193,104 @@ fn enter_running(pid: u32, rootless: bool, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// A running container's view: its files through `/proc/<pid>/root`, and its upper
+/// directory, after joining its user namespace (rootless).
+fn view_running(pid: u32, rootless: bool, spec: &crate::spec::ContainerSpec) -> Result<View> {
+    let fail = |e: std::io::Error| {
+        Error::io(
+            format!("cannot reach the files of container {}", spec.name),
+            &e,
+            "check that the container is still running",
+        )
+    };
+    let mountinfo = std::fs::read_to_string(format!("/proc/{pid}/mountinfo")).map_err(fail)?;
+    // Mount points inside the container, relative to its root: left out of an export.
+    let skip = mountinfo
+        .lines()
+        .filter_map(|l| l.split(' ').nth(4))
+        .map(|p| p.trim_start_matches('/').to_string())
+        .filter(|p| !p.is_empty())
+        .collect();
+    if rootless {
+        let user = File::open(format!("/proc/{pid}/ns/user")).map_err(fail)?;
+        // SAFETY: setns on a namespace descriptor we opened; this process is single-threaded.
+        if unsafe { libc::setns(user.as_raw_fd(), libc::CLONE_NEWUSER) } != 0 {
+            return Err(fail(std::io::Error::last_os_error()));
+        }
+    }
+    let (upper, lower) = match &spec.rootfs {
+        crate::spec::Rootfs::Overlay { upper, lower, .. } => (Some(upper.clone()), lower.clone()),
+        crate::spec::Rootfs::Dir { path } => (None, path.clone()),
+    };
+    Ok(View {
+        upper,
+        merged: format!("/proc/{pid}/root"),
+        lower,
+        skip,
+    })
+}
+
+/// Read the container's changes or files and report them.
+fn serve_layer(
+    req: &ArchiveRequest,
+    view: &View,
+    name: &str,
+    rootless: bool,
+    status: &mut StatusChannel,
+) -> Result<()> {
+    use crate::build::layer::{self, XattrSpace};
+    let space = XattrSpace::for_rootless(rootless);
+    let upper = || {
+        view.upper
+            .as_deref()
+            .map(Path::new)
+            .ok_or_else(|| super::rootfs::no_image_layer(name))
+    };
+    let read_fail = |e: std::io::Error| {
+        Error::io(
+            format!("cannot read the files of container {name}"),
+            &e,
+            "check that the reader is still there",
+        )
+    };
+    let stdout = || {
+        // Not through std's stdout: a child that ends with _exit never flushes it.
+        // SAFETY: fd 1 is this process's stdout; ManuallyDrop leaves it open.
+        std::mem::ManuallyDrop::new(unsafe { <File as std::os::fd::FromRawFd>::from_raw_fd(1) })
+    };
+    match req.op {
+        ArchiveOp::Changes => {
+            let list = layer::changes(upper()?, Path::new(&view.lower)).map_err(read_fail)?;
+            status.report(&StatusMessage::Done {
+                output: serde_json::to_value(list).unwrap_or_default(),
+            });
+            Ok(())
+        }
+        ArchiveOp::Layer => {
+            let upper = upper()?;
+            status.report(&StatusMessage::Done {
+                output: serde_json::Value::Null,
+            });
+            let mut raw = stdout();
+            let mut out = std::io::BufWriter::with_capacity(256 * 1024, &mut *raw);
+            layer::write_layer(upper, Path::new(&view.merged), space, &mut out)
+                .and_then(|()| std::io::Write::flush(&mut out))
+                .map_err(read_fail)
+        }
+        ArchiveOp::Export => {
+            status.report(&StatusMessage::Done {
+                output: serde_json::Value::Null,
+            });
+            let mut raw = stdout();
+            let mut out = std::io::BufWriter::with_capacity(256 * 1024, &mut *raw);
+            layer::write_tree(Path::new(&view.merged), &view.skip, &mut out)
+                .and_then(|()| std::io::Write::flush(&mut out))
+                .map_err(read_fail)
+        }
+        _ => unreachable!("only ops that read the layer come here"),
+    }
+}
+
 /// Do the work in the container's root and report `done`. An error goes back to the
 /// caller, who reports it (or, after `done`, ends with a nonzero code).
 fn serve(req: &ArchiveRequest, status: &mut StatusChannel) -> Result<()> {
@@ -176,6 +327,9 @@ fn serve(req: &ArchiveRequest, status: &mut StatusChannel) -> Result<()> {
             crate::archive::extract(root, &req.path, &mut input, &req.put)?;
             done(status, serde_json::Value::Null);
             Ok(())
+        }
+        ArchiveOp::Layer | ArchiveOp::Changes | ArchiveOp::Export => {
+            unreachable!("served by serve_layer")
         }
     }
 }

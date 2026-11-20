@@ -5,6 +5,7 @@
 //! used together. It ends after a quiet spell without connections, and can be started by
 //! systemd socket activation, so nothing runs at rest.
 
+pub mod build;
 pub mod containers;
 pub mod create;
 pub mod docker;

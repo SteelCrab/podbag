@@ -9,10 +9,14 @@ pub mod api;
 pub mod archive;
 #[doc(hidden)]
 pub mod base64;
+/// Image builds from a Dockerfile.
+pub mod build;
 #[doc(hidden)]
 pub mod caps;
 #[doc(hidden)]
 pub mod cgroup;
+/// A client for the Docker API on podbag's socket (the TUI and the desktop app).
+pub mod client;
 #[doc(hidden)]
 pub mod config;
 pub(crate) mod container;
