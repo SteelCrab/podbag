@@ -1,9 +1,13 @@
 # Run on a disposable Windows runner, with the same CPU as the package.
 param(
     [Parameter(Mandatory)][string]$Installer,
-    [Parameter(Mandatory)][ValidateSet('x86_64')][string]$Arch
+    [Parameter(Mandatory)][ValidateSet('x86_64', 'aarch64')][string]$Arch
 )
 $ErrorActionPreference = 'Stop'
+$nativeArch = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+$expectedHost = @{ x86_64 = 'X64'; aarch64 = 'Arm64' }[$Arch]
+if ($nativeArch -ne $expectedHost) { throw "Expected a native $Arch runner, found $nativeArch" }
+
 $msi = (Resolve-Path $Installer).Path
 $installDir = Join-Path $env:ProgramFiles 'Podbag Desktop'
 $engine = Join-Path $installDir 'podbag.exe'
@@ -35,7 +39,7 @@ function Assert-PeMachine([string]$Path, [int]$Expected) {
 
 Invoke-Msi i
 try {
-    $machine = @{ x86_64 = 0x8664 }[$Arch]
+    $machine = @{ x86_64 = 0x8664; aarch64 = 0xaa64 }[$Arch]
     Assert-PeMachine $gui $machine
     Assert-PeMachine $engine $machine
     & $engine --version
