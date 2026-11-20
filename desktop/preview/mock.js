@@ -242,6 +242,7 @@
       return true;
     },
     open_repository: () => null,
+    practice_volumes: () => null,
     volume_tools_lab: ({ action, package: file }) => {
       if (action === "install") volumeLesson = { package: JSON.parse(file), completed: false };
       if (action === "remove") volumeLesson = null;

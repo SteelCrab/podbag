@@ -51,20 +51,24 @@ function renderTutorials(main) {
       const record = await API.volumeToolsLab(action, pack);
       if (!tools.isConnected) return;
       tools.hidden = !record;
+      const gui = record?.package.format === GUI_VOLUME_FORMAT;
+      if (S.practiceInstalled !== gui) { S.practiceInstalled = gui; renderNav(); }
       if (!record) {
         tools.replaceChildren();
         return true;
       }
       const lesson = words(record.package);
+      const progress = gui ? h("section", { class: "practice-progress" }) : null;
       put(tools, h("div", { class: "tutorial-title" }, icon("shell"), h("h2", { text: lesson.title })),
-        h("p", { class: "tutorial-progress", text: t(record.completed ? "tutorial.complete" : "tutorial.installed") }),
-        h("p", { class: "lab-guide", text: lesson.guide }), codeLine("podbag lab start"),
+        gui ? null : h("p", { class: "tutorial-progress", text: t(record.completed ? "tutorial.complete" : "tutorial.installed") }),
+        gui ? progress : h("p", { class: "lab-guide", text: lesson.guide }), gui ? null : codeLine("podbag lab start"),
         h("div", { class: "buttons-row" },
           button("shell", t("status.terminal"), () => toolsAction("start"), "primary"),
-          button("refresh", t("action.refresh"), () => toolsAction("status")),
+          gui ? button("volumes", t("practice.volumes"), () => go("lab-volumes")) : button("refresh", t("action.refresh"), () => toolsAction("status")),
           button("remove", t("tutorial.uninstall"), async () => {
             if (await confirmDialog(t("tutorial.removeNote"), t("tutorial.uninstall"))) await toolsAction("remove");
           })));
+      if (gui) watchPractice(progress, record.completed);
       return true;
     } catch (error) {
       status.textContent = String(error);
@@ -83,7 +87,7 @@ function renderTutorials(main) {
       try {
         if (file.size > TUTORIAL_LIMIT) throw Error();
         const pack = JSON.parse(await file.text());
-        const cliLab = pack?.format === "podbag-cli-tui-volumes-v1";
+        const cliLab = [GUI_VOLUME_FORMAT, "podbag-cli-tui-volumes-v1"].includes(pack?.format);
         if (cliLab ? !pack.translations?.en?.title : !validTutorial(pack)) throw Error();
         if (!input.isConnected) return;
         show("tutorials", titleOf(words(pack)), h("p", { class: "mono", text: file.name }),

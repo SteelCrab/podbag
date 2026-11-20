@@ -312,6 +312,35 @@ pub fn open_shell(shell: &Shell) -> Result<(), String> {
     }
 }
 
+/// Launch the practice shell through Launch Services. Terminal opens the command
+/// file directly, including on systems where Apple Events automation is disabled.
+#[cfg(target_os = "macos")]
+pub fn open_practice_terminal(argv: &[String]) -> std::io::Result<bool> {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    let mut file = tempfile::Builder::new()
+        .prefix("Podbag-volume-lab-")
+        .suffix(".command")
+        .tempfile()?;
+    let args = argv
+        .iter()
+        .map(|s| format!("'{}'", s.replace('\'', "'\\''")))
+        .collect::<Vec<_>>()
+        .join(" ");
+    writeln!(file, "#!/bin/sh\n/bin/rm -f -- \"$0\"\nexec {args}")?;
+    file.as_file()
+        .set_permissions(std::fs::Permissions::from_mode(0o700))?;
+    let (_file, path) = file.keep()?;
+    let launch = std::process::Command::new("/usr/bin/open")
+        .args(["-a", "Terminal"])
+        .arg(&path)
+        .status();
+    if !matches!(&launch, Ok(status) if status.success()) {
+        let _ = std::fs::remove_file(path);
+    }
+    launch.map(|status| status.success())
+}
+
 /// Open a terminal window that runs `argv` (None: a plain shell). False when no
 /// terminal app was found.
 pub fn open_terminal(argv: Option<&[String]>) -> bool {

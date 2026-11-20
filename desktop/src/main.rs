@@ -1080,6 +1080,54 @@ fn build_app_menu(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
+#[tauri::command(async)]
+fn practice_volumes(
+    action: String,
+    session: Option<String>,
+    name: Option<String>,
+) -> Result<Option<podbag::volume_lesson::gui::Snapshot>, String> {
+    use podbag::volume_lesson::{directory, gui};
+    let dir = directory().map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        gui::view(
+            &dir,
+            &action,
+            session.as_deref(),
+            name.as_deref().unwrap_or(""),
+        )
+        .map_err(|e| e.to_string())
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        if !dir.join(gui::ACTIVE).exists() && action == "status" {
+            return Ok(None);
+        }
+        let path = podbag::wsl::wsl_path(&dir.to_string_lossy())?;
+        let out = std::process::Command::new("wsl.exe")
+            .args([
+                "-d",
+                podbag::wsl::DISTRO,
+                "--exec",
+                podbag::wsl::ENGINE,
+                "lab",
+                "desktop-view",
+                &path,
+                &action,
+            ])
+            .args(session)
+            .args(name)
+            .creation_flags(0x08000000)
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !out.status.success() {
+            return Err(String::from_utf8_lossy(&out.stderr).trim().to_owned());
+        }
+        serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())
+    }
+}
+
 #[tauri::command]
 fn volume_tools_lab(
     state: State<'_, AppState>,
@@ -1107,7 +1155,11 @@ fn volume_tools_lab(
                 "--library".into(),
                 dir.to_string_lossy().into_owned(),
             ];
-            if !commands::open_terminal(Some(&argv)) {
+            #[cfg(target_os = "macos")]
+            let opened = commands::open_practice_terminal(&argv).map_err(|e| e.to_string())?;
+            #[cfg(not(target_os = "macos"))]
+            let opened = commands::open_terminal(Some(&argv));
+            if !opened {
                 return Err("Open a terminal and run podbag lab start.".into());
             }
         }
@@ -1139,6 +1191,7 @@ fn main() {
             engine,
             tutorial_lab,
             volume_tools_lab,
+            practice_volumes,
             list,
             kubernetes::kube_counts,
             migration::migration_sources,

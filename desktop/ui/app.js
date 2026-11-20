@@ -539,13 +539,14 @@ function updateKubeNav() {
 
 function renderNav() {
   const nav = document.getElementById("nav");
-  const item = (view, label, count) => h("li", {}, h("button", {
+  const item = (view, label, count, symbol = view) => h("li", {}, h("button", {
     type: "button", class: "nav-item", "aria-current": S.view === view ? "page" : null, onclick: () => go(view),
     title: label,
-  }, icon(view), h("span", { class: "label", text: label }), h("span", { class: "count", text: count ?? "" })));
+  }, icon(symbol), h("span", { class: "label", text: label }), h("span", { class: "count", text: count ?? "" })));
   updateMigrationNav();
   nav.replaceChildren(...KINDS.map(k => item(k, t(`nav.${k}`), S.loaded && !S.listErrors[k] ? S.lists[k].length : null)),
-    item("tutorials", t("nav.tutorials"), null));
+    item("tutorials", t("nav.tutorials"), null),
+    ...(S.practiceInstalled ? [item("lab-volumes", t("practice.volumes"), null, "volumes")] : []));
   updateKubeNav();
   if (windowBar) {
     const [reload, settings] = document.getElementById("topbar-tools").children;
@@ -888,6 +889,11 @@ function renderMain(fresh) {
     shownView = S.view;
     return;
   }
+  if (S.view === "lab-volumes") {
+    if (fresh || shownView !== S.view) renderPracticeVolumes(main);
+    shownView = S.view;
+    return;
+  }
   if (S.view === "tutorials") {
     if (fresh || shownView !== S.view) renderTutorials(main);
     shownView = S.view;
@@ -1052,25 +1058,29 @@ function renderList() {
     content.replaceChildren(h("p", { class: "nothing", text: t("empty.search", { q }) }));
     return;
   }
+  content.replaceChildren(resourceTable(kind, rows, o => openDetail(kind, objectId(kind, o), "info"), o => rowActions(kind, o)));
+}
+
+function resourceTable(kind, rows, open, actions) {
   const cols = COLUMNS[kind];
   const head = h("thead", {}, h("tr", {}, cols.map(([key, c]) => h("th", { class: `col-${c}`, scope: "col", text: t(key) })),
     h("th", { class: "col-actions", scope: "col" }, h("span", { class: "visually-hidden", text: t("col.actions") }))));
   const body = h("tbody", {}, rows.map((o) => {
-    const tr = h("tr", {}, cells(kind, o).map((cell, i) => h("td", { class: `col-${cols[i][1]}` }, cell)), h("td", { class: "col-actions" }, rowActions(kind, o)));
+    const tr = h("tr", {}, cells(kind, o).map((cell, i) => h("td", { class: `col-${cols[i][1]}` }, cell)), h("td", { class: "col-actions" }, actions(o)));
     // The name opens the details; the row is clickable too, for the mouse.
     const first = tr.querySelector("td .primary-text");
     if (first) {
-      const link = h("button", { type: "button", class: "link", onclick: () => openDetail(kind, objectId(kind, o), "info") });
+      const link = h("button", { type: "button", class: "link", onclick: () => open(o) });
       first.replaceWith(link);
       link.append(first);
     }
     tr.addEventListener("click", (e) => {
       if (e.target.closest("button")) return;
-      openDetail(kind, objectId(kind, o), "info");
+      open(o);
     });
     return tr;
   }));
-  content.replaceChildren(h("table", { class: `list list-${kind}` }, head, body));
+  return h("table", { class: `list list-${kind}` }, head, body);
 }
 
 function emptyState(kind) {
@@ -1750,6 +1760,8 @@ async function init() {
   } catch { /* the defaults */ }
   applyTheme();
   await I18N.load(S.settings.language);
+  try { S.practiceInstalled = (await API.volumeToolsLab("status"))?.package.format === GUI_VOLUME_FORMAT; }
+  catch { S.practiceInstalled = false; }
   setupWindowBar();
   setupKubeNav();
   setupSidebar();

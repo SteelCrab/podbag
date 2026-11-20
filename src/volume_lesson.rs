@@ -1,4 +1,5 @@
-//! Installed instructions for the CLI and TUI volume lesson. Packages contain text only.
+//! Installed instructions and completion records for hands-on volume lessons. Packages contain text only.
+pub mod gui;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -78,7 +79,7 @@ pub fn install(dir: &Path, text: &str) -> io::Result<()> {
         return Err(io::Error::other("The module is too large."));
     }
     let package: Package = serde_json::from_str(text)?;
-    if package.format != FORMAT
+    if (package.format != FORMAT && package.format != gui::FORMAT)
         || !package.translations.contains_key("en")
         || package.translations.values().any(|w| {
             [&w.title, &w.guide]
@@ -96,7 +97,10 @@ pub fn install(dir: &Path, text: &str) -> io::Result<()> {
         .unwrap()
         .to_string_lossy()
         .into_owned();
-    let completed = read(dir).ok().flatten().is_some_and(|r| r.completed);
+    let completed = read(dir)
+        .ok()
+        .flatten()
+        .is_some_and(|r| r.package.format == package.format && r.completed);
     write(
         dir,
         &Installed {
@@ -157,6 +161,10 @@ mod tests {
         assert_eq!(current.words("ko").title, "Volumes");
         current.finish(dir).unwrap();
         assert!(read(dir).unwrap().unwrap().completed);
+        install(dir, package).unwrap();
+        assert!(read(dir).unwrap().unwrap().completed);
+        install(dir, &package.replace(FORMAT, gui::FORMAT)).unwrap();
+        assert!(!read(dir).unwrap().unwrap().completed);
         assert!(install(dir, "{}").is_err());
     }
 }

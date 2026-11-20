@@ -9,7 +9,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Cmd {
-    /// Install or run the hands-on CLI and TUI volume lesson
+    /// Install or run a hands-on volume lesson
     Lab {
         #[command(subcommand)]
         cmd: LabCmd,
@@ -354,6 +354,14 @@ pub enum LabCmd {
     #[cfg(unix)]
     #[command(hide = true)]
     Workspace,
+    #[cfg(unix)]
+    #[command(hide = true)]
+    DesktopView {
+        library: std::path::PathBuf,
+        action: String,
+        session: Option<String>,
+        name: Option<String>,
+    },
     /// Install the downloaded .podbag module
     Install { file: std::path::PathBuf },
     /// Open a shell in a new temporary practice store

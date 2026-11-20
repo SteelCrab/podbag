@@ -9,6 +9,21 @@ pub fn command(cmd: LabCmd) -> i32 {
         match cmd {
             #[cfg(unix)]
             LabCmd::Workspace => return workspace(),
+            #[cfg(unix)]
+            LabCmd::DesktopView {
+                library,
+                action,
+                session,
+                name,
+            } => {
+                let snapshot = volume_lesson::gui::view(
+                    &library,
+                    &action,
+                    session.as_deref(),
+                    name.as_deref().unwrap_or(""),
+                )?;
+                println!("{}", serde_json::to_string(&snapshot)?);
+            }
             LabCmd::Install { file } => {
                 use std::io::Read;
                 let mut text = String::new();
@@ -54,7 +69,11 @@ pub fn command(cmd: LabCmd) -> i32 {
                     let installed = volume_lesson::read(&dir)?.ok_or_else(|| {
                         io::Error::other("Install the module with podbag lab install FILE first.")
                     })?;
-                    if session(&installed.words(&lang).guide)? {
+                    if session(
+                        &installed.words(&lang).guide,
+                        (installed.package.format == volume_lesson::gui::FORMAT)
+                            .then_some(dir.as_path()),
+                    )? {
                         installed.finish(&dir)?;
                     }
                 }
@@ -145,7 +164,7 @@ fn workspace() -> io::Result<()> {
 }
 
 #[cfg(unix)]
-fn session(guide: &str) -> io::Result<bool> {
+fn session(guide: &str, library: Option<&Path>) -> io::Result<bool> {
     use std::io::{BufRead, BufReader, IsTerminal};
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
@@ -158,12 +177,16 @@ fn session(guide: &str) -> io::Result<bool> {
         .stdout(Stdio::piped())
         .process_group(0)
         .spawn()?;
+    let mut registration = None;
     let result = (|| {
         let mut line = String::new();
         if BufReader::new(owner.stdout.take().unwrap()).read_line(&mut line)? == 0 {
             return Err(io::Error::other("The practice engine did not start."));
         }
         let dir = Path::new(line.trim_end());
+        if let Some(library) = library {
+            registration = Some(volume_lesson::gui::Registration::open(library, dir)?);
+        }
         println!("\n{guide}\n");
         if Path::new("/bin/sh").is_file() {
             practice_command(Path::new("/bin/sh"), dir)?
@@ -183,6 +206,7 @@ fn session(guide: &str) -> io::Result<bool> {
             "Could not finish cleaning the practice store.",
         ));
     }
+    drop(registration);
     let complete = result?;
     println!(
         "{}",
@@ -256,15 +280,24 @@ pub fn scoped(root: &Path, cmd: crate::args::Cmd) -> i32 {
         }
         Cmd::Volume { cmd } => {
             let check = matches!(cmd, VolumeCmd::Ls { .. });
-            let create = matches!(&cmd, VolumeCmd::Create { name: Some(n), .. } if n == "my-api");
+            let create = matches!(&cmd, VolumeCmd::Create { name: Some(n), .. } if n == "my-api")
+                && Volume::get("my-api").is_err_and(|e| e.kind == podbag::ErrorKind::NotFound);
             let result = crate::volume::run(cmd);
             if result == 0 && create {
-                let _ = fs::remove_file(root.join("run/removed"));
+                for marker in ["run/removed", "run/gui-inspected", "run/gui-removed"] {
+                    let _ = fs::remove_file(root.join(marker));
+                }
                 let _ = fs::remove_file(root.join("verified"));
             }
             if result == 0
                 && check
-                && root.join("run/removed").is_file()
+                && root
+                    .join(if root.join("run/gui").exists() {
+                        "run/gui-removed"
+                    } else {
+                        "run/removed"
+                    })
+                    .is_file()
                 && Volume::list().is_ok_and(|volumes| volumes.iter().all(|v| v.name != "my-api"))
             {
                 if let Err(e) = fs::write(root.join("verified"), []) {
