@@ -32,24 +32,13 @@
 
 ## 特性
 
-- **没有守护进程。** 没有容器时，什么都不运行。
-- **一个静态二进制文件。** 在 Linux 上约 4 MB。
-- **按文件，而不是按层。** 多个镜像共用的文件，在磁盘和内存中只保存一份。
-- **快。** 在 Linux 上，容器约 4 毫秒启动。
-- **兼容 Docker 工具。** 支持 Docker 和 OCI 镜像、`docker` CLI、Compose、buildx，以及单节点的 swarm stack。
-- **构建 Dockerfile。** 可以用 `podbag build`，也可以用经典构建器的 `docker build`，不需要 BuildKit 或守护进程。
-- **Kubernetes。** `podbag cri serve` 可以作为节点的容器运行时，供 kubelet 或 k3s 使用。
-- **有无 root 都可以。** 同一个程序两种方式都能用。
-- **Linux、macOS 和 Windows。** 支持 x86_64 和 arm64。Windows 支持处于实验阶段。
-- **有 TUI 和桌面应用。** 在终端里用 `podbag tui`，在桌面上用带菜单栏图标的窗口，管理容器、镜像、卷和网络。
-
-### 层与文件
+- **跨镜像共享文件。** 即使位于不同的镜像层，相同的文件也可以共享磁盘空间和 Linux 页缓存。
+- **Linux 引擎按需运行。** 一个进程负责管理同一用户的容器。最后一个容器停止后，进程会在空闲超时后退出。
+- **macOS 虚拟机自动关机。** 默认情况下，Linux 虚拟机空闲 60 秒后会关机。下一条容器命令会再次启动它。
+- **Kubernetes 节点运行时（`v0.2.0`）。** 在 Linux 上运行 `podbag cri serve` 后，kubelet 可以直接通过 Podbag 运行 Pod。
+- **跨引擎迁移（`v0.2.0`）。** 可以在兼容 Docker 的引擎之间复制镜像、卷和已停止的容器。源端会保留原有数据。
 
 <picture><source media="(max-width: 600px) and (prefers-color-scheme: dark)" srcset="docs/images/storage-zh-CN-tall-dark.svg"><source media="(max-width: 600px)" srcset="docs/images/storage-zh-CN-tall-light.svg"><source media="(prefers-color-scheme: dark)" srcset="docs/images/storage-zh-CN-dark.svg"><img alt="动画。两个镜像的大部分文件相同。按层存储时，只有完全相同的层才只存一次；镜像 B 的上层有一个文件不同，所以 spring.jar 和 jackson.jar 又存了一次：共 8 个文件。podbag 每个文件只存一次：共 6 个文件。8 个 Spring 服务、2 个版本的实测磁盘用量：按层（Docker）2,970 MiB，podbag 902 MiB。" src="docs/images/storage-zh-CN-light.svg"></picture>
-
-- 按层存储（Docker、Podman、Kiri）只有在整层完全相同时才只存一份。只要有一个文件不同，整层就要再存一次，和其他层相同的文件也跟着再存一次。
-- podbag 每个文件只保存一份。镜像是指向这些文件的路径列表。
-- 以 8 个 Spring 服务、2 个版本为例：磁盘 902 MiB（Docker 为 2,970 MiB），页缓存 324 MiB（Docker 为 982 MiB）。
 
 ## Podbag Desktop
 
@@ -61,91 +50,87 @@
 
 ## 安装
 
-### 安装脚本（Linux、macOS）
+### Linux（x86_64、arm64）和 macOS（Apple 芯片）
 
 ```sh
 curl -fsSL https://podbag.dev/install.sh | sh
+podbag --version
 ```
 
-- 下载适合你系统的文件，并校验 SHA-256。
-- 安装到 `/usr/local/bin`，需要时使用 `sudo`。
-- 在 Ubuntu 24.04 及以上版本，添加 rootless 容器需要的 AppArmor 配置文件。
-- 设置： `PODBAG_VERSION=v0.2.0`, `PODBAG_INSTALL_DIR=$HOME/.local/bin`,
-  `PODBAG_SKIP_APPARMOR=1`.
+安装脚本会核对发行文件的 SHA-256 校验值，然后将 CLI 安装到 `/usr/local/bin`。更新时再次运行此脚本即可。
 
-### 下载
+Linux 需要 5.12 或更高版本的内核以及 cgroup v2。运行 `podbag check` 可检查缺少的依赖。普通用户使用桥接网络时，请检查 `uidmap` 和 `passt` 软件包。[Linux 运行要求](docs/usage.md#requirements-on-linux)
 
-从[最新版本](https://github.com/SteelCrab/podbag/releases/latest)下载文件，并用 `SHA256SUMS` 校验。
+手动安装时，请下载适合当前操作系统和 CPU 的文件，并用 `SHA256SUMS` 校验。[下载发行文件](https://github.com/SteelCrab/podbag/releases/latest)
 
-| 系统 | 文件 |
-|---|---|
-| Linux，x86_64 | `podbag-x86_64-linux` |
-| Linux，arm64 | `podbag-aarch64-linux` |
-| macOS，Apple 芯片 | `podbag-aarch64-macos` |
-| Windows，x86_64（实验） | `podbag-x86_64-windows.exe` |
-| Windows，arm64（实验） | `podbag-aarch64-windows.exe` |
+### Windows（实验性支持）
 
-Windows 需要 WSL 2（运行一次 `wsl --install`）：
+在管理员 PowerShell 中运行 `wsl --install`，然后重启 Windows。根据 CPU 架构下载 `podbag-x86_64-windows.exe` 或 `podbag-aarch64-windows.exe`。将文件的 SHA-256 与 `SHA256SUMS` 核对后，将文件重命名为 `podbag.exe`。[下载发行文件](https://github.com/SteelCrab/podbag/releases/latest)
 
 ```powershell
-curl.exe -fsSLo podbag.exe https://github.com/SteelCrab/podbag/releases/latest/download/podbag-x86_64-windows.exe
 .\podbag.exe run --rm alpine echo hello
 ```
 
-### Cargo
+### 其他安装方式
 
-```sh
-cargo install podbag
-```
-
-- 仅适用于 Linux。在 macOS 和 Windows 上请使用发布文件：其中包含虚拟机和 Linux 引擎。
-
-### 从源码构建
-
-- Linux、macOS 和 Windows 的构建方法见 [docs/build.md](docs/build.md)（英文）。
-
-### 系统要求和 AppArmor（Linux）
-
-- Linux 5.12 或更高版本，cgroup v2。
-- 不使用 root 时，还需要：
-  - `newuidmap`（软件包 `uidmap`），
-  - 用于网络的 `pasta`（软件包 `passt`），
-  - 在 Ubuntu 24.04 及以上版本，需要 AppArmor 配置文件。安装脚本会添加它。手动添加：
-
-    ```sh
-    podbag check --apparmor-profile | sudo tee /etc/apparmor.d/podbag >/dev/null
-    sudo apparmor_parser -r /etc/apparmor.d/podbag
-    ```
-
-- `podbag check` 会列出系统还缺少什么，以及如何添加。
+- **Linux 上的 Cargo 安装。** 运行 `cargo install --locked podbag` 可安装已发布的 CLI。
+- **Linux 桌面应用。** 从 GitHub Actions 下载适合当前 CPU 的压缩包。解压后安装适合发行版的 `.deb` 或 `.rpm` 软件包，其中已包含引擎。[桌面软件包安装指南](docs/build.md#linux-desktop-packages)
+- **从源码构建。** 使用 Rust 构建 CLI 和 Podbag Desktop。 [构建指南](docs/build.md)
 
 ## 使用
 
-### 基本命令
+### 运行容器
+
+以下命令输出 `hello`，并在运行结束后删除容器。
 
 ```sh
-podbag run --rm alpine echo hello                 # 需要时拉取镜像，运行，然后删除
-podbag run -d --name web -p 8080:80 nginx:alpine  # 在后台运行
-podbag ps                                         # 列出容器
-podbag logs -f web                                # 持续查看日志
-podbag exec -it web sh                            # 在容器里打开 shell
-podbag stats --no-stream                          # CPU、内存和网络用量
-podbag stop web && podbag rm web                  # 停止并删除
-podbag images                                     # 列出镜像
-podbag build -t myapp .                           # 用 Dockerfile 构建镜像
-podbag login ghcr.io                              # 登录镜像仓库（与 docker login 共用）
-podbag push ghcr.io/me/app:1                      # 把镜像推送到镜像仓库
+podbag run --rm alpine echo hello
 ```
 
-### docker CLI、Compose 和 buildx
+在 8080 端口启动 nginx，发送请求并查看访问日志。
 
 ```sh
-podbag system service &      # Linux（macOS：podbag vm start）
-export DOCKER_HOST=unix://$XDG_RUNTIME_DIR/podbag/docker.sock   # macOS：unix://$HOME/.podbag/run/docker.sock
-docker compose up -d
+podbag run -d --name web -p 8080:80 nginx:alpine
+podbag ps
+curl -I http://localhost:8080/
+podbag logs web
+podbag exec web nginx -v
+podbag stop web && podbag rm web
 ```
 
-- 所有命令和选项：[docs/usage.md](docs/usage.md)（英文）。
+### Docker CLI 和 Compose
+
+Linux 普通用户（需已设置 `XDG_RUNTIME_DIR`）
+
+```sh
+podbag system service &
+podbag_socket="unix://$XDG_RUNTIME_DIR/podbag/docker.sock"
+```
+
+macOS
+
+```sh
+podbag vm start
+podbag_socket="unix://$HOME/.podbag/run/docker.sock"
+```
+
+设置套接字后，进入包含 `compose.yaml` 的项目目录并运行以下命令。此示例使用已发布的镜像。
+
+```sh
+docker --host "$podbag_socket" ps
+docker --host "$podbag_socket" compose up -d
+docker --host "$podbag_socket" compose down
+```
+
+### 从 Docker 复制镜像（`v0.2.0`）
+
+启动两个引擎。如果 Docker 本地已有 `alpine:latest` 镜像，可以使用Podbag CLI v0.2.0 或更高版本 将它复制到 Podbag。
+
+```sh
+podbag migrate --from docker --to podbag image alpine:latest
+```
+
+[迁移指南](docs/usage.md#migrate-between-engines-or-kubernetes-clusters) · [命令参考](docs/usage.md)
 
 ## 基准测试
 

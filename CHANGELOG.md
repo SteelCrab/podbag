@@ -59,6 +59,9 @@
   or load it again to apply the fix.
 - Restore truncated files when a pull or load reads them again from an image layer.
 - Honor the configured timeout when stopping a container.
+- Keep the installed CLI if a download fails its checksum or cannot run.
+  Keep the existing Ubuntu AppArmor profile if the installer cannot generate
+  or load its replacement.
 
 ## v0.1.0 (2026-11-20)
 

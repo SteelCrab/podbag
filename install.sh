@@ -50,7 +50,13 @@ else
   fail "curl or wget is needed"
 fi
 tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
+staged=
+install_sudo=
+cleanup() {
+  if [ -n "$staged" ]; then $install_sudo rm -f "$staged"; fi
+  rm -rf "$tmp"
+}
+trap cleanup EXIT
 trap 'exit 1' INT TERM
 say "Downloading $file ($version)"
 get "$url/$file" "$tmp/podbag" || fail "cannot download $url/$file"
@@ -67,14 +73,18 @@ fi
 [ "$got" = "$want" ] || fail "the download does not match SHA256SUMS"
 
 # 4. Install it, with sudo when the directory needs it.
-sudo=
 if [ "$(id -u)" -ne 0 ] && ! { mkdir -p "$dir" 2>/dev/null && [ -w "$dir" ]; }; then
   command -v sudo >/dev/null 2>&1 || fail "$dir is not writable; set PODBAG_INSTALL_DIR"
-  sudo=sudo
+  install_sudo=sudo
 fi
-$sudo mkdir -p "$dir"
-$sudo install -m 0755 "$tmp/podbag" "$dir/podbag"
-say "Installed $dir/podbag ($("$dir/podbag" --version))"
+$install_sudo mkdir -p "$dir"
+[ ! -d "$dir/podbag" ] || fail "$dir/podbag is a directory"
+staged=$($install_sudo mktemp "$dir/.podbag.XXXXXXXX")
+$install_sudo install -m 0755 "$tmp/podbag" "$staged"
+installed_version=$("$staged" --version) || fail "cannot run the downloaded $file"
+$install_sudo mv -f "$staged" "$dir/podbag"
+staged=
+say "Installed $dir/podbag ($installed_version)"
 
 # 5. Ubuntu 24.04 and later allow user namespaces (rootless containers) only to programs
 #    with an AppArmor profile.
@@ -84,8 +94,10 @@ if [ "$os" = Linux ] && [ "${PODBAG_SKIP_APPARMOR:-0}" != 1 ] &&
   sudo=
   [ "$(id -u)" -eq 0 ] || sudo=sudo
   say "Adding an AppArmor profile, so that podbag runs without root"
-  "$dir/podbag" check --apparmor-profile | $sudo tee /etc/apparmor.d/podbag >/dev/null
-  $sudo apparmor_parser -r /etc/apparmor.d/podbag
+  profile="$tmp/podbag.apparmor"
+  "$dir/podbag" check --apparmor-profile > "$profile" || fail "cannot generate the AppArmor profile"
+  $sudo apparmor_parser -r "$profile" || fail "cannot load the AppArmor profile"
+  $sudo install -m 0644 "$profile" /etc/apparmor.d/podbag
 fi
 
 case ":$PATH:" in

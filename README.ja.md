@@ -32,24 +32,13 @@
 
 ## 特徴
 
-- **デーモンがありません。** コンテナがないときは、何も動きません。
-- **静的バイナリ1つ。** Linux では約 4 MB です。
-- **レイヤーではなくファイル。** 複数のイメージが同じファイルを使う場合、ディスクとメモリに1回だけ置きます。
-- **速い。** Linux ではコンテナが約 4 ms で起動します。
-- **Docker のツールと一緒に使えます。** Docker・OCI イメージ、`docker` CLI、Compose、buildx、ノード1台の swarm スタックに対応しています。
-- **Dockerfile をビルドします。** `podbag build` と、クラシックビルダーの `docker build` が使えます。BuildKit もデーモンも要りません。
-- **Kubernetes。** `podbag cri serve` が、kubelet や k3s のためのノードのコンテナランタイムになります。
-- **root なしでも、root でも。** 同じプログラムが両方の方式で動きます。
-- **Linux、macOS、Windows。** x86_64 と arm64 に対応しています。Windows 対応は実験段階です。
-- **TUI とデスクトップアプリがあります。** ターミナルでは `podbag tui`、デスクトップではメニューバー項目つきのウィンドウで、コンテナ、イメージ、ボリューム、ネットワークを扱えます。
-
-### レイヤーとファイル
+- **イメージ間でファイルを共有。** レイヤーが異なっても、同一のファイルはディスク領域と Linux のページキャッシュを共有できます。
+- **必要なときだけ動く Linux エンジン。** 1 つのプロセスがユーザーのコンテナを管理します。最後のコンテナが停止し、待機時間が過ぎると、このプロセスも終了します。
+- **macOS の仮想マシンを自動停止。** 既定では、アイドル状態が 60 秒続くと Linux 仮想マシンが停止します。次のコンテナコマンドで再び起動します。
+- **Kubernetes ノードのランタイム（`v0.2.0`）。** Linux で `podbag cri serve` を実行すると、kubelet が Podbag で Pod を起動できます。
+- **エンジン間の移行（`v0.2.0`）。** Docker 互換エンジン間でイメージ、ボリューム、停止中のコンテナをコピーできます。移行元のデータは保持されます。
 
 <picture><source media="(max-width: 600px) and (prefers-color-scheme: dark)" srcset="docs/images/storage-ja-tall-dark.svg"><source media="(max-width: 600px)" srcset="docs/images/storage-ja-tall-light.svg"><source media="(prefers-color-scheme: dark)" srcset="docs/images/storage-ja-dark.svg"><img alt="アニメーション。2つのイメージは、ほとんどのファイルが同じです。レイヤー方式では、同じレイヤーだけが1回で済みます。イメージ B の上のレイヤーはファイルが1つ違うので、spring.jar と jackson.jar をもう一度保存します: 8ファイル。podbag はファイルを1回だけ保存します: 6ファイル。Spring サービス8個・2リリースの実測ディスク: レイヤー (Docker) 2,970 MiB、podbag 902 MiB。" src="docs/images/storage-ja-light.svg"></picture>
-
-- レイヤー方式（Docker、Podman、Kiri）は、レイヤー全体が同じときだけ1回で済みます。ファイルが1つ違うだけで、レイヤー全体と、ほかのレイヤーと同じファイルも、もう一度保存されます。
-- podbag はファイルを1つずつ、1回だけ保存します。イメージは、それらのファイルを指すパスの一覧です。
-- Spring サービス8個・2リリースの場合: ディスク 902 MiB（Docker は 2,970 MiB）、ページキャッシュ 324 MiB（Docker は 982 MiB）。
 
 ## Podbag Desktop
 
@@ -61,91 +50,87 @@ Linux と macOS でコンテナ、イメージ、ボリューム、ネットワ�
 
 ## インストール
 
-### インストールスクリプト（Linux、macOS）
+### Linux（x86_64、arm64）と macOS（Apple silicon）
 
 ```sh
 curl -fsSL https://podbag.dev/install.sh | sh
+podbag --version
 ```
 
-- システムに合ったファイルをダウンロードし、SHA-256 を確認します。
-- `/usr/local/bin` にインストールします。必要なら `sudo` を使います。
-- Ubuntu 24.04 以降では、rootless コンテナに必要な AppArmor プロファイルを追加します。
-- 設定: `PODBAG_VERSION=v0.2.0`, `PODBAG_INSTALL_DIR=$HOME/.local/bin`,
-  `PODBAG_SKIP_APPARMOR=1`.
+インストーラーはリリースファイルの SHA-256 を確認し、CLI を `/usr/local/bin` にインストールします。更新時も同じスクリプトを実行します。
 
-### ダウンロード
+Linux カーネル 5.12 以降と cgroup v2 が必要です。`podbag check` で不足している項目を確認できます。一般ユーザーでブリッジネットワークを使う場合は `uidmap` と `passt` パッケージを確認してください。[Linux の要件](docs/usage.md#requirements-on-linux)
 
-[最新リリース](https://github.com/SteelCrab/podbag/releases/latest)からファイルをダウンロードします。`SHA256SUMS` でファイルを確認します。
+手動でインストールする場合は、OS と CPU に合うファイルをダウンロードし、`SHA256SUMS` と照合します。[リリースのダウンロード](https://github.com/SteelCrab/podbag/releases/latest)
 
-| システム | ファイル |
-|---|---|
-| Linux、x86_64 | `podbag-x86_64-linux` |
-| Linux、arm64 | `podbag-aarch64-linux` |
-| macOS、Apple silicon | `podbag-aarch64-macos` |
-| Windows、x86_64（実験的） | `podbag-x86_64-windows.exe` |
-| Windows、arm64（実験的） | `podbag-aarch64-windows.exe` |
+### Windows（実験的サポート）
 
-Windows には WSL 2 が必要です（`wsl --install` を一度実行します）:
+管理者権限の PowerShell で `wsl --install` を実行し、Windows を再起動します。CPU に合った `podbag-x86_64-windows.exe` または `podbag-aarch64-windows.exe` をダウンロードします。SHA-256 を `SHA256SUMS` と照合したら、ファイル名を `podbag.exe` に変更します。[リリースのダウンロード](https://github.com/SteelCrab/podbag/releases/latest)
 
 ```powershell
-curl.exe -fsSLo podbag.exe https://github.com/SteelCrab/podbag/releases/latest/download/podbag-x86_64-windows.exe
 .\podbag.exe run --rm alpine echo hello
 ```
 
-### Cargo
+### その他のインストール方法
 
-```sh
-cargo install podbag
-```
-
-- Linux 用です。macOS と Windows ではリリースのファイルを使ってください。VM と Linux エンジンが入っています。
-
-### ソースからビルド
-
-- Linux、macOS、Windows のビルド方法は [docs/build.md](docs/build.md) にあります（英語）。
-
-### 要件と AppArmor（Linux）
-
-- Linux 5.12 以降、cgroup v2。
-- root なしで使う場合は、次も必要です:
-  - `newuidmap`（パッケージ `uidmap`）、
-  - ネットワーク用の `pasta`（パッケージ `passt`）、
-  - Ubuntu 24.04 以降では AppArmor プロファイル。インストールスクリプトが追加します。手動の場合:
-
-    ```sh
-    podbag check --apparmor-profile | sudo tee /etc/apparmor.d/podbag >/dev/null
-    sudo apparmor_parser -r /etc/apparmor.d/podbag
-    ```
-
-- `podbag check` は、システムにまだ必要なものと、その追加方法を表示します。
+- **Linux 用の Cargo パッケージ。** `cargo install --locked podbag` で公開版の CLI をインストールします。
+- **Linux デスクトップアプリ。** GitHub Actions から CPU に合ったアーカイブをダウンロードして展開し、`.deb` または `.rpm` をインストールします。エンジンも同梱されています。[デスクトップパッケージの手順](docs/build.md#linux-desktop-packages)
+- **ソースからビルド。** Rust で CLI と Podbag Desktop をビルドします。 [ビルド手順](docs/build.md)
 
 ## 使い方
 
-### 基本のコマンド
+### コンテナを実行する
+
+次のコマンドは `hello` を表示し、実行後にコンテナを削除します。
 
 ```sh
-podbag run --rm alpine echo hello                 # 必要ならイメージを取得し、実行して、削除します
-podbag run -d --name web -p 8080:80 nginx:alpine  # バックグラウンドで実行します
-podbag ps                                         # コンテナの一覧
-podbag logs -f web                                # ログを追いかけて表示します
-podbag exec -it web sh                            # コンテナの中でシェルを開きます
-podbag stats --no-stream                          # CPU、メモリ、ネットワークの使用量
-podbag stop web && podbag rm web                  # 停止して削除します
-podbag images                                     # イメージの一覧
-podbag build -t myapp .                           # Dockerfile からイメージをビルドします
-podbag login ghcr.io                              # レジストリにログインします（docker login と共有）
-podbag push ghcr.io/me/app:1                      # イメージをレジストリに送ります
+podbag run --rm alpine echo hello
 ```
 
-### docker CLI、Compose、buildx
+ポート 8080 で nginx を起動し、リクエストを送ってアクセスログを確認します。
 
 ```sh
-podbag system service &      # Linux（macOS: podbag vm start）
-export DOCKER_HOST=unix://$XDG_RUNTIME_DIR/podbag/docker.sock   # macOS: unix://$HOME/.podbag/run/docker.sock
-docker compose up -d
+podbag run -d --name web -p 8080:80 nginx:alpine
+podbag ps
+curl -I http://localhost:8080/
+podbag logs web
+podbag exec web nginx -v
+podbag stop web && podbag rm web
 ```
 
-- すべてのコマンドとオプション: [docs/usage.md](docs/usage.md)（英語）。
+### Docker CLI と Compose
+
+Linux で一般ユーザーとして実行する場合（`XDG_RUNTIME_DIR` の設定が必要）
+
+```sh
+podbag system service &
+podbag_socket="unix://$XDG_RUNTIME_DIR/podbag/docker.sock"
+```
+
+macOS
+
+```sh
+podbag vm start
+podbag_socket="unix://$HOME/.podbag/run/docker.sock"
+```
+
+ソケットを設定したら、公開済みのイメージを使う `compose.yaml` があるディレクトリで実行します。
+
+```sh
+docker --host "$podbag_socket" ps
+docker --host "$podbag_socket" compose up -d
+docker --host "$podbag_socket" compose down
+```
+
+### Docker からイメージをコピーする（`v0.2.0`）
+
+両方のエンジンを起動します。Docker に `alpine:latest` イメージがある場合は、Podbag CLI v0.2.0 以降で Podbag にコピーできます。
+
+```sh
+podbag migrate --from docker --to podbag image alpine:latest
+```
+
+[移行の手順](docs/usage.md#migrate-between-engines-or-kubernetes-clusters) · [コマンド一覧](docs/usage.md)
 
 ## ベンチマーク
 

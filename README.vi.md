@@ -32,24 +32,13 @@ Bạn có thể dùng dòng lệnh hoặc [Podbag Desktop](#podbag-desktop).
 
 ## Tính năng
 
-- **Không có daemon.** Khi không có container nào, không có gì chạy.
-- **Một tệp nhị phân tĩnh.** Khoảng 4 MB trên Linux.
-- **Theo tệp, không theo lớp.** Tệp mà nhiều image dùng chung chỉ được lưu và cache một lần.
-- **Nhanh.** Trên Linux, container khởi động trong khoảng 4 ms.
-- **Dùng được với công cụ của Docker.** Image Docker và OCI, CLI `docker`, Compose, buildx và swarm stack trên một node.
-- **Build Dockerfile.** `podbag build`, và `docker build` với trình build cổ điển, không cần BuildKit hay daemon.
-- **Kubernetes.** `podbag cri serve` là container runtime của một node, cho kubelet hoặc k3s.
-- **Có hoặc không có root.** Cùng một chương trình chạy được theo cả hai cách.
-- **Linux, macOS và Windows.** x86_64 và arm64. Hỗ trợ Windows đang ở giai đoạn thử nghiệm.
-- **Có TUI và ứng dụng desktop.** `podbag tui` trong terminal, và một cửa sổ có biểu tượng trên thanh menu, cho container, image, volume và mạng.
-
-### Lớp và tệp
+- **Chia sẻ tệp giữa các image.** Các tệp giống nhau có thể dùng chung dung lượng đĩa và bộ nhớ đệm trang của Linux, kể cả khi nằm ở các lớp khác nhau.
+- **Chạy theo nhu cầu trên Linux.** Một tiến trình theo dõi các container của mỗi người dùng. Khi container cuối cùng dừng, tiến trình này thoát sau thời gian chờ.
+- **Tự tắt máy ảo trên macOS.** Theo mặc định, máy ảo Linux tắt sau 60 giây không hoạt động. Lệnh container tiếp theo sẽ khởi động lại máy ảo.
+- **Runtime cho nút Kubernetes (`v0.2.0`).** Trên Linux, `podbag cri serve` cho phép kubelet chạy pod trực tiếp bằng Podbag.
+- **Di chuyển giữa các engine (`v0.2.0`).** Sao chép image, volume và container đã dừng giữa các engine tương thích với Docker. Dữ liệu nguồn được giữ nguyên.
 
 <picture><source media="(max-width: 600px) and (prefers-color-scheme: dark)" srcset="docs/images/storage-vi-tall-dark.svg"><source media="(max-width: 600px)" srcset="docs/images/storage-vi-tall-light.svg"><source media="(prefers-color-scheme: dark)" srcset="docs/images/storage-vi-dark.svg"><img alt="Hoạt ảnh. Hai image có hầu hết các tệp giống nhau. Khi lưu theo lớp, một lớp chỉ được lưu một lần khi nó giống hệt; lớp trên của image B khác một tệp, nên spring.jar và jackson.jar được lưu lại: 8 tệp. podbag lưu mỗi tệp một lần: 6 tệp. Đo với 8 dịch vụ Spring trong 2 bản phát hành: 2.970 MiB đĩa khi lưu theo lớp (Docker), 902 MiB với podbag." src="docs/images/storage-vi-light.svg"></picture>
-
-- Kho lưu theo lớp (Docker, Podman, Kiri) chỉ lưu một lớp một lần khi cả lớp giống hệt. Chỉ cần một tệp khác, cả lớp được lưu lại, cùng với các tệp giống với lớp khác.
-- podbag lưu mỗi tệp một lần. Một image là danh sách đường dẫn trỏ tới các tệp đó.
-- Với 8 dịch vụ Spring ở 2 bản phát hành: 902 MiB đĩa so với 2.970 MiB của Docker, và 324 MiB page cache so với 982 MiB.
 
 ## Podbag Desktop
 
@@ -61,91 +50,87 @@ Quản lý container, image, volume và mạng trên Linux và macOS. Hỗ trợ
 
 ## Cài đặt
 
-### Script cài đặt (Linux và macOS)
+### Linux (x86_64, arm64) và macOS (Apple silicon)
 
 ```sh
 curl -fsSL https://podbag.dev/install.sh | sh
+podbag --version
 ```
 
-- Tải tệp phù hợp với hệ thống của bạn và kiểm tra SHA-256.
-- Cài vào `/usr/local/bin`, dùng `sudo` khi cần.
-- Trên Ubuntu 24.04 trở lên, thêm hồ sơ AppArmor mà container không cần root cần có.
-- Tùy chọn: `PODBAG_VERSION=v0.2.0`, `PODBAG_INSTALL_DIR=$HOME/.local/bin`,
-  `PODBAG_SKIP_APPARMOR=1`.
+Script kiểm tra mã SHA-256 của tệp phát hành rồi cài CLI vào `/usr/local/bin`. Chạy lại script này khi cần cập nhật.
 
-### Tải về
+Linux cần kernel 5.12 trở lên và cgroup v2. Chạy `podbag check` để biết hệ thống còn thiếu gì. Nếu dùng mạng bridge mà không có quyền root, hãy kiểm tra các gói `uidmap` và `passt`. [Yêu cầu trên Linux](docs/usage.md#requirements-on-linux)
 
-Tải tệp từ [bản phát hành mới nhất](https://github.com/SteelCrab/podbag/releases/latest). Kiểm tra bằng `SHA256SUMS`.
+Để cài thủ công, tải tệp phù hợp với hệ điều hành và CPU rồi đối chiếu mã kiểm tra với `SHA256SUMS`. [Tải bản phát hành](https://github.com/SteelCrab/podbag/releases/latest)
 
-| Hệ thống | Tệp |
-|---|---|
-| Linux, x86_64 | `podbag-x86_64-linux` |
-| Linux, arm64 | `podbag-aarch64-linux` |
-| macOS, Apple silicon | `podbag-aarch64-macos` |
-| Windows, x86_64 (thử nghiệm) | `podbag-x86_64-windows.exe` |
-| Windows, arm64 (thử nghiệm) | `podbag-aarch64-windows.exe` |
+### Windows (thử nghiệm)
 
-Windows cần WSL 2 (chạy `wsl --install` một lần):
+Chạy `wsl --install` trong PowerShell với quyền quản trị rồi khởi động lại Windows. Tải `podbag-x86_64-windows.exe` hoặc `podbag-aarch64-windows.exe` theo kiến trúc CPU. Đối chiếu mã SHA-256 với `SHA256SUMS` rồi đổi tên tệp thành `podbag.exe`. [Tải bản phát hành](https://github.com/SteelCrab/podbag/releases/latest)
 
 ```powershell
-curl.exe -fsSLo podbag.exe https://github.com/SteelCrab/podbag/releases/latest/download/podbag-x86_64-windows.exe
 .\podbag.exe run --rm alpine echo hello
 ```
 
-### Cargo
+### Các cách cài đặt khác
 
-```sh
-cargo install podbag
-```
-
-- Dành cho Linux. Trên macOS và Windows, hãy dùng các tệp phát hành: chúng có sẵn VM và Linux engine.
-
-### Biên dịch từ mã nguồn
-
-- Xem [docs/build.md](docs/build.md) cho Linux, macOS và Windows (tiếng Anh).
-
-### Yêu cầu và AppArmor (Linux)
-
-- Linux 5.12 trở lên, có cgroup v2.
-- Khi không dùng root, podbag còn cần:
-  - `newuidmap` (gói `uidmap`),
-  - `pasta` (gói `passt`) cho mạng,
-  - một hồ sơ AppArmor trên Ubuntu 24.04 trở lên. Script cài đặt sẽ thêm nó. Làm thủ công:
-
-    ```sh
-    podbag check --apparmor-profile | sudo tee /etc/apparmor.d/podbag >/dev/null
-    sudo apparmor_parser -r /etc/apparmor.d/podbag
-    ```
-
-- `podbag check` cho biết hệ thống của bạn còn thiếu gì và cách thêm vào.
+- **Cargo trên Linux.** Chạy `cargo install --locked podbag` để cài bản CLI đã phát hành.
+- **Ứng dụng desktop trên Linux.** Tải tệp nén cho CPU của bạn từ GitHub Actions. Giải nén rồi cài gói `.deb` hoặc `.rpm` cho bản phân phối đang dùng. Gói này có sẵn engine. [Gói desktop cho Linux](docs/build.md#linux-desktop-packages)
+- **Biên dịch từ mã nguồn.** Dùng Rust để biên dịch CLI và Podbag Desktop. [Hướng dẫn biên dịch](docs/build.md)
 
 ## Sử dụng
 
-### Lệnh cơ bản
+### Chạy container
+
+Lệnh này in ra `hello` và xóa container khi chạy xong.
 
 ```sh
-podbag run --rm alpine echo hello                 # tải image nếu cần, chạy rồi xóa
-podbag run -d --name web -p 8080:80 nginx:alpine  # chạy ở chế độ nền
-podbag ps                                         # liệt kê container
-podbag logs -f web                                # theo dõi log
-podbag exec -it web sh                            # mở shell trong container
-podbag stats --no-stream                          # mức dùng CPU, bộ nhớ và mạng
-podbag stop web && podbag rm web                  # dừng và xóa
-podbag images                                     # liệt kê image
-podbag build -t myapp .                           # build image từ Dockerfile
-podbag login ghcr.io                              # đăng nhập registry (dùng chung với docker login)
-podbag push ghcr.io/me/app:1                      # gửi image lên registry
+podbag run --rm alpine echo hello
 ```
 
-### CLI docker, Compose và buildx
+Chạy nginx trên cổng 8080, gửi yêu cầu rồi xem nhật ký truy cập.
 
 ```sh
-podbag system service &      # Linux (trên macOS: podbag vm start)
-export DOCKER_HOST=unix://$XDG_RUNTIME_DIR/podbag/docker.sock   # macOS: unix://$HOME/.podbag/run/docker.sock
-docker compose up -d
+podbag run -d --name web -p 8080:80 nginx:alpine
+podbag ps
+curl -I http://localhost:8080/
+podbag logs web
+podbag exec web nginx -v
+podbag stop web && podbag rm web
 ```
 
-- Tất cả lệnh và tùy chọn: [docs/usage.md](docs/usage.md) (tiếng Anh).
+### Docker CLI và Compose
+
+Linux với người dùng thường và biến `XDG_RUNTIME_DIR` đã được đặt
+
+```sh
+podbag system service &
+podbag_socket="unix://$XDG_RUNTIME_DIR/podbag/docker.sock"
+```
+
+macOS
+
+```sh
+podbag vm start
+podbag_socket="unix://$HOME/.podbag/run/docker.sock"
+```
+
+Sau khi thiết lập socket, chạy các lệnh sau trong thư mục có tệp `compose.yaml` sử dụng các image đã phát hành.
+
+```sh
+docker --host "$podbag_socket" ps
+docker --host "$podbag_socket" compose up -d
+docker --host "$podbag_socket" compose down
+```
+
+### Sao chép image từ Docker (`v0.2.0`)
+
+Khởi động cả hai engine. Nếu Docker đã có image `alpine:latest`, hãy dùng Podbag CLI v0.2.0 trở lên để sao chép image đó sang Podbag.
+
+```sh
+podbag migrate --from docker --to podbag image alpine:latest
+```
+
+[Hướng dẫn di chuyển](docs/usage.md#migrate-between-engines-or-kubernetes-clusters) · [Danh sách lệnh](docs/usage.md)
 
 ## Đo hiệu năng
 
