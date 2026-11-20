@@ -4,8 +4,8 @@
 //! proxies them: `vm.sock` takes a first line `PORT <n>` (answered `OK` once the guest's
 //! port n is connected, then bytes both ways) or `STOP` (the VM is powered off, then the
 //! connection closes); `docker.sock` goes straight to the Docker API. One host runs per
-//! user (a lock file). When no connection has been open for the idle time
-//! (`PODBAG_VM_IDLE`, seconds; 60) and the VM has no work, it powers the VM off and
+//! user (a lock file). When no connection has been open for the idle time (`podbag vm set`,
+//! or `PODBAG_VM_IDLE`; 60 s; 0: never) and the VM has no work, it powers the VM off and
 //! starts the standby (see [`super::standby`]) and ends: the sockets stay, and the next
 //! connection starts a VM again. When asked (`podbag vm stop`: SIGTERM, or `STOP`), and
 //! on SIGTERM, SIGINT or SIGHUP (a logout), it powers the VM off and ends.

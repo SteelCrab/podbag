@@ -60,6 +60,8 @@ curl -fsSL https://raw.githubusercontent.com/SteelCrab/podbag/main/install.sh | 
 - On Ubuntu 24.04 and later, adds the AppArmor profile that rootless containers need.
 - Settings: `PODBAG_VERSION=v0.1.0`, `PODBAG_INSTALL_DIR=$HOME/.local/bin`,
   `PODBAG_SKIP_APPARMOR=1`.
+- Later, `podbag upgrade` installs a newer release (`sudo podbag upgrade` in
+  `/usr/local/bin`).
 
 ### Download
 

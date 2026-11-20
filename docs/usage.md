@@ -15,6 +15,7 @@ The [README](../README.md) shows how to install podbag. This page shows what it 
 - [TUI and GUI](#tui-and-gui)
 - [macOS](#macos)
 - [Windows (experimental)](#windows-experimental)
+- [Update podbag](#update-podbag)
 - [Requirements on Linux](#requirements-on-linux)
 - [AppArmor](#apparmor)
 
@@ -494,7 +495,8 @@ cargo build --release -p podbag-desktop
 - On a Mac (Apple silicon), podbag runs containers in a small Linux VM of its own
   (Virtualization.framework, Linux 6.18).
 - The first command starts the VM in about half a second.
-- The VM powers off 60 seconds after the last container (`PODBAG_VM_IDLE`, in seconds).
+- The VM powers off 60 seconds after the last container. `podbag vm set --idle` changes
+  this.
 - With no container, only a small standby process runs (under 2 MiB).
 - With the VM running, `podbag run --rm --network none alpine true` takes about 8 ms, and
   the same `docker run` about 15 ms.
@@ -510,11 +512,36 @@ cargo build --release -p podbag-desktop
 - Named volumes live in the VM.
 - Images, containers and volumes stay on a 64 GiB sparse disk, `~/.podbag/disk.img`.
 - `podbag vm stop`, or logging out, powers the VM off cleanly.
+- `podbag vm start`, `vm restart` and `vm status` start it, restart it and show its state.
+  `vm status` wakes no VM.
 - Containers cannot reach the VM's agent.
 
 ### Resources
 
-- Memory: 2 GiB (`PODBAG_VM_MEMORY`, in MiB). CPUs: the Mac's, up to 8 (`PODBAG_VM_CPUS`).
+- Memory: 2 GiB. CPUs: the Mac's, up to 8. Idle power-off: 60 seconds.
+- `podbag vm set` changes them and saves them in `~/.podbag/vm.json`:
+
+```sh
+podbag vm set --cpus 4 --memory 6G --idle 5m
+podbag vm set --memory 4096M --restart     # apply now
+```
+
+- `--cpus`: from 1 to the Mac's CPUs.
+- `--memory`: from 1 GiB to the Mac's memory minus 4 GiB, which macOS keeps for itself.
+  On a 24 GiB Mac that is 20 GiB. A plain number is MiB. A small Mac always allows 1 GiB.
+- `--idle`: `90s`, `5m`, `1h`, or `0` (never power off by itself).
+- The VM uses new settings at its next start. `--restart`, or `podbag vm restart`, applies
+  them now.
+- A restart powers the VM off, so running containers stop. Both commands ask first. Without
+  a terminal they need `--yes`.
+- `PODBAG_VM_CPUS`, `PODBAG_VM_MEMORY` (MiB) and `PODBAG_VM_IDLE` (seconds) still win over
+  the saved values. `vm set` says so when one is set.
+- `podbag vm status --json` is for apps. It has the state (`running`, `standby`,
+  `starting`, `stopped`), the settings in use and those of the next start, this Mac's
+  limits, the uptime, the disk use and, while the VM runs, the running containers and the
+  VM's CPU and memory use. It reads files only, so it wakes no VM.
+- The disk use is what the sparse disk takes on the Mac (`allocatedBytes`), and its size
+  (64 GiB).
 - Containers get 1048576 open files and `vm.max_map_count` 262144, as in Docker Desktop.
 - A container that needs more memory than the VM has is stopped with exit code 137. The VM
   keeps running.
@@ -569,8 +596,13 @@ docker buildx build --load -t app .
   `C:\src` is `/mnt/c/src`.
 - Network paths (`\\server\share`) are refused.
 - Named volumes and images live in the distribution.
-- `podbag vm status|start|stop|rm` shows, starts, stops or removes the distribution.
-  `vm rm` deletes its images, containers and volumes.
+- `podbag vm status|start|stop|restart|rm` shows, starts, stops, restarts or removes the
+  distribution. `vm rm` deletes its images, containers and volumes. A stop or a restart
+  stops its containers.
+- `podbag vm status --json` gives the state, for apps.
+- WSL's CPUs and memory are set for all distributions at once, in
+  `%UserProfile%\.wslconfig`. podbag does not change them, so there is no `vm set` on
+  Windows.
 
 ### Limits
 
@@ -580,6 +612,52 @@ docker buildx build --load -t app .
 - Resource limits need cgroup v2. Where WSL's kernel does not have it, containers run
   without limits, with a warning.
 - Not yet: the Docker API for Windows programs (the docker CLI on Windows).
+
+## Update podbag
+
+```sh
+podbag upgrade --check          # only say whether a newer release exists
+podbag upgrade                  # install the latest release (it asks first)
+podbag upgrade --version 0.1.0  # install this release; the only way to go back
+```
+
+- `--yes` skips the question. Without a terminal, `upgrade` needs it.
+- `--check --json` prints `{"current", "latest", "newer"}`, for apps.
+
+### How it works
+
+- It reads the latest release from GitHub's API, over HTTPS only.
+- It downloads this system's file and the release's `SHA256SUMS` next to podbag.
+- The file must match its SHA-256 sum. Nothing downloaded runs before that.
+- Then the new file must print the expected version (`podbag --version`). On macOS, it
+  must also have a valid signature with the virtualization entitlement.
+- Only then is it renamed over podbag. The old one stays as `podbag.old`.
+- On Windows a running `.exe` cannot be overwritten, so it is renamed first.
+- It never goes to an older release unless `--version` asks for it.
+
+### Where podbag is installed
+
+- `install.sh` puts podbag in `/usr/local/bin`. Writing there needs root, so run
+  `sudo podbag upgrade`. podbag says so, with the exact command (exit code 77).
+- On Windows, use an administrator terminal when podbag is in a protected folder.
+
+### After the update
+
+- macOS: the VM's guest is in the program, so the VM must restart to use the new one.
+  `upgrade` restarts it at once when no container runs. Otherwise it says so: run
+  `podbag vm restart` (the containers stop), or wait until the VM powers off when idle.
+- Linux: a `podbag system service` that started on demand ends when no client is
+  connected, and the next client starts the new one. A service with `--timeout 0` stays.
+  Running containers keep running, with their keeper.
+- Each build of podbag has its own keeper (`keeper-<build>.sock`). So after an update, the
+  new program starts its own keeper at once, and starts stay fast. The old keeper watches
+  its containers until they end, then exits.
+- Windows: the next command brings the new engine into podbag's WSL distribution.
+
+### Limits
+
+- The download is checked against the release's `SHA256SUMS`, which comes from the same
+  place. A signature with a release key is not checked yet.
 
 ## Requirements on Linux
 
