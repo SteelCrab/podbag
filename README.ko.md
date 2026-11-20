@@ -36,8 +36,9 @@
 - **정적 바이너리 하나.** Linux에서 약 4 MB입니다.
 - **레이어가 아니라 파일.** 여러 이미지가 같은 파일을 쓰면 디스크와 메모리에 한 번만 둡니다.
 - **빠릅니다.** Linux에서 컨테이너가 약 4 ms 만에 시작됩니다.
-- **Docker 도구와 함께 씁니다.** Docker·OCI 이미지, `docker` CLI, Compose, buildx를 지원합니다.
+- **Docker 도구와 함께 씁니다.** Docker·OCI 이미지, `docker` CLI, Compose, buildx, 노드 하나의 swarm stack을 지원합니다.
 - **Dockerfile을 빌드합니다.** `podbag build`와 클래식 빌더의 `docker build`를 씁니다. BuildKit과 데몬이 없어도 됩니다.
+- **Kubernetes.** `podbag cri serve`가 kubelet이나 k3s를 위한 노드의 컨테이너 런타임이 됩니다.
 - **root 없이도, root로도.** 같은 프로그램이 두 방식으로 동작합니다.
 - **Linux, macOS, Windows.** x86_64와 arm64를 지원합니다. Windows 지원은 실험 단계입니다.
 - **TUI와 데스크톱 앱이 있습니다.** 터미널에서는 `podbag tui`, 데스크톱에서는 메뉴 막대 아이콘이 있는 창으로 컨테이너, 이미지, 볼륨, 네트워크를 다룹니다.
@@ -166,6 +167,7 @@ docker compose up -d
 - Linux VM 한 대에서 잰 중앙값입니다: 4 CPU, 3.8 GiB, arm64.
 - 버전: podbag 0.1.0, Podman 5.7.0, Docker 29.1.3, Kiri 0.2.1.
 - 모든 수치와 측정 방법: [docs/benchmarks.md](docs/benchmarks.md), [docs/benchmarks-msa.md](docs/benchmarks-msa.md) (영문).
+- k3s 노드의 런타임으로 pod 30개를 실행할 때: podbag은 프로세스 2개, 3.5 MiB입니다. containerd는 63개(276 MiB), CRI-O는 32개(85 MiB)입니다. [docs/benchmarks-k8s.md](docs/benchmarks-k8s.md) (영문).
 
 ## 다른 도구와 비교
 

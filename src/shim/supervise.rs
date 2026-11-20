@@ -7,7 +7,7 @@
 //! cannot stop the loop from serving stop, kill and signals.
 
 use super::control::{self, Request, Response};
-use super::logbook::{LOG_FILE_LIMIT, LogWriter, Stream};
+use super::logbook::{LogWriter, Stream};
 use crate::helper::{StatusChannel, StatusMessage};
 use crate::paths::Dirs;
 use crate::spec::ContainerSpec;
@@ -123,10 +123,15 @@ impl Io {
         };
         let (out_r, out_w) = pipe()?;
         let (err_r, err_w) = pipe()?;
-        let null: OwnedFd = File::open("/dev/null")
-            .map_err(|e| Error::io("cannot open /dev/null", &e, "check the system"))?
-            .into();
-        let stdin = if spec.interactive {
+        // The input: a named pipe (whoever writes to it holds it open), the caller's stdin,
+        // or nothing.
+        let null: OwnedFd = match &spec.stdin_fifo {
+            Some(path) => open_fifo(path)?,
+            None => File::open("/dev/null")
+                .map_err(|e| Error::io("cannot open /dev/null", &e, "check the system"))?
+                .into(),
+        };
+        let stdin = if spec.interactive && spec.stdin_fifo.is_none() {
             0
         } else {
             null.as_raw_fd()
@@ -346,7 +351,7 @@ pub(super) fn run(
         Ok(io) => io,
         Err(e) => return failed(status, e),
     };
-    let mut log = match LogWriter::open(&dirs.container_dir(id), LOG_FILE_LIMIT) {
+    let mut log = match LogWriter::for_container(dirs, spec) {
         Ok(l) => l,
         Err(e) => return failed(status, e),
     };
@@ -392,19 +397,22 @@ pub(super) fn run(
     // As root, the container may open only the usual devices (a privileged one: all).
     // Rootless, the kernel refuses device nodes to the user namespace already.
     if let (false, false, Some(g)) = (rootless, spec.security.privileged, &group) {
-        if let Err(e) = crate::cgroup::restrict_devices(g.fd()) {
-            remove_control(dirs, id);
-            if let Some(g) = group {
-                g.remove();
-            }
-            return failed(
-                status,
+        let rules = crate::cgroup::device_rules(&spec.devices);
+        let restricted = rules.and_then(|rules| {
+            crate::cgroup::restrict_devices(g.fd(), &rules).map_err(|e| {
                 Error::io(
                     "cannot limit the devices the container may open",
                     &e,
                     "check that the kernel has cgroup BPF (CONFIG_CGROUP_BPF)",
-                ),
-            );
+                )
+            })
+        });
+        if let Err(e) = restricted {
+            remove_control(dirs, id);
+            if let Some(g) = group {
+                g.remove();
+            }
+            return failed(status, e);
         }
     }
     let bridged = matches!(spec.network, crate::network::NetworkMode::Bridge { .. });
@@ -455,6 +463,7 @@ pub(super) fn run(
         Ok(mut files) => {
             files.append(&mut run_spec.mounts);
             run_spec.mounts = files;
+            run_spec.mounts.extend(device_mounts(&spec.devices));
         }
         Err(e) => {
             undo(group);
@@ -590,6 +599,10 @@ pub(super) fn run(
     }
     let _ = log.flush_partial();
     let oom = group.as_ref().and_then(|g| g.oom_reason());
+    // Without a PID namespace of its own, its other processes outlive it: they go too.
+    if let (Some(g), false) = (&group, spec.namespaces.pid == crate::spec::Namespace::Own) {
+        cgroup::kill_all(g.path());
+    }
     finish(
         dirs,
         spec,
@@ -624,6 +637,49 @@ pub(super) fn run(
         started: true,
         handed_over: false,
     }
+}
+
+/// Open a named pipe for reading without waiting for a writer, then make reads wait.
+fn open_fifo(path: &str) -> Result<OwnedFd> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|e| {
+            Error::io(
+                format!("cannot open the input pipe {path}"),
+                &e,
+                "report this bug",
+            )
+        })?;
+    // SAFETY: fcntl on a descriptor we own; the flags are plain integers.
+    unsafe {
+        let flags = libc::fcntl(file.as_raw_fd(), libc::F_GETFL);
+        libc::fcntl(
+            file.as_raw_fd(),
+            libc::F_SETFL,
+            flags.max(0) & !libc::O_NONBLOCK,
+        );
+    }
+    Ok(file.into())
+}
+
+/// The device nodes a container was given, bound from the host's.
+fn device_mounts(devices: &[crate::spec::Device]) -> Vec<crate::volume::Mount> {
+    devices
+        .iter()
+        .map(|d| crate::volume::Mount {
+            source: crate::volume::MountSource::Bind {
+                path: d.host.clone(),
+                propagation: Default::default(),
+                shallow_ro: false,
+            },
+            target: d.container.clone(),
+            read_only: false,
+            copy_up: false,
+        })
+        .collect()
 }
 
 /// What follows a container's end, for the shim and for the keeper's finisher: the state,

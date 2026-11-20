@@ -477,8 +477,9 @@ function go(view, kind = S.kubeKind) {
   }
   S.view = view;
   renderNav();
-  renderMain(true);
+  const rendered = renderMain(true);
   remember();
+  return rendered;
 }
 
 // Keep the disclosure and child buttons mounted when the engine refreshes its lists.
@@ -807,7 +808,7 @@ function renderVmCard() {
     bar,
     btn,
     // The rail shows only this: the state as a dot, its text in the tooltip.
-    h("button", { type: "button", class: "icon-button vm-rail", title: `${t("vm.title")}: ${stateText}`, "aria-label": `${t("vm.title")}: ${stateText}`, onclick: () => go("settings") },
+    h("button", { type: "button", class: "icon-button vm-rail", title: `${t("vm.title")}: ${stateText}`, "aria-label": `${t("vm.title")}: ${stateText}`, onclick: () => openSettingsSection("vm-settings") },
       icon("vm"), h("span", { class: `dot ${running ? "dot-on" : ""}`, "aria-hidden": "true" })));
 }
 
@@ -853,14 +854,7 @@ async function openPlainTerminal() {
 }
 
 function openUpdates() {
-  if (S.view !== "settings") go("settings");
-  // The settings page draws after the language names load.
-  const show = () => {
-    const el = document.getElementById("updates");
-    if (el) el.scrollIntoView({ block: "start", behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
-    else setTimeout(show, 50);
-  };
-  show();
+  return openSettingsSection("updates");
 }
 
 function dockerCommandItem() { return null; }
@@ -885,8 +879,9 @@ function renderMain(fresh) {
     return;
   }
   if (S.view === "settings") {
-    if (fresh || shownView !== "settings") renderSettings(main);
+    const redraw = fresh || shownView !== "settings";
     shownView = "settings";
+    if (redraw) return renderSettings(main);
     return;
   }
   if (S.engine && !S.engine.reachable) {
@@ -1267,6 +1262,26 @@ function onLogs(batch) {
 
 // ---- settings ----
 
+async function openSettingsSection(id) {
+  if (S.view !== "settings" || !document.getElementById(id)) await go("settings");
+  const section = document.getElementById(id);
+  if (!section || section.hidden) return;
+  section.open = true;
+  section.querySelector("summary").focus({ preventScroll: true });
+  section.scrollIntoView({ block: "start" });
+}
+
+function settingTitle(key, symbol) {
+  return h("span", { class: "setting-title" },
+    h("span", { class: `setting-icon setting-${key}` }, icon(symbol)), t(`settings.${key}`));
+}
+
+function settingDetails(id, key, symbol, value, ...body) {
+  return h("details", { id },
+    h("summary", {}, settingTitle(key, symbol), h("span", { class: "setting-value", text: value }), icon("forward")),
+    h("div", { class: "setting-body" }, body));
+}
+
 // Settings can be reopened while the operating system is updating its login entry.
 let startupWrite = Promise.resolve();
 
@@ -1292,8 +1307,8 @@ function startupSettings() {
     readRegistration();
   });
   readRegistration();
-  return h("section", { class: "card" },
-    h("h2", { class: "setting-label", text: t("settings.startup") }),
+  return h("div", { class: "preference" },
+    settingTitle("startup", "power"),
     h("label", { class: "check" }, toggle, t("settings.launchAtLogin")), status);
 }
 
@@ -1302,37 +1317,45 @@ async function renderSettings(main) {
   if (S.view !== "settings") return;
   const lang = h("select", {
     id: "language",
-    onchange: async (e) => { S.settings.language = e.target.value; await saveSettings(); },
+    onchange: async (e) => {
+      S.settings.language = e.target.value;
+      await saveSettings();
+      await I18N.load(S.settings.language);
+      setupKubeNav();
+      renderAll();
+      if (S.view === "settings") document.getElementById("language")?.focus();
+    },
   }, h("option", { value: "system", text: t("settings.system") }),
   I18N.LANGUAGES.map((l) => h("option", { value: l, lang: l, text: S.languageNames[l] })));
   lang.value = S.settings.language;
-  const themes = ["system", "light", "dark"].map((v) => h("label", { class: "radio" },
-    h("input", { type: "radio", name: "theme", value: v, checked: S.settings.theme === v, onchange: async () => { S.settings.theme = v; applyTheme(); await saveSettings(); } }),
-    h("span", { text: t(`settings.${v}`) })));
+  const themes = [["system", "display"], ["light", "sun"], ["dark", "moon"]].map(([value, symbol]) =>
+    h("label", { class: "segment" },
+      h("input", { type: "radio", class: "visually-hidden", name: "theme", value, checked: S.settings.theme === value,
+        onchange: () => { S.settings.theme = value; applyTheme(); saveSettings(); } }),
+      h("span", {}, icon(symbol), t(`settings.${value}`))));
   const e = S.engine || {};
+  const openSections = Array.from(main.querySelectorAll(".settings details[open]"), (el) => el.id);
   put(main,
     h("header", { class: "toolbar" }, h("h1", { text: t("settings.title") })),
     h("div", { class: "content settings" },
-      startupSettings(),
-      h("section", { class: "card" },
-        h("label", { class: "setting-label", for: "language", text: t("settings.language") }), lang),
-      h("section", { class: "card" },
-        h("fieldset", {}, h("legend", { class: "setting-label", text: t("settings.theme") }), h("div", { class: "radios" }, themes))),
-      h("section", { class: "card", id: "engine-settings" },
-        h("h2", { class: "setting-label", text: t("settings.engine") }),
-        h("div", { class: "setting-row" }, h("span", { class: "secondary-text", text: t("settings.engine") }), engineChoice()),
-        h("p", { class: "hint", text: t("settings.engineNote") }),
-        h("dl", { class: "fields" },
-          field(t("settings.socket"), e.endpoint, "mono"),
-          field(t("settings.version"), e.version)),
-        dockerSettings()),
-      h("section", { class: "card", id: "vm-settings", hidden: true }),
-      h("section", { class: "card", id: "updates" }),
-      h("section", { class: "card" },
-        h("h2", { class: "setting-label", text: t("settings.about") }),
-        h("p", { text: t("settings.aboutText") }))));
+      h("div", { class: "card" },
+        startupSettings(),
+        h("div", { class: "preference" }, h("label", { for: "language" }, settingTitle("language", "globe")), lang),
+        h("div", { class: "preference" }, h("span", { id: "theme-label" }, settingTitle("theme", "appearance")),
+          h("div", { class: "segments themes", role: "radiogroup", "aria-labelledby": "theme-label" }, themes))),
+      h("div", { class: "card" },
+        settingDetails("engine-settings", "engine", "engine", e.engineName,
+          h("div", { class: "setting-row" }, h("span", { class: "secondary-text", text: t("settings.engine") }), engineChoice()),
+          h("p", { class: "hint", text: t("settings.engineNote") }),
+          h("dl", { class: "fields" },
+            field(t("settings.socket"), e.endpoint, "mono"), field(t("settings.version"), e.version)),
+          dockerSettings()),
+        settingDetails("vm-settings", "vm", "vm"),
+        settingDetails("updates", "updates", "update"),
+        settingDetails("about-settings", "about", "inspect", null, h("p", { text: t("settings.aboutText") })))));
   renderVmSettings(true);
   renderUpdates();
+  for (const id of openSections) document.getElementById(id).open = true;
 }
 
 // The parts of the docker command's settings (filled in when known).
@@ -1347,15 +1370,16 @@ let vmFormDirty = false;
 // The VM's section. `fresh`: build the form again (otherwise only the state changes,
 // so what the user types stays).
 function renderVmSettings(fresh) {
-  const box = document.getElementById("vm-settings");
-  if (!box) return;
+  const section = document.getElementById("vm-settings");
+  if (!section) return;
+  const box = section.querySelector(".setting-body");
   const vm = S.vm;
-  if (!vm || !hasVm()) {
-    box.hidden = true;
+  section.hidden = !vm || !hasVm();
+  if (section.hidden) {
     box.replaceChildren();
     return;
   }
-  box.hidden = false;
+  section.querySelector(".setting-value").textContent = t(`vm.state.${vmStateKey(vm.state)}`);
   const statusPart = vmStatusPart(vm);
   const old = box.querySelector(".vm-status");
   if (old && !fresh && box.querySelector(".vm-form, .vm-note")) {
@@ -1367,7 +1391,6 @@ function renderVmSettings(fresh) {
   }
   vmFormDirty = false;
   put(box,
-    h("h2", { class: "setting-label", text: t("settings.vm") }),
     statusPart,
     vm.resourcesEditable ? vmForm(vm) : h("p", { class: "hint vm-note", text: t("settings.vmWsl") }));
 }
@@ -1537,8 +1560,8 @@ async function loadUpdates(check) {
 }
 
 function renderUpdates() {
-  const box = document.getElementById("updates");
-  if (!box) return;
+  const section = document.getElementById("updates");
+  if (!section) return;
   const u = S.updates || {};
   const status = checking ? t("update.checking")
     : u.error ? u.error
@@ -1548,8 +1571,8 @@ function renderUpdates() {
   check.disabled = checking || upgrading;
   const install = button("update", upgrading ? t("update.installing") : t("update.install"), runUpgrade, "primary");
   install.disabled = !u.newer || checking || upgrading;
-  put(box,
-    h("h2", { class: "setting-label", text: t("settings.updates") }),
+  section.querySelector(".setting-value").textContent = u.newer && u.latest ? t("status.available", { version: u.latest }) : u.engine || "";
+  put(section.querySelector(".setting-body"),
     h("dl", { class: "fields" },
       field(t("settings.engineVersion"), u.engine),
       field(t("settings.appVersion"), u.app),
@@ -1606,9 +1629,6 @@ async function saveSettings() {
   } catch (e) {
     toast(String(e), true);
   }
-  await I18N.load(S.settings.language);
-  setupKubeNav();
-  renderAll();
 }
 
 function renderAll() {
@@ -1751,7 +1771,7 @@ async function init() {
 // For the preview page (desktop/preview), which shows each view with a mocked API.
 window.podbag = {
   ready, go, openDetail, remove: (kind, i) => remove(kind, S.lists[kind][i]), pull, prune, state: S,
-  toggleSidebar, openUpdates, switchEngine, applyVm: () => applyVm(document.querySelector(".vm-form")), runUpgrade,
+  toggleSidebar, openSettingsSection, openUpdates, switchEngine, applyVm: () => applyVm(document.querySelector(".vm-form")), runUpgrade,
 };
 
 // images.js starts the app, once its parts are in place.

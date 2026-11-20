@@ -9,13 +9,32 @@ pub const SIDEBAR_WIDTH: u32 = 216;
 pub const SIDEBAR_MIN: u32 = 160;
 pub const SIDEBAR_MAX: u32 = 360;
 
+#[derive(Debug, Default, Copy, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemePreference {
+    Light,
+    Dark,
+    #[default]
+    #[serde(other)]
+    System,
+}
+
+impl ThemePreference {
+    pub fn native(self) -> Option<tauri::Theme> {
+        match self {
+            Self::Light => Some(tauri::Theme::Light),
+            Self::Dark => Some(tauri::Theme::Dark),
+            Self::System => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
     /// `system`, or one of [`crate::strings::LANGUAGES`].
     pub language: String,
-    /// `system`, `light` or `dark`.
-    pub theme: String,
+    pub theme: ThemePreference,
     pub sidebar_width: u32,
     /// The user collapsed the sidebar to a rail of icons.
     pub sidebar_collapsed: bool,
@@ -25,7 +44,7 @@ impl Default for Settings {
     fn default() -> Settings {
         Settings {
             language: "system".into(),
-            theme: "system".into(),
+            theme: ThemePreference::System,
             sidebar_width: SIDEBAR_WIDTH,
             sidebar_collapsed: false,
         }
@@ -50,14 +69,11 @@ impl Settings {
         std::fs::write(file, json).map_err(|e| format!("{}: {e}", file.display()))
     }
 
-    /// Unknown values become `system`; the width comes within its limits.
+    /// Fall back to the system language and clamp the sidebar width.
     pub fn checked(mut self) -> Settings {
         if self.language != "system" && !crate::strings::LANGUAGES.contains(&self.language.as_str())
         {
             self.language = "system".into();
-        }
-        if !matches!(self.theme.as_str(), "system" | "light" | "dark") {
-            self.theme = "system".into();
         }
         self.sidebar_width = self.sidebar_width.clamp(SIDEBAR_MIN, SIDEBAR_MAX);
         self
@@ -69,13 +85,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn native_theme_matches_saved_preference() {
+        for (name, native) in [
+            ("system", None),
+            ("light", Some(tauri::Theme::Light)),
+            ("dark", Some(tauri::Theme::Dark)),
+        ] {
+            let json = serde_json::json!({ "theme": name });
+            let settings: Settings = serde_json::from_value(json).unwrap();
+            assert_eq!(settings.theme.native(), native);
+            assert_eq!(serde_json::to_value(settings).unwrap()["theme"], name);
+        }
+        for json in [
+            r#"{"language":"ko"}"#,
+            r#"{"language":"ko","theme":"unknown"}"#,
+        ] {
+            let settings: Settings = serde_json::from_str(json).unwrap();
+            assert_eq!(settings.language, "ko");
+            assert_eq!(settings.theme.native(), None);
+        }
+    }
+
+    #[test]
     fn saved_and_loaded() {
         let dir = std::env::temp_dir().join(format!("podbag-desktop-{}", std::process::id()));
         let file = dir.join("settings.json");
         assert_eq!(Settings::load(&file), Settings::default());
         let s = Settings {
             language: "ko".into(),
-            theme: "dark".into(),
+            theme: ThemePreference::Dark,
             sidebar_width: 280,
             sidebar_collapsed: true,
         };

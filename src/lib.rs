@@ -23,6 +23,9 @@ pub(crate) mod container;
 #[cfg(unix)]
 mod containers;
 mod credentials;
+#[cfg(unix)]
+#[doc(hidden)]
+pub mod cri;
 #[doc(hidden)]
 pub mod diagnose;
 #[doc(hidden)]
@@ -74,6 +77,9 @@ pub mod spec;
 pub mod state;
 #[doc(hidden)]
 pub mod store;
+#[cfg(unix)]
+#[doc(hidden)]
+pub mod swarm;
 /// `podbag upgrade`: replace this program with a release from GitHub.
 pub mod upgrade;
 /// The macOS VM's shared parts (and, on Linux, the guest's init and agent).

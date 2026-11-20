@@ -385,10 +385,38 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 .kube-inspect h2, .empty .error-text { overflow-wrap: anywhere; }
 
 /* ---- settings ---- */
-.settings { display: grid; gap: 14px; align-content: start; max-width: 640px; padding-top: 20px; }
-.card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; }
+.settings { display: grid; gap: 18px; align-content: start; padding-block-start: 20px; }
+.settings .card { width: 100%; max-width: 780px; min-width: 0; padding-inline: 16px; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; }
 .card p { margin: 0; color: var(--ink-2); }
-.setting-label { display: block; margin: 0 0 10px; font-size: 13px; font-weight: 600; color: var(--ink); padding: 0; }
+.preference, .settings summary { display: flex; align-items: center; gap: 12px; min-height: 61px; padding-block: 10px; }
+.preference { justify-content: space-between; flex-wrap: wrap; }
+.preference + .preference, .settings details + details { border-top: 1px solid var(--line); }
+.preference select { min-width: 0; width: 190px; }
+.preference [role="status"]:empty { display: none; }
+.preference [role="status"] { width: 100%; }
+.setting-title { display: inline-flex; align-items: center; gap: 12px; font-size: 14px; font-weight: 600; }
+.setting-icon { display: grid; place-items: center; flex: none; width: 32px; height: 32px; border-radius: 8px; color: #fff; background: #677382; }
+.setting-icon .icon { width: 20px; height: 20px; }
+.setting-startup { background: #24846c; }
+.setting-language { background: #3379bd; }
+.setting-theme { background: #8254b2; }
+.setting-engine { background: #516887; }
+.setting-vm { background: #a76528; }
+.setting-updates { background: #316fb9; }
+.themes { max-width: 100%; flex-wrap: wrap; }
+.themes .segment { flex: auto; }
+.themes .segment span { display: flex; justify-content: center; align-items: center; gap: 6px; padding: 4px 9px; }
+.themes .icon { width: 15px; height: 15px; }
+.settings summary { list-style: none; cursor: pointer; border-radius: 6px; }
+.settings summary::-webkit-details-marker { display: none; }
+.settings summary:hover { background: var(--hover); }
+.settings summary:focus-visible { outline-offset: -2px; }
+.setting-value { margin-inline-start: auto; text-align: end; font-size: 13px; color: var(--ink-2); }
+.settings summary > .icon { width: 14px; height: 14px; color: var(--muted); }
+.settings details[open] > summary > .icon { transform: rotate(90deg); }
+.setting-body { padding: 0 0 18px 44px; }
+.setting-body > .fields:first-child { margin-top: 0; }
 .vm-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
 .vm-row .setting-label { margin-bottom: 3px; font-size: 15px; }
 .vm-row p { font-size: 12px; }
@@ -424,7 +452,7 @@ input[type="number"], input[type="password"], input[type="search"].field {
 input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; border-color: var(--accent); }
 .vm-error:empty { display: none; }
 .update-note { color: var(--accent-text) !important; font-weight: 600; margin-top: 12px !important; }
-.card > [role="status"] { margin-top: 12px; }
+.setting-body > [role="status"] { margin-top: 12px; }
 .upgrade-result { margin-top: 14px; display: grid; gap: 6px; }
 .upgrade-result pre { max-height: 200px; }
 

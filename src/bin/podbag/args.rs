@@ -245,6 +245,11 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: VolumeCmd,
     },
+    /// Run podbag as a Kubernetes container runtime (CRI)
+    Cri {
+        #[command(subcommand)]
+        cmd: CriCmd,
+    },
     /// Manage the image store
     System {
         #[command(subcommand)]
@@ -266,6 +271,9 @@ pub enum Cmd {
     Store { op: String },
     #[command(name = "__session", hide = true)]
     Session,
+    /// The init that holds a Kubernetes pod's PID namespace
+    #[command(name = "__pause", hide = true)]
+    PodInit,
     /// Start an ended container again when its restart policy says so
     #[command(name = "__restart", hide = true)]
     Restarter { id: String },
@@ -358,6 +366,34 @@ pub enum VolumeCmd {
     },
     /// Show a volume's details as JSON
     Inspect { name: String },
+}
+
+#[derive(Subcommand)]
+pub enum CriCmd {
+    /// Serve the Kubernetes CRI on a Unix socket, for a kubelet (as root)
+    ///
+    /// Point the kubelet at it with --container-runtime-endpoint unix://<socket>. Unlike
+    /// the rest of podbag, this runs as long as the kubelet uses it.
+    Serve {
+        /// The socket
+        #[arg(long, default_value = "/run/podbag/cri.sock")]
+        socket: std::path::PathBuf,
+        /// Where the CNI network configurations are
+        #[arg(long, default_value = "/etc/cni/net.d")]
+        cni_conf_dir: std::path::PathBuf,
+        /// Where the CNI plugins are; several folders separated by ':'
+        #[arg(long, default_value = "/opt/cni/bin")]
+        cni_bin_dir: String,
+        /// How the kubelet places cgroups
+        #[arg(long, value_enum, default_value_t = CgroupDriverArg::Cgroupfs)]
+        cgroup_driver: CgroupDriverArg,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum CgroupDriverArg {
+    Cgroupfs,
+    Systemd,
 }
 
 #[derive(Subcommand)]

@@ -158,6 +158,21 @@ impl Group {
     }
 }
 
+/// End every process left in the group at `path` (and below it). A container without a
+/// PID namespace of its own (a Kubernetes pod's, or the host's) leaves its other processes
+/// behind when its main process ends; the kernel ends them only with a namespace's init.
+pub fn kill_all(path: &Path) {
+    if std::fs::write(path.join("cgroup.kill"), "1").is_ok() {
+        return;
+    }
+    // Before Linux 5.14: one by one.
+    let procs = std::fs::read_to_string(path.join("cgroup.procs")).unwrap_or_default();
+    for pid in procs.lines().filter_map(|l| l.trim().parse::<i32>().ok()) {
+        // SAFETY: kill has no memory arguments.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+}
+
 /// Remove an empty cgroup directory once, with the groups below it; a busy or missing
 /// one is left as it is.
 pub fn try_remove_dir(path: &Path) {
@@ -215,7 +230,55 @@ pub fn create(
         Placement::None => Ok(None),
         Placement::Direct { parent } => direct(Path::new(parent), id, limits, budget).map(Some),
         Placement::Scope { slice } => scoped(slice, limits, budget).map(Some),
+        Placement::Exact { path } => exact(Path::new(path), limits).map(Some),
     }
+}
+
+/// The group at `path`, with its missing parents; controllers are turned on from the root
+/// down. The parents are left as they are (a kubelet's pod group has its own limits).
+fn exact(path: &Path, limits: &Limits) -> Result<Group> {
+    let fail = |e: std::io::Error| cgroup_error(path, e);
+    let root = Path::new(ROOT);
+    let rel = path.strip_prefix(root).map_err(|_| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            "cannot set up the container's cgroup",
+            format!("{} is not below {ROOT}", path.display()),
+            "report this bug",
+        )
+    })?;
+    let more = limits.controllers();
+    let mut dir = root.to_path_buf();
+    let mut enabled = enable_with(&dir, &more).map_err(fail)?;
+    for part in rel.parent().into_iter().flat_map(Path::components) {
+        dir.push(part);
+        match std::fs::create_dir(&dir) {
+            Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(fail(e)),
+            _ => {}
+        }
+        enabled = enable_with(&dir, &more).map_err(fail)?;
+    }
+    if let Err(e) = std::fs::create_dir(path) {
+        if e.kind() != std::io::ErrorKind::AlreadyExists {
+            return Err(fail(e));
+        }
+        remove_below(path);
+        std::fs::remove_dir(path)
+            .and_then(|()| std::fs::create_dir(path))
+            .map_err(fail)?;
+    }
+    let group = configure(path, &enabled, limits).and_then(|()| {
+        let dir = open_dir(path).map_err(fail)?;
+        Ok(Group {
+            path: path.to_path_buf(),
+            dir,
+            owned: true,
+        })
+    });
+    if group.is_err() {
+        let _ = std::fs::remove_dir(path);
+    }
+    group
 }
 
 fn warn_budget(e: impl std::fmt::Display) {
@@ -359,11 +422,21 @@ pub fn enable_controllers(dir: &Path) -> std::io::Result<Vec<String>> {
 }
 
 pub(super) fn enable(dir: &Path) -> std::io::Result<Vec<String>> {
+    enable_with(dir, &[])
+}
+
+/// As `enable`, with further controllers when available.
+fn enable_with(dir: &Path, more: &[String]) -> std::io::Result<Vec<String>> {
     let available = std::fs::read_to_string(dir.join("cgroup.controllers"))?;
     let on = std::fs::read_to_string(dir.join("cgroup.subtree_control"))?;
     let has = |list: &str, c: &str| list.split_whitespace().any(|x| x == c);
     let wanted: Vec<&str> = CONTROLLERS
         .into_iter()
+        .chain(
+            more.iter()
+                .map(String::as_str)
+                .filter(|c| !CONTROLLERS.contains(c)),
+        )
         .filter(|c| has(&available, c))
         .collect();
     let missing: Vec<String> = wanted
@@ -377,6 +450,9 @@ pub(super) fn enable(dir: &Path) -> std::io::Result<Vec<String>> {
     let mut enabled: Vec<String> = wanted.into_iter().map(String::from).collect();
     // Each on its own, and a failure is no error: containers run without them.
     for c in OPTIONAL_CONTROLLERS {
+        if enabled.iter().any(|name| name == c) {
+            continue;
+        }
         let on = has(&on, c)
             || (has(&available, c)
                 && std::fs::write(dir.join("cgroup.subtree_control"), format!("+{c}")).is_ok());
@@ -398,7 +474,9 @@ pub(super) fn configure(path: &Path, enabled: &[String], limits: &Limits) -> Res
             return Err(missing_controller(path, s));
         }
     }
-    write_settings(path, &settings).map(drop)
+    write_settings(path, &settings)?;
+    // Further files the CRI asks for (cpu.weight, hugetlb, unified settings).
+    write_files(path, &limits.files)
 }
 
 fn missing_controller(path: &Path, s: &Setting) -> Error {
@@ -457,6 +535,34 @@ fn write_settings(path: &Path, settings: &[Setting]) -> Result<Vec<String>> {
 /// Returns warnings about what this kernel cannot apply.
 pub fn apply_live(path: &Path, old: &Limits, new: &Limits) -> Result<Vec<String>> {
     write_settings(path, &super::resources::changes(old, new))
+}
+
+/// Write further cgroup files (a running container's new limits, too). Swap files are
+/// skipped on a kernel without swap accounting.
+pub fn write_files(path: &Path, files: &std::collections::BTreeMap<String, String>) -> Result<()> {
+    for (name, value) in files {
+        if name.contains('/') || name.starts_with("cgroup.") {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "cannot set up the container's cgroup",
+                format!("{name} is not a limit file"),
+                "report this bug",
+            ));
+        }
+        match std::fs::write(path.join(name), value) {
+            Err(e)
+                if e.kind() == std::io::ErrorKind::NotFound && name.starts_with("memory.swap.") => {
+            }
+            Err(e) => {
+                return Err(cgroup_error(
+                    path,
+                    std::io::Error::new(e.kind(), format!("{name} = {value}: {e}")),
+                ));
+            }
+            Ok(()) => {}
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn open_dir(path: &Path) -> std::io::Result<OwnedFd> {

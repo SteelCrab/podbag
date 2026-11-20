@@ -25,7 +25,30 @@ const WRITE: i32 = 4;
 const ALL: i32 = MKNOD | READ | WRITE;
 
 /// A device rule: its type, major and minor (None: any), and the accesses it allows.
-struct Rule(i32, Option<i32>, Option<i32>, i32);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rule(i32, Option<i32>, Option<i32>, i32);
+
+impl Rule {
+    /// A rule for one device node: a block or character device, and the access it allows
+    /// as `r`, `w` and `m` (make the node).
+    pub fn device(block: bool, major: u32, minor: u32, access: &str) -> Rule {
+        let mut allowed = 0;
+        for c in access.chars() {
+            allowed |= match c {
+                'r' => READ,
+                'w' => WRITE,
+                'm' => MKNOD,
+                _ => 0,
+            };
+        }
+        Rule(
+            if block { BLOCK } else { CHAR },
+            Some(major as i32),
+            Some(minor as i32),
+            allowed,
+        )
+    }
+}
 
 const RULES: &[Rule] = &[
     Rule(CHAR, None, None, MKNOD),
@@ -77,7 +100,7 @@ fn insn(code: u8, dst: u8, src: u8, off: i16, imm: i32) -> Insn {
 /// The program: allow when a rule matches, refuse otherwise. Its input is
 /// `struct bpf_cgroup_dev_ctx { u32 access_type; u32 major; u32 minor; }`, where
 /// `access_type` holds the access in its high 16 bits and the device type in the low ones.
-fn program() -> Vec<Insn> {
+fn program(extra: &[Rule]) -> Vec<Insn> {
     let mut p = vec![
         insn(LDX_W, 2, 1, 0, 0),        // r2 = access_type
         insn(AND32_K, 2, 0, 0, 0xffff), // r2 = type
@@ -86,7 +109,7 @@ fn program() -> Vec<Insn> {
         insn(LDX_W, 4, 1, 4, 0),        // r4 = major
         insn(LDX_W, 5, 1, 8, 0),        // r5 = minor
     ];
-    for &Rule(kind, major, minor, access) in RULES {
+    for &Rule(kind, major, minor, access) in RULES.iter().chain(extra) {
         let mut block = vec![insn(JNE_K, 2, 0, 0, kind)];
         if access != ALL {
             // Allowed when every access asked for is in the rule's.
@@ -151,10 +174,41 @@ fn prog_name() -> [u8; 16] {
     name
 }
 
+/// The rules for the devices a container was given, from their host nodes as they are now.
+pub fn device_rules(devices: &[crate::spec::Device]) -> crate::Result<Vec<Rule>> {
+    use rustix::fs::FileType;
+    devices
+        .iter()
+        .map(|d| {
+            let bad = |why: String| {
+                crate::Error::new(
+                    crate::ErrorKind::InvalidInput,
+                    format!("cannot give the container the device {}", d.host),
+                    why,
+                    "give the path of a device node on the host",
+                )
+            };
+            let st = rustix::fs::stat(d.host.as_str()).map_err(|e| bad(e.to_string()))?;
+            let block = match FileType::from_raw_mode(st.st_mode) {
+                FileType::BlockDevice => true,
+                FileType::CharacterDevice => false,
+                _ => return Err(bad("it is not a device node".into())),
+            };
+            Ok(Rule::device(
+                block,
+                rustix::fs::major(st.st_rdev),
+                rustix::fs::minor(st.st_rdev),
+                &d.access,
+            ))
+        })
+        .collect()
+}
+
 /// Attach the device rules to the cgroup open at `group`. They hold for every process
 /// that enters it or a group below it, until the group is removed.
-pub fn restrict(group: BorrowedFd<'_>) -> std::io::Result<()> {
-    let insns = program();
+/// `extra` allows further devices (the ones a container was given).
+pub fn restrict(group: BorrowedFd<'_>, extra: &[Rule]) -> std::io::Result<()> {
+    let insns = program(extra);
     let license = c"Apache";
     let name = prog_name();
     let load = ProgLoad {
@@ -223,7 +277,11 @@ mod tests {
     /// Run the program on one access, as the kernel would (a small interpreter of the
     /// instructions it uses).
     fn allows(kind: i32, major: i32, minor: i32, access: i32) -> bool {
-        let p = program();
+        allows_with(&[], kind, major, minor, access)
+    }
+
+    fn allows_with(extra: &[Rule], kind: i32, major: i32, minor: i32, access: i32) -> bool {
+        let p = program(extra);
         let mut r = [0i64; 11];
         let ctx = [((access << 16) | kind) as i64, major as i64, minor as i64];
         let mut pc = 0usize;
@@ -272,5 +330,24 @@ mod tests {
         assert!(allows(CHAR, 1, 1, MKNOD));
         // Asking for more than a rule allows is refused.
         assert!(!allows(BLOCK, 253, 0, MKNOD | READ));
+    }
+
+    #[test]
+    fn given_devices_open_as_their_rule_says() {
+        let fuse = Rule::device(false, 10, 229, "rw");
+        let disk = Rule::device(true, 8, 0, "r");
+        let extra = [fuse, disk];
+        assert!(allows_with(&extra, CHAR, 10, 229, READ | WRITE));
+        assert!(allows_with(&extra, BLOCK, 8, 0, READ));
+        assert!(!allows_with(&extra, BLOCK, 8, 0, WRITE));
+        assert!(!allows_with(&extra, BLOCK, 8, 1, READ));
+        assert!(
+            allows_with(&extra, CHAR, 1, 3, READ),
+            "the usual ones still open"
+        );
+        assert_eq!(
+            Rule::device(false, 1, 2, "mrw"),
+            Rule(CHAR, Some(1), Some(2), ALL)
+        );
     }
 }

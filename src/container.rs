@@ -676,6 +676,9 @@ impl Running {
 }
 
 #[cfg(target_os = "linux")]
+pub(crate) use linux_launch::create_on_image;
+
+#[cfg(target_os = "linux")]
 mod linux_launch {
     use super::{Container, Source, command_line};
     use crate::helper::{self, HelperChild, Io};
@@ -741,6 +744,8 @@ mod linux_launch {
                 } => Mount {
                     source: MountSource::Bind {
                         path: bind_source(&source)?,
+                        propagation: Default::default(),
+                        shallow_ro: false,
                     },
                     target,
                     read_only: access(a),
@@ -998,6 +1003,10 @@ mod linux_launch {
                     health: health.clone(),
                     console_size: c.console_size,
                     extra_networks: c.extra_networks.clone(),
+                    namespaces: Default::default(),
+                    devices: Vec::new(),
+                    cri_log: None,
+                    stdin_fifo: None,
                 };
                 spec.validate()?;
                 state::create(&dirs, &spec)?;
@@ -1005,93 +1014,115 @@ mod linux_launch {
             Source::Image(ref image) => {
                 let command =
                     command_line(&image.config, c.entrypoint.as_deref(), c.command.as_deref())?;
-                let not_pulled = || {
-                    Error::new(
-                        ErrorKind::NotFound,
-                        format!("cannot find image {}", image.name),
-                        "it has not been pulled",
-                        format!("run `podbag pull {}`", image.name),
-                    )
-                };
-                // As root the store may build what this mount method needs; rootless stores
-                // always hold the hard-link tree a pull made.
-                let mut store = if rootless {
-                    Store::open_existing(&dirs).ok_or_else(not_pulled)?
-                } else {
-                    Store::open_existing(&dirs).ok_or_else(not_pulled)?;
-                    Store::open(&dirs, true)?
-                };
-                store.use_mount_method(rootless, crate::config::load(&dirs)?.image_mount);
-                let _ = store.touch(&image.name);
-                // Hold the shared lock until the config names the image: prune and rmi
-                // skip images that a container config names.
-                let lock = store.lock_shared()?;
-                let (_, record) = store.find(&image.digest)?;
-                let (lower, data) = match store.image_root(&record.digest)? {
-                    ImageRoot::Tree(tree) => (tree, None),
-                    ImageRoot::Composefs { lower, objects } => (lower, Some(objects)),
-                };
-                let text = |p: &std::path::Path| p.to_string_lossy().into_owned();
-                let dir = dirs.container_dir(&id);
-                let sub = |name: &str| dir.join(name).to_string_lossy().into_owned();
                 let mut env = image.config.env.clone();
                 env.extend(c.env);
-                let spec = ContainerSpec {
-                    rootfs: Rootfs::Overlay {
-                        lower: text(&lower),
-                        upper: sub("upper"),
-                        work: sub("work"),
-                        merged: sub("merged"),
-                        data: data.as_deref().map(text),
-                    },
-                    id,
-                    command,
-                    env,
-                    workdir: c.workdir.or(image.config.workdir.clone()),
-                    hostname,
-                    user: c.user.or(image.config.user.clone()),
-                    image: Some(record.digest),
-                    image_name: Some(image.name.clone()),
-                    name: name.clone(),
-                    auto_remove,
-                    tty,
-                    interactive,
-                    detach: false,
-                    labels: c.labels.clone(),
-                    limits: limits.clone(),
-                    cgroup: placement.clone(),
-                    security: c.security.clone(),
-                    mounts: mounts.clone(),
-                    network: network.clone(),
-                    publish: c.publish.clone(),
-                    aliases: c.aliases.clone(),
-                    stop_timeout: c.stop_timeout,
-                    restart: c.restart,
-                    health: health.clone(),
-                    console_size: c.console_size,
-                    extra_networks: c.extra_networks.clone(),
-                };
-                spec.validate()?;
-                state::create(&dirs, &spec)?;
-                for name in ["upper", "work", "merged"] {
-                    use std::os::unix::fs::DirBuilderExt;
-                    let path = dir.join(name);
-                    std::fs::DirBuilder::new()
-                        .mode(0o755)
-                        .create(&path)
-                        .map_err(|e| {
-                            Error::io(
-                                format!("cannot create {}", path.display()),
-                                &e,
-                                "check the permissions of the podbag data directory",
-                            )
-                        })?;
-                }
-                drop(lock);
+                create_on_image(&dirs, image, &id.clone(), |rootfs, digest| {
+                    Ok(ContainerSpec {
+                        rootfs,
+                        id,
+                        command,
+                        env,
+                        workdir: c.workdir.or(image.config.workdir.clone()),
+                        hostname,
+                        user: c.user.or(image.config.user.clone()),
+                        image: Some(digest),
+                        image_name: Some(image.name.clone()),
+                        name: name.clone(),
+                        auto_remove,
+                        tty,
+                        interactive,
+                        detach: false,
+                        labels: c.labels.clone(),
+                        limits: limits.clone(),
+                        cgroup: placement.clone(),
+                        security: c.security.clone(),
+                        mounts: mounts.clone(),
+                        network: network.clone(),
+                        publish: c.publish.clone(),
+                        aliases: c.aliases.clone(),
+                        stop_timeout: c.stop_timeout,
+                        restart: c.restart,
+                        health: health.clone(),
+                        console_size: c.console_size,
+                        extra_networks: c.extra_networks.clone(),
+                        namespaces: Default::default(),
+                        devices: Vec::new(),
+                        cri_log: None,
+                        stdin_fifo: None,
+                    })
+                })?;
             }
         }
         drop(volume_lock);
         Ok((cleanup, auto_remove))
+    }
+
+    /// Record container `id` on `image`: `build` makes its settings from its root (the
+    /// image below a writable layer in the container directory) and the image's digest.
+    /// The store's shared lock is held until the record names the image: prune and rmi
+    /// skip images that a container record names. The caller removes the container
+    /// directory when this fails.
+    pub(crate) fn create_on_image(
+        dirs: &Dirs,
+        image: &crate::image::Image,
+        id: &str,
+        build: impl FnOnce(Rootfs, String) -> Result<ContainerSpec>,
+    ) -> Result<()> {
+        // SAFETY: geteuid has no preconditions.
+        let rootless = unsafe { libc::geteuid() } != 0;
+        let not_pulled = || {
+            Error::new(
+                ErrorKind::NotFound,
+                format!("cannot find image {}", image.name),
+                "it has not been pulled",
+                format!("run `podbag pull {}`", image.name),
+            )
+        };
+        // As root the store may build what this mount method needs; rootless stores
+        // always hold the hard-link tree a pull made.
+        let mut store = if rootless {
+            Store::open_existing(dirs).ok_or_else(not_pulled)?
+        } else {
+            Store::open_existing(dirs).ok_or_else(not_pulled)?;
+            Store::open(dirs, true)?
+        };
+        store.use_mount_method(rootless, crate::config::load(dirs)?.image_mount);
+        let _ = store.touch(&image.name);
+        let lock = store.lock_shared()?;
+        let (_, record) = store.find(&image.digest)?;
+        let (lower, data) = match store.image_root(&record.digest)? {
+            ImageRoot::Tree(tree) => (tree, None),
+            ImageRoot::Composefs { lower, objects } => (lower, Some(objects)),
+        };
+        let text = |p: &std::path::Path| p.to_string_lossy().into_owned();
+        let dir = dirs.container_dir(id);
+        let sub = |name: &str| dir.join(name).to_string_lossy().into_owned();
+        let rootfs = Rootfs::Overlay {
+            lower: text(&lower),
+            upper: sub("upper"),
+            work: sub("work"),
+            merged: sub("merged"),
+            data: data.as_deref().map(text),
+        };
+        let spec = build(rootfs, record.digest)?;
+        spec.validate()?;
+        state::create(dirs, &spec)?;
+        for name in ["upper", "work", "merged"] {
+            use std::os::unix::fs::DirBuilderExt;
+            let path = dir.join(name);
+            std::fs::DirBuilder::new()
+                .mode(0o755)
+                .create(&path)
+                .map_err(|e| {
+                    Error::io(
+                        format!("cannot create {}", path.display()),
+                        &e,
+                        "check the permissions of the podbag data directory",
+                    )
+                })?;
+        }
+        drop(lock);
+        Ok(())
     }
 
     /// A start that failed.
