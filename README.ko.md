@@ -52,7 +52,7 @@
 ### 설치 스크립트 (Linux, macOS)
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/SteelCrab/podbag/main/install.sh | sh
+curl -fsSL https://podbag.dev/install.sh | sh
 ```
 
 - 시스템에 맞는 파일을 받고 SHA-256 값을 확인합니다.

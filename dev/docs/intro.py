@@ -182,7 +182,7 @@ def build():
     o.append(text(400, 158, "podbag", 50, C["ink"], 800, "middle", cls=m.rise(26.6, T)))
     o.append(text(400, 192, "Linux · macOS · Windows · x86_64 and arm64", 17, C["muted"], None,
                   "middle", cls=m.rise(26.9, T)))
-    cmd = "curl -fsSL https://raw.githubusercontent.com/SteelCrab/podbag/main/install.sh | sh"
+    cmd = "curl -fsSL https://podbag.dev/install.sh | sh"
     o.append(f'<g class="{m.rise(27.2, T)}"><rect x="70" y="222" width="660" height="48" rx="10" '
              f'fill="{C["panel2"]}" stroke="{C["line"]}"/>'
              + text(90, 251, "$ " + cmd, 11.6, C["ink"], None, font=MONO) + "</g>")

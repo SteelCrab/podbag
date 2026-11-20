@@ -52,7 +52,7 @@
 ### 安装脚本（Linux、macOS）
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/SteelCrab/podbag/main/install.sh | sh
+curl -fsSL https://podbag.dev/install.sh | sh
 ```
 
 - 下载适合你系统的文件，并校验 SHA-256。

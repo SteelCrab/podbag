@@ -52,7 +52,7 @@ Image được lưu theo từng tệp: tệp mà nhiều image dùng chung chỉ
 ### Script cài đặt (Linux và macOS)
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/SteelCrab/podbag/main/install.sh | sh
+curl -fsSL https://podbag.dev/install.sh | sh
 ```
 
 - Tải tệp phù hợp với hệ thống của bạn và kiểm tra SHA-256.
