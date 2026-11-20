@@ -2,8 +2,10 @@ name: Linux desktop packages
 
 on:
   pull_request:
+    paths-ignore: ['README*.md', 'docs/**']
   push:
     branches: [main]
+    paths-ignore: ['README*.md', 'docs/**']
     tags: ['v*']
   workflow_dispatch:
 
