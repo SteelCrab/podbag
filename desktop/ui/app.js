@@ -246,7 +246,7 @@ async function refreshVm() {
   if (S.view === "settings") renderVmSettings();
 }
 
-// Switch this window to podbag or Docker; the TUI reads the same choice.
+// The Desktop and TUI share the preferred engine in Settings.
 async function switchEngine(name) {
   if (S.connection.name === name) return;
   await API.setEngine(name);

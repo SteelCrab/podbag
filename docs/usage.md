@@ -683,6 +683,10 @@ volumes block the copy. An identical image can be reused.
   named and anonymous volumes, and creates a stopped container with the same name,
   command, environment and supported runtime settings. Create any custom networks on
   the destination first. Host bind mounts require a separate host file transfer.
+  To use the destination engine’s logging driver and process limits, select this option
+  during review or pass `--destination-defaults` to the CLI. This supports Podman
+  containers that use journald and per-container ulimits when copying to Podbag.
+  Other unsupported runtime settings stop the transfer.
 - **Volumes** copy files from local Docker-compatible volumes, including hidden files,
   links, permissions and ownership. Stop workloads writing to the source volume first.
   Podbag uses a BusyBox 1.36.1 helper image and temporary local disk space for the archive.
@@ -693,7 +697,8 @@ volumes block the copy. An identical image can be reused.
   needs compatible storage and permission to create temporary Pods and use `pods/exec` in
   both namespaces. Podbag transfers the files through those Pods and checks their contents
   on the destination. Stop writers before starting. Raw block devices and CSI snapshots
-  need a storage-specific transfer.
+  need a storage-specific transfer. If a bound claim fails during the copy, the destination
+  claim retains its storage and carries the annotation `podbag.io/migration-state=copying`.
 
 The CLI supports the same engine transfers. For example, with Docker and Podbag running:
 
@@ -792,12 +797,10 @@ podbag migrate --from context:staging --to podbag container web
   persistent volume claims in the context's namespace or select **All namespaces**.
   Select a name to inspect its JSON. These Kubernetes views are read-only.
 
-![Podbag Desktop with the Kiri engine selected and a Kubernetes volume claim in the dev cluster](images/engine-kubernetes-en.png)
+![Available migrations in a Kubernetes namespace and resource counts in the sidebar](images/migration-overview-en.png)
 
 - On macOS, the window toolbar has Refresh and Settings on the right.
-  Drag the space between the title and the buttons to move the window.
-
-  ![The macOS window with the podbag title, Refresh and Settings in one row](images/macos-window-toolbar.png)
+  The toolbar shows the app icon on the left. Drag its open space to move the window.
 - Each list has a search box, and the same actions as the TUI.
 - A container's page has its details, its logs (as they come) and all its data.
 - With no containers, the window shows how to start one.

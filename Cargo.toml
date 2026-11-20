@@ -68,9 +68,6 @@ objc2-virtualization = "0.3.2"
 block2 = "0.6"
 dispatch2 = "0.3"
 
-[dev-dependencies]
-tempfile = "3"
-
 [profile.release]
 opt-level = "s"
 lto = true

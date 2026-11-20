@@ -37,6 +37,9 @@ pub fn file_manifest(reader: impl Read) -> Result<BTreeMap<Vec<u8>, Vec<u8>>, St
         if path.is_empty() || path == b"." {
             continue;
         }
+        if path.starts_with(b"/") || path.split(|b| *b == b'/').any(|part| part == b"..") {
+            return Err("Source returned a path outside the volume".into());
+        }
         let path = path.to_vec();
         let header = entry.header();
         let mut hash = Sha256::new();
@@ -288,9 +291,6 @@ fn volume_manifest(reader: impl Read, wrapper: bool) -> Result<BTreeMap<Vec<u8>,
         } else {
             path
         };
-        if path.starts_with(b"/") || path.split(|b| *b == b'/').any(|p| p == b"..") {
-            return Err("Source returned a path outside the volume".into());
-        }
         result.insert(path, hash);
     }
     Ok(result)
@@ -393,10 +393,64 @@ fn copy_volume(
     )
 }
 
+fn verify_container(source: &Value, target: &Value) -> Result<(), String> {
+    let original = &source["Config"];
+    let copied = &target["Config"];
+    for key in ["Cmd", "Entrypoint"] {
+        if original[key]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .ne(copied[key].as_array().into_iter().flatten())
+        {
+            return Err(format!("Container {key} verification failed"));
+        }
+    }
+    let workdir = |config: &Value| {
+        config["WorkingDir"]
+            .as_str()
+            .unwrap_or("")
+            .trim_end_matches('/')
+            .to_owned()
+    };
+    if field(source, "Name")?.trim_start_matches('/')
+        != field(target, "Name")?.trim_start_matches('/')
+        || workdir(original) != workdir(copied)
+        || original["User"].as_str().unwrap_or("") != copied["User"].as_str().unwrap_or("")
+        || target["State"]["Running"] == true
+    {
+        return Err("Container identity or runtime configuration verification failed".into());
+    }
+    for entry in original["Env"].as_array().into_iter().flatten() {
+        if !copied["Env"]
+            .as_array()
+            .is_some_and(|env| env.contains(entry))
+        {
+            return Err("Container environment verification failed".into());
+        }
+    }
+    for mount in source["Mounts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|m| m["Type"] == "volume")
+    {
+        if !target["Mounts"].as_array().into_iter().flatten().any(|m| {
+            ["Type", "Name", "Destination", "RW"]
+                .iter()
+                .all(|key| m[key] == mount[key])
+        }) {
+            return Err("Container volume mount verification failed".into());
+        }
+    }
+    Ok(())
+}
+
 fn migrate_container(
     from: &Client,
     to: &Client,
     id: &str,
+    destination_defaults: bool,
     owner: &str,
     created: &mut Owned<'_>,
     progress: &impl Fn(&str),
@@ -444,14 +498,50 @@ fn migrate_container(
     for v in &volumes {
         require_new(to, Kind::Volumes, v)?;
     }
-    if host["ShmSize"].as_u64().is_some_and(|size| size > 0)
-        && to.version().map_err(|e| e.message)?["Platform"]["Name"] == "podbag"
+    if destination_defaults {
+        let host = host.as_object_mut().unwrap();
+        host.remove("LogConfig");
+        host.remove("Ulimits");
+    }
+    let podbag = to.version().map_err(|e| e.message)?["Platform"]["Name"] == "podbag";
+    if podbag
+        && matches!(
+            config["StopSignal"].as_str(),
+            Some("15" | "SIGTERM" | "TERM")
+        )
     {
+        config.as_object_mut().unwrap().remove("StopSignal");
+    }
+    if podbag && host["ShmSize"].as_u64().is_some_and(|size| size > 0) {
         let size = host["ShmSize"].as_u64().unwrap();
         if host["Tmpfs"]["/dev/shm"].is_null() {
             host["Tmpfs"]["/dev/shm"] = json!(format!("size={size},mode=1777,nosuid,nodev,noexec"));
         }
         host.as_object_mut().unwrap().remove("ShmSize");
+    }
+    // Cgroup v2 has no per-container swappiness control. Podman serializes the absent value as zero.
+    if host["MemorySwappiness"] == 0
+        && from.call("GET", "/info", None).map_err(|e| e.message)?["CgroupVersion"] == "2"
+    {
+        host.as_object_mut().unwrap().remove("MemorySwappiness");
+    }
+    // Docker represents isolated PID and UTS namespaces with the empty mode.
+    for key in ["PidMode", "UTSMode"] {
+        if host[key] == "private" {
+            host.as_object_mut().unwrap().remove(key);
+        }
+    }
+    if host["Runtime"] == "oci" {
+        host.as_object_mut().unwrap().remove("Runtime");
+    }
+    // Podman's inspect API uses libc names. Docker's create API takes lowercase names.
+    for limit in host["Ulimits"].as_array_mut().into_iter().flatten() {
+        if let Some(name) = limit["Name"]
+            .as_str()
+            .and_then(|s| s.strip_prefix("RLIMIT_"))
+        {
+            limit["Name"] = json!(name.to_ascii_lowercase());
+        }
     }
     host["Binds"] = Value::Null;
     host["Mounts"] = json!(mounts);
@@ -486,13 +576,14 @@ fn migrate_container(
         "/commit?container={}&repo={repo}&tag={owner}",
         encode(field(&spec, "Id")?)
     );
-    let (res, _) = from
-        .request("POST", &path, None, None)
-        .map_err(|e| e.message)?;
-    res.bytes(1 << 20).map_err(|e| e.to_string())?;
     let mut source = Owned::new(from);
+    require_new(from, Kind::Images, &image)?;
     source.add(Kind::Images, &image);
     let result = (|| {
+        let (res, _) = from
+            .request("POST", &path, None, None)
+            .map_err(|e| e.message)?;
+        res.bytes(1 << 20).map_err(|e| e.to_string())?;
         copy_image(from, to, &image)?;
         created.add(Kind::Images, &image);
         for volume in volumes {
@@ -520,10 +611,7 @@ fn migrate_container(
         let checked = to
             .inspect(Kind::Containers, target)
             .map_err(|e| e.message)?;
-        if field(&checked, "Name")?.trim_start_matches('/') != name {
-            return Err("Container name verification failed".into());
-        }
-        Ok(())
+        verify_container(&spec, &checked)
     })();
     with_cleanup(result, source.clean())
 }
@@ -533,6 +621,7 @@ pub fn migrate(
     to: &Client,
     kind: Kind,
     id: &str,
+    destination_defaults: bool,
     progress: impl Fn(&str),
 ) -> Result<(), String> {
     progress("prepare");
@@ -552,11 +641,40 @@ pub fn migrate(
             progress("files");
             copy_volume(from, to, id, &owner, &mut dest)
         }
-        Kind::Containers => migrate_container(from, to, id, &owner, &mut dest, &progress),
+        Kind::Containers => migrate_container(
+            from,
+            to,
+            id,
+            destination_defaults,
+            &owner,
+            &mut dest,
+            &progress,
+        ),
         Kind::Networks => Err("Select a container, image or volume".into()),
     };
     if result.is_err() {
         return with_cleanup(result, dest.clean());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verifies_the_created_container_after_engine_normalization() {
+        let source = json!({"Name":"/demo","Config":{"Cmd":["true"],"Env":["PORT=80"]},
+            "Mounts":[{"Type":"volume","Name":"files","Destination":"/files","RW":false}]});
+        let mut target = source.clone();
+        target["Config"]["Env"] = json!(["PORT=80", "HOME=/root"]);
+        target["Config"]["WorkingDir"] = json!("/");
+        target["Config"]["Entrypoint"] = json!([]);
+        verify_container(&source, &target).unwrap();
+        target["Mounts"][0]["RW"] = json!(true);
+        assert!(verify_container(&source, &target).is_err());
+        target["Mounts"] = source["Mounts"].clone();
+        target["Config"]["Env"] = json!(["PORT=81"]);
+        assert!(verify_container(&source, &target).is_err());
+    }
 }

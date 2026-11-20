@@ -27,6 +27,8 @@ pub struct Request {
     source: String,
     destination: String,
     kind: String,
+    #[serde(default)]
+    destination_defaults: bool,
     name: String,
     #[serde(default)]
     uid: String,
@@ -80,6 +82,7 @@ pub fn migrate(
                 &client(&state, &request.destination)?,
                 kind,
                 &request.name,
+                request.destination_defaults,
                 progress,
             )
         }

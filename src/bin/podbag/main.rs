@@ -26,6 +26,7 @@ fn migrate(
     to: podbag::client::Choice,
     kind: &str,
     name: &str,
+    destination_defaults: bool,
 ) -> i32 {
     use podbag::client::{Client, Kind, Target, migration, podbag_program};
     let connect =
@@ -37,9 +38,14 @@ fn migrate(
         _ => return 2,
     };
     let result = (|| {
-        migration::migrate(&connect(&from)?, &connect(&to)?, kind, name, |phase| {
-            eprintln!("{phase}")
-        })
+        migration::migrate(
+            &connect(&from)?,
+            &connect(&to)?,
+            kind,
+            name,
+            destination_defaults,
+            |phase| eprintln!("{phase}"),
+        )
     })();
     match result {
         Ok(()) => {
@@ -382,7 +388,8 @@ fn dispatch(cmd: Cmd) -> i32 {
             to,
             kind,
             name,
-        } => migrate(from, to, &kind, &name),
+            destination_defaults,
+        } => migrate(from, to, &kind, &name, destination_defaults),
         Cmd::Pull { image } => image::pull(&image),
         Cmd::Push { image } => registry::push(&image),
         Cmd::Tag { source, target } => registry::tag(&source, &target),
@@ -535,7 +542,8 @@ fn dispatch(cmd: Cmd) -> i32 {
             to,
             kind,
             name,
-        } => migrate(from, to, &kind, &name),
+            destination_defaults,
+        } => migrate(from, to, &kind, &name, destination_defaults),
         Cmd::Pull { image } => image::pull(&image),
         Cmd::Push { image } => registry::push(&image),
         Cmd::Tag { source, target } => registry::tag(&source, &target),

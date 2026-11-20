@@ -1,4 +1,5 @@
 {
+  "migration.defaults": "Dùng cấu hình nhật ký và giới hạn tiến trình của đích",
   "migration.allEngines": "Tất cả bộ máy cục bộ",
   "migration.unavailable": "Tài nguyên không khả dụng",
   "migration.title": "Di chuyển",

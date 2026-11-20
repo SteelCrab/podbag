@@ -39,7 +39,7 @@ function renderMigration(main) {
         h("span", { text: kindLabel(kind) }), h("span", { class: "count", text: rows.length })),
         rows.map(item => h("button", { type: "button", class: "migration-row", "data-kind": kind, "data-name": item.name,
           title: t("migration.review"), onclick: () => confirmMigration(item, choices, reload) },
-          h("span", { class: "migration-name", text: item.label }), h("span", { class: "migration-origin", text: item.namespace || item.sourceLabel }), icon("forward"))));
+          h("span", { class: "migration-name", text: item.label }), h("span", { class: "migration-origin", text: migrationScope.cluster ? (migrationScope.namespace ? "" : item.namespace) : item.sourceLabel }), icon("forward"))));
     }));
     const namespaces = [...new Set(items.map(i => i.namespace).filter(Boolean))].sort();
     scope.replaceChildren(opt(["", t("kube.allNamespaces")]), ...namespaces.map(n => opt([n, n])));
@@ -56,7 +56,7 @@ function renderMigration(main) {
   async function read(source, kind) {
     if (migrationScope.cluster) {
       const { items } = await API.kubeList(kind, true, source);
-      return items.map(({ metadata }) => ({ name: metadata.name, label: metadata.name, uid: metadata.uid, namespace: metadata.namespace }));
+      return items.filter(({ metadata }) => !metadata.deletionTimestamp && !metadata.ownerReferences?.length).map(({ metadata }) => ({ name: metadata.name, label: metadata.name, uid: metadata.uid, namespace: metadata.namespace }));
     }
     const rows = await API.migrationList(source, kind);
     if (kind === "images") return rows.flatMap(i => {
@@ -128,9 +128,11 @@ function confirmMigration(item, choices, reload) {
   const target = h("select", { id: "migration-target", "aria-label": t("migration.to") },
     choices.filter(([value]) => value !== item.source).map(([value, text]) => h("option", { value, text })));
   const custom = migrationSocket();
-  const namespace = h("input", { id: "migration-namespace", value: item.namespace, "aria-label": t("migration.namespace") });
+  const namespace = h("input", { id: "migration-namespace", type: "text", value: item.namespace, "aria-label": t("migration.namespace") });
   const destination = h("dd", {}, target, custom);
   const destNs = h("dd", {}, namespace);
+  const defaults = h("input", { type: "checkbox" });
+  const defaultsField = h("label", { class: "check", hidden: item.kind !== "containers" }, defaults, t("migration.defaults"));
   const route = h("dl", { class: "fields" },
     h("dt", { text: t("migration.resource") }), h("dd", { text: item.label }),
     h("dt", { text: t("migration.from") }), h("dd", { text: [item.sourceLabel, item.namespace].filter(Boolean).join(" / ") }),
@@ -150,6 +152,8 @@ function confirmMigration(item, choices, reload) {
     if (dialog.dataset.phase !== "confirm") return;
     request.destination = target.value === "custom" ? custom.value.trim() : target.value;
     request.destinationNamespace = namespace.value.trim();
+    request.destinationDefaults = defaults.checked;
+    defaultsField.hidden = true;
     destination.textContent = target.value === "custom" ? request.destination : target.selectedOptions[0].textContent;
     destNs.textContent = request.destinationNamespace;
     state("running", "refresh", "migration.running");
@@ -178,7 +182,7 @@ function confirmMigration(item, choices, reload) {
   target.onchange = custom.oninput = namespace.oninput = validate;
   validate();
   actions.append(cancel, start);
-  dialog.append(h("div", { class: "migration-dialog-body" }, mark, title, route, progress, status, actions));
+  dialog.append(h("div", { class: "migration-dialog-body" }, mark, title, route, defaultsField, progress, status, actions));
   dialog.addEventListener("cancel", e => { if (dialog.dataset.phase === "running") e.preventDefault(); });
   dialog.addEventListener("close", () => dialog.remove(), { once: true });
   document.body.append(dialog);

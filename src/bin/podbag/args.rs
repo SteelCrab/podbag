@@ -174,6 +174,9 @@ pub enum Cmd {
         from: podbag::client::Choice,
         #[arg(long, value_parser = parse_engine)]
         to: podbag::client::Choice,
+        /// Use the destination logging driver and process limits for the copied container
+        #[arg(long)]
+        destination_defaults: bool,
         #[arg(value_parser = ["container", "image", "volume"])]
         kind: String,
         name: String,

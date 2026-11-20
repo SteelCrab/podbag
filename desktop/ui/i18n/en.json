@@ -1,4 +1,5 @@
 {
+  "migration.defaults": "Use destination logging and process limits",
   "migration.allEngines": "All local engines",
   "migration.unavailable": "Unavailable resources",
   "migration.title": "Migrate",

@@ -35,7 +35,9 @@ frame.addEventListener("load", async () => {
     by("migration-source").value = "docker";
     by("migration-source").dispatchEvent(new win.Event("change"));
     await wait(() => row() && !by("migration-source").disabled);
-    check(!by("engine-switch") && !doc.querySelector(".topbar .brand"), "Remove window branding and engine selector");
+    const mark = doc.querySelector("#window-bar > .app-icon");
+    check(mark?.complete && mark.naturalWidth > 0 && !by("window-bar").textContent.toLowerCase().includes("podbag"), "Show only the app icon in the toolbar");
+    check(!by("engine-switch"), "Remove the window engine selector");
     const total = doc.querySelectorAll(".migration-row").length;
     check(Number(doc.querySelector("#nav .count").textContent) === total, "Count the listed resources");
     check([...doc.querySelectorAll(".migration-group")].every(g => g.querySelector(".migration-row")), "Hide empty groups");

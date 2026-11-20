@@ -1,4 +1,5 @@
 {
+  "migration.defaults": "Usar el registro y los límites de procesos del destino",
   "migration.allEngines": "Todos los motores locales",
   "migration.unavailable": "Recursos no disponibles",
   "migration.title": "Migrar",

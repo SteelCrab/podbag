@@ -1,4 +1,5 @@
 {
+  "migration.defaults": "移行先のログ設定とプロセス制限を使用",
   "migration.allEngines": "すべてのローカルエンジン",
   "migration.unavailable": "取得できないリソース",
   "migration.title": "移行",

@@ -1,4 +1,5 @@
 {
+  "migration.defaults": "使用目标引擎的日志设置和进程限制",
   "migration.allEngines": "所有本地引擎",
   "migration.unavailable": "无法获取的资源",
   "migration.title": "迁移",

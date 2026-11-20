@@ -1,4 +1,5 @@
 {
+  "migration.defaults": "Gamitin ang logging at mga limitasyon sa proseso ng destinasyon",
   "migration.allEngines": "Lahat ng lokal na engine",
   "migration.unavailable": "Hindi magagamit na mga resource",
   "migration.title": "Ilipat",
