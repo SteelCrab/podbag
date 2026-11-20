@@ -290,6 +290,24 @@ pub enum SystemCmd {
     /// For programs that cannot reach the socket themselves, such as the desktop app on
     /// Windows. It starts the service when none runs.
     DialStdio,
+    /// Where the docker command goes, and switch it to podbag or back
+    Docker {
+        #[command(subcommand)]
+        cmd: DockerCmd,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum DockerCmd {
+    /// Show where the docker command goes (podbag, Docker Desktop, OrbStack, …)
+    Status,
+    /// Make the docker command use podbag (a docker context named podbag)
+    ///
+    /// It creates the context when it is missing and remembers the context in use.
+    /// Other contexts are never changed or removed.
+    Use,
+    /// Go back to the context in use before `podbag system docker use`
+    Restore,
 }
 
 #[derive(Args)]

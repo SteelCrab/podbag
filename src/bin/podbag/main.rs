@@ -2,6 +2,7 @@ mod args;
 mod check;
 #[cfg(unix)]
 mod container;
+mod dockerctx;
 mod image;
 mod network;
 #[cfg(unix)]
@@ -47,6 +48,8 @@ fn windows_front(args: Vec<String>) -> Option<i32> {
         Some("vm") => Some(podbag::windows::vm_command(&args[1..])),
         // podbag.exe itself is replaced; the next command updates the engine in WSL.
         None | Some("-h" | "--help" | "help" | "-V" | "--version" | "upgrade") => None,
+        // Windows' docker CLI and its contexts.
+        Some("system") if args.get(1).is_some_and(|a| a == "docker") => None,
         // Checked here first: help and wrong arguments need no WSL.
         Some(_) => match parse(&args) {
             Err(e) => e.exit(),
@@ -134,6 +137,8 @@ fn macos_front(args: Vec<String>) -> Option<i32> {
         // Clients of the Docker API: they use the Mac's docker.sock, which starts the VM.
         Some("tui") => None,
         Some("system") if args.get(1).is_some_and(|a| a == "dial-stdio") => None,
+        // The Mac's docker CLI and its contexts.
+        Some("system") if args.get(1).is_some_and(|a| a == "docker") => None,
         // Helpers the library starts on this Mac (`__store`, `__shim`, …) run here.
         Some(helper) if helper.starts_with("__") => None,
         // Checked here first: help and wrong arguments need no VM.

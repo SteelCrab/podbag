@@ -119,15 +119,15 @@ pub fn parse_idle(text: &str) -> Result<u64, String> {
 pub fn idle_text(secs: u64) -> String {
     match secs {
         0 => "never".into(),
-        s if s % 3600 == 0 => format!("{}h", s / 3600),
-        s if s % 60 == 0 => format!("{}m", s / 60),
+        s if s.is_multiple_of(3600) => format!("{}h", s / 3600),
+        s if s.is_multiple_of(60) => format!("{}m", s / 60),
         s => format!("{s}s"),
     }
 }
 
 /// A memory size for people: `2 GiB`, `1536 MiB`.
 pub fn memory_text(mib: u64) -> String {
-    if mib % 1024 == 0 {
+    if mib.is_multiple_of(1024) {
         format!("{} GiB", mib / 1024)
     } else {
         format!("{mib} MiB")

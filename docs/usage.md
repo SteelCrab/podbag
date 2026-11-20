@@ -287,11 +287,24 @@ podbag tui                                   # containers, images, volumes and n
 - It stops after 60 seconds without a connection (`--timeout`; `0` means never).
 
 ```sh
-podbag system service &                                         # without root
-export DOCKER_HOST=unix://$XDG_RUNTIME_DIR/podbag/docker.sock   # as root: /run/podbag/docker.sock
+podbag system service &         # without root
+podbag system docker use        # the docker command now goes to podbag
 docker run --rm -it alpine sh
-docker context create podbag --docker host=$DOCKER_HOST         # or keep it as a context
+podbag system docker restore    # back to the context you had (Docker Desktop, …)
 ```
+
+- `podbag system docker status` shows where the `docker` command goes: podbag, Docker
+  Desktop, OrbStack, Colima, or another host.
+- `use` makes a docker context named `podbag` when there is none, remembers the context in
+  use, and makes `podbag` the current one. `restore` goes back. Other contexts are never
+  changed or removed. It needs the docker CLI.
+- `DOCKER_HOST` wins over contexts. In a shell that sets it, `status` says so.
+- The same switch is in the TUI (`D`) and the desktop app.
+- By hand, it is: `docker context create podbag --docker
+  host=unix://$XDG_RUNTIME_DIR/podbag/docker.sock` (as root: `/run/podbag/docker.sock`),
+  then `docker context use podbag`. Or set
+  `DOCKER_HOST=unix://$XDG_RUNTIME_DIR/podbag/docker.sock` in one shell.
+- On Windows, the docker CLI cannot reach podbag's API yet.
 
 - With systemd, the service can start on the first connection:
   - `podbag system service --print-units` prints a socket unit and a service unit,
@@ -549,7 +562,7 @@ podbag vm set --memory 4096M --restart     # apply now
 ### docker CLI, Compose and buildx
 
 ```sh
-export DOCKER_HOST=unix://$HOME/.podbag/run/docker.sock
+podbag system docker use        # or: export DOCKER_HOST=unix://$HOME/.podbag/run/docker.sock
 docker run --rm alpine echo hi
 docker compose up -d
 docker buildx create --use --driver docker-container
