@@ -509,7 +509,9 @@ dialog input[type="text"] { width: 100%; }
 
 @media (prefers-reduced-motion: no-preference) {
   .nav-item, .icon-button, .button, .tab { transition: background-color 0.12s, color 0.12s, border-color 0.12s; }
-  .star-prompt-action > .icon { animation: star-pulse 200ms cubic-bezier(.45, 0, .55, 1); }
+}
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+  .star-prompt-action:hover > .icon { animation: star-pulse 200ms cubic-bezier(.45, 0, .55, 1); }
 }
 @keyframes star-pulse {
   0%, 100% { transform: scale(1); }
