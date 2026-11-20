@@ -65,6 +65,13 @@ pub fn text(lang: &str, key: &str, n: Option<usize>) -> String {
     }
 }
 
+/// The text for `key`, with each `{name}` replaced by its value.
+pub fn fill(lang: &str, key: &str, vars: &[(&str, &str)]) -> String {
+    vars.iter().fold(text(lang, key, None), |s, (name, value)| {
+        s.replace(&format!("{{{name}}}"), value)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,5 +131,13 @@ mod tests {
         assert_eq!(text("en", "tray.running", Some(3)), "Running: 3");
         assert_eq!(text("xx", "tray.open", None), "Open podbag");
         assert_eq!(text("en", "no.such.key", None), "no.such.key");
+        assert_eq!(
+            fill("en", "tray.update", &[("version", "0.2.0")]),
+            "Update available (0.2.0)…"
+        );
+        assert_eq!(
+            fill("en", "tray.engine", &[("name", "Docker")]),
+            "Engine: Docker"
+        );
     }
 }

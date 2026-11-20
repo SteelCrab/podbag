@@ -4,6 +4,7 @@
 
 Un motor de contenedores sin daemon, en un solo binario estático.
 Guarda las imágenes archivo por archivo: un archivo que comparten muchas imágenes se guarda una sola vez.
+Puedes usar la línea de comandos o [Podbag Desktop](#podbag-desktop).
 
 [![CI](https://github.com/SteelCrab/podbag/actions/workflows/ci.yml/badge.svg)](https://github.com/SteelCrab/podbag/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/SteelCrab/podbag)](https://github.com/SteelCrab/podbag/releases/latest)
@@ -20,6 +21,7 @@ Guarda las imágenes archivo por archivo: un archivo que comparten muchas imáge
 ## Contenido
 
 - [Características](#características)
+- [Podbag Desktop](#podbag-desktop)
 - [Instalación](#instalación)
 - [Uso](#uso)
 - [Rendimiento](#rendimiento)
@@ -47,6 +49,14 @@ Guarda las imágenes archivo por archivo: un archivo que comparten muchas imáge
 - Los almacenes por capas (Docker, Podman, Kiri) guardan una capa una sola vez solo si toda la capa es igual. Si un solo archivo es distinto, se guarda otra vez toda la capa, con los archivos que comparte con otras capas.
 - podbag guarda cada archivo una sola vez. Una imagen es una lista de rutas que apuntan a esos archivos.
 - Con 8 servicios Spring en 2 versiones: 902 MiB de disco frente a 2.970 MiB de Docker, y 324 MiB de caché de páginas frente a 982 MiB.
+
+## Podbag Desktop
+
+Gestiona contenedores, imágenes, volúmenes y redes en Linux y macOS. La compatibilidad con Windows es experimental y requiere WSL 2. Desde la lista puedes iniciar, detener o reiniciar un contenedor. Ábrelo para ver sus registros en tiempo real.
+
+![Podbag Desktop muestra tres contenedores de ejemplo en ejecución y dos detenidos, con sus imágenes y puertos publicados](docs/images/desktop-containers-en.png)
+
+[Instala un paquete para Linux](docs/build.md#linux-desktop-packages) o [compila la aplicación de escritorio desde el código fuente](docs/usage.md#build-the-desktop-app).
 
 ## Instalación
 

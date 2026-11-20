@@ -4,6 +4,7 @@
 
 Isang container engine na walang daemon, sa iisang static binary.
 Iniimbak nito ang mga image nang file-by-file: ang file na ginagamit ng maraming image ay iniimbak nang isang beses lang.
+Puwede mong gamitin ang command line o ang [Podbag Desktop](#podbag-desktop).
 
 [![CI](https://github.com/SteelCrab/podbag/actions/workflows/ci.yml/badge.svg)](https://github.com/SteelCrab/podbag/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/SteelCrab/podbag)](https://github.com/SteelCrab/podbag/releases/latest)
@@ -20,6 +21,7 @@ Iniimbak nito ang mga image nang file-by-file: ang file na ginagamit ng maraming
 ## Nilalaman
 
 - [Mga tampok](#mga-tampok)
+- [Podbag Desktop](#podbag-desktop)
 - [Pag-install](#pag-install)
 - [Paggamit](#paggamit)
 - [Mga benchmark](#mga-benchmark)
@@ -47,6 +49,14 @@ Iniimbak nito ang mga image nang file-by-file: ang file na ginagamit ng maraming
 - Isang beses lang iniimbak ng mga layer store (Docker, Podman, Kiri) ang isang layer kapag pareho ang buong layer. Kapag may isang file na iba, iniimbak ulit ang buong layer, kasama ang mga file na pareho sa ibang layer.
 - Iniimbak ng podbag ang bawat file nang isang beses. Ang image ay listahan ng mga path na tumuturo sa mga file.
 - Para sa 8 Spring service sa 2 release: 902 MiB sa disk laban sa 2,970 MiB ng Docker, at 324 MiB na page cache laban sa 982 MiB.
+
+## Podbag Desktop
+
+Sa Linux at macOS, puwede mong pamahalaan ang mga container, image, volume at network. Eksperimental ang suporta sa Windows at kailangan nito ng WSL 2. Mula sa listahan, puwede mong simulan, ihinto o i-restart ang isang container. Buksan ito para makita ang mga log habang dumarating ang mga ito.
+
+![Listahan sa Podbag Desktop ng tatlong tumatakbo at dalawang nakahintong halimbawa ng container, kasama ang mga image at port ng mga ito](docs/images/desktop-containers-en.png)
+
+[Mag-install ng package para sa Linux](docs/build.md#linux-desktop-packages) o [i-build ang desktop app mula sa source](docs/usage.md#build-the-desktop-app).
 
 ## Pag-install
 

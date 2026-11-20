@@ -179,10 +179,7 @@ fn the_keeper_leaves_after_its_linger() {
         "left behind: {:?}",
         processes(&sb)
     );
-    assert!(
-        !sb.runtime().join("keeper.sock").exists(),
-        "the socket stayed"
-    );
+    assert!(keeper_socket(&sb.runtime()).is_none(), "the socket stayed");
     // And the next run starts a new one.
     ok(&sb.run(&["true"]));
 }
@@ -872,8 +869,25 @@ fn id_of(sb: &Sandbox, name: &str) -> String {
     inspect(sb, name)["id"].as_str().unwrap_or("").to_string()
 }
 
+/// The keeper sockets in a runtime directory (`keeper-<build>.sock`).
+fn keeper_sockets(runtime: &std::path::Path) -> Vec<String> {
+    std::fs::read_dir(runtime)
+        .map(|d| {
+            d.filter_map(|e| e.ok()?.file_name().into_string().ok())
+                .filter(|n| n.starts_with("keeper-") && n.ends_with(".sock"))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The keeper's socket in a runtime directory, if one is there.
+fn keeper_socket(runtime: &std::path::Path) -> Option<String> {
+    keeper_sockets(runtime).into_iter().next()
+}
+
 /// Connect to the socket `name` in `dir` (a path too long for a socket address goes
 /// through an open descriptor of the directory).
+
 fn connect_in(dir: &std::path::Path, name: &str) -> std::os::unix::net::UnixStream {
     use std::os::fd::AsRawFd;
     let handle = std::fs::File::open(dir).unwrap();
@@ -932,9 +946,13 @@ fn a_killed_keeper_ends_a_foreground_container() {
     );
 }
 
+/// After an upgrade: the old program's keeper keeps watching its container, and the new
+/// program starts a keeper of its own (`keeper-<build>.sock`) instead of being refused by
+/// the old one. Refused, each of its starts took the slow way (a shim of its own) for as
+/// long as an old container ran: about twice as slow.
 #[test]
-fn another_build_does_not_use_this_keeper() {
-    let sb = kept(300);
+fn another_build_gets_its_own_keeper() {
+    let sb = kept(5000);
     detached(&sb, "old", "sleep 300");
     assert!(wait_for(Duration::from_secs(5), || processes(&sb) == (1, 0)));
     // The same program in another file: another build, as far as the keeper can tell.
@@ -963,12 +981,18 @@ fn another_build_does_not_use_this_keeper() {
     let started = out.status.code();
     let err = stderr(&out);
     let new = id_of(&sb, "new");
-    // The other build watches its container itself; the keeper keeps the one it has.
-    let shims = wait_for(Duration::from_secs(5), || own_shims(&new) == 1);
+    // Two keepers, one per build; each watches its own container.
+    let keepers = wait_for(Duration::from_secs(5), || processes(&sb) == (2, 0));
+    let sockets = keeper_sockets(&sb.runtime()).len();
+    let shims = own_shims(&new);
     op(&sb, &["rm", "-f", "old", "new"]);
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(started, Some(0), "{err}");
-    assert!(shims, "the other build's container has no shim of its own");
+    assert!(keepers, "not one keeper per build: {:?}", processes(&sb));
+    if !root_mode() {
+        assert_eq!(sockets, 2);
+    }
+    assert_eq!(shims, 0, "the new build's container has a shim of its own");
 }
 
 #[test]
@@ -981,7 +1005,7 @@ fn silent_connections_do_not_stall_the_keeper() {
     let a = id_of(&sb, "a");
     // Connections that say nothing: to the keeper, and to a container's control socket.
     let quiet: Vec<_> = (0..3)
-        .map(|_| connect_in(&sb.runtime(), "keeper.sock"))
+        .map(|_| connect_in(&sb.runtime(), &keeper_socket(&sb.runtime()).unwrap()))
         .chain((0..3).map(|_| connect_in(&sb.runtime().join("containers").join(&a), "shim.sock")))
         .collect();
     // Others are served meanwhile.
@@ -990,7 +1014,7 @@ fn silent_connections_do_not_stall_the_keeper() {
     // A request cut in the middle is no better.
     let mut half = connect_in(&sb.runtime().join("containers").join(&a), "shim.sock");
     half.write_all(br#"{"op":"ki"#).unwrap();
-    let mut cut = connect_in(&sb.runtime(), "keeper.sock");
+    let mut cut = connect_in(&sb.runtime(), &keeper_socket(&sb.runtime()).unwrap());
     cut.write_all(&[0, 0, 1]).unwrap();
     let took = time_a_run(&sb);
     assert!(took < Duration::from_millis(1500), "a start took {took:?}");

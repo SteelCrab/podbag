@@ -19,6 +19,7 @@ The [README](../README.md) shows how to install podbag. This page shows what it 
 - [Swarm mode](#swarm-mode)
 - [macOS](#macos)
 - [Windows (experimental)](#windows-experimental)
+- [Update podbag](#update-podbag)
 - [Requirements on Linux](#requirements-on-linux)
 - [AppArmor](#apparmor)
 
@@ -504,11 +505,24 @@ podbag build -t myapp - < Dockerfile               # only a Dockerfile, no conte
 - It stops after 60 seconds without a connection (`--timeout`; `0` means never).
 
 ```sh
-podbag system service &                                         # without root
-export DOCKER_HOST=unix://$XDG_RUNTIME_DIR/podbag/docker.sock   # as root: /run/podbag/docker.sock
+podbag system service &         # without root
+podbag system docker use        # the docker command now goes to podbag
 docker run --rm -it alpine sh
-docker context create podbag --docker host=$DOCKER_HOST         # or keep it as a context
+podbag system docker restore    # back to the context you had (Docker Desktop, …)
 ```
+
+- `podbag system docker status` shows where the `docker` command goes: podbag, Docker
+  Desktop, OrbStack, Colima, or another host.
+- `use` makes a docker context named `podbag` when there is none, remembers the context in
+  use, and makes `podbag` the current one. `restore` goes back. Other contexts are never
+  changed or removed. It needs the docker CLI.
+- `DOCKER_HOST` wins over contexts. In a shell that sets it, `status` says so.
+- The same switch is in the TUI (`D`) and the desktop app.
+- By hand, it is: `docker context create podbag --docker
+  host=unix://$XDG_RUNTIME_DIR/podbag/docker.sock` (as root: `/run/podbag/docker.sock`),
+  then `docker context use podbag`. Or set
+  `DOCKER_HOST=unix://$XDG_RUNTIME_DIR/podbag/docker.sock` in one shell.
+- On Windows, the docker CLI cannot reach podbag's API yet.
 
 - With systemd, the service can start on the first connection:
   - `podbag system service --print-units` prints a socket unit and a service unit,
@@ -622,8 +636,18 @@ docker compose build --builder podbag
 
 ### Which engine they use
 
-- `DOCKER_HOST`, when it is a Unix socket (`unix://…`).
-- Otherwise podbag's own socket:
+- They manage podbag, Docker (Docker Engine or Docker Desktop), or a socket you name.
+- The order:
+  1. `podbag tui --engine podbag|docker|unix:///path`, for one run.
+  2. The saved choice. Both UIs read and write it in `ui.json`: `~/.podbag/ui.json` on
+     macOS, `~/.config/podbag/ui.json` on Linux, `%LOCALAPPDATA%\podbag\ui.json` on
+     Windows.
+  3. `DOCKER_HOST`, when it is a Unix socket (`unix://…`).
+  4. podbag's own socket.
+- Docker is found as the docker CLI finds it: `DOCKER_HOST`, the current context, then the
+  usual sockets.
+- Docker is never started. When it does not answer, the UIs say how to start it.
+- podbag's own socket:
   - Linux: `$XDG_RUNTIME_DIR/podbag/docker.sock` (as root: `/run/podbag/docker.sock`).
     When nothing answers, they start `podbag system service`. It stops a minute after the
     last client.
@@ -639,6 +663,13 @@ docker compose build --builder podbag
 - The lists change as the engine's events come. Without events, they are read every 2
   seconds.
 - It fits a terminal of 80×24.
+- The top line shows the engine. On macOS, with podbag, it also shows the VM's state
+  (running, standby, starting or stopped). It reads the state from files, so it never
+  wakes the VM.
+- The top line also shows where the `docker` command goes, for example
+  `docker → Docker Desktop`. It is hidden when the docker CLI is not installed.
+- When a newer podbag is out, the bottom line says "Update x.y.z available".
+  `PODBAG_NO_UPDATE_CHECK=1` turns the check off.
 
 | Key | What it does |
 |---|---|
@@ -647,17 +678,72 @@ docker compose build --builder podbag
 | `Enter` or `i` | All details (inspect) |
 | `s`, `x`, `r` | Start, stop, restart a container |
 | `l` | Logs, as they come |
-| `e` | A shell: `podbag exec -it <container> sh`, then back to the TUI |
+| `e` | A shell in the container, then back to the TUI |
 | `d` | Remove (it asks first) |
-| `p` | Pull an image (in Images) |
+| `p` | Pull an image (in Images). `Tab` changes where from |
 | `c` | Remove all that is not used (it asks first) |
 | `/` | Search. `Esc` clears it |
+| `E` | Switch between podbag and Docker. The choice is saved |
+| `D` | Point the `docker` command at podbag, or back (it asks first) |
+| `m` | Mouse on or off |
 | `?` | All keys |
 | `q` | Quit |
 
+#### The engine
+
+- `E`, or a click on the engine's name, switches between podbag and Docker. From a socket,
+  it goes to podbag.
+- The choice is saved in `ui.json`, so the next `podbag tui` and the desktop app use it
+  too.
+- The shell (`e`) is `podbag exec -it <container> sh` with podbag. With Docker, it is
+  `docker exec -it <container> sh`. Without the docker CLI, there is no `e`.
+- With Docker, pause (`p`), rename (`n`), stats and top show, because Docker has them.
+
+#### The docker command
+
+- `D`, or a click on `docker → …`, points the `docker` command at podbag. It asks first.
+- It makes a docker context named `podbag` and uses it. The context in use before is
+  saved in `ui.json`. Other contexts stay as they are.
+- At podbag, `D` goes back to the context before (`default` when none is saved).
+- When `DOCKER_HOST` is set, contexts do not apply. Shells that set it keep using it.
+- `podbag system docker status|use|restore` does the same in a shell.
+
+#### Pull
+
+- `p` in Images opens the pull form.
+- `Tab` cycles through the registry presets and the custom registry. `Shift+Tab` goes back.
+- The form shows who is logged in there. It reads the docker CLI's logins. It never shows
+  a password.
+- ECR, GAR, ACR and custom registries need a host. Type it, then press `Enter`.
+- ECR, GAR and ACR also show the command to log in.
+- A short name gets the registry's host: `me/app:1` from GitHub is `ghcr.io/me/app:1`.
+- From Docker Hub, typing searches Docker Hub, when the engine can search. `↑` `↓` choose
+  a result. podbag cannot search yet, so there is no search with podbag.
+- The pull sends your login for that registry to the engine.
+
+#### The mouse
+
+- Click a tab to switch the list. Click a row to select it.
+- Double-click a row to see all its details (like `Enter`).
+- Click a key at the bottom to do what the key does.
+- Click Yes or No in a question.
+- The wheel scrolls the list, the details and the logs.
+- While the TUI has the mouse, the terminal does not select text. To select text, hold
+  `Shift` while you drag. Some macOS terminals use `Option` instead, for example iTerm2.
+  In Terminal.app, View > Allow Mouse Reporting (`⌘R`) gives the mouse back to the
+  terminal.
+- `m` turns the mouse off and on. `podbag tui --no-mouse` starts with it off.
+
 ### podbag-desktop
 
-- A window with Containers, Images, Volumes, Networks and Settings.
+- A window with Containers, Images, Volumes, Networks, Kubernetes and Settings.
+- Open Kubernetes in the sidebar, or expand it and select **Pods** or **Services**.
+  The sidebar and the page tabs show the same selection.
+- Install `kubectl` on the desktop host and
+  select a context with `kubectl config use-context`. The view starts in that context's
+  namespace. Select **All namespaces** to list resources across the cluster.
+- Search the Kubernetes list or select a name to inspect the object's JSON. Refresh
+  reads the active context again. These read-only views also work when the engine is off.
 - On macOS, the window toolbar has Refresh and Settings on the right.
   Drag the space between the title and the buttons to move the window.
 
@@ -678,6 +764,96 @@ docker compose build --builder podbag
 - Languages: English, 한국어, 日本語, 简体中文, Filipino, Español and Tiếng Việt. The app
   follows the system language. Settings can change it.
 
+#### Engine switch
+
+- "This window: podbag / Docker" sits at the top of the sidebar and in Settings.
+- The choice is saved in `ui.json`. `podbag tui` uses the same choice.
+- Switching reloads the lists. The app never starts Docker. When Docker does not answer,
+  it says so: "Docker is not running. Start Docker Desktop."
+- With Docker, Open shell runs `docker exec -it <container> sh`. It is hidden when the
+  docker CLI is missing. Pause, rename, stats and top show when the engine has them.
+- The tray shows the engine in use.
+
+#### Sidebar
+
+- Drag its edge to change its width (160–360 px). A double click sets it back.
+- The sidebar button in the top bar makes it a narrow rail of icons. Keys: `⌃⌘S` on
+  macOS, `Ctrl+B` elsewhere.
+- Below about 720 px it becomes a rail by itself. It comes back when there is room.
+- The edge works with the keyboard: arrow keys change the width, `Home` and `End` go to
+  the limits, `Enter` hides or shows the sidebar.
+- The app keeps the width and the rail choice.
+- Back and forward: the buttons in the top bar, `⌘[` `⌘]` on macOS, `Alt+←` `Alt+→`
+  elsewhere. `⌘K` or `Ctrl+K` goes to the search box.
+
+#### VM card and status bar
+
+- The VM card (podbag on macOS and Windows) shows the VM's state, running containers,
+  CPU and memory, and Start or Stop. It reads `podbag vm status --json`, which wakes
+  nothing. It updates only while the window shows.
+- The status bar shows podbag's version, a new version when one is known, a Terminal
+  button, the engine's state, "N of M running", the VM's memory and where the `docker`
+  command goes.
+
+#### Settings
+
+- Settings opens from the sidebar, from the tray (Settings…), with `⌘,` on macOS and
+  with `Ctrl+,` elsewhere.
+- Virtual machine (podbag on macOS): the state, the settings in use, uptime and disk use.
+  Start, Stop and Restart. CPUs, memory and the idle power-off time (0 = never). Apply
+  saves them with `podbag vm set`.
+  - When the VM runs, Apply asks: Restart now (it says how many containers stop) or At
+    the next start.
+  - When an environment variable (`PODBAG_VM_CPUS`, …) sets a value, the app says so.
+  - Windows: the state, Start and Stop only. WSL's CPUs and memory are set for all
+    distributions in `.wslconfig`. podbag does not change them.
+- Updates: podbag's version and the app's version. Check for updates. The app also
+  checks when the window opens, at most once a day. While the window is closed, it asks
+  nothing.
+  - Update podbag runs `podbag upgrade --yes`. When podbag's folder needs administrator
+    rights, the app shows the command (`sudo <path> upgrade`) with Copy and Open terminal.
+  - The desktop app has no installer yet. It cannot update itself.
+- The tray shows "Update available (x.y.z)…" when one is known. It opens Updates.
+
+#### Pull panel
+
+- Pull image on Images opens it. `⌘⇧P` (macOS) or `Ctrl+Shift+P` opens it from any
+  page.
+- One field: type to search Docker Hub, or paste a full reference. `↑` `↓` move, `Enter`
+  pulls, `Esc` closes.
+- A search result asks for the tag (`latest` first), then pulls.
+- When the engine cannot search (podbag today), the panel says so. Type the full name.
+- Open the registry picker and search by service name or server. Choose **My registry**
+  to use any other Docker/OCI image registry supported by your engine. Enter the full
+  server name and optional port, then the repository and tag or digest.
+- Presets include Docker Hub and Hardened Images, GitHub, GitLab, Quay, Amazon ECR
+  (private and public), Azure Container Registry, Microsoft Artifact Registry, Google
+  Artifact Registry (including gcr.io), DigitalOcean, Oracle Cloud, Oracle Container
+  Registry, IBM, Alibaba, Tencent, Huawei, Scaleway, OVHcloud, Red Hat, SUSE, Kubernetes,
+  NVIDIA NGC, Chainguard and Cloudsmith. Harbor, JFrog Artifactory, Sonatype Nexus and
+  GitLab Self-Managed accept your installation's hostname. The Docker import list uses
+  that hostname to identify its images.
+- For Alibaba Cloud, search for **Alibaba ACR** or **Aliyun**. Copy the login server
+  from your instance in the Alibaba Cloud console. Personal and Enterprise Edition
+  servers, including regional and VPC endpoints, are recognized in the import list.
+- Log in asks for a user and a password or token. The password goes only to the login
+  program's stdin. The app does not keep it or show it. ECR, Google Artifact Registry
+  and ACR show their cloud's login command. For ACR, enter the full login server
+  (such as `contoso-hash.azurecr.io`). Sign in with `az acr login --name contoso`.
+- A private pull sends the login only to an engine on this computer.
+
+#### docker command
+
+- When `docker` goes to another engine (for example Docker Desktop), a banner says so:
+  what you run in a terminal does not show here.
+- Use podbag for docker points the `docker` command at podbag with podbag's own docker
+  context. Other contexts stay as they are. The banner, the status bar, Settings and the
+  tray all offer it. Switch back goes to the context in use before.
+- When `DOCKER_HOST` is set, shells that set it do not follow the switch. The app says so.
+- Without the docker CLI, the app says so and hides the switch.
+- Import from Docker (on Images) copies chosen images from Docker to podbag. It only
+  reads from Docker.
+
 ### Build the desktop app
 
 - It is a separate program in `desktop/` (Tauri 2). The `podbag` binary does not carry
@@ -693,6 +869,31 @@ cargo build --release -p podbag-desktop
 - It finds the `podbag` program next to itself, in `PATH`, or in `/usr/local/bin`,
   `/opt/homebrew/bin` and `~/.local/bin`. `PODBAG_BIN` sets another one.
 - There are no installers yet (.dmg, .msi, AppImage).
+
+#### Its name: podbag
+
+- The executable is `podbag-desktop`, so that it does not take the place of the `podbag`
+  command in the same folder. The name people see is podbag.
+- macOS: build `podbag.app` (the name podbag in the menu bar and the Dock, and its icon):
+
+```sh
+desktop/bundle-macos.sh            # target/release/podbag.app (debug: add "debug")
+open target/release/podbag.app
+```
+
+- The script makes the bundle itself (Tauri's bundler needs the separate `tauri-cli`).
+- Run bare, the executable's menu says About, Hide and Quit podbag, but macOS shows
+  `podbag-desktop` as the menu bar's title and in the Dock. Only a bundle changes that.
+- Windows: the .exe's product name and file description are podbag.
+- Linux: `desktop/podbag.desktop` is a desktop entry named podbag. Copy it to
+  `~/.local/share/applications/`.
+
+#### Its icon
+
+- The app icon follows Apple's grid: a rounded square of 824 px on a 1024 px canvas, a
+  soft shadow, a light blue background, and the bag from `docs/images/logo.png`.
+- At 16 and 32 px the bag takes more of the square, so it stays readable.
+- `desktop/icons/make-icons.sh` makes every icon file again (macOS: Swift and `iconutil`).
 
 ### What is hidden
 
@@ -773,7 +974,8 @@ docker swarm leave --force                       # removes services, secrets, co
 - On a Mac (Apple silicon), podbag runs containers in a small Linux VM of its own
   (Virtualization.framework, Linux 6.18).
 - The first command starts the VM in about half a second.
-- The VM powers off 60 seconds after the last container (`PODBAG_VM_IDLE`, in seconds).
+- The VM powers off 60 seconds after the last container. `podbag vm set --idle` changes
+  this.
 - With no container, only a small standby process runs (under 2 MiB).
 - With the VM running, `podbag run --rm --network none alpine true` takes about 8 ms, and
   the same `docker run` about 15 ms.
@@ -789,6 +991,8 @@ docker swarm leave --force                       # removes services, secrets, co
 - Named volumes live in the VM.
 - Images, containers and volumes stay on a 64 GiB sparse disk, `~/.podbag/disk.img`.
 - `podbag vm stop`, or logging out, powers the VM off cleanly.
+- `podbag vm start`, `vm restart` and `vm status` start it, restart it and show its state.
+  `vm status` wakes no VM.
 - Containers cannot reach the VM's agent.
 
 ### Registry logins
@@ -803,10 +1007,32 @@ docker swarm leave --force                       # removes services, secrets, co
 
 ### Resources
 
-- The VM defaults to 2 GiB of memory and up to 8 of the Mac's CPUs. To read its settings,
-  run `podbag vm resources`. For example, `podbag vm resources 2 4096` saves 2 CPUs and
-  4 GiB in `~/.podbag/vm-resources.json`. The VM host's `PODBAG_VM_MEMORY` (MiB) and
-  `PODBAG_VM_CPUS` environment variables override the corresponding saved values.
+- Memory: 2 GiB. CPUs: the Mac's, up to 8. Idle power-off: 60 seconds.
+- `podbag vm set` changes them and saves them in `~/.podbag/vm.json`:
+
+```sh
+podbag vm set --cpus 4 --memory 6G --idle 5m
+podbag vm set --memory 4096M --restart     # apply now
+```
+
+- `--cpus`: from 1 to the Mac's CPUs.
+- `--memory`: from 1 GiB to the Mac's memory minus 4 GiB, which macOS keeps for itself.
+  On a 24 GiB Mac that is 20 GiB. A plain number is MiB. A small Mac always allows 1 GiB.
+- `--idle`: `90s`, `5m`, `1h`, or `0` (never power off by itself).
+- The VM uses new settings at its next start. `--restart`, or `podbag vm restart`, applies
+  them now.
+- A restart powers the VM off, so running containers stop. Both commands ask first. Without
+  a terminal they need `--yes`.
+- `PODBAG_VM_CPUS`, `PODBAG_VM_MEMORY` (MiB) and `PODBAG_VM_IDLE` (seconds) still win over
+  the saved values. `vm set` says so when one is set.
+- `podbag vm status --json` is for apps. It has the state (`running`, `standby`,
+  `starting`, `stopped`), the settings in use and those of the next start, this Mac's
+  limits, the uptime, the disk use and, while the VM runs, the running containers and the
+  VM's CPU and memory use. It reads files only, so it wakes no VM.
+- The disk use is what the sparse disk takes on the Mac (`allocatedBytes`), and its size
+  (64 GiB).
+- `podbag vm resources [CPUS MEMORY_MIB]` reads or updates the same CPU and memory
+  settings. Older homes with `vm-resources.json` are read on the next start.
 - Containers get 1048576 open files and `vm.max_map_count` 262144, as in Docker Desktop.
 - A container that needs more memory than the VM has is stopped with exit code 137. The VM
   keeps running.
@@ -814,7 +1040,7 @@ docker swarm leave --force                       # removes services, secrets, co
 ### docker CLI, Compose and buildx
 
 ```sh
-export DOCKER_HOST=unix://$HOME/.podbag/run/docker.sock
+podbag system docker use        # or: export DOCKER_HOST=unix://$HOME/.podbag/run/docker.sock
 docker run --rm alpine echo hi
 docker compose up -d
 docker buildx create --use --driver docker-container
@@ -861,8 +1087,13 @@ docker buildx build --load -t app .
   `C:\src` is `/mnt/c/src`.
 - Network paths (`\\server\share`) are refused.
 - Named volumes and images live in the distribution.
-- `podbag vm status|start|stop|rm` shows, starts, stops or removes the distribution.
-  `vm rm` deletes its images, containers and volumes.
+- `podbag vm status|start|stop|restart|rm` shows, starts, stops, restarts or removes the
+  distribution. `vm rm` deletes its images, containers and volumes. A stop or a restart
+  stops its containers.
+- `podbag vm status --json` gives the state, for apps.
+- WSL's CPUs and memory are set for all distributions at once, in
+  `%UserProfile%\.wslconfig`. podbag does not change them, so there is no `vm set` on
+  Windows.
 - `login`, `logout` and `search` run on Windows. Logins stay in the Windows user's Docker
   config and its credential helper.
 - `pull`, `push`, `run` and `create` take the login for the image's registry to the engine
@@ -876,6 +1107,52 @@ docker buildx build --load -t app .
 - Resource limits need cgroup v2. Where WSL's kernel does not have it, containers run
   without limits, with a warning.
 - Not yet: the Docker API for Windows programs (the docker CLI on Windows).
+
+## Update podbag
+
+```sh
+podbag upgrade --check          # only say whether a newer release exists
+podbag upgrade                  # install the latest release (it asks first)
+podbag upgrade --version 0.1.0  # install this release; the only way to go back
+```
+
+- `--yes` skips the question. Without a terminal, `upgrade` needs it.
+- `--check --json` prints `{"current", "latest", "newer"}`, for apps.
+
+### How it works
+
+- It reads the latest release from GitHub's API, over HTTPS only.
+- It downloads this system's file and the release's `SHA256SUMS` next to podbag.
+- The file must match its SHA-256 sum. Nothing downloaded runs before that.
+- Then the new file must print the expected version (`podbag --version`). On macOS, it
+  must also have a valid signature with the virtualization entitlement.
+- Only then is it renamed over podbag. The old one stays as `podbag.old`.
+- On Windows a running `.exe` cannot be overwritten, so it is renamed first.
+- It never goes to an older release unless `--version` asks for it.
+
+### Where podbag is installed
+
+- `install.sh` puts podbag in `/usr/local/bin`. Writing there needs root, so run
+  `sudo podbag upgrade`. podbag says so, with the exact command (exit code 77).
+- On Windows, use an administrator terminal when podbag is in a protected folder.
+
+### After the update
+
+- macOS: the VM's guest is in the program, so the VM must restart to use the new one.
+  `upgrade` restarts it at once when no container runs. Otherwise it says so: run
+  `podbag vm restart` (the containers stop), or wait until the VM powers off when idle.
+- Linux: a `podbag system service` that started on demand ends when no client is
+  connected, and the next client starts the new one. A service with `--timeout 0` stays.
+  Running containers keep running, with their keeper.
+- Each build of podbag has its own keeper (`keeper-<build>.sock`). So after an update, the
+  new program starts its own keeper at once, and starts stay fast. The old keeper watches
+  its containers until they end, then exits.
+- Windows: the next command brings the new engine into podbag's WSL distribution.
+
+### Limits
+
+- The download is checked against the release's `SHA256SUMS`, which comes from the same
+  place. A signature with a release key is not checked yet.
 
 ## Requirements on Linux
 

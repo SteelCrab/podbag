@@ -6,3 +6,4 @@ site/node_modules/
 site/.cloudflare/
 _site/
 /desktop/gen/
+/desktop/preview/out/

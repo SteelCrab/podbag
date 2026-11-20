@@ -4,6 +4,7 @@
 
 没有守护进程的容器引擎，只是一个静态二进制文件。
 镜像按文件存储：多个镜像共用的文件只保存一份。
+可以使用命令行或 [Podbag Desktop](#podbag-desktop)。
 
 [![CI](https://github.com/SteelCrab/podbag/actions/workflows/ci.yml/badge.svg)](https://github.com/SteelCrab/podbag/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/SteelCrab/podbag)](https://github.com/SteelCrab/podbag/releases/latest)
@@ -20,6 +21,7 @@
 ## 目录
 
 - [特性](#特性)
+- [Podbag Desktop](#podbag-desktop)
 - [安装](#安装)
 - [使用](#使用)
 - [基准测试](#基准测试)
@@ -47,6 +49,14 @@
 - 按层存储（Docker、Podman、Kiri）只有在整层完全相同时才只存一份。只要有一个文件不同，整层就要再存一次，和其他层相同的文件也跟着再存一次。
 - podbag 每个文件只保存一份。镜像是指向这些文件的路径列表。
 - 以 8 个 Spring 服务、2 个版本为例：磁盘 902 MiB（Docker 为 2,970 MiB），页缓存 324 MiB（Docker 为 982 MiB）。
+
+## Podbag Desktop
+
+在 Linux 和 macOS 上，可以管理容器、镜像、卷和网络。Windows 支持尚处于实验阶段，需要 WSL 2。可以在列表中启动、停止或重启容器，也可以打开容器查看实时日志。
+
+![Podbag Desktop 示例列表显示 3 个运行中和 2 个已停止的容器，以及各自的镜像和已发布端口。](docs/images/desktop-containers-en.png)
+
+参见 [Linux 软件包安装说明](docs/build.md#linux-desktop-packages)或[桌面应用源码构建说明](docs/usage.md#build-the-desktop-app)。
 
 ## 安装
 
