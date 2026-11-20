@@ -1,6 +1,6 @@
-<img src="docs/images/logo.png" alt="podbag" width="120" align="right">
-
 # podbag
+
+<img src="docs/images/logo.png" alt="podbag" width="120" align="right">
 
 没有守护进程的容器引擎，只是一个静态二进制文件。
 镜像按文件存储：多个镜像共用的文件只保存一份。

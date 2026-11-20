@@ -1,6 +1,6 @@
-<img src="docs/images/logo.png" alt="podbag" width="120" align="right">
-
 # podbag
+
+<img src="docs/images/logo.png" alt="podbag" width="120" align="right">
 
 Un motor de contenedores sin daemon, en un solo binario estático.
 Guarda las imágenes archivo por archivo: un archivo que comparten muchas imágenes se guarda una sola vez.
