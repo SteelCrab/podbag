@@ -25,10 +25,12 @@ function showPracticeProgress(panel, stage, practice) {
   const items = steps.map((step, i) => {
     const state = i < index ? "done" : i === index ? "current" : "pending";
     return h("li", { class: "practice-" + state, "aria-current": state === "current" ? "step" : null },
-      h("span", { text: t(namespace + step) }), h("small", { text: t("practice." + state) }));
+      h("span", { class: "practice-marker", "aria-hidden": "true" }, state === "done" && icon("check")),
+      h("span", { class: "practice-step-name", text: t(namespace + step) }),
+      h("small", { text: t("practice." + state) }));
   });
   const command = commands[stage];
-  put(panel, h("h2", { text: t("practice.progress") }), h("ul", { class: "practice-steps" }, items),
+  put(panel, h("h2", { text: t("practice.progress") }), h("ol", { class: "practice-steps", role: "list" }, items),
     h("p", { role: "status", text: t(namespace + "hint." + stage) }), command && codeLine(command));
 }
 
