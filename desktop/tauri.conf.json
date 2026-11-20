@@ -11,6 +11,7 @@
     "windows": [
       {
         "label": "main",
+        "create": false,
         "title": "podbag",
         "width": 1100,
         "height": 720,
