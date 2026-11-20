@@ -35,6 +35,7 @@
 - **レイヤーではなくファイル。** 複数のイメージが同じファイルを使う場合、ディスクとメモリに1回だけ置きます。
 - **速い。** Linux ではコンテナが約 4 ms で起動します。
 - **Docker のツールと一緒に使えます。** Docker・OCI イメージ、`docker` CLI、Compose、buildx に対応しています。
+- **Dockerfile をビルドします。** `podbag build` と、クラシックビルダーの `docker build` が使えます。BuildKit もデーモンも要りません。
 - **root なしでも、root でも。** 同じプログラムが両方の方式で動きます。
 - **Linux、macOS、Windows。** x86_64 と arm64 に対応しています。Windows 対応は実験段階です。
 - **TUI とデスクトップアプリがあります。** ターミナルでは `podbag tui`、デスクトップではメニューバー項目つきのウィンドウで、コンテナ、イメージ、ボリューム、ネットワークを扱えます。
@@ -119,6 +120,7 @@ podbag logs -f web                                # ログを追いかけて表�
 podbag exec -it web sh                            # コンテナの中でシェルを開きます
 podbag stop web && podbag rm web                  # 停止して削除します
 podbag images                                     # イメージの一覧
+podbag build -t myapp .                           # Dockerfile からイメージをビルドします
 ```
 
 ### docker CLI、Compose、buildx

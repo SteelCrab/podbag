@@ -7,6 +7,7 @@ The [README](../README.md) shows how to install podbag. This page shows what it 
 - [Commands](#commands)
 - [How containers run](#how-containers-run)
 - [Images](#images)
+- [Builds](#builds)
 - [Checks](#checks)
 - [Volumes](#volumes)
 - [Limits and security](#limits-and-security)
@@ -38,6 +39,10 @@ podbag exec -it web sh
 podbag stop web && podbag rm web
 podbag pull alpine | podbag images | podbag rmi alpine
 podbag save -o app.tar myapp:1 && podbag load -i app.tar   # image archives
+podbag build -t myapp:1 .                    # build an image from ./Dockerfile
+podbag commit web web-snapshot:1             # a container's changes as an image
+podbag diff web                              # the files a container changed
+podbag export -o web.tar web                 # all its files as a tar
 podbag run --rm --privileged alpine mount -t tmpfs none /mnt
 podbag system df | podbag system prune -f
 podbag system verify                         # check every stored file (exit code 1 if one is damaged)
@@ -152,6 +157,80 @@ podbag tui                                   # containers, images, volumes and n
   `PODBAG_IMAGE_MOUNT=hardlink`.
 - When the method changes, an image gets what it needs the first time a container uses it.
 - Removing an image unmounts it.
+
+## Builds
+
+### Build an image
+
+```sh
+podbag build -t myapp:1 .                          # ./Dockerfile, with . as the context
+podbag build -f app.Dockerfile --build-arg VERSION=2 --target app -t myapp .
+tar -c . | podbag build -t myapp -                 # the context as a tar on stdin
+podbag build -t myapp - < Dockerfile               # only a Dockerfile, no context
+```
+
+- No BuildKit and no daemon: podbag reads the Dockerfile and does each step itself.
+- Options: `-t` (more than once), `-f`, `--build-arg`, `--target`, `--no-cache`, `--pull`,
+  `--label`, `--network`, `-q`.
+
+### How the steps work
+
+- `RUN` runs in a podbag container on the image so far, with the build arguments, `ENV`,
+  `USER`, `WORKDIR` and `SHELL` of the stage.
+  - The network is the default bridge; `--network host|none|<name>` changes it.
+  - The files it changed become a new layer. Deleted files stay deleted in the image.
+- `COPY` and `ADD` put the files in a new layer, owned by root unless `--chown` says
+  otherwise. `--chmod` sets the mode.
+  - `ADD` unpacks a local tar archive (plain, gzip or zstd) and downloads a URL.
+- `WORKDIR` makes the folder when it is missing.
+- Steps that change only settings (`ENV`, `CMD`, `LABEL`, `EXPOSE`, …) make no layer.
+- The new layers go into the store like pulled ones: each file is kept once.
+
+### Dockerfiles
+
+- All the classic instructions: `FROM` (`AS`), `RUN`, `CMD`, `ENTRYPOINT`, `ENV`, `ARG`,
+  `LABEL`, `EXPOSE`, `VOLUME`, `USER`, `WORKDIR`, `COPY`, `ADD`, `ONBUILD`, `STOPSIGNAL`,
+  `HEALTHCHECK`, `SHELL`.
+- Variables (`$V`, `${V:-default}`, `${V:+set}`), `ARG` before `FROM`, `# escape=`, line
+  continuations, JSON and shell forms, `RUN <<EOF` heredocs.
+- Several stages: only the stages the target needs are built. `COPY --from` takes a stage
+  name, a stage number or an image.
+- `.dockerignore` (or `<Dockerfile>.dockerignore`) leaves files out of the context, with
+  Docker's patterns (`**`, `!` exceptions).
+- `ARG TARGETARCH` and the other platform arguments have this machine's values.
+
+### The cache
+
+- Each step's result is kept. A step is found again by:
+  - the image before it,
+  - the instruction, after its variables,
+  - the build arguments a `RUN` sees,
+  - the contents of the files a `COPY` or `ADD` copies.
+- A second build prints `Using cache` for the steps it did not do again.
+- `--no-cache` does every step again.
+- The steps' images have no name: `podbag system prune` (or `docker image prune`) removes
+  them, and the cache entries with them. `docker builder prune` forgets the cache.
+
+### commit, export and diff
+
+- `podbag commit CONTAINER [NAME]`: the container's image plus its changes, as a new image.
+  - `-c` sets the config with a Dockerfile instruction: `-c 'CMD ["app"]'`.
+  - It works on running containers too, without stopping them.
+  - It does not pause a running container (Docker pauses by default), so a file that is
+    being written at that moment can be cut.
+- `podbag export [-o FILE] CONTAINER`: all its files as a tar, without its volumes.
+- `podbag diff CONTAINER`: the paths it changed: `A` added, `C` changed, `D` deleted.
+
+### Not supported in builds
+
+- BuildKit features: `RUN --mount`, secrets, SSH, `--output`, cache export and import,
+  builds for other platforms, `COPY --parents` and `--exclude`, `ADD --checksum`, `ADD` of a
+  Git repository, heredocs in `COPY` and `ADD`. podbag stops with a message; build such
+  Dockerfiles with buildx (see [buildx](#buildx)).
+- `ADD` of bzip2 or xz archives.
+- Base images from private registries: pulls are anonymous for now.
+- Image history (`docker history`).
+- Changes that a `RUN` makes in a `VOLUME` path stay in the image (Docker drops them).
 
 ## Checks
 
@@ -327,11 +406,14 @@ docker context create podbag --docker host=$DOCKER_HOST         # or keep it as 
 ### What works
 
 - System: `version`, `info`, `system df`, `events` (live only; there is no history).
-- Images: `pull`, `images`, `image inspect`, `tag`, `rmi`, `image prune`, `save`, `load`.
+- Images: `pull`, `images`, `image inspect`, `tag`, `rmi`, `image prune`, `save`, `load`,
+  `build` with the classic builder (see [Builds with the docker CLI](#builds-with-the-docker-cli)),
+  `builder prune`.
 - Containers: `run` (attached, `-d`, `-i`, `-t`, `--rm`), `create`, `start [-a]`, `stop`,
   `restart`, `kill`, `wait`, `rm`, `logs` (`-f`, `--tail`, `-t`, `--since`), `attach`,
   `ps` (filters `label`, `name`, `id`, `status`), `inspect`, `port`,
-  `exec` (`-i`, `-t`, `-d`, `-e`, `-w`, `-u`), `cp`, `container prune`.
+  `exec` (`-i`, `-t`, `-d`, `-e`, `-w`, `-u`), `cp`, `commit`, `export`, `diff`,
+  `container prune`.
 - Volumes and networks: `create`, `ls`, `inspect`, `rm`, `prune`.
 
 ### What does not work
@@ -340,8 +422,8 @@ docker context create podbag --docker host=$DOCKER_HOST         # or keep it as 
   `--link`, port ranges, other network or volume drivers.
 - Accepted with a warning, because ignoring them is safe: `--dns`, `--add-host`, ulimits,
   log drivers, fixed addresses.
-- Answered with 501 and what to do instead: the classic builder (`POST /build`; use
-  buildx), `commit`, `export`, `diff`, `top`, `stats`, `pause`, `rename`, `update`, `push`,
+- Answered with 501 and what to do instead: BuildKit's build API (use buildx with the
+  `docker-container` driver), `top`, `stats`, `pause`, `rename`, `update`, `push`,
   `search`, swarm and plugins.
 
 ### cp, save and load
@@ -355,8 +437,9 @@ docker context create podbag --docker host=$DOCKER_HOST         # or keep it as 
 - `docker save` writes Docker's archive format:
   - the store keeps files, not layer archives, so the saved layers (and the image ID) get
     new digests,
-  - it keeps the image's command, environment, user, working folder, volumes and health
-    check, but not its labels or history.
+  - it keeps the image's command, environment, user, working folder, volumes, health
+    check, labels, exposed ports and stop signal, but not its history (images stored
+    before podbag kept labels have none).
 - `docker load` reads `docker save` archives and OCI image layouts, plain or gzip:
   - it checks every digest,
   - it refuses an archive that is larger than the store limit.
@@ -377,7 +460,24 @@ docker context create podbag --docker host=$DOCKER_HOST         # or keep it as 
   health checks.
 - Names live in each container's `/etc/hosts` (no DNS server). When replicas share a name,
   the first one answers.
-- `docker compose build` uses a buildx builder (`--builder`; see below).
+- `docker compose build` works with the classic builder (see below), or with a buildx
+  builder (`--builder`).
+
+### Builds with the docker CLI
+
+```sh
+export DOCKER_BUILDKIT=0          # the classic builder: podbag builds the image
+docker build -t myapp .
+docker compose build
+```
+
+- podbag serves the classic builder (`POST /build`), and its `_ping` answers
+  `Builder-Version: 1`.
+- A docker CLI with the buildx plugin still sends `docker build` to buildx, whatever the
+  server says. `DOCKER_BUILDKIT=0` makes it use the classic builder.
+- Without `DOCKER_BUILDKIT=0`, buildx starts its own BuildKit in a podbag container, and
+  keeps the result in its cache (add `--load` to get the image).
+- The build works as `podbag build` does: see [Builds](#builds).
 
 ### buildx
 

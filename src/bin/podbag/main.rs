@@ -1,4 +1,6 @@
 mod args;
+#[cfg(unix)]
+mod build;
 mod check;
 #[cfg(unix)]
 mod container;
@@ -75,7 +77,25 @@ fn wsl_argv(cli: &Cli, mut argv: Vec<String>) -> Result<Vec<String>, String> {
         Cmd::Load { input: Some(_), .. } => rewrite(&mut argv, Some('i'), "--input", 1, wsl_path)?,
         Cmd::Save {
             output: Some(_), ..
+        }
+        | Cmd::Export {
+            output: Some(_), ..
         } => rewrite(&mut argv, Some('o'), "--output", 1, wsl_path)?,
+        Cmd::Build(a) => {
+            rewrite(
+                &mut argv,
+                Some('f'),
+                "--file",
+                usize::from(a.file.is_some()),
+                wsl_path,
+            )?;
+            // The context is the one positional argument: the last word that is it.
+            if a.context != "-"
+                && let Some(i) = argv.iter().rposition(|w| *w == a.context)
+            {
+                argv[i] = wsl_path(&a.context)?;
+            }
+        }
         _ => {}
     }
     Ok(argv)
@@ -184,7 +204,18 @@ fn mac_command(cli: &Cli, argv: Vec<String>) -> podbag::macos::cli::Forward {
         },
         Cmd::Save {
             output: Some(p), ..
+        }
+        | Cmd::Export {
+            output: Some(p), ..
         } => f.paths.push(p.display().to_string()),
+        Cmd::Build(a) => {
+            if a.context == "-" {
+                f.stdin = true;
+            } else {
+                f.paths.push(a.context.clone());
+            }
+            f.paths.extend(a.file.clone());
+        }
         Cmd::System {
             cmd: args::SystemCmd::Service {
                 socket: Some(p), ..
@@ -264,6 +295,18 @@ fn dispatch(cmd: Cmd) -> i32 {
         Cmd::Rmi { images } => image::rmi(&images),
         Cmd::Load { input, quiet } => image::load(input.as_deref(), quiet),
         Cmd::Save { output, images } => image::save(output.as_deref(), &images),
+        Cmd::Build(a) => build::build(a),
+        Cmd::Commit {
+            change,
+            container: c,
+            image,
+            ..
+        } => build::commit(&c, image, change),
+        Cmd::Export {
+            output,
+            container: c,
+        } => build::export(&c, output.as_deref()),
+        Cmd::Diff { container: c } => build::diff(&c),
         Cmd::System {
             cmd:
                 args::SystemCmd::Service {
@@ -474,6 +517,30 @@ mod tests {
             ["save", "--output", "out/a.tar", "alpine"]
         );
         assert_eq!(via_wsl(&["ps", "-a"]).unwrap(), ["ps", "-a"]);
+    }
+
+    #[test]
+    fn build_context_dockerfile_and_export_files() {
+        assert_eq!(
+            via_wsl(&["build", "-t", "app", "-f", r"C:\src\Dockerfile", r"C:\src"]).unwrap(),
+            [
+                "build",
+                "-t",
+                "app",
+                "-f",
+                "/mnt/c/src/Dockerfile",
+                "/mnt/c/src"
+            ]
+        );
+        assert_eq!(
+            via_wsl(&["build", "-q", "."]).unwrap(),
+            ["build", "-q", "."]
+        );
+        assert_eq!(via_wsl(&["build", "-"]).unwrap(), ["build", "-"]);
+        assert_eq!(
+            via_wsl(&["export", "-o", r"out\c.tar", "c"]).unwrap(),
+            ["export", "-o", "out/c.tar", "c"]
+        );
     }
 
     #[test]

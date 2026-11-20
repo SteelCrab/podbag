@@ -309,8 +309,8 @@ fn list(req: &Request, ctx: &Ctx) -> Reply {
             .get(key)
             .is_some_and(|v| v.iter().any(|x| x == value))
     };
-    // podbag keeps no image without a name, and no image labels.
-    if wants("dangling", "true") || wants("dangling", "1") || filters.contains_key("label") {
+    // Images without a name are not listed.
+    if wants("dangling", "true") || wants("dangling", "1") {
         return Reply::Json(200, json!([]));
     }
     let images = match stored(ctx) {
@@ -326,7 +326,7 @@ fn list(req: &Request, ctx: &Ctx) -> Reply {
                 .collect(),
             None => names,
         };
-        if names.is_empty() {
+        if names.is_empty() || !super::router::labels_match(&record.config.labels, &filters) {
             continue;
         }
         let (tags, digests) = repo_names(&names, &digest);
@@ -341,7 +341,7 @@ fn list(req: &Request, ctx: &Ctx) -> Reply {
                 "Size": record.size,
                 "SharedSize": -1,
                 "VirtualSize": record.size,
-                "Labels": {},
+                "Labels": record.config.labels,
                 "Containers": -1,
             }),
         ));
@@ -359,6 +359,11 @@ fn config_json(c: &ImageConfig) -> Value {
     let env: Vec<String> = c.env.iter().map(|(k, v)| format!("{k}={v}")).collect();
     let volumes: serde_json::Map<String, Value> =
         c.volumes.iter().map(|v| (v.clone(), json!({}))).collect();
+    let ports: serde_json::Map<String, Value> = c
+        .exposed_ports
+        .iter()
+        .map(|p| (p.clone(), json!({})))
+        .collect();
     json!({
         "Hostname": "",
         "Domainname": "",
@@ -375,8 +380,11 @@ fn config_json(c: &ImageConfig) -> Value {
         "Volumes": if volumes.is_empty() { Value::Null } else { Value::Object(volumes) },
         "WorkingDir": c.workdir.clone().unwrap_or_default(),
         "Entrypoint": list(&c.entrypoint),
-        "OnBuild": null,
-        "Labels": null,
+        "OnBuild": list(&c.onbuild),
+        "Labels": if c.labels.is_empty() { Value::Null } else { json!(c.labels) },
+        "ExposedPorts": if ports.is_empty() { Value::Null } else { Value::Object(ports) },
+        "StopSignal": c.stop_signal,
+        "Shell": list(&c.shell),
     })
 }
 
@@ -465,7 +473,7 @@ fn prune(req: &Request) -> Reply {
     let all = filters
         .get("dangling")
         .is_some_and(|v| v.iter().any(|d| d == "false" || d == "0"));
-    // Images have no labels in podbag: a label filter matches none.
+    // podbag does not prune by label: a label filter removes nothing.
     if filters.contains_key("label") {
         return Reply::Json(200, json!({"ImagesDeleted": null, "SpaceReclaimed": 0}));
     }

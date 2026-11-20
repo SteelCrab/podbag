@@ -137,6 +137,8 @@ base, with the same jars:
   (Kiri: 0.3 s).
 - **docker run on a Mac.** 14.4 ms (Kiri: 11.8 ms).
 - **Kubernetes.** There is no CRI, so Kubernetes cannot use podbag as a node's runtime.
-- **Docker API.** No classic builder (use buildx), `commit`, `export`, `diff`, `top`,
-  `stats`, `pause`, `rename`, `update`, `push`, `search`, swarm or plugins.
+- **Builds.** podbag builds Dockerfiles itself, with the classic builder's features. For
+  BuildKit's (`RUN --mount`, secrets, other platforms), use buildx.
+- **Docker API.** No `top`, `stats`, `pause`, `rename`, `update`, `push`, `search`, swarm
+  or plugins.
 - **Windows.** Not yet tried on a Windows machine.

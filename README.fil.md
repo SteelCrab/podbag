@@ -35,6 +35,7 @@ Iniimbak nito ang mga image nang file-by-file: ang file na ginagamit ng maraming
 - **Mga file, hindi mga layer.** Ang file na ginagamit ng maraming image ay iniimbak at kina-cache nang isang beses lang.
 - **Mabilis.** Nagsisimula ang isang container sa mga 4 ms sa Linux.
 - **Gumagana sa mga tool ng Docker.** Mga Docker at OCI image, ang `docker` CLI, Compose at buildx.
+- **Nagbu-build ng mga Dockerfile.** `podbag build`, at `docker build` gamit ang classic builder, nang walang BuildKit o daemon.
 - **May root man o wala.** Iisang programa ang gumagana sa dalawang paraan.
 - **Linux, macOS at Windows.** x86_64 at arm64. Eksperimental pa ang suporta sa Windows.
 - **May TUI at desktop app.** `podbag tui` sa terminal, at isang window na may item sa menu bar, para sa mga container, image, volume at network.
@@ -119,6 +120,7 @@ podbag logs -f web                                # sundan ang mga log
 podbag exec -it web sh                            # magbukas ng shell sa container
 podbag stop web && podbag rm web                  # ihinto at alisin
 podbag images                                     # ilista ang mga image
+podbag build -t myapp .                           # mag-build ng image mula sa isang Dockerfile
 ```
 
 ### docker CLI, Compose at buildx
