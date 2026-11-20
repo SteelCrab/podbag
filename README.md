@@ -36,7 +36,8 @@ Use the command line or [Podbag Desktop](#podbag-desktop).
 - **One static binary.** About 4 MB on Linux.
 - **Files, not layers.** A file that many images share is stored once and cached once.
 - **Fast.** A container starts in about 4 ms on Linux.
-- **Works with Docker tools.** Docker and OCI images, the `docker` CLI, Compose and buildx.
+- **Works with Docker tools.** Docker and OCI images, the `docker` CLI, Compose, buildx,
+  and swarm stacks on one node.
 - **Builds Dockerfiles.** `podbag build`, and `docker build` with the classic builder,
   without BuildKit or a daemon.
 - **Kubernetes.** `podbag cri serve` is the container runtime of a node, for the kubelet or k3s.

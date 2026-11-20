@@ -36,7 +36,7 @@
 - **一个静态二进制文件。** 在 Linux 上约 4 MB。
 - **按文件，而不是按层。** 多个镜像共用的文件，在磁盘和内存中只保存一份。
 - **快。** 在 Linux 上，容器约 4 毫秒启动。
-- **兼容 Docker 工具。** 支持 Docker 和 OCI 镜像、`docker` CLI、Compose 和 buildx。
+- **兼容 Docker 工具。** 支持 Docker 和 OCI 镜像、`docker` CLI、Compose、buildx，以及单节点的 swarm stack。
 - **构建 Dockerfile。** 可以用 `podbag build`，也可以用经典构建器的 `docker build`，不需要 BuildKit 或守护进程。
 - **Kubernetes。** `podbag cri serve` 可以作为节点的容器运行时，供 kubelet 或 k3s 使用。
 - **有无 root 都可以。** 同一个程序两种方式都能用。

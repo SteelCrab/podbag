@@ -3,6 +3,7 @@
 
 pub mod nft;
 pub mod route;
+pub mod service_nat;
 #[cfg(target_os = "linux")]
 mod socket;
 #[cfg(target_os = "linux")]

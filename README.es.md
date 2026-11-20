@@ -36,7 +36,7 @@ Puedes usar la línea de comandos o [Podbag Desktop](#podbag-desktop).
 - **Un solo binario estático.** Unos 4 MB en Linux.
 - **Archivos, no capas.** Un archivo que comparten muchas imágenes se guarda y se cachea una sola vez.
 - **Rápido.** Un contenedor arranca en unos 4 ms en Linux.
-- **Funciona con las herramientas de Docker.** Imágenes Docker y OCI, el CLI `docker`, Compose y buildx.
+- **Funciona con las herramientas de Docker.** Imágenes Docker y OCI, el CLI `docker`, Compose, buildx y stacks de swarm en un solo nodo.
 - **Construye Dockerfiles.** `podbag build`, y `docker build` con el constructor clásico, sin BuildKit ni daemon.
 - **Kubernetes.** `podbag cri serve` es el runtime de contenedores de un nodo, para el kubelet o k3s.
 - **Con o sin root.** El mismo programa funciona de las dos formas.

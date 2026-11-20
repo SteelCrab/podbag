@@ -36,7 +36,7 @@ Puwede mong gamitin ang command line o ang [Podbag Desktop](#podbag-desktop).
 - **Iisang static binary.** Mga 4 MB sa Linux.
 - **Mga file, hindi mga layer.** Ang file na ginagamit ng maraming image ay iniimbak at kina-cache nang isang beses lang.
 - **Mabilis.** Nagsisimula ang isang container sa mga 4 ms sa Linux.
-- **Gumagana sa mga tool ng Docker.** Mga Docker at OCI image, ang `docker` CLI, Compose at buildx.
+- **Gumagana sa mga tool ng Docker.** Mga Docker at OCI image, ang `docker` CLI, Compose, buildx, at mga swarm stack sa iisang node.
 - **Nagbu-build ng mga Dockerfile.** `podbag build`, at `docker build` gamit ang classic builder, nang walang BuildKit o daemon.
 - **Kubernetes.** Ang `podbag cri serve` ang container runtime ng isang node, para sa kubelet o k3s.
 - **May root man o wala.** Iisang programa ang gumagana sa dalawang paraan.

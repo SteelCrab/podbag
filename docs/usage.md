@@ -16,6 +16,7 @@ The [README](../README.md) shows how to install podbag. This page shows what it 
 - [Networks](#networks)
 - [Docker API](#docker-api)
 - [TUI and GUI](#tui-and-gui)
+- [Swarm mode](#swarm-mode)
 - [Kubernetes](#kubernetes)
 - [macOS](#macos)
 - [Windows (experimental)](#windows-experimental)
@@ -552,8 +553,8 @@ podbag system docker restore    # back to the context you had (Docker Desktop, â
 - Accepted with a warning, because ignoring them is safe: `--dns`, `--add-host`, ulimits,
   log drivers, fixed addresses.
 - Answered with 501 and what to do instead: BuildKit's build API (use buildx with the
-  `docker-container` driver), `image history`, swarm and
-  plugins.
+  `docker-container` driver), `image history` and plugins.
+- Swarm mode works on one node. See [Swarm mode](#swarm-mode).
 
 ### cp, save and load
 
@@ -897,8 +898,75 @@ open target/release/podbag.app
 
 ### What is hidden
 
-- The API has no `pause`, `rename`, `stats` or `top` yet. Both UIs ask the engine when they
-  start, and hide what it does not have.
+- Both UIs check which features the engine supports at startup and hide unavailable actions.
+
+## Swarm mode
+
+### What it is
+
+- `docker swarm init`, `docker service`, `docker stack deploy`, `docker secret`,
+  `docker config` and `docker node ls` work through `podbag system service`.
+- **One node only.** The swarm is this machine. Docker's swarm nodes (SwarmKit) cannot
+  join it, and it cannot join theirs: `docker swarm join` is refused.
+- Several podbag nodes may come later. They will be podbag nodes only, never Docker's.
+
+```sh
+docker swarm init
+docker service create --name web --replicas 3 -p 8080:80 nginx
+docker service update --image nginx:1.27 web     # a rolling update
+docker service rollback web
+docker stack deploy -c compose.yml app
+docker swarm leave --force                       # removes services, secrets, configs
+```
+
+### How it runs without a daemon
+
+- Each task is an ordinary podbag container, named `<service>.<slot>.<task id>`, with
+  Docker's swarm labels. `podbag ps` and `docker ps` show them.
+- A task restarts by the service's restart policy (`any`, `on-failure`, `none`), like any
+  container with `--restart`.
+- The swarm's state is in files under the data folder (`<data>/swarm`), so the service
+  can stop and start again.
+- Each API call that changes a service, and each read of services and tasks, compares
+  the wanted tasks with the running containers: it starts missing tasks and removes extra
+  ones. A task removed by hand comes back at the next `docker service ps`.
+- A rolling update goes on after the update call returns. The API service does not stop
+  while it runs. It follows `--update-parallelism`, `--update-delay`, `--update-order`,
+  `--update-monitor`, `--update-failure-action` and `--update-max-failure-ratio`.
+- `global` mode runs one task on the node.
+
+### Networks and ports
+
+- An `overlay` network is a podbag bridge network with the same name. The `ingress`
+  network is one too. Tasks of a service without networks join `ingress`.
+- **As root**, a published port reaches every task: nftables rules send each new
+  connection to a random task. It works from other hosts and from this host.
+- **Rootless**, a published port reaches one task only (the first one).
+- Names, in the `/etc/hosts` of each container on the network (there is no DNS server):
+  - `tasks.<service>` names every task,
+  - the service name is a virtual address that reaches every task (as root), or names
+    the tasks themselves (rootless, or `--endpoint-mode dnsrr`).
+- The rules follow the tasks at each API call. When a task restarts on its own and gets
+  another address, the next `docker service ps` (or any other call) fixes the rules.
+
+### Secrets and configs
+
+- They are files under the data folder, readable only by their owner (`0600`; owned by
+  root as root). The API never returns a secret's data.
+- A task gets each one as a read-only file: secrets at `/run/secrets/<name>`, configs at
+  their target. The mode, user and group come from the service (default `0444`, root).
+- Rootless, the files belong to root inside the container whatever user is given.
+- Only the labels of a secret or config can change, as with Docker.
+
+### What does not work
+
+- Jobs (`replicated-job`, `global-job`), placement across nodes, `--autolock`, secret
+  drivers and templating.
+- Restart delays and windows: podbag's own restart timing applies.
+- Registry logins sent with `--with-registry-auth`: tasks pull with podbag's own
+  credentials.
+- The docker CLI asks the registry for the image digest, which podbag does not answer;
+  it prints a warning and the tag is used.
 
 ## Kubernetes
 

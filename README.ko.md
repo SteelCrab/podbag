@@ -36,7 +36,7 @@
 - **정적 바이너리 하나.** Linux에서 약 4 MB입니다.
 - **레이어가 아니라 파일.** 여러 이미지가 같은 파일을 쓰면 디스크와 메모리에 한 번만 둡니다.
 - **빠릅니다.** Linux에서 컨테이너가 약 4 ms 만에 시작됩니다.
-- **Docker 도구와 함께 씁니다.** Docker·OCI 이미지, `docker` CLI, Compose, buildx를 지원합니다.
+- **Docker 도구와 함께 씁니다.** Docker·OCI 이미지, `docker` CLI, Compose, buildx, 노드 하나의 swarm stack을 지원합니다.
 - **Dockerfile을 빌드합니다.** `podbag build`와 클래식 빌더의 `docker build`를 씁니다. BuildKit과 데몬이 없어도 됩니다.
 - **Kubernetes.** `podbag cri serve`가 kubelet이나 k3s를 위한 노드의 컨테이너 런타임이 됩니다.
 - **root 없이도, root로도.** 같은 프로그램이 두 방식으로 동작합니다.

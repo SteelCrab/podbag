@@ -173,7 +173,8 @@ pub fn route(req: &Request, ctx: &Ctx) -> Reply {
             | ["tasks", ..]
             | ["secrets", ..]
             | ["configs", ..],
-        ) => not_supported("swarm", "podbag runs containers on one host"),
+        ) => crate::swarm::http::route(req, ctx, &segments)
+            .unwrap_or_else(|| message(404, "page not found")),
         (_, ["plugins", ..]) => not_supported(
             "plugins",
             "use the built-in local volumes and bridge networks",

@@ -282,11 +282,15 @@ fn prune_volumes(req: &Request) -> Reply {
 /// Routes under `/networks`.
 pub fn networks(req: &Request, ctx: &Ctx, rest: &[&str]) -> Option<Reply> {
     Some(match (req.method.as_str(), rest) {
-        ("GET", []) => list_networks(req),
-        ("POST", ["create"]) => create_network(req),
+        ("GET", []) => list_networks(req, ctx),
+        ("POST", ["create"]) => req
+            .json()
+            .ok()
+            .and_then(|body| crate::swarm::http::create_network(ctx, &body))
+            .unwrap_or_else(|| create_network(req)),
         ("POST", ["prune"]) => prune_networks(req),
         ("GET", [id]) => inspect_network(ctx, id),
-        ("DELETE", [id]) => remove_network(id),
+        ("DELETE", [id]) => remove_network(ctx, id),
         ("POST", [id, "connect"]) => connect_network(req, id, true),
         ("POST", [id, "disconnect"]) => connect_network(req, id, false),
         _ => return None,
@@ -323,7 +327,7 @@ fn find_network(id: &str) -> Result<(String, Option<Network>), Reply> {
 }
 
 /// `GET /networks?filters`: `name`, `id`, `driver`, `type` and `label`.
-fn list_networks(req: &Request) -> Reply {
+fn list_networks(req: &Request, ctx: &Ctx) -> Reply {
     let filters = match filters(req) {
         Ok(f) => f,
         Err(reply) => return reply,
@@ -342,8 +346,12 @@ fn list_networks(req: &Request) -> Reply {
             (
                 n.name.clone(),
                 n.docker_id(),
-                "bridge",
-                network_json(n, &[]),
+                crate::swarm::net::driver_of(&ctx.dirs, &n.name),
+                {
+                    let mut v = network_json(n, &[]);
+                    crate::swarm::net::dress(&ctx.dirs, &mut v);
+                    v
+                },
                 n.labels.clone(),
             )
         })
@@ -383,7 +391,9 @@ fn inspect_network(ctx: &Ctx, id: &str) -> Reply {
     match find_network(id) {
         Ok((_, Some(n))) => {
             let endpoints = crate::network::endpoints(&ctx.dirs, &n.name).unwrap_or_default();
-            Reply::Json(200, network_json(&n, &endpoints))
+            let mut v = network_json(&n, &endpoints);
+            crate::swarm::net::dress(&ctx.dirs, &mut v);
+            Reply::Json(200, v)
         }
         Ok((name, None)) => Reply::Json(200, special_network_json(&name)),
         Err(reply) => reply,
@@ -533,7 +543,7 @@ fn create_network(req: &Request) -> Reply {
 }
 
 /// `DELETE /networks/{id}`.
-fn remove_network(id: &str) -> Reply {
+fn remove_network(ctx: &Ctx, id: &str) -> Reply {
     let (name, network) = match find_network(id) {
         Ok(found) => found,
         Err(reply) => return reply,
@@ -546,6 +556,7 @@ fn remove_network(id: &str) -> Reply {
     };
     match Network::remove(&network.name) {
         Ok(()) => {
+            crate::swarm::net::forget(&ctx.dirs, &network.name);
             publish(
                 "network",
                 "destroy",

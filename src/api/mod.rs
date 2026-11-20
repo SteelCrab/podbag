@@ -193,10 +193,10 @@ pub fn serve(opts: ServeOptions) -> Result<()> {
                 }
             }
         }
-        if opts.timeout.is_some_and(|t| activity.idle_for() >= t) {
-            break;
-        }
-        if activity.idle_for() >= REPLACED_GRACE && program.as_ref().is_some_and(|p| p.replaced()) {
+        let idle = activity.idle_for();
+        let timed_out = opts.timeout.is_some_and(|t| idle >= t);
+        let replaced = idle >= REPLACED_GRACE && program.as_ref().is_some_and(|p| p.replaced());
+        if (timed_out || replaced) && !crate::swarm::busy() {
             break;
         }
     }

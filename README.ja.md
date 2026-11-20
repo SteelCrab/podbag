@@ -36,7 +36,7 @@
 - **静的バイナリ1つ。** Linux では約 4 MB です。
 - **レイヤーではなくファイル。** 複数のイメージが同じファイルを使う場合、ディスクとメモリに1回だけ置きます。
 - **速い。** Linux ではコンテナが約 4 ms で起動します。
-- **Docker のツールと一緒に使えます。** Docker・OCI イメージ、`docker` CLI、Compose、buildx に対応しています。
+- **Docker のツールと一緒に使えます。** Docker・OCI イメージ、`docker` CLI、Compose、buildx、ノード1台の swarm スタックに対応しています。
 - **Dockerfile をビルドします。** `podbag build` と、クラシックビルダーの `docker build` が使えます。BuildKit もデーモンも要りません。
 - **Kubernetes。** `podbag cri serve` が、kubelet や k3s のためのノードのコンテナランタイムになります。
 - **root なしでも、root でも。** 同じプログラムが両方の方式で動きます。

@@ -36,7 +36,7 @@ Bạn có thể dùng dòng lệnh hoặc [Podbag Desktop](#podbag-desktop).
 - **Một tệp nhị phân tĩnh.** Khoảng 4 MB trên Linux.
 - **Theo tệp, không theo lớp.** Tệp mà nhiều image dùng chung chỉ được lưu và cache một lần.
 - **Nhanh.** Trên Linux, container khởi động trong khoảng 4 ms.
-- **Dùng được với công cụ của Docker.** Image Docker và OCI, CLI `docker`, Compose và buildx.
+- **Dùng được với công cụ của Docker.** Image Docker và OCI, CLI `docker`, Compose, buildx và swarm stack trên một node.
 - **Build Dockerfile.** `podbag build`, và `docker build` với trình build cổ điển, không cần BuildKit hay daemon.
 - **Kubernetes.** `podbag cri serve` là container runtime của một node, cho kubelet hoặc k3s.
 - **Có hoặc không có root.** Cùng một chương trình chạy được theo cả hai cách.

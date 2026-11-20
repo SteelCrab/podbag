@@ -6,6 +6,7 @@ pub const RTM_NEWLINK: u16 = 16;
 pub const RTM_DELLINK: u16 = 17;
 pub const RTM_GETLINK: u16 = 18;
 pub const RTM_NEWADDR: u16 = 20;
+pub const RTM_DELADDR: u16 = 21;
 pub const RTM_NEWROUTE: u16 = 24;
 pub const IFLA_IFNAME: u16 = 3;
 pub const IFLA_MASTER: u16 = 10;
@@ -93,6 +94,18 @@ pub fn add_address(index: u32, addr: [u8; 4], prefix: u8) -> Message {
     h[1] = prefix;
     h[4..8].copy_from_slice(&index.to_ne_bytes());
     let mut m = Message::new(RTM_NEWADDR, CREATE, &h);
+    m.attr(IFA_LOCAL, &addr);
+    m.attr(IFA_ADDRESS, &addr);
+    m
+}
+
+/// Take the IPv4 address `addr/prefix` from link `index`.
+pub fn del_address(index: u32, addr: [u8; 4], prefix: u8) -> Message {
+    let mut h = [0u8; 8];
+    h[0] = AF_INET;
+    h[1] = prefix;
+    h[4..8].copy_from_slice(&index.to_ne_bytes());
+    let mut m = Message::new(RTM_DELADDR, NLM_F_REQUEST | NLM_F_ACK, &h);
     m.attr(IFA_LOCAL, &addr);
     m.attr(IFA_ADDRESS, &addr);
     m
@@ -200,6 +213,16 @@ mod tests {
         assert_eq!(&r[16..24], &[2, 0, 0, 0, 254, 3, 0, 1], "rtmsg");
         assert_eq!((u16_at(&r, 28), u16_at(&r, 30)), (8, RTA_GATEWAY));
         assert_eq!(&r[32..36], &[10, 77, 0, 1]);
+    }
+
+    #[test]
+    fn address_removal() {
+        let a = del_address(3, [10, 78, 1, 9], 32).finish(1);
+        assert_eq!(u16_at(&a, 4), RTM_DELADDR);
+        assert_eq!(u16_at(&a, 6), NLM_F_REQUEST | NLM_F_ACK);
+        assert_eq!(&a[16..20], &[2, 32, 0, 0]);
+        assert_eq!(u32_at(&a, 20), 3);
+        assert_eq!(&a[28..32], &[10, 78, 1, 9]);
     }
 
     #[test]
