@@ -3,8 +3,9 @@
 use super::docker::{docker_arch, docker_image_name, docker_repo, rfc3339};
 use super::http::Request;
 use super::router::{Ctx, Reply, check_filters, error_text, message, not_supported, reply_error};
+use crate::image::auth::AuthConfig;
 use crate::image::reference::Reference;
-use crate::image::{Image, ImageConfig, PullEvent};
+use crate::image::{Image, ImageConfig, PullEvent, PushEvent};
 use crate::store::{ImageRecord, Store};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -17,9 +18,7 @@ pub fn route(req: &Request, ctx: &Ctx, rest: &str) -> Option<Reply> {
         ("GET", "json") => list(req, ctx),
         ("POST", "create") => create(req),
         ("POST", "prune") => prune(req),
-        ("GET", "search") => {
-            not_supported("searching a registry", "search on the registry's web site")
-        }
+        ("GET", "search") => search(req),
         ("POST", "load") => load(),
         ("GET", "get") => save(req.query.all("names")),
         ("GET", r) if r.ends_with("/json") => inspect(ctx, &r[..r.len() - "/json".len()]),
@@ -28,9 +27,7 @@ pub fn route(req: &Request, ctx: &Ctx, rest: &str) -> Option<Reply> {
             not_supported("image history", "use `docker image inspect`")
         }
         ("POST", r) if r.ends_with("/tag") => tag(req, &r[..r.len() - "/tag".len()]),
-        ("POST", r) if r.ends_with("/push") => {
-            not_supported("pushing images", "push with another tool, like skopeo")
-        }
+        ("POST", r) if r.ends_with("/push") => push(req, &r[..r.len() - "/push".len()]),
         ("DELETE", r) if !r.is_empty() => remove(ctx, r),
         _ => return None,
     })
@@ -164,6 +161,10 @@ fn create(req: &Request) -> Reply {
     let Some(from) = req.query.get("fromImage").filter(|f| !f.is_empty()) else {
         return message(400, "fromImage is required");
     };
+    let login = match registry_login(req) {
+        Ok(l) => l,
+        Err(reply) => return reply,
+    };
     let tag = req.query.get("tag").unwrap_or("");
     let reference = match tag {
         "" => from.to_string(),
@@ -199,7 +200,7 @@ fn create(req: &Request) -> Reply {
                 return Ok(());
             }
             let mut messages = PullMessages::new(&shown, before);
-            let result = Image::pull_with_events(&reference, |ev| {
+            let result = Image::pull_with_login(&reference, login.as_ref(), |ev| {
                 let m = messages.on(&ev);
                 send(out, m);
             });
@@ -214,6 +215,187 @@ fn create(req: &Request) -> Reply {
             }
             Ok(())
         }),
+    }
+}
+
+/// The login of a request's `X-Registry-Auth` header (base64url JSON), if any.
+pub fn registry_login(req: &Request) -> Result<Option<AuthConfig>, Reply> {
+    match req.header("x-registry-auth") {
+        None => Ok(None),
+        Some(value) => AuthConfig::from_header(value).map_err(|e| reply_error(&e)),
+    }
+}
+
+/// `POST /auth`: check a login against its registry, as `docker login` asks. The client
+/// keeps it; podbag keeps nothing.
+pub fn login(req: &Request) -> Reply {
+    let login: AuthConfig = match serde_json::from_slice(&req.body) {
+        Ok(l) => l,
+        Err(e) => return message(400, format!("invalid login: {e}")),
+    };
+    let login = login.normalized();
+    if login.is_empty() {
+        return message(
+            400,
+            "a user name and a password (or an identity token) are required",
+        );
+    }
+    let registry = crate::image::auth::registry_of(&login.serveraddress);
+    match crate::image::registry::Registry::with_auth(Some(login)).login(&registry) {
+        Ok(token) => Reply::Json(
+            200,
+            json!({"Status": "Login Succeeded", "IdentityToken": token.unwrap_or_default()}),
+        ),
+        Err(e) if crate::image::registry::is_login_failure(&e) => message(401, error_text(&e)),
+        Err(e) => reply_error(&e),
+    }
+}
+
+/// Turns push events into Docker's JSON progress messages.
+pub fn push_messages(ev: &PushEvent) -> Vec<Value> {
+    match ev {
+        PushEvent::Started { repository, layers } => {
+            let mut m = vec![json!({
+                "status": format!("The push refers to repository [{repository}]")
+            })];
+            m.extend(layers.iter().map(|id| layer_id("Preparing", id)));
+            m
+        }
+        PushEvent::LayerExists { id } => vec![layer_id("Layer already exists", id)],
+        PushEvent::LayerMounted { id, from } => {
+            vec![layer_id(&format!("Mounted from {from}"), id)]
+        }
+        PushEvent::LayerPushed { id, .. } => vec![layer_id("Pushed", id)],
+        PushEvent::Done { tag, digest, size } => vec![
+            json!({"status": format!("{tag}: digest: {digest} size: {size}")}),
+            json!({"progressDetail": {}, "aux": {"Tag": tag, "Digest": digest, "Size": size}}),
+        ],
+    }
+}
+
+fn layer_id(status: &str, id: &str) -> Value {
+    json!({"status": status, "progressDetail": {}, "id": id})
+}
+
+/// `POST /images/{name}/push?tag=…`: push, streaming progress. Without a tag, every tag
+/// of the repository (`docker push --all-tags`).
+fn push(req: &Request, name: &str) -> Reply {
+    let login = match registry_login(req) {
+        Ok(l) => l,
+        Err(reply) => return reply,
+    };
+    let tag = req.query.get("tag").unwrap_or("");
+    let repository = match Reference::parse(name) {
+        Ok(r) if r.digest.is_none() && !name.contains('@') => {
+            format!("{}/{}", r.registry, r.repository)
+        }
+        Ok(_) => return message(400, format!("cannot push {name}: give a tag, not a digest")),
+        Err(e) => return reply_error(&e),
+    };
+    let names: Vec<String> = if tag.is_empty() {
+        let prefix = format!("{repository}:");
+        match Image::list() {
+            Ok(list) => list
+                .into_iter()
+                .map(|i| i.name)
+                .filter(|n| n.starts_with(&prefix))
+                .collect(),
+            Err(e) => return reply_error(&e),
+        }
+    } else {
+        vec![format!("{repository}:{tag}")]
+    };
+    if names.is_empty() || Image::get(&names[0]).is_err() {
+        return message(
+            404,
+            format!(
+                "No such image: {}",
+                docker_image_name(names.first().unwrap_or(&repository))
+            ),
+        );
+    }
+    Reply::Stream {
+        content_type: "application/json",
+        body: Box::new(move |out| {
+            for name in names {
+                let result = Image::push_with_login(&name, login.as_ref(), |ev| {
+                    send(out, push_messages(&ev));
+                });
+                match result {
+                    Ok(_) => {
+                        let short = docker_image_name(&name);
+                        super::events::publish("image", "push", &short, &[("name", short.clone())]);
+                    }
+                    Err(e) => {
+                        send(out, vec![failure(&error_text(&e))]);
+                        break;
+                    }
+                }
+            }
+            Ok(())
+        }),
+    }
+}
+
+/// `GET /images/search?term=…&limit=…&filters=…`: Docker Hub's search (or the registry's
+/// that the term names).
+fn search(req: &Request) -> Reply {
+    let Some(term) = req.query.get("term").filter(|t| !t.is_empty()) else {
+        return message(400, "term is required");
+    };
+    let filters = match req.query.filters() {
+        Ok(f) => f,
+        Err(_) => return message(400, "invalid filters"),
+    };
+    if let Err(reply) = check_filters(&filters, &["is-official", "is-automated", "stars"], &[]) {
+        return reply;
+    }
+    let limit = match req.query.get("limit").filter(|l| !l.is_empty()) {
+        None => 25,
+        Some(l) => match l.parse::<u32>() {
+            Ok(n) if (1..=100).contains(&n) => n,
+            _ => return message(400, "limit must be between 1 and 100"),
+        },
+    };
+    let truthy = |key: &str| -> Result<Option<bool>, Reply> {
+        match filters.get(key).and_then(|v| v.first()).map(String::as_str) {
+            None => Ok(None),
+            Some("true" | "1") => Ok(Some(true)),
+            Some("false" | "0") => Ok(Some(false)),
+            Some(other) => Err(message(400, format!("invalid filter '{key}={other}'"))),
+        }
+    };
+    let (official, automated) = match (truthy("is-official"), truthy("is-automated")) {
+        (Ok(o), Ok(a)) => (o, a),
+        (Err(r), _) | (_, Err(r)) => return r,
+    };
+    let stars = match filters.get("stars").and_then(|v| v.first()) {
+        None => 0,
+        Some(s) => match s.parse::<u64>() {
+            Ok(n) => n,
+            Err(_) => return message(400, format!("invalid filter 'stars={s}'")),
+        },
+    };
+    match crate::image::registry::search(term, limit) {
+        Ok(found) => Reply::Json(
+            200,
+            Value::Array(
+                found
+                    .into_iter()
+                    .filter(|r| official.is_none_or(|o| r.is_official == o))
+                    .filter(|r| automated.is_none_or(|a| r.is_automated == a))
+                    .filter(|r| r.star_count >= stars)
+                    .map(|r| {
+                        json!({
+                            "name": r.name, "description": r.description,
+                            "star_count": r.star_count, "is_official": r.is_official,
+                            "is_automated": r.is_automated,
+                        })
+                    })
+                    .collect(),
+            ),
+        ),
+        Err(e) => reply_error(&e),
     }
 }
 
@@ -309,8 +491,8 @@ fn list(req: &Request, ctx: &Ctx) -> Reply {
             .get(key)
             .is_some_and(|v| v.iter().any(|x| x == value))
     };
-    // podbag keeps no image without a name, and no image labels.
-    if wants("dangling", "true") || wants("dangling", "1") || filters.contains_key("label") {
+    // Images without a name are not listed.
+    if wants("dangling", "true") || wants("dangling", "1") {
         return Reply::Json(200, json!([]));
     }
     let images = match stored(ctx) {
@@ -326,7 +508,7 @@ fn list(req: &Request, ctx: &Ctx) -> Reply {
                 .collect(),
             None => names,
         };
-        if names.is_empty() {
+        if names.is_empty() || !super::router::labels_match(&record.config.labels, &filters) {
             continue;
         }
         let (tags, digests) = repo_names(&names, &digest);
@@ -341,7 +523,7 @@ fn list(req: &Request, ctx: &Ctx) -> Reply {
                 "Size": record.size,
                 "SharedSize": -1,
                 "VirtualSize": record.size,
-                "Labels": {},
+                "Labels": record.config.labels,
                 "Containers": -1,
             }),
         ));
@@ -359,6 +541,11 @@ fn config_json(c: &ImageConfig) -> Value {
     let env: Vec<String> = c.env.iter().map(|(k, v)| format!("{k}={v}")).collect();
     let volumes: serde_json::Map<String, Value> =
         c.volumes.iter().map(|v| (v.clone(), json!({}))).collect();
+    let ports: serde_json::Map<String, Value> = c
+        .exposed_ports
+        .iter()
+        .map(|p| (p.clone(), json!({})))
+        .collect();
     json!({
         "Hostname": "",
         "Domainname": "",
@@ -375,8 +562,11 @@ fn config_json(c: &ImageConfig) -> Value {
         "Volumes": if volumes.is_empty() { Value::Null } else { Value::Object(volumes) },
         "WorkingDir": c.workdir.clone().unwrap_or_default(),
         "Entrypoint": list(&c.entrypoint),
-        "OnBuild": null,
-        "Labels": null,
+        "OnBuild": list(&c.onbuild),
+        "Labels": if c.labels.is_empty() { Value::Null } else { json!(c.labels) },
+        "ExposedPorts": if ports.is_empty() { Value::Null } else { Value::Object(ports) },
+        "StopSignal": c.stop_signal,
+        "Shell": list(&c.shell),
     })
 }
 
@@ -465,7 +655,7 @@ fn prune(req: &Request) -> Reply {
     let all = filters
         .get("dangling")
         .is_some_and(|v| v.iter().any(|d| d == "false" || d == "0"));
-    // Images have no labels in podbag: a label filter matches none.
+    // podbag does not prune by label: a label filter removes nothing.
     if filters.contains_key("label") {
         return Reply::Json(200, json!({"ImagesDeleted": null, "SpaceReclaimed": 0}));
     }

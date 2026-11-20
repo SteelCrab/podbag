@@ -105,6 +105,13 @@ pub fn info(ctx: &Ctx) -> Reply {
             "Runtimes": {"podbag": {"path": "podbag"}},
             "DefaultRuntime": "podbag",
             "Swarm": crate::swarm::http::info(ctx),
+            // Docker Hub; local registries are reached over plain HTTP.
+            "IndexServerAddress": crate::image::auth::DOCKER_HUB_KEY,
+            "RegistryConfig": {
+                "InsecureRegistryCIDRs": ["127.0.0.0/8", "::1/128"],
+                "IndexConfigs": {"docker.io": {"Name": "docker.io", "Mirrors": [], "Secure": true, "Official": true}},
+                "Mirrors": [],
+            },
             "Plugins": {"Volume": ["local"], "Network": ["bridge", "host", "null", "overlay"], "Log": ["json-file"]},
             "Warnings": [],
         }),
