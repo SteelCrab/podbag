@@ -65,10 +65,11 @@ jobs:
           if-no-files-found: error
 
   # The image store against the kernel: the store's integration tests and the library
-  # tests that need root, rootless and as root.
+  # tests that need root, rootless and as root. The container jobs run on Ubuntu 26.04:
+  # rootless networks need pasta's --map-host-loopback, which 24.04's pasta lacks.
   integration:
     name: Integration ${{ matrix.mode }} ${{ matrix.arch }}
-    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-26.04-arm' || 'ubuntu-26.04' }}
     strategy:
       fail-fast: false
       matrix:
@@ -97,7 +98,7 @@ jobs:
   e2e:
     name: E2E ${{ matrix.mode }} ${{ matrix.arch }}
     needs: linux
-    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-26.04-arm' || 'ubuntu-26.04' }}
     strategy:
       fail-fast: false
       matrix:
@@ -122,7 +123,7 @@ jobs:
   nginx:
     name: Nginx ${{ matrix.mode }} ${{ matrix.arch }}
     needs: linux
-    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-26.04-arm' || 'ubuntu-26.04' }}
     strategy:
       fail-fast: false
       matrix:
