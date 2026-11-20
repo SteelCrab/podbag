@@ -1,4 +1,4 @@
-//! Installed instructions and completion records for hands-on volume lessons. Packages contain text only.
+//! Installed instructions and completion records for hands-on volume lessons. Lessons can include a small offline animation.
 pub mod gui;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -14,14 +14,30 @@ pub const FORMAT: &str = "podbag-cli-tui-volumes-v1";
 pub const LIMIT: usize = 65_536;
 
 #[derive(Serialize, Deserialize, Clone)]
+pub struct Introduction {
+    pub title: String,
+    pub text: String,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Animation {
+    pub mp4: String,
+    pub webp: String,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
 pub struct Words {
     pub title: String,
     pub guide: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intro: Option<Introduction>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Package {
     pub format: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub animation: Option<Animation>,
     pub translations: BTreeMap<String, Words>,
 }
 
@@ -79,12 +95,26 @@ pub fn install(dir: &Path, text: &str) -> io::Result<()> {
         return Err(io::Error::other("The module is too large."));
     }
     let package: Package = serde_json::from_str(text)?;
+    let valid_text =
+        |s: &str| !s.trim().is_empty() && !s.chars().any(|c| c.is_control() && c != '\n');
     if (package.format != FORMAT && package.format != gui::FORMAT)
         || !package.translations.contains_key("en")
+        || package.animation.as_ref().is_some_and(|a| {
+            package.translations["en"].intro.is_none()
+                || [&a.mp4, &a.webp].into_iter().any(|s| {
+                    s.is_empty()
+                        || !s.len().is_multiple_of(4)
+                        || !s
+                            .bytes()
+                            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'/' | b'='))
+                })
+        })
         || package.translations.values().any(|w| {
-            [&w.title, &w.guide]
-                .into_iter()
-                .any(|s| s.trim().is_empty() || s.chars().any(|c| c.is_control() && c != '\n'))
+            !valid_text(&w.title)
+                || !valid_text(&w.guide)
+                || w.intro
+                    .as_ref()
+                    .is_some_and(|i| !valid_text(&i.title) || !valid_text(&i.text))
         })
     {
         return Err(io::Error::other("Invalid volume lesson."));

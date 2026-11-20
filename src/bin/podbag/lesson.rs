@@ -70,7 +70,7 @@ pub fn command(cmd: LabCmd) -> i32 {
                         io::Error::other("Install the module with podbag lab install FILE first.")
                     })?;
                     if session(
-                        &installed.words(&lang).guide,
+                        installed.words(&lang),
                         (installed.package.format == volume_lesson::gui::FORMAT)
                             .then_some(dir.as_path()),
                     )? {
@@ -164,7 +164,7 @@ fn workspace() -> io::Result<()> {
 }
 
 #[cfg(unix)]
-fn session(guide: &str, library: Option<&Path>) -> io::Result<bool> {
+fn session(words: &volume_lesson::Words, library: Option<&Path>) -> io::Result<bool> {
     use std::io::{BufRead, BufReader, IsTerminal};
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
@@ -187,7 +187,10 @@ fn session(guide: &str, library: Option<&Path>) -> io::Result<bool> {
         if let Some(library) = library {
             registration = Some(volume_lesson::gui::Registration::open(library, dir)?);
         }
-        println!("\n{guide}\n");
+        if let Some(intro) = &words.intro {
+            println!("\n{}\n{}", intro.title, intro.text);
+        }
+        println!("\n{}\n", words.guide);
         if Path::new("/bin/sh").is_file() {
             practice_command(Path::new("/bin/sh"), dir)?
                 .arg("-i")

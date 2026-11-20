@@ -1760,7 +1760,7 @@ async function init() {
   } catch { /* the defaults */ }
   applyTheme();
   await I18N.load(S.settings.language);
-  try { S.practiceInstalled = (await API.volumeToolsLab("status"))?.package.format === GUI_VOLUME_FORMAT; }
+  try { S.practiceInstalled = (await API.volumeToolsLab("summary"))?.package.format === GUI_VOLUME_FORMAT; }
   catch { S.practiceInstalled = false; }
   setupWindowBar();
   setupKubeNav();

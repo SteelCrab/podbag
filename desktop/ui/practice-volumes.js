@@ -29,7 +29,7 @@ function watchPractice(panel, completed, onChange) {
     try {
       const state = await API.practiceVolumes();
       // Completion is saved by the shell after it shuts down the practice engine.
-      if (!state) completed = !!(await API.volumeToolsLab("status"))?.completed;
+      if (!state) completed = !!(await API.volumeToolsLab("summary"))?.completed;
       if (!panel.isConnected || ticket !== revision) return;
       const stage = state?.stage || (completed ? "complete" : "start");
       showPracticeProgress(panel, stage);

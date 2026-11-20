@@ -1138,7 +1138,7 @@ fn volume_tools_lab(
     use podbag::volume_lesson as lesson;
     let dir = lesson::directory().map_err(|e| e.to_string())?;
     match action {
-        "status" => {}
+        "status" | "summary" => {}
         "install" => lesson::install(&dir, package.as_deref().ok_or("Choose a module file.")?)
             .map_err(|e| e.to_string())?,
         "remove" => lesson::remove(&dir).map_err(|e| e.to_string())?,
@@ -1165,7 +1165,14 @@ fn volume_tools_lab(
         }
         _ => return Err("Unknown lesson action.".into()),
     }
-    lesson::read(&dir).map_err(|e| e.to_string())
+    let mut record = lesson::read(&dir).map_err(|e| e.to_string())?;
+    // Progress polling and sidebar discovery only need the installation state.
+    if action == "summary"
+        && let Some(record) = &mut record
+    {
+        record.package.animation = None;
+    }
+    Ok(record)
 }
 
 #[tauri::command]

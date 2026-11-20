@@ -13,6 +13,18 @@ function validTutorial(pack) {
     ["title", "goal", "create", "write", "serve", "request"].every((key) => text(words?.[key])));
 }
 
+function lessonIntroduction(pack, lesson) {
+  const intro = lesson.intro || pack.translations.en.intro;
+  if (!intro) return null;
+  const animation = pack.animation;
+  const video = animation && h("video", {
+    controls: true, playsinline: true, preload: "none", "aria-label": intro.title,
+    poster: "data:image/webp;base64," + animation.webp, src: "data:video/mp4;base64," + animation.mp4,
+  });
+  return h("section", { class: "lesson-intro" },
+    h("h3", { text: intro.title }), h("p", { text: intro.text }), video);
+}
+
 function renderTutorials(main) {
   const card = h("section", { class: "card tutorial-card", "aria-labelledby": "tutorial-heading" });
   const status = h("p", { role: "status", class: "tutorial-status" });
@@ -59,8 +71,9 @@ function renderTutorials(main) {
       }
       const lesson = words(record.package);
       const progress = gui ? h("section", { class: "practice-progress" }) : null;
-      put(tools, h("div", { class: "tutorial-title" }, icon("shell"), h("h2", { text: lesson.title })),
+      put(tools, h("div", { class: "tutorial-title" }, icon("shell"), h("h2", { tabindex: "-1", text: lesson.title })),
         gui ? null : h("p", { class: "tutorial-progress", text: t(record.completed ? "tutorial.complete" : "tutorial.installed") }),
+        lessonIntroduction(record.package, lesson),
         gui ? progress : h("p", { class: "lab-guide", text: lesson.guide }), gui ? null : codeLine("podbag lab start"),
         h("div", { class: "buttons-row" },
           button("shell", t("status.terminal"), () => toolsAction("start"), "primary"),
@@ -75,7 +88,7 @@ function renderTutorials(main) {
       return false;
     }
   }
-  function home() { if (installed) openLab(); else installer(); }
+  function home() { if (installed) return openLab(); installer(); }
   function installer() {
     const guide = I18N.lang === "en" ? "https://podbag.dev/blog/" : `https://podbag.dev/${I18N.lang}/blog/`;
     const input = h("input", { type: "file", accept: ".podbag", hidden: true });
@@ -94,8 +107,11 @@ function renderTutorials(main) {
           h("p", { text: t("tutorial.installNote") }),
           h("div", { class: "buttons-row" },
             button("pull", t("tutorial.install"), async () => {
-              if (cliLab) { if (await toolsAction("install", JSON.stringify(pack))) home(); }
-              else if (save({ pack, complete: installed?.complete || false })) openLab();
+              if (cliLab) {
+                if (!await toolsAction("install", JSON.stringify(pack))) return;
+                await home();
+                tools.querySelector("h2")?.focus();
+              } else if (save({ pack, complete: installed?.complete || false })) openLab();
             }, "primary"),
             button(null, t("action.cancel"), home)));
       } catch {
@@ -139,7 +155,7 @@ function renderTutorials(main) {
   }
   function openLab() {
     overview();
-    run("status");
+    return run("status");
   }
 
   function renderLab(state, editing = false) {
