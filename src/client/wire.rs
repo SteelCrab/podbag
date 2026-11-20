@@ -15,7 +15,7 @@ const MAX_HEAD: usize = 64 * 1024;
 pub struct Response {
     pub status: u16,
     headers: Vec<(String, String)>,
-    body: Body,
+    body: Reader,
 }
 
 enum Framing {
@@ -25,7 +25,7 @@ enum Framing {
     Done,
 }
 
-struct Body {
+struct Reader {
     inner: BufReader<Box<dyn Conn>>,
     framing: Framing,
 }
@@ -58,31 +58,72 @@ impl Read for Response {
     }
 }
 
-/// Send a request and read the response head.
+/// A request body.
+pub enum Body<'a> {
+    None,
+    /// JSON, sent with its length.
+    Json(&'a [u8]),
+    /// A stream of this content type, sent chunked as it is read.
+    Stream(&'static str, &'a mut dyn Read),
+}
+
+/// Send a request and read the response head. `headers` go out as given.
 pub fn send(
     mut conn: Box<dyn Conn>,
     method: &str,
     path: &str,
-    body: Option<&[u8]>,
+    headers: &[(&str, &str)],
+    body: Body,
 ) -> io::Result<Response> {
     let mut head = format!(
         "{method} {path} HTTP/1.1\r\nHost: docker\r\nUser-Agent: podbag/{}\r\nConnection: close\r\n",
         env!("CARGO_PKG_VERSION")
     );
-    match body {
-        Some(b) => head.push_str(&format!(
+    for (k, v) in headers {
+        head.push_str(&format!("{k}: {v}\r\n"));
+    }
+    match &body {
+        Body::Json(b) => head.push_str(&format!(
             "Content-Type: application/json\r\nContent-Length: {}\r\n\r\n",
             b.len()
         )),
-        None if method == "GET" || method == "HEAD" => head.push_str("\r\n"),
-        None => head.push_str("Content-Length: 0\r\n\r\n"),
+        Body::Stream(kind, _) => head.push_str(&format!(
+            "Content-Type: {kind}\r\nTransfer-Encoding: chunked\r\n\r\n"
+        )),
+        Body::None if method == "GET" || method == "HEAD" => head.push_str("\r\n"),
+        Body::None => head.push_str("Content-Length: 0\r\n\r\n"),
     }
     conn.write_all(head.as_bytes())?;
-    if let Some(b) = body {
-        conn.write_all(b)?;
+    let sent = match body {
+        Body::None => Ok(()),
+        Body::Json(b) => conn.write_all(b),
+        Body::Stream(_, r) => write_chunked(&mut conn, r),
+    };
+    let sent = sent.and_then(|()| conn.flush());
+    let head_only = method == "HEAD";
+    match sent {
+        Ok(()) => read_response(BufReader::new(conn), head_only),
+        // The engine may answer (an error) and close before it has the whole body:
+        // its answer says more than the failed write.
+        Err(e) => read_response(BufReader::new(conn), head_only).map_err(|_| e),
     }
-    conn.flush()?;
-    read_response(BufReader::new(conn), method == "HEAD")
+}
+
+/// Copy `r` to `w` as HTTP chunks, then the last (empty) chunk.
+fn write_chunked(w: &mut dyn Write, r: &mut dyn Read) -> io::Result<()> {
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = match r.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        write!(w, "{n:x}\r\n")?;
+        w.write_all(&buf[..n])?;
+        w.write_all(b"\r\n")?;
+    }
+    w.write_all(b"0\r\n\r\n")
 }
 
 fn read_response(mut inner: BufReader<Box<dyn Conn>>, head_only: bool) -> io::Result<Response> {
@@ -152,7 +193,7 @@ fn read_response(mut inner: BufReader<Box<dyn Conn>>, head_only: bool) -> io::Re
     Ok(Response {
         status,
         headers,
-        body: Body { inner, framing },
+        body: Reader { inner, framing },
     })
 }
 
@@ -168,7 +209,7 @@ fn read_line(r: &mut impl BufRead) -> io::Result<String> {
     Ok(String::from_utf8_lossy(&line).trim().to_string())
 }
 
-impl Read for Body {
+impl Read for Reader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if buf.is_empty() {
             return Ok(0);
@@ -286,7 +327,7 @@ mod tests {
 
     fn get(answer: &str) -> io::Result<(u16, String)> {
         let conn = Box::new(Canned(Cursor::new(answer.as_bytes().to_vec())));
-        let r = send(conn, "GET", "/x", None)?;
+        let r = send(conn, "GET", "/x", &[], Body::None)?;
         let status = r.status;
         let body = r.bytes(1024)?;
         Ok((status, String::from_utf8(body).unwrap()))

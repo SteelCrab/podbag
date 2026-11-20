@@ -309,12 +309,28 @@ impl Client {
         body: Option<&Value>,
         timeout: Option<std::time::Duration>,
     ) -> Result<(wire::Response, Closer)> {
+        let body = body.map(|b| serde_json::to_vec(b).unwrap_or_default());
+        let body = match &body {
+            Some(b) => wire::Body::Json(b),
+            None => wire::Body::None,
+        };
+        self.send(method, path, &[], body, timeout)
+    }
+
+    /// A request with extra headers and any body.
+    fn send(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: wire::Body,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<(wire::Response, Closer)> {
         let (conn, closer) = self.endpoint.connect(timeout).map_err(|e| ApiError {
             status: 0,
             message: format!("cannot connect to {}: {e}", self.endpoint.describe()),
         })?;
-        let body = body.map(|b| serde_json::to_vec(b).unwrap_or_default());
-        let resp = wire::send(conn, method, path, body.as_deref()).map_err(ApiError::io)?;
+        let resp = wire::send(conn, method, path, headers, body).map_err(ApiError::io)?;
         if resp.status < 400 {
             return Ok((resp, closer));
         }
@@ -447,40 +463,60 @@ impl Client {
 
     /// Pull an image; `progress` gets each status line. The pull's own error (sent in
     /// the stream, after a 200) is an error here too.
-    pub fn pull(&self, image: &str, mut progress: impl FnMut(&str)) -> Result<()> {
+    pub fn pull(&self, image: &str, progress: impl FnMut(&str)) -> Result<()> {
+        self.pull_auth(image, None, progress)
+    }
+
+    /// [`Client::pull`] with a login: `auth` is the `X-Registry-Auth` value (see
+    /// [`registries::registry_auth`]). It is a secret: it goes only to the engine.
+    pub fn pull_auth(
+        &self,
+        image: &str,
+        auth: Option<&str>,
+        progress: impl FnMut(&str),
+    ) -> Result<()> {
         let (name, tag) = split_tag(image);
         let mut path = format!("/images/create?fromImage={}", encode(name));
         if let Some(tag) = tag {
             path.push_str(&format!("&tag={}", encode(tag)));
         }
-        let (resp, _) = self.request("POST", &path, None, None)?;
-        for msg in serde_json::Deserializer::from_reader(BufReader::new(resp)).into_iter::<Value>()
-        {
-            let msg = msg.map_err(|e| ApiError {
-                status: 0,
-                message: format!("the pull stopped: {e}"),
-            })?;
-            if let Some(err) = msg["error"]
-                .as_str()
-                .or(msg["errorDetail"]["message"].as_str())
-            {
-                return Err(ApiError {
-                    status: 0,
-                    message: err.to_string(),
-                });
-            }
-            let mut line = msg["status"].as_str().unwrap_or("").to_string();
-            if let Some(id) = msg["id"].as_str() {
-                line = format!("{id}: {line}");
-            }
-            if let Some(p) = msg["progress"].as_str() {
-                line = format!("{line} {p}");
-            }
-            if !line.is_empty() {
-                progress(&line);
-            }
-        }
-        Ok(())
+        let headers: Vec<(&str, &str)> = auth.map(|a| ("X-Registry-Auth", a)).into_iter().collect();
+        let (resp, _) = self.send("POST", &path, &headers, wire::Body::None, None)?;
+        read_messages(resp, "the pull stopped", progress)
+    }
+
+    /// Search Docker Hub through the engine (`GET /images/search`). An engine without
+    /// search answers 404 or 501: [`ApiError::unsupported`] is true, so hide search.
+    pub fn search(&self, term: &str, limit: usize) -> Result<Vec<SearchResult>> {
+        self.get(&format!(
+            "/images/search?term={}&limit={limit}",
+            encode(term)
+        ))
+    }
+
+    /// The images as one tar archive (`GET /images/get`), read as it comes. Give it to
+    /// [`Client::load_images`] of another engine to copy them.
+    pub fn export_images(&self, names: &[&str]) -> Result<ImageArchive> {
+        let query: Vec<String> = names
+            .iter()
+            .map(|n| format!("names={}", encode(n)))
+            .collect();
+        let path = format!("/images/get?{}", query.join("&"));
+        let (resp, closer) = self.request("GET", &path, None, None)?;
+        Ok(ImageArchive(resp, closer))
+    }
+
+    /// Store the images of a tar archive (`POST /images/load`). The body is sent as it
+    /// is read, never held whole.
+    pub fn load_images(&self, mut body: impl Read) -> Result<()> {
+        let (resp, _) = self.send(
+            "POST",
+            "/images/load",
+            &[],
+            wire::Body::Stream("application/x-tar", &mut body),
+            None,
+        )?;
+        read_messages(resp, "the load stopped", |_| {})
     }
 
     /// A container's log, as lines. `follow`: the stream stays open for new lines.
@@ -547,6 +583,73 @@ pub fn split_tag(image: &str) -> (&str, Option<&str>) {
     match image.rsplit_once(':') {
         Some((name, tag)) if !tag.contains('/') => (name, Some(tag)),
         _ => (image, None),
+    }
+}
+
+/// Read a stream of JSON messages (a pull, a load). `progress` gets each status line; an
+/// error message in the stream (sent after a 200) is an error.
+fn read_messages(
+    resp: wire::Response,
+    stopped: &str,
+    mut progress: impl FnMut(&str),
+) -> Result<()> {
+    for msg in serde_json::Deserializer::from_reader(BufReader::new(resp)).into_iter::<Value>() {
+        let msg = msg.map_err(|e| ApiError {
+            status: 0,
+            message: format!("{stopped}: {e}"),
+        })?;
+        if let Some(err) = msg["error"]
+            .as_str()
+            .or(msg["errorDetail"]["message"].as_str())
+        {
+            return Err(ApiError {
+                status: 0,
+                message: err.to_string(),
+            });
+        }
+        let mut line = msg["status"]
+            .as_str()
+            .or(msg["stream"].as_str())
+            .unwrap_or("")
+            .trim_end()
+            .to_string();
+        if let Some(id) = msg["id"].as_str() {
+            line = format!("{id}: {line}");
+        }
+        if let Some(p) = msg["progress"].as_str() {
+            line = format!("{line} {p}");
+        }
+        if !line.is_empty() {
+            progress(&line);
+        }
+    }
+    Ok(())
+}
+
+/// One answer of [`Client::search`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SearchResult {
+    pub name: String,
+    #[serde(deserialize_with = "nullable")]
+    pub description: String,
+    pub star_count: u64,
+    pub is_official: bool,
+}
+
+/// A tar archive of images, read from the engine as it comes.
+pub struct ImageArchive(wire::Response, Closer);
+
+impl ImageArchive {
+    /// Ends the stream from another thread.
+    pub fn closer(&self) -> Closer {
+        self.1.clone()
+    }
+}
+
+impl Read for ImageArchive {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.0.read(buf)
     }
 }
 
