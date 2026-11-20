@@ -174,6 +174,24 @@ pub enum Cmd {
     /// distribution this way)
     #[command(name = "__install-self", hide = true)]
     InstallSelf { dest: std::path::PathBuf },
+    /// Replace podbag with a newer release from GitHub
+    ///
+    /// The download must match the release's SHA256SUMS before it runs; the old program
+    /// stays as podbag.old.
+    Upgrade {
+        /// Only say whether a newer release exists
+        #[arg(long)]
+        check: bool,
+        /// Install this release (the only way to go back to an older one)
+        #[arg(long, value_name = "X.Y.Z")]
+        version: Option<String>,
+        /// Do not ask before replacing podbag
+        #[arg(short, long)]
+        yes: bool,
+        /// With --check: print the result as JSON (for apps)
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]

@@ -45,7 +45,8 @@ fn main() {
 fn windows_front(args: Vec<String>) -> Option<i32> {
     match args.first().map(String::as_str) {
         Some("vm") => Some(podbag::windows::vm_command(&args[1..])),
-        None | Some("-h" | "--help" | "help" | "-V" | "--version") => None,
+        // podbag.exe itself is replaced; the next command updates the engine in WSL.
+        None | Some("-h" | "--help" | "help" | "-V" | "--version" | "upgrade") => None,
         // Checked here first: help and wrong arguments need no WSL.
         Some(_) => match parse(&args) {
             Err(e) => e.exit(),
@@ -128,7 +129,8 @@ fn macos_front(args: Vec<String>) -> Option<i32> {
         Some("__vm-host") => Some(podbag::macos::host::host_main()),
         Some("__vm-standby") => Some(podbag::macos::standby::standby_main()),
         Some("vm") => Some(podbag::macos::cli::vm_command(&args[1..])),
-        None | Some("-h" | "--help" | "help" | "-V" | "--version") => None,
+        // The Mac's program is replaced; the VM runs the guest it carries.
+        None | Some("-h" | "--help" | "help" | "-V" | "--version" | "upgrade") => None,
         // Clients of the Docker API: they use the Mac's docker.sock, which starts the VM.
         Some("tui") => None,
         Some("system") if args.get(1).is_some_and(|a| a == "dial-stdio") => None,
@@ -323,7 +325,22 @@ fn dispatch(cmd: Cmd) -> i32 {
         Cmd::Restarter { id } => podbag::restart::restart_main(&id),
         Cmd::Probe { id, start_period } => podbag::health::probe_main(&id, start_period),
         Cmd::InstallSelf { dest } => install_self(&dest),
+        Cmd::Upgrade {
+            check,
+            version,
+            yes,
+            json,
+        } => upgrade(check, version, yes, json),
     }
+}
+
+fn upgrade(check: bool, version: Option<String>, yes: bool, json: bool) -> i32 {
+    podbag::upgrade::upgrade_main(podbag::upgrade::Options {
+        check,
+        version,
+        yes,
+        json,
+    })
 }
 
 #[cfg(unix)]
@@ -351,6 +368,12 @@ fn dispatch(cmd: Cmd) -> i32 {
         Cmd::System { cmd } => image::system(cmd),
         Cmd::Volume { cmd } => volume::run(cmd),
         Cmd::Network { cmd } => network::run(cmd),
+        Cmd::Upgrade {
+            check,
+            version,
+            yes,
+            json,
+        } => upgrade(check, version, yes, json),
         _ => unsupported(),
     }
 }
