@@ -5,9 +5,9 @@
 //! slow connection would stop the logs and the requests of every container. Requests are
 //! read when they arrive, piece by piece, with a size limit and a deadline.
 
+use super::UNDER_KEEPER;
 use super::handover::KEEPER_FD;
 use super::proto::{self, Handover, Incoming, Progress, Reply, Request};
-use super::{LOCK, SOCKET, UNDER_KEEPER};
 use crate::helper::{ShimMode, StatusChannel, StatusMessage};
 use crate::paths::Dirs;
 use crate::shim::control;
@@ -166,7 +166,9 @@ pub fn keeper_main(runtime: &str) -> i32 {
             "start it with the same PODBAG_RUNTIME_DIR",
         ));
     }
-    let (lock, listener, socket_path, socket_inode) = match claim(&dirs) {
+    // Unreadable: no client matches, and every one of them starts its own shim.
+    let build = super::build_of(std::path::Path::new("/proc/self/exe")).unwrap_or_default();
+    let (lock, listener, socket_path, socket_inode) = match claim(&dirs, &build) {
         Ok(Some(c)) => c,
         // Another keeper serves this directory.
         Ok(None) => {
@@ -187,7 +189,7 @@ pub fn keeper_main(runtime: &str) -> i32 {
         Ok(p) => p,
         Err(e) => return status.fail(os_error("start", e.into())),
     };
-    let mut keeper = match Keeper::new(listener, socket_path, socket_inode, sig_r, linger) {
+    let mut keeper = match Keeper::new(listener, socket_path, socket_inode, sig_r, linger, build) {
         Ok(k) => k,
         Err(e) => return status.fail(os_error("start", e)),
     };
@@ -212,7 +214,8 @@ pub fn keeper_main(runtime: &str) -> i32 {
 
 /// Take the keeper's lock and bind its socket. `None`: another keeper holds the lock.
 #[allow(clippy::type_complexity)]
-fn claim(dirs: &Dirs) -> crate::Result<Option<(File, UnixListener, PathBuf, u64)>> {
+fn claim(dirs: &Dirs, build: &str) -> crate::Result<Option<(File, UnixListener, PathBuf, u64)>> {
+    let (socket, lock_file) = (super::socket_name(build), super::lock_name(build));
     let fail = |e: std::io::Error| os_error("start", e);
     crate::store::perm::private_dir_builder()
         .recursive(true)
@@ -234,7 +237,7 @@ fn claim(dirs: &Dirs) -> crate::Result<Option<(File, UnixListener, PathBuf, u64)
         .create(true)
         .truncate(false)
         .write(true)
-        .open(dirs.runtime.join(LOCK))
+        .open(dirs.runtime.join(&lock_file))
         .map_err(fail)?;
     // The lock is held by a keeper that serves (its socket answers: leave it to that
     // one), or by one that is still starting or already leaving (wait for its lock).
@@ -244,7 +247,7 @@ fn claim(dirs: &Dirs) -> crate::Result<Option<(File, UnixListener, PathBuf, u64)
             Ok(()) => break,
             Err(std::fs::TryLockError::WouldBlock) => {
                 let serves =
-                    super::with_socket_path(&dirs.runtime, SOCKET, |p| UnixStream::connect(p))
+                    super::with_socket_path(&dirs.runtime, &socket, |p| UnixStream::connect(p))
                         .is_ok();
                 if serves || Instant::now() >= deadline {
                     return Ok(None);
@@ -254,13 +257,13 @@ fn claim(dirs: &Dirs) -> crate::Result<Option<(File, UnixListener, PathBuf, u64)
             Err(std::fs::TryLockError::Error(e)) => return Err(fail(e)),
         }
     }
-    let path = dirs.runtime.join(SOCKET);
+    let path = dirs.runtime.join(&socket);
     // Left by a keeper that was killed: nobody listens there (we hold the lock).
     let _ = std::fs::remove_file(&path);
     // The socket is private from the moment it exists.
     // SAFETY: umask changes only this process's file mode mask; it has one thread.
     let old = unsafe { libc::umask(0o077) };
-    let bound = super::with_socket_path(&dirs.runtime, SOCKET, |p| UnixListener::bind(p));
+    let bound = super::with_socket_path(&dirs.runtime, &socket, |p| UnixListener::bind(p));
     // SAFETY: as above.
     unsafe { libc::umask(old) };
     let listener = bound.map_err(fail)?;
@@ -325,6 +328,7 @@ impl Keeper {
         socket_inode: u64,
         sig_r: OwnedFd,
         linger_ms: u64,
+        build: String,
     ) -> std::io::Result<Keeper> {
         // SAFETY: epoll_create1 has no memory arguments.
         let epoll = unsafe { libc::epoll_create1(libc::EPOLL_CLOEXEC) };
@@ -339,8 +343,7 @@ impl Keeper {
             socket_path,
             socket_inode,
             sig_r,
-            // Unreadable: no client matches, and every one of them starts its own shim.
-            build: super::build_of(std::path::Path::new("/proc/self/exe")).unwrap_or_default(),
+            build,
             starters: Vec::new(),
             containers: Vec::new(),
             pending: Vec::new(),
@@ -1319,7 +1322,7 @@ mod tests {
         .unwrap();
         // As in the keeper: the writing end stays open for the life of the process.
         std::mem::forget(sig_w);
-        Keeper::new(listener, path, 0, sig_r, 1000).unwrap()
+        Keeper::new(listener, path, 0, sig_r, 1000, String::new()).unwrap()
     }
 
     /// A container as a starter hands it over, and the writing ends of its outputs.

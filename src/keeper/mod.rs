@@ -16,9 +16,30 @@ pub use host::keeper_main;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// The keeper's socket and lock in the runtime directory.
-pub const SOCKET: &str = "keeper.sock";
-pub const LOCK: &str = "keeper.lock";
+/// The keeper's socket in the runtime directory: one per build of podbag
+/// (`keeper-<tag>.sock`, from [`build_of`]). After an upgrade the new program starts a
+/// keeper of its own at once, while the old keeper keeps watching the containers it
+/// started and ends when they are gone. With one name for all builds, the old keeper
+/// held the socket as long as one of its containers ran, and refused the new program,
+/// whose every start then took the slower way of a shim of its own.
+pub fn socket_name(build: &str) -> String {
+    format!("keeper-{}.sock", build_tag(build))
+}
+
+/// The keeper's lock, next to its socket.
+pub fn lock_name(build: &str) -> String {
+    format!("keeper-{}.lock", build_tag(build))
+}
+
+/// 12 hex digits of the build's SHA-256: short, as a socket path must be.
+fn build_tag(build: &str) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(build.as_bytes())
+        .iter()
+        .take(6)
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
 
 /// Set in a starter: a fork of the keeper that runs the shim code for one container.
 static UNDER_KEEPER: AtomicBool = AtomicBool::new(false);
@@ -132,6 +153,24 @@ fn with_socket_path<T>(
     let handle = std::fs::File::open(dir)?;
     let short = std::path::PathBuf::from(format!("/proc/self/fd/{}/{name}", handle.as_raw_fd()));
     f(&short)
+}
+
+#[cfg(test)]
+mod name_tests {
+    use super::*;
+
+    #[test]
+    fn each_build_has_its_own_socket_and_lock() {
+        let a = socket_name("0.1.0:1:2:3:4.5");
+        assert!(a.starts_with("keeper-") && a.ends_with(".sock"), "{a}");
+        assert_eq!(a.len(), "keeper-".len() + 12 + ".sock".len());
+        assert_eq!(a, socket_name("0.1.0:1:2:3:4.5"));
+        assert_ne!(a, socket_name("0.1.0:1:2:9:4.5"));
+        assert_eq!(
+            lock_name("x").trim_end_matches(".lock"),
+            socket_name("x").trim_end_matches(".sock")
+        );
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]

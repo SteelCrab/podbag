@@ -1,7 +1,7 @@
 //! What the window asks for, on a [`Client`]: no Tauri here, so it is tested against a
 //! fake engine. `main.rs` wraps these in Tauri commands.
 
-use podbag::client::{Client, Endpoint, Kind, LogLines, Pruned};
+use podbag::client::{Choice, Client, Endpoint, Kind, LogLines, Pruned, Target};
 use serde::Serialize;
 use serde_json::Value;
 use std::path::Path;
@@ -13,7 +13,13 @@ use std::time::Duration;
 pub struct EngineStatus {
     /// `linux`, `macos` or `windows`.
     pub platform: &'static str,
+    /// The engine this window uses: `podbag`, `docker` or `socket`.
+    pub engine: &'static str,
+    /// Its name for the user: `podbag`, `Docker` or the socket's path.
+    pub engine_name: String,
     pub endpoint: String,
+    /// Open shell works: podbag, or the docker CLI is installed.
+    pub shell: bool,
     /// The API answered.
     pub reachable: bool,
     /// macOS and Windows: `running`, `stopped` or `not set up`.
@@ -62,13 +68,18 @@ pub fn vm_status(podbag: &Path) -> Option<String> {
 /// Find out whether the engine answers. On Linux podbag's service is started; on macOS
 /// a stopped VM is left alone unless `start_vm` (a standby that holds the socket starts
 /// it at the first request anyway).
-pub fn engine(client: &Client, podbag: &Path, start_vm: bool) -> EngineStatus {
+pub fn engine(target: &Target, client: &Client, podbag: &Path, start_vm: bool) -> EngineStatus {
     let mut status = EngineStatus {
         platform: platform(),
+        engine: engine_kind(&target.choice),
+        engine_name: target.choice.label(),
         endpoint: client.endpoint.describe(),
+        shell: target.choice == Choice::Podbag
+            || podbag::client::choice::find_docker_cli().is_some(),
         ..EngineStatus::default()
     };
-    let own = matches!(client.endpoint, Endpoint::Socket { own: true, .. });
+    let own = target.choice == Choice::Podbag
+        && matches!(client.endpoint, Endpoint::Socket { own: true, .. });
     if own {
         status.vm = vm_status(podbag);
     }
@@ -78,7 +89,7 @@ pub fn engine(client: &Client, podbag: &Path, start_vm: bool) -> EngineStatus {
         status.error = Some("vm-stopped".into());
         return status;
     }
-    if let Err(e) = client.endpoint.ensure_running(podbag, start_vm) {
+    if let Err(e) = target.ensure_running(podbag, start_vm) {
         status.error = Some(e);
         return status;
     }
@@ -98,6 +109,26 @@ pub fn engine(client: &Client, podbag: &Path, start_vm: bool) -> EngineStatus {
         status.vm = vm_status(podbag).or(status.vm);
     }
     status
+}
+
+/// `podbag`, `docker` or `socket`.
+pub fn engine_kind(choice: &Choice) -> &'static str {
+    match choice {
+        Choice::Podbag => "podbag",
+        Choice::Docker => "docker",
+        Choice::Socket(_) => "socket",
+    }
+}
+
+/// Switch this window (and the TUI, which reads the same file) to `podbag` or `docker`:
+/// saved in `file` (`ui.json`), then found.
+pub fn choose(name: &str, file: &Path, podbag: &Path) -> Result<Target, String> {
+    let choice = match Choice::parse(name) {
+        Some(c @ (Choice::Podbag | Choice::Docker)) => c,
+        _ => return Err(format!("unknown engine {name}")),
+    };
+    podbag::client::choice::save_in(file, &choice)?;
+    Target::find(Some(&choice), podbag)
 }
 
 fn kind(name: &str) -> Result<Kind, String> {
@@ -215,28 +246,78 @@ fn safe_id(id: &str) -> Result<&str, String> {
     }
 }
 
-/// The command a shell runs with: `podbag exec -it <id> sh`.
-pub fn shell_command(podbag: &Path, id: &str) -> Result<Vec<String>, String> {
-    Ok(vec![
-        podbag.display().to_string(),
-        "exec".into(),
-        "-it".into(),
-        safe_id(id)?.into(),
-        "sh".into(),
-    ])
+/// A shell in a container: the command, and what to type by hand.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Shell {
+    pub argv: Vec<String>,
+    pub by_hand: String,
+}
+
+/// `podbag exec -it <id> sh` for podbag; `docker exec -it <id> sh` for another engine,
+/// with `DOCKER_HOST` set to its socket.
+pub fn shell_command(
+    target: &Target,
+    podbag: &Path,
+    docker: &Path,
+    id: &str,
+) -> Result<Shell, String> {
+    let id = safe_id(id)?;
+    let tail = ["exec", "-it", id, "sh"].map(String::from);
+    if target.choice == Choice::Podbag {
+        let mut argv = vec![podbag.display().to_string()];
+        argv.extend(tail);
+        return Ok(Shell {
+            argv,
+            by_hand: format!("podbag exec -it {id} sh"),
+        });
+    }
+    let mut argv = Vec::new();
+    if let Endpoint::Socket { path, .. } = &target.endpoint {
+        argv.push("env".to_string());
+        argv.push(format!("DOCKER_HOST=unix://{}", path.display()));
+    }
+    argv.push(docker.display().to_string());
+    argv.extend(tail);
+    Ok(Shell {
+        argv,
+        by_hand: format!("docker exec -it {id} sh"),
+    })
 }
 
 /// Open a terminal window with a shell in the container. When none can be opened, the
 /// error is the command to run by hand.
-pub fn open_shell(podbag: &Path, id: &str) -> Result<(), String> {
-    let argv = shell_command(podbag, id)?;
-    let by_hand = format!("podbag exec -it {} sh", argv[3]);
+pub fn open_shell(shell: &Shell) -> Result<(), String> {
+    if open_terminal(Some(&shell.argv)) {
+        Ok(())
+    } else {
+        Err(shell.by_hand.clone())
+    }
+}
+
+/// Open a terminal window that runs `argv` (None: a plain shell). False when no
+/// terminal app was found.
+pub fn open_terminal(argv: Option<&[String]>) -> bool {
+    let Some(argv) = argv else {
+        return if cfg!(target_os = "macos") {
+            std::process::Command::new("open")
+                .args(["-a", "Terminal"])
+                .spawn()
+                .is_ok()
+        } else if cfg!(windows) {
+            std::process::Command::new("cmd")
+                .args(["/C", "start", "cmd"])
+                .spawn()
+                .is_ok()
+        } else {
+            linux_terminal(&[])
+        };
+    };
     let quoted: Vec<String> = argv
         .iter()
         .map(|a| format!("'{}'", a.replace('\'', "'\\''")))
         .collect();
     let line = quoted.join(" ");
-    let started = if cfg!(target_os = "macos") {
+    if cfg!(target_os = "macos") {
         let script = format!(
             "tell application \"Terminal\"\nactivate\ndo script \"{}\"\nend tell",
             line.replace('\\', "\\\\").replace('"', "\\\"")
@@ -248,13 +329,12 @@ pub fn open_shell(podbag: &Path, id: &str) -> Result<(), String> {
     } else if cfg!(windows) {
         std::process::Command::new("cmd")
             .args(["/C", "start", "podbag"])
-            .args(&argv)
+            .args(argv)
             .spawn()
             .is_ok()
     } else {
-        linux_terminal(&argv)
-    };
-    if started { Ok(()) } else { Err(by_hand) }
+        linux_terminal(argv)
+    }
 }
 
 /// The first terminal found: $TERMINAL, then the common ones.
@@ -276,11 +356,11 @@ fn linux_terminal(argv: &[String]) -> bool {
         candidates.push((t.to_string(), flag));
     }
     candidates.into_iter().any(|(t, flag)| {
-        std::process::Command::new(&t)
-            .arg(flag)
-            .args(argv)
-            .spawn()
-            .is_ok()
+        let mut cmd = std::process::Command::new(&t);
+        if !argv.is_empty() {
+            cmd.arg(flag).args(argv);
+        }
+        cmd.spawn().is_ok()
     })
 }
 
@@ -302,8 +382,18 @@ mod tests {
                 small_engine("GET", path)
             }
         });
-        let s = super::engine(&engine.client, Path::new("/nonexistent/podbag"), false);
+        let target = Target {
+            choice: Choice::Podbag,
+            endpoint: engine.client.endpoint.clone(),
+        };
+        let s = super::engine(
+            &target,
+            &engine.client,
+            Path::new("/nonexistent/podbag"),
+            false,
+        );
         assert!(s.reachable, "{s:?}");
+        assert_eq!(s.engine, "podbag");
         assert_eq!(s.version.as_deref(), Some("podbag 0.1.0 (API 1.47)"));
         assert_eq!(s.vm, None);
         assert!(s.endpoint.starts_with("unix://"));
@@ -311,11 +401,15 @@ mod tests {
 
     #[test]
     fn no_engine_is_an_error_not_a_panic() {
-        let client = Client::new(Endpoint::Socket {
-            path: "/nonexistent/docker.sock".into(),
-            own: false,
-        });
-        let s = super::engine(&client, Path::new("/nonexistent/podbag"), false);
+        let target = Target {
+            choice: Choice::Socket("/nonexistent/docker.sock".into()),
+            endpoint: Endpoint::Socket {
+                path: "/nonexistent/docker.sock".into(),
+                own: false,
+            },
+        };
+        let client = Client::new(target.endpoint.clone());
+        let s = super::engine(&target, &client, Path::new("/nonexistent/podbag"), false);
         assert!(!s.reachable);
         assert!(s.error.unwrap().contains("nothing answers"));
     }
@@ -384,14 +478,140 @@ mod tests {
         assert_eq!(got.concat(), ["listening on :80", "GET / 200"]);
     }
 
+    fn docker_at(path: impl Into<std::path::PathBuf>) -> Target {
+        Target {
+            choice: Choice::Docker,
+            endpoint: Endpoint::Socket {
+                path: path.into(),
+                own: false,
+            },
+        }
+    }
+
+    #[test]
+    fn docker_that_does_not_answer_is_never_started() {
+        let target = docker_at("/nonexistent/docker.sock");
+        let client = Client::new(target.endpoint.clone());
+        let s = super::engine(&target, &client, Path::new("/bin/false"), true);
+        assert!(!s.reachable);
+        assert_eq!(s.engine, "docker");
+        assert_eq!(
+            s.error.as_deref(),
+            Some(podbag::client::choice::docker_down())
+        );
+        assert_eq!(s.vm, None);
+    }
+
+    #[test]
+    fn docker_that_answers_is_used() {
+        let engine = FakeEngine::start(|method, path| {
+            if path == "/version" {
+                podbag::client::fake::json(
+                    200,
+                    serde_json::json!({"Platform": {"Name": "Docker Desktop 4.50.0"},
+                                       "Version": "29.0.1", "ApiVersion": "1.52"}),
+                )
+            } else {
+                small_engine(method, path)
+            }
+        });
+        let Endpoint::Socket { path, .. } = &engine.client.endpoint else {
+            unreachable!()
+        };
+        let target = docker_at(path.clone());
+        let s = super::engine(
+            &target,
+            &engine.client,
+            Path::new("/nonexistent/podbag"),
+            false,
+        );
+        assert!(s.reachable, "{s:?}");
+        assert_eq!(s.engine, "docker");
+        assert_eq!(s.vm, None, "Docker has no podbag VM");
+    }
+
+    #[test]
+    fn the_choice_is_saved_for_both_uis() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("ui.json");
+        let podbag = Path::new("/nonexistent/podbag");
+        let t = choose("docker", &file, podbag).unwrap();
+        assert_eq!(t.choice, Choice::Docker);
+        assert_eq!(
+            podbag::client::choice::saved_in(&file),
+            Some(Choice::Docker)
+        );
+        let t = choose("podbag", &file, podbag).unwrap();
+        assert_eq!(t.choice, Choice::Podbag);
+        assert!(matches!(t.endpoint, Endpoint::Socket { own: true, .. }));
+        assert_eq!(
+            podbag::client::choice::saved_in(&file),
+            Some(Choice::Podbag)
+        );
+        assert!(choose("/tmp/other.sock", &file, podbag).is_err());
+        assert_eq!(
+            podbag::client::choice::saved_in(&file),
+            Some(Choice::Podbag)
+        );
+    }
+
+    #[test]
+    fn docker_shells_use_the_docker_cli_and_its_socket() {
+        let target = docker_at("/x/docker.sock");
+        let shell = shell_command(
+            &target,
+            Path::new("/opt/podbag"),
+            Path::new("/usr/bin/docker"),
+            "web",
+        )
+        .unwrap();
+        assert_eq!(
+            shell.argv,
+            [
+                "env",
+                "DOCKER_HOST=unix:///x/docker.sock",
+                "/usr/bin/docker",
+                "exec",
+                "-it",
+                "web",
+                "sh"
+            ]
+        );
+        assert_eq!(shell.by_hand, "docker exec -it web sh");
+        let podbag = Target {
+            choice: Choice::Podbag,
+            endpoint: Endpoint::Socket {
+                path: "/p.sock".into(),
+                own: true,
+            },
+        };
+        let shell = shell_command(
+            &podbag,
+            Path::new("/opt/podbag"),
+            Path::new("docker"),
+            "web",
+        )
+        .unwrap();
+        assert_eq!(shell.argv, ["/opt/podbag", "exec", "-it", "web", "sh"]);
+        assert_eq!(shell.by_hand, "podbag exec -it web sh");
+    }
+
     #[test]
     fn shell_commands_take_only_plain_ids() {
-        let argv = shell_command(Path::new("/usr/local/bin/podbag"), "web-1").unwrap();
+        let t = Target {
+            choice: Choice::Podbag,
+            endpoint: Endpoint::Socket {
+                path: "/p.sock".into(),
+                own: true,
+            },
+        };
+        let docker = Path::new("docker");
+        let shell = shell_command(&t, Path::new("/usr/local/bin/podbag"), docker, "web-1").unwrap();
         assert_eq!(
-            argv,
+            shell.argv,
             ["/usr/local/bin/podbag", "exec", "-it", "web-1", "sh"]
         );
-        assert!(shell_command(Path::new("podbag"), "web; rm -rf /").is_err());
-        assert!(shell_command(Path::new("podbag"), "").is_err());
+        assert!(shell_command(&t, Path::new("podbag"), docker, "web; rm -rf /").is_err());
+        assert!(shell_command(&t, Path::new("podbag"), docker, "").is_err());
     }
 }

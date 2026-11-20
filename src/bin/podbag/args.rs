@@ -170,12 +170,18 @@ pub enum Cmd {
     Exec(ExecArgs),
     /// Manage containers, images, volumes and networks in the terminal
     ///
-    /// A client of the Docker API on podbag's socket (or DOCKER_HOST, when it is a Unix
-    /// socket). Press ? for the keys.
+    /// A client of the Docker API: podbag, Docker, or a socket (the saved choice, else
+    /// DOCKER_HOST when it is a Unix socket, else podbag). Press ? for the keys.
     Tui {
         /// Draw one screen as text, without a terminal, and exit
         #[arg(long, hide = true)]
         once: bool,
+        /// The engine for this run: podbag, docker, or a socket (unix:///path)
+        #[arg(long, value_name = "ENGINE", value_parser = parse_engine)]
+        engine: Option<podbag::client::Choice>,
+        /// Leave the mouse to the terminal (press m to change it)
+        #[arg(long)]
+        no_mouse: bool,
     },
     /// Show the resource use of containers (default: the running ones)
     Stats {
@@ -264,6 +270,24 @@ pub enum Cmd {
     /// distribution this way)
     #[command(name = "__install-self", hide = true)]
     InstallSelf { dest: std::path::PathBuf },
+    /// Replace podbag with a newer release from GitHub
+    ///
+    /// The download must match the release's SHA256SUMS before it runs; the old program
+    /// stays as podbag.old.
+    Upgrade {
+        /// Only say whether a newer release exists
+        #[arg(long)]
+        check: bool,
+        /// Install this release (the only way to go back to an older one)
+        #[arg(long, value_name = "X.Y.Z")]
+        version: Option<String>,
+        /// Do not ask before replacing podbag
+        #[arg(short, long)]
+        yes: bool,
+        /// With --check: print the result as JSON (for apps)
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -365,6 +389,24 @@ pub enum SystemCmd {
     /// For programs that cannot reach the socket themselves, such as the desktop app on
     /// Windows. It starts the service when none runs.
     DialStdio,
+    /// Where the docker command goes, and switch it to podbag or back
+    Docker {
+        #[command(subcommand)]
+        cmd: DockerCmd,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum DockerCmd {
+    /// Show where the docker command goes (podbag, Docker Desktop, OrbStack, …)
+    Status,
+    /// Make the docker command use podbag (a docker context named podbag)
+    ///
+    /// It creates the context when it is missing and remembers the context in use.
+    /// Other contexts are never changed or removed.
+    Use,
+    /// Go back to the context in use before `podbag system docker use`
+    Restore,
 }
 
 #[derive(Args)]
@@ -585,6 +627,12 @@ pub fn parse_env(arg: &str, lookup: impl Fn(&str) -> Option<String>) -> Option<(
         Some((k, v)) => Some((k.to_string(), v.to_string())),
         None => lookup(arg).map(|v| (arg.to_string(), v)),
     }
+}
+
+/// `--engine`: podbag, docker, or a socket.
+fn parse_engine(text: &str) -> Result<podbag::client::Choice, String> {
+    podbag::client::Choice::parse(text)
+        .ok_or_else(|| "use podbag, docker, or a socket (unix:///path)".to_string())
 }
 
 #[cfg(test)]

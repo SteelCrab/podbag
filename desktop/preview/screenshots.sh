@@ -5,7 +5,7 @@
 set -euo pipefail
 
 out="${1:?usage: screenshots.sh <output-folder> [views] [languages] [themes]}"
-views="${2:-containers images volumes networks pods services detail logs inspect settings empty offline vm confirm pull}"
+views="${2:-containers images pods services volumes networks detail logs inspect settings settings-vm settings-updates update-admin collapsed docker docker-down docker-settings settings-docker banner pull pull-locations pull-alibaba pull-login import empty offline vm confirm}"
 langs="${3:-en ko}"
 themes="${4:-light dark}"
 here="$(cd "$(dirname "$0")/.." && pwd)"
@@ -28,11 +28,13 @@ for lang in $langs; do
   for theme in $themes; do
     for view in $views; do
       file="$out/$view-$lang-$theme.png"
+      profile="$(mktemp -d)"
       "$chrome" --headless=new --disable-gpu --hide-scrollbars --no-first-run \
-        --user-data-dir="$(mktemp -d)" --window-size="${SIZE:-1100,720}" \
+        --user-data-dir="$profile" --window-size="${SIZE:-1100,720}" \
         --virtual-time-budget=3000 --screenshot="$file" \
         "http://127.0.0.1:$port/preview/preview.html?view=$view&lang=$lang&theme=$theme" \
         >/dev/null 2>&1
+      rm -rf "$profile"
       echo "$file"
     done
   done

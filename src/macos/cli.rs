@@ -3,6 +3,7 @@
 //! size and signals until the command's exit code comes back.
 
 use super::host::{Paths, make_run_dir, paths};
+use super::settings;
 use crate::vm::proto::{CLI_PORT, CliRequest, Frame};
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
@@ -143,34 +144,40 @@ fn error_since(log: &Path, at: u64) -> String {
     }
 }
 
-/// `podbag vm start|stop|status|logs|resources`.
+const VM_USAGE: &str = "usage: podbag vm start|stop|restart [--yes]|status [--json]|logs|resources [CPUS MEMORY_MIB]\n       \
+                        podbag vm set [--cpus N] [--memory SIZE] [--idle TIME] [--restart] [--yes]";
+
+/// `podbag vm start|stop|restart|status|set|logs|resources`.
 pub fn vm_command(args: &[String]) -> i32 {
+    let rest = args.get(1..).unwrap_or_default();
     let result = match args.first().map(String::as_str) {
-        // A round trip to the VM's agent: the VM is up, and works.
-        Some("start") => match forward(Forward {
-            argv: vec!["__vm-check".into()],
-            stdin: false,
-            paths: Vec::new(),
-            env: Vec::new(),
-        }) {
+        Some("start") => match start() {
             0 => {
                 println!("running");
                 Ok(())
             }
             _ => return 1,
         },
+        Some("status") if rest.iter().any(|a| a == "--json") => {
+            paths().map(|p| println!("{}", status_json(&p)))
+        }
         Some("resources") => {
             super::host::home().and_then(|home| super::resources::command(&home, &args[1..]))
         }
         Some("status") => paths().map(|p| println!("{}", status(&p))),
         Some("stop") => stop(),
+        Some("restart") => {
+            let yes = rest.iter().any(|a| a == "--yes" || a == "-y");
+            restart(yes).map(|()| println!("running"))
+        }
+        Some("set") => set(rest),
         Some("logs") => paths().and_then(|p| {
             let log = std::fs::read_to_string(&p.console)
                 .map_err(|e| format!("{}: {e}", p.console.display()))?;
             print!("{log}");
             Ok(())
         }),
-        _ => Err("usage: podbag vm start|stop|status|logs|resources".into()),
+        _ => Err(VM_USAGE.into()),
     };
     match result {
         Ok(()) => 0,
@@ -178,6 +185,256 @@ pub fn vm_command(args: &[String]) -> i32 {
             eprintln!("podbag: {e}");
             1
         }
+    }
+}
+
+/// A round trip to the VM's agent: the VM is up, and works. Its exit code.
+/// A round trip to the VM's agent: the VM is up, and works.
+fn start() -> i32 {
+    forward(Forward {
+        argv: vec!["__vm-check".into()],
+        stdin: false,
+        paths: Vec::new(),
+        env: Vec::new(),
+    })
+}
+
+/// `running`, `standby` (the VM is off, the sockets wait), `starting` or `stopped`,
+/// without connecting.
+pub fn state(p: &Paths) -> &'static str {
+    if lock_is_free(&p.lock) {
+        return "stopped";
+    }
+    match std::fs::read_to_string(&p.state).as_deref().map(str::trim) {
+        Ok("running") => "running",
+        Ok("standby") => "standby",
+        _ => "starting",
+    }
+}
+
+/// What the running VM's host wrote (None when no VM runs).
+fn running_info(p: &Paths) -> Option<settings::Running> {
+    if state(p) != "running" {
+        return None;
+    }
+    serde_json::from_slice(&std::fs::read(&p.running).ok()?).ok()
+}
+
+/// The containers that run in the VM, as its host last counted them.
+pub fn running_containers(p: &Paths) -> u64 {
+    running_info(p).and_then(|r| r.containers).unwrap_or(0)
+}
+
+/// `podbag vm status --json`, for apps: the state, the settings in use and those of the
+/// next start, the limits of this Mac, the disk, and what the running VM does. It reads
+/// files only: it wakes no VM and keeps none up.
+pub fn status_json(p: &Paths) -> serde_json::Value {
+    use std::os::unix::fs::MetadataExt;
+    let mac = settings::Mac::this();
+    let saved = settings::load(&p.home);
+    let env = |k: &str| std::env::var(k).ok();
+    let (next, overridden) = settings::effective(&saved, &env, &mac);
+    let state = state(p);
+    let info = running_info(p);
+    let in_use = info.as_ref().and_then(|i| i.resources);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let disk = std::fs::metadata(&p.disk).ok().map(|m| {
+        serde_json::json!({
+            "path": p.disk,
+            "allocatedBytes": m.blocks() * 512,
+            "sizeBytes": m.len(),
+        })
+    });
+    let pending = in_use.is_some_and(|u| u.cpus != next.cpus || u.memory_mib != next.memory_mib);
+    serde_json::json!({
+        "platform": "macos",
+        "state": state,
+        "resourcesEditable": true,
+        "inUse": in_use,
+        "next": next,
+        "saved": saved,
+        "overriddenBy": overridden,
+        "pending": pending,
+        "limits": {
+            "cpusMin": 1,
+            "cpusMax": mac.cpus,
+            "memoryMinMiB": settings::MEMORY_MIN_MIB,
+            "memoryMaxMiB": mac.memory_max_mib(),
+            "macMemoryMiB": mac.memory_mib,
+        },
+        "uptimeSeconds": info
+            .as_ref()
+            .filter(|i| i.started > 0)
+            .map(|i| now.saturating_sub(i.started)),
+        "containers": info.as_ref().and_then(|i| i.containers),
+        "cpuPercent": info.as_ref().and_then(|i| i.cpu_percent),
+        "memoryUsedMiB": info.as_ref().and_then(|i| i.memory_used_mib),
+        "memoryTotalMiB": info.as_ref().and_then(|i| i.memory_total_mib),
+        "disk": disk,
+    })
+}
+
+fn interactive() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
+}
+
+/// "1 container runs" or "3 containers run".
+fn containers_run(n: u64) -> String {
+    if n == 1 {
+        "1 container runs".into()
+    } else {
+        format!("{n} containers run")
+    }
+}
+
+/// A restart stops the containers that run: asked first (or `--yes`).
+fn confirm_restart(p: &Paths, yes: bool) -> Result<(), String> {
+    let n = running_containers(p);
+    if n == 0 || yes {
+        return Ok(());
+    }
+    let what = containers_run(n);
+    if !interactive() {
+        return Err(format!(
+            "{what} in the VM, and a restart stops them; add --yes to restart anyway"
+        ));
+    }
+    eprint!("{what} in the VM. A restart stops them. Restart? [y/N] ");
+    let _ = std::io::stderr().flush();
+    let mut line = String::new();
+    let _ = std::io::stdin().read_line(&mut line);
+    if matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        Ok(())
+    } else {
+        Err("the VM was not restarted".into())
+    }
+}
+
+/// `podbag vm restart`: power the VM off and start it again with the saved settings.
+/// Running containers stop (asked first, unless `yes`). A VM that is off just starts.
+pub fn restart(yes: bool) -> Result<(), String> {
+    let p = paths()?;
+    if state(&p) == "running" {
+        confirm_restart(&p, yes)?;
+        stop()?;
+    }
+    match start() {
+        0 => Ok(()),
+        _ => Err("the VM did not start again".into()),
+    }
+}
+
+/// `podbag vm set`: check and save the VM's settings; they apply at its next start
+/// (`--restart`: now).
+fn set(args: &[String]) -> Result<(), String> {
+    let p = paths()?;
+    let mut saved = settings::read(&p.home)?;
+    let mut changes = settings::Saved::default();
+    let (mut restart_now, mut yes, mut changed) = (false, false, false);
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        let (name, inline) = match a.split_once('=') {
+            Some((n, v)) if n.starts_with("--") => (n, Some(v.to_string())),
+            _ => (a, None),
+        };
+        let mut value = || -> Result<String, String> {
+            if let Some(v) = &inline {
+                return Ok(v.clone());
+            }
+            i += 1;
+            args.get(i)
+                .cloned()
+                .ok_or_else(|| format!("{name} needs a value\n{VM_USAGE}"))
+        };
+        match name {
+            "--cpus" => {
+                let v = value()?;
+                let n = v
+                    .trim()
+                    .parse()
+                    .map_err(|_| format!("--cpus: {v:?} is not a number"))?;
+                changes.cpus = Some(n);
+                changed = true;
+            }
+            "--memory" => {
+                changes.memory_mib = Some(settings::parse_memory(&value()?)?);
+                changed = true;
+            }
+            "--idle" => {
+                changes.idle_seconds = Some(settings::parse_idle(&value()?)?);
+                changed = true;
+            }
+            "--restart" => restart_now = true,
+            "--yes" | "-y" => yes = true,
+            _ => return Err(format!("unknown option {a}\n{VM_USAGE}")),
+        }
+        i += 1;
+    }
+    if !changed {
+        return Err(format!("nothing to set\n{VM_USAGE}"));
+    }
+    let mac = settings::Mac::this();
+    settings::validate(&changes, &mac)?;
+    saved.cpus = changes.cpus.or(saved.cpus);
+    saved.memory_mib = changes.memory_mib.or(saved.memory_mib);
+    saved.idle_seconds = changes.idle_seconds.or(saved.idle_seconds);
+    // Asked before anything is saved: a "no" changes nothing.
+    if restart_now && state(&p) == "running" {
+        confirm_restart(&p, yes)?;
+    }
+    settings::save(&p.home, &saved)?;
+    let env = |k: &str| std::env::var(k).ok();
+    let (next, overridden) = settings::effective(&saved, &env, &mac);
+    let idle = match next.idle_seconds {
+        0 => "never".to_string(),
+        s => format!("after {}", settings::idle_text(s)),
+    };
+    println!(
+        "Saved: {} CPUs, {} memory, power off when idle: {idle}.",
+        next.cpus,
+        settings::memory_text(next.memory_mib),
+    );
+    for v in overridden {
+        println!("{v} is set here, and it wins over the saved value.");
+    }
+    if restart_now {
+        return restart(true);
+    }
+    if state(&p) == "running" {
+        println!(
+            "The VM uses them at its next start. To use them now: podbag vm restart \
+             (running containers stop)."
+        );
+    } else {
+        println!("The VM uses them at its next start.");
+    }
+    Ok(())
+}
+
+/// After `podbag upgrade`: the guest is in the program, so a running VM restarts to run
+/// the new one. Not while containers run: then the user is told how and when.
+pub fn after_upgrade() {
+    let Ok(p) = paths() else { return };
+    if state(&p) != "running" {
+        return;
+    }
+    let n = running_containers(&p);
+    if n > 0 {
+        println!(
+            "{} in the VM, which runs the old version until it restarts. `podbag vm \
+             restart` restarts it now (the containers stop). Otherwise it powers off when \
+             idle, and the next command starts the new version.",
+            containers_run(n)
+        );
+        return;
+    }
+    println!("Restarting the VM with the new version.");
+    if let Err(e) = restart(true) {
+        eprintln!("podbag: {e}");
     }
 }
 

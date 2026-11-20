@@ -13,9 +13,14 @@ pub struct Service {
 
 impl Service {
     pub fn start(sb: &Sandbox, extra: &[&str]) -> Service {
+        Service::start_bin(sb, BIN, extra)
+    }
+
+    /// The service of another copy of podbag.
+    pub fn start_bin(sb: &Sandbox, bin: &str, extra: &[&str]) -> Service {
         let socket = sb.tmp.path().join("docker.sock");
         let child = sb
-            .podbag()
+            .podbag_bin(bin)
             .args(["system", "service", "--socket"])
             .arg(&socket)
             .args(extra)
