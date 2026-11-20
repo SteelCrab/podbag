@@ -135,6 +135,25 @@ podbag.exe runs a static Linux podbag in WSL 2. A build needs both.
 - On a Mac or on Linux, `--target x86_64-pc-windows-gnu` cross-compiles. It needs
   `mingw-w64`.
 
+### Windows desktop installer
+
+On Windows x86_64 or ARM64, build the CLI with the Linux engine for the same CPU.
+Use a native Rust toolchain for that CPU.
+Install the Visual Studio C++ build tools for your CPU, WebView2, and Node.js.
+From the repository root, run:
+
+```powershell
+New-Item -ItemType Directory -Force target/windows-engine | Out-Null
+Copy-Item target/release/podbag.exe target/windows-engine/podbag.exe
+Set-Location desktop
+npx --yes --package @tauri-apps/cli@2.12.6 tauri build --config windows/msi.json -- --locked
+```
+
+Open the MSI in `target/release/bundle/msi`, then start **Podbag Desktop** from
+the Start menu. The installer includes the GUI and its matching CLI. Enable WSL 2
+to run containers. CI publishes the tested MSI as `podbag-desktop-x86_64-windows` or
+`podbag-desktop-aarch64-windows`. The latter runs natively on Windows on Arm.
+
 ## Check your build
 
 - `podbag --version` prints the version.
