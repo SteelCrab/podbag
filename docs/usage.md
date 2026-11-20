@@ -800,7 +800,7 @@ podbag migrate --from context:staging --to podbag container web
 ![Available migrations in a Kubernetes namespace and resource counts in the sidebar](images/migration-overview-en.png)
 
 - On macOS, the window toolbar has Refresh and Settings on the right.
-  The toolbar shows the app icon on the left. Drag its open space to move the window.
+  Drag the open space in the toolbar to move the window.
 - Each list has a search box, and the same actions as the TUI.
 - A container's page has its details, its logs (as they come) and all its data.
 - With no containers, the window shows how to start one.

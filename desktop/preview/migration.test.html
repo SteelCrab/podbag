@@ -35,8 +35,8 @@ frame.addEventListener("load", async () => {
     by("migration-source").value = "docker";
     by("migration-source").dispatchEvent(new win.Event("change"));
     await wait(() => row() && !by("migration-source").disabled);
-    const mark = doc.querySelector("#window-bar > .app-icon");
-    check(mark?.complete && mark.naturalWidth > 0 && !by("window-bar").textContent.toLowerCase().includes("podbag"), "Show only the app icon in the toolbar");
+    const toolbar = by("window-bar");
+    check(!toolbar.querySelector("img") && !toolbar.textContent.toLowerCase().includes("podbag"), "Keep the toolbar free of branding");
     check(!by("engine-switch"), "Remove the window engine selector");
     const total = doc.querySelectorAll(".migration-row").length;
     check(Number(doc.querySelector("#nav .count").textContent) === total, "Count the listed resources");
