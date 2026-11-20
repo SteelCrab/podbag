@@ -1,6 +1,6 @@
-<img src="docs/images/logo.png" alt="podbag" width="120" align="right">
-
 # podbag
+
+<img src="docs/images/logo.png" alt="podbag" width="120" align="right">
 
 Một container engine không có daemon, chỉ gồm một tệp nhị phân tĩnh.
 Image được lưu theo từng tệp: tệp mà nhiều image dùng chung chỉ được lưu một lần.
@@ -51,7 +51,7 @@ Image được lưu theo từng tệp: tệp mà nhiều image dùng chung chỉ
 ### Script cài đặt (Linux và macOS)
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/SteelCrab/podbag/main/install.sh | sh
+curl -fsSL https://podbag.dev/install.sh | sh
 ```
 
 - Tải tệp phù hợp với hệ thống của bạn và kiểm tra SHA-256.

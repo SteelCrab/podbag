@@ -43,6 +43,7 @@ podbag tag myapp:1 ghcr.io/me/myapp:1 && podbag push ghcr.io/me/myapp:1
 podbag search nginx                          # search Docker Hub
 podbag run --rm --privileged alpine mount -t tmpfs none /mnt
 podbag system df | podbag system prune -f
+podbag system verify                         # check every stored file (exit code 1 if one is damaged)
 podbag run --rootfs ./rootfs sh              # a plain folder instead of an image
 podbag check                                 # is this system ready? (exit code 1 if not)
 podbag check-image myapp:1                   # programs that cannot run in the image
@@ -107,7 +108,8 @@ podbag vm status                             # macOS and Windows: podbag's Linux
 ### Storage
 
 - Each distinct file is stored once, whatever image it comes from.
-- Identical files in different images share the page cache (memory).
+- Identical files in different images share the page cache (memory). In hard-link trees
+  (without root) they must have the same time too: see [File times and links](#file-times-and-links).
 - The store keeps at most 10 GiB by default.
 
 ### How a container sees its image
@@ -118,7 +120,31 @@ podbag vm status                             # macOS and Windows: podbag's Linux
   - a pull does not unpack a folder tree.
 - **Hard-link trees** (without root, or on older kernels):
   - each image is unpacked once, as a folder of hard links to the stored files.
-- Both ways show the same files, owners, modes, extended attributes and hard links.
+- Both ways show the same files, owners, modes, times, extended attributes and hard links.
+
+### File times and links
+
+- Files keep the times they have in the image:
+  - Python's `.pyc` files stay valid, so containers do not compile them again,
+  - nginx sends the same `ETag` and `Last-Modified` headers as with Docker.
+- In a hard-link tree, files share one inode only when their times match too. A file
+  with the contents of another but a different time gets a copy of its own. A rebuilt
+  image whose files got new times shares less with the old one.
+- Crontabs (`/etc/crontab`, and everything in `/etc/cron.d` and `/var/spool/cron`) get
+  an inode of their own: cron skips a crontab that has more than one link.
+- Images stored by podbag 0.1.0 keep the times and links they had. To fix them, remove
+  them and pull or load them again.
+
+### Damaged files
+
+- podbag writes new files to disk before it records them. A crash cannot leave an image
+  whose files never reached the disk.
+- A stored file that a crash cut short is written again by the next pull or load that
+  reads a layer with that file. All images that share the file get it back.
+- `podbag system verify` reads every stored file and checks its hash:
+  - it names the images that use a damaged file, and exits with 1,
+  - `--fix` removes those images (not the ones a container uses); then pull or load
+    them again.
 
 ### Choose the method
 

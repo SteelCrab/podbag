@@ -1,6 +1,6 @@
-<img src="docs/images/logo.png" alt="podbag" width="120" align="right">
-
 # podbag
+
+<img src="docs/images/logo.png" alt="podbag" width="120" align="right">
 
 デーモンのないコンテナエンジンです。静的バイナリ1つで動きます。
 イメージをファイル単位で保存します。複数のイメージが同じファイルを使う場合、保存は1回だけです。
@@ -51,7 +51,7 @@
 ### インストールスクリプト（Linux、macOS）
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/SteelCrab/podbag/main/install.sh | sh
+curl -fsSL https://podbag.dev/install.sh | sh
 ```
 
 - システムに合ったファイルをダウンロードし、SHA-256 を確認します。

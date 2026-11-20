@@ -9,7 +9,7 @@
 
 use super::layer::{EntryKind, unhex};
 use super::object::ObjectStore;
-use super::tree::Tree;
+use super::tree::{Tree, needs_own_inode};
 use crate::{Error, ErrorKind, Result};
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -65,6 +65,8 @@ struct Node {
     mode: u16,
     uid: u32,
     gid: u32,
+    /// Modification time in seconds.
+    mtime: u64,
     nlink: u32,
     /// The encoded inline xattr body, empty when there are none.
     xattrs: Vec<u8>,
@@ -81,12 +83,13 @@ struct Node {
 }
 
 impl Node {
-    fn new(kind: Kind, mode: u16, uid: u32, gid: u32) -> Node {
+    fn new(kind: Kind, mode: u16, uid: u32, gid: u32, mtime: u64) -> Node {
         Node {
             kind,
             mode,
             uid,
             gid,
+            mtime,
             nlink: 1,
             xattrs: Vec::new(),
             xattr_count: 0,
@@ -125,9 +128,11 @@ fn unstorable(why: String) -> Error {
     )
 }
 
-/// Build the EROFS image of `tree`. `mtime` (seconds) is every inode's modification time.
+/// Build the EROFS image of `tree`. Each inode has its entry's modification time;
+/// `mtime` (seconds) is the root's, and that of entries without one (a layer stored by an
+/// older podbag).
 pub fn build(tree: &Tree, mtime: u64) -> Result<Vec<u8>> {
-    let mut nodes = collect(tree)?;
+    let mut nodes = collect(tree, mtime)?;
     let order = placement_order(&nodes);
     for &i in &order {
         lay_out(&mut nodes, i)?;
@@ -181,7 +186,7 @@ pub fn build(tree: &Tree, mtime: u64) -> Result<Vec<u8>> {
         put32(&mut img, p + 20, ino as u32 + 1);
         put32(&mut img, p + 24, n.uid);
         put32(&mut img, p + 28, n.gid);
-        put64(&mut img, p + 32, mtime);
+        put64(&mut img, p + 32, n.mtime);
         put32(&mut img, p + 44, n.nlink);
         let x = p + INODE_SIZE;
         img[x..x + n.xattrs.len()].copy_from_slice(&n.xattrs);
@@ -202,9 +207,10 @@ pub fn build(tree: &Tree, mtime: u64) -> Result<Vec<u8>> {
     Ok(img)
 }
 
-/// One node per directory, symlink, device and FIFO; one per object for regular files,
-/// so paths that share an object share an inode, like hard links to it.
-fn collect(tree: &Tree) -> Result<Vec<Node>> {
+/// One node per directory, symlink, device and FIFO; for regular files, one per object
+/// and time, so paths that share both share an inode, like hard links to the object in a
+/// hard-link tree. Crontabs get a node of their own.
+fn collect(tree: &Tree, default_mtime: u64) -> Result<Vec<Node>> {
     let mut nodes = vec![Node::new(
         Kind::Dir {
             parent: 0,
@@ -213,10 +219,12 @@ fn collect(tree: &Tree) -> Result<Vec<Node>> {
         S_IFDIR | 0o755,
         0,
         0,
+        default_mtime,
     )];
     let mut dirs: HashMap<&str, usize> = HashMap::from([("", 0)]);
-    let mut by_object: HashMap<&str, usize> = HashMap::new();
+    let mut by_object: HashMap<(&str, u64), usize> = HashMap::new();
     for (path, e) in &tree.entries {
+        let mtime = e.mtime.unwrap_or(default_mtime);
         let (parent_path, name) = path.rsplit_once('/').unwrap_or(("", path.as_str()));
         if name.len() > NAME_MAX {
             return Err(unstorable(format!(
@@ -243,12 +251,16 @@ fn collect(tree: &Tree) -> Result<Vec<Node>> {
                     S_IFDIR | perm,
                     e.uid,
                     e.gid,
+                    mtime,
                 ));
                 dirs.insert(path, nodes.len() - 1);
                 nodes.len() - 1
             }
             EntryKind::File { object, size } => {
-                if let Some(&i) = by_object.get(object.as_str()) {
+                let shared = (!needs_own_inode(path))
+                    .then(|| by_object.get(&(object.as_str(), mtime)))
+                    .flatten();
+                if let Some(&i) = shared {
                     nodes[i].nlink += 1;
                     i
                 } else {
@@ -267,8 +279,11 @@ fn collect(tree: &Tree) -> Result<Vec<Node>> {
                         S_IFREG | perm,
                         e.uid,
                         e.gid,
+                        mtime,
                     ));
-                    by_object.insert(object, nodes.len() - 1);
+                    if !needs_own_inode(path) {
+                        by_object.insert((object, mtime), nodes.len() - 1);
+                    }
                     nodes.len() - 1
                 }
             }
@@ -283,6 +298,7 @@ fn collect(tree: &Tree) -> Result<Vec<Node>> {
                     S_IFLNK | 0o777,
                     e.uid,
                     e.gid,
+                    mtime,
                 ));
                 nodes.len() - 1
             }
@@ -293,11 +309,17 @@ fn collect(tree: &Tree) -> Result<Vec<Node>> {
                     S_IFBLK
                 };
                 let rdev = (minor & 0xff) | (major << 8) | ((minor & !0xff) << 12);
-                nodes.push(Node::new(Kind::Device(rdev), kind | perm, e.uid, e.gid));
+                nodes.push(Node::new(
+                    Kind::Device(rdev),
+                    kind | perm,
+                    e.uid,
+                    e.gid,
+                    mtime,
+                ));
                 nodes.len() - 1
             }
             EntryKind::Fifo => {
-                nodes.push(Node::new(Kind::Fifo, S_IFIFO | perm, e.uid, e.gid));
+                nodes.push(Node::new(Kind::Fifo, S_IFIFO | perm, e.uid, e.gid, mtime));
                 nodes.len() - 1
             }
             // merge() resolves hard links and applies whiteouts and opaque markers.
@@ -528,6 +550,7 @@ mod tests {
         gid: u32,
         size: u64,
         nlink: u32,
+        mtime: u64,
         nid: u64,
         layout: u16,
         target: Option<Vec<u8>>,
@@ -568,6 +591,7 @@ mod tests {
         let iu = u32_at(img, pos + 16);
         let uid = u32_at(img, pos + 24);
         let gid = u32_at(img, pos + 28);
+        let mtime = u64_at(img, pos + 32);
         let nlink = u32_at(img, pos + 44);
         let xsize = if icount == 0 {
             0
@@ -653,6 +677,7 @@ mod tests {
                 gid,
                 size,
                 nlink,
+                mtime,
                 nid,
                 layout,
                 target,
@@ -785,6 +810,7 @@ mod tests {
             uid: 0,
             gid: 0,
             xattrs: vec![],
+            mtime: None,
         }
     }
 
@@ -864,6 +890,77 @@ mod tests {
         assert_eq!(items["c"].nlink, 1);
         // The root holds one subdirectory.
         assert_eq!(items[""].nlink, 3);
+    }
+
+    fn timed(mut e: Entry, t: u64) -> Entry {
+        e.mtime = Some(t);
+        e
+    }
+
+    /// Each inode has its entry's time; entries without one, and the root, the default.
+    #[test]
+    fn every_inode_has_its_entrys_time() {
+        let items = built(vec![
+            timed(entry("d", EntryKind::Dir, 0o755), 10),
+            timed(file("d/f", 1, 5), 100),
+            timed(
+                entry(
+                    "l",
+                    EntryKind::Symlink {
+                        target: "d/f".into(),
+                    },
+                    0o777,
+                ),
+                30,
+            ),
+            timed(entry("p", EntryKind::Fifo, 0o644), 40),
+            entry("untimed", EntryKind::Dir, 0o755),
+        ]);
+        assert_eq!(
+            ["", "d", "d/f", "l", "p", "untimed"].map(|p| items[p].mtime),
+            [1_700_000_000, 10, 100, 30, 40, 1_700_000_000]
+        );
+    }
+
+    /// An inode has one time: paths share it only when their times are the same too.
+    /// Both inodes read the one object.
+    #[test]
+    fn paths_share_an_inode_only_with_the_same_object_and_time() {
+        let items = built(vec![
+            timed(file("a", 1, 10), 100),
+            timed(file("b", 1, 10), 100),
+            timed(file("c", 1, 10), 200),
+        ]);
+        assert_eq!(items["a"].nid, items["b"].nid);
+        assert_eq!(items["a"].nlink, 2);
+        assert_ne!(items["c"].nid, items["a"].nid);
+        assert_eq!((items["c"].nlink, items["c"].mtime), (1, 200));
+        assert_eq!(
+            xattr(&items, "c", "trusted.overlay.redirect"),
+            xattr(&items, "a", "trusted.overlay.redirect")
+        );
+    }
+
+    /// cron skips a crontab with more than one link.
+    #[test]
+    fn crontabs_get_an_inode_of_their_own() {
+        let items = built(vec![
+            file("etc/crontab", 1, 10),
+            file("etc/cron.d/job", 1, 10),
+            file("var/spool/cron/crontabs/root", 1, 10),
+            file("usr/share/doc/a", 1, 10),
+            file("usr/share/doc/b", 1, 10),
+        ]);
+        for p in [
+            "etc/crontab",
+            "etc/cron.d/job",
+            "var/spool/cron/crontabs/root",
+        ] {
+            assert_eq!(items[p].nlink, 1, "{p}");
+            assert_ne!(items[p].nid, items["usr/share/doc/a"].nid, "{p}");
+        }
+        assert_eq!(items["usr/share/doc/a"].nid, items["usr/share/doc/b"].nid);
+        assert_eq!(items["usr/share/doc/a"].nlink, 2);
     }
 
     #[test]

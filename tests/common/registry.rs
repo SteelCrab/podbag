@@ -796,6 +796,12 @@ pub enum TarEntry {
         mode: u32,
         xattrs: Vec<(String, Vec<u8>)>,
     },
+    /// A root-owned 0644 file with a modification time (the other entries have 0).
+    Timed {
+        path: String,
+        data: Vec<u8>,
+        mtime: u64,
+    },
 }
 
 impl TarEntry {
@@ -915,6 +921,13 @@ pub fn layer(entries: &[TarEntry]) -> Vec<u8> {
                 h.set_size(0);
                 b.append_data(&mut h, format!("{dir}/.wh..wh..opq"), std::io::empty())
                     .unwrap();
+            }
+            TarEntry::Timed { path, data, mtime } => {
+                h.set_entry_type(tar::EntryType::Regular);
+                h.set_mode(0o644);
+                h.set_mtime(*mtime);
+                h.set_size(data.len() as u64);
+                b.append_data(&mut h, path, data.as_slice()).unwrap();
             }
         }
     }

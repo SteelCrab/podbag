@@ -36,6 +36,10 @@ pub enum StoreOp {
     Prune,
     /// Remove the images without a name that no container uses.
     PruneDangling,
+    /// Check every object; `fix`: remove the images that use damaged ones.
+    Verify {
+        fix: bool,
+    },
     RemoveContainer {
         id: String,
     },
@@ -248,6 +252,9 @@ mod linux_ops {
             }
             StoreOp::PruneDangling => {
                 to_json(&Store::open(dirs, !rootless)?.prune_dangling(&|| images_in_use(dirs))?)
+            }
+            StoreOp::Verify { fix } => {
+                to_json(&Store::open(dirs, !rootless)?.verify(fix, &|| images_in_use(dirs))?)
             }
             StoreOp::CheckImage { name } => {
                 Store::open_existing(dirs).ok_or_else(|| crate::image::not_pulled(&name))?;

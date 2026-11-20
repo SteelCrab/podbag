@@ -20,7 +20,7 @@ use crate::config::ImageMount;
 use crate::image::manifest::{self, Compression};
 use crate::image::reference::Reference;
 use crate::image::registry::{Registry, digest_mismatch};
-use crate::image::{DiskUsage, ImageConfig, PruneReport};
+use crate::image::{DiskUsage, ImageConfig, PruneReport, VerifyReport};
 use crate::paths::Dirs;
 use crate::{Error, ErrorKind, Result};
 use layer::{EntryKind, LayerIndex};
@@ -314,7 +314,7 @@ impl Store {
     ) -> Result<()> {
         match kind {
             Artifact::Tree => {
-                let report = tree::materialize(tree, &self.objects, dest, self.can_mknod)?;
+                let report = tree::materialize(tree, &self.objects, dest, self.can_mknod, created)?;
                 if report.skipped_devices > 0 {
                     eprintln!(
                         "podbag: skipped {} device files: rootless mode cannot create them",
@@ -343,6 +343,8 @@ impl Store {
         ));
         let result = self
             .write_artifact(kind, tree, &tmp, created)
+            // The artifact (and the copies its tree made) reach the disk before its name.
+            .and_then(|()| self.objects.sync())
             .and_then(|()| match std::fs::rename(&tmp, &dest) {
                 Ok(()) => Ok(()),
                 Err(_) if dest.exists() => Ok(()),
@@ -601,7 +603,7 @@ impl Store {
         }
         for (i, desc) in resolved.layers.iter().enumerate() {
             let diff_id = &resolved.config.diff_ids[i];
-            if self.layer_path(diff_id).exists() {
+            if self.has_layer(diff_id) {
                 progress(Progress::LayerCached {
                     index: i,
                     digest: &desc.digest,
@@ -695,6 +697,8 @@ impl Store {
         if plain_digest != diff_id {
             return Err(source.mismatch(diff_id));
         }
+        // The objects reach the disk before the index that names them.
+        self.objects.sync()?;
         write_json(
             &self.layer_path(diff_id),
             &LayerIndex {
@@ -937,6 +941,101 @@ impl Store {
         })
     }
 
+    /// Read every object and check its contents against its name: one damaged object (a
+    /// crash, a failing disk) can break every image that shares the file. `fix`: remove the
+    /// images that use a damaged object, except those a container uses; garbage collection
+    /// then deletes the objects that no image uses any more. `in_use` is read after the
+    /// exclusive lock is taken.
+    pub fn verify(
+        &self,
+        fix: bool,
+        in_use: &dyn Fn() -> HashMap<String, String>,
+    ) -> Result<VerifyReport> {
+        // Reading every object takes long, and needs no lock: an object is complete under
+        // its name, and one deleted meanwhile reads as gone. Containers start, pulls and
+        // removals go on.
+        let (objects, mut damaged) = self.objects.verify()?;
+        // Removing takes the exclusive lock. A pull may have written a damaged object again
+        // in the meantime (or was writing it when it was read): check those again under
+        // the lock.
+        let _lock = self.lock(fix)?;
+        damaged.retain(|name| self.objects.is_damaged(name).unwrap_or(true));
+        let bad: HashSet<&str> = damaged.iter().map(String::as_str).collect();
+        let uses_bad = |e: &layer::Entry| match &e.kind {
+            EntryKind::File { object, .. } => {
+                bad.contains(object.as_str())
+                    || e.mtime
+                        .is_some_and(|t| bad.contains(ObjectStore::variant_key(object, t).as_str()))
+            }
+            _ => false,
+        };
+        let mut affected = Vec::new();
+        for digest in self.image_digests()? {
+            let record = self.read_record(&digest)?;
+            // A layer index that cannot be read breaks the image as well.
+            let broken = record.diff_ids.iter().any(|id| {
+                self.read_layer_index(id)
+                    .map_or(true, |index| index.entries.iter().any(uses_bad))
+            });
+            if broken {
+                affected.push(digest);
+            }
+        }
+        let refs = self.read_refs()?;
+        let names_of = |digest: &str| -> Vec<String> {
+            let names: Vec<String> = refs
+                .iter()
+                .filter(|(_, r)| r.digest == digest)
+                .map(|(n, _)| n.clone())
+                .collect();
+            if names.is_empty() {
+                vec![digest.to_string()]
+            } else {
+                names
+            }
+        };
+        let mut report = VerifyReport {
+            objects,
+            images: affected.iter().flat_map(|d| names_of(d)).collect(),
+            ..VerifyReport::default()
+        };
+        if fix {
+            let used = in_use();
+            for digest in &affected {
+                if used.contains_key(digest) {
+                    report.in_use.extend(names_of(digest));
+                    continue;
+                }
+                self.update_refs(|refs| refs.retain(|_, r| r.digest != *digest))?;
+                self.delete_image(digest)?;
+                report.removed.extend(names_of(digest));
+            }
+            self.collect_garbage()?;
+        }
+        report.damaged = damaged;
+        report.images.sort();
+        report.removed.sort();
+        report.in_use.sort();
+        Ok(report)
+    }
+
+    /// Every stored image, by digest.
+    fn image_digests(&self) -> Result<Vec<String>> {
+        let dir = self.root.join("images");
+        let mut digests: Vec<String> = std::fs::read_dir(&dir)
+            .map_err(|e| io_error(&dir, e))?
+            .flatten()
+            .filter_map(|entry| {
+                let digest = format!("sha256:{}", entry.file_name().to_string_lossy());
+                (crate::image::reference::is_digest(&digest)
+                    && entry.path().join("image.json").exists())
+                .then_some(digest)
+            })
+            .collect();
+        digests.sort();
+        Ok(digests)
+    }
+
     /// Remove least recently used images until the objects fit in `limit` bytes.
     /// Images in `in_use` and the image `keep` stay. Returns the names removed.
     pub fn enforce_limit(
@@ -1038,10 +1137,15 @@ impl Store {
             let id = name.trim_end_matches(".json");
             if used_layers.contains(id) {
                 let index: LayerIndex = read_json(&f.path())?;
-                keep.extend(index.entries.into_iter().filter_map(|e| match e.kind {
-                    EntryKind::File { object, .. } => Some(object),
-                    _ => None,
-                }));
+                for e in index.entries {
+                    if let EntryKind::File { object, .. } = e.kind {
+                        // And the object's copy with this file's time, if a tree needed one.
+                        if let Some(t) = e.mtime {
+                            keep.insert(ObjectStore::variant_key(&object, t));
+                        }
+                        keep.insert(object);
+                    }
+                }
             } else {
                 let _ = std::fs::remove_file(f.path());
             }
@@ -1060,7 +1164,20 @@ impl Store {
                 let _ = std::fs::remove_file(f.path());
             }
         }
+        self.objects.adopt_copies(&keep)?;
         self.objects.sweep(&keep)?;
+        // What unfinished jobs left: inserts, record writes, and scratch directories.
+        self.objects.clear_tmp();
+        for f in std::fs::read_dir(&self.root)
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let name = f.file_name().to_string_lossy().into_owned();
+            if name.starts_with("refs.") && name.ends_with(".tmp") {
+                let _ = std::fs::remove_file(f.path());
+            }
+        }
         let _ = remove_tree(&self.root.join("tmp"));
         Ok(())
     }
@@ -1106,6 +1223,14 @@ impl Store {
             None => known.blobs.push(blob),
         }
         self.write_layer_blobs(diff_id, &known);
+    }
+
+    /// True when the layer is stored, with file times. An index from an older podbag has
+    /// none, and a damaged one cannot be read: the layer is read again and its index
+    /// replaced (the object keys stay the same).
+    fn has_layer(&self, diff_id: &str) -> bool {
+        self.read_layer_index(diff_id)
+            .is_ok_and(|index| index.entries.iter().all(|e| e.mtime.is_some()))
     }
 
     fn layer_path(&self, diff_id: &str) -> PathBuf {
@@ -1197,7 +1322,7 @@ impl Store {
             crate::image::registry::sha256_hex(diff_ids.join(",").as_bytes())
         );
         for (layer, id) in layers.into_iter().zip(&diff_ids) {
-            if !self.layer_path(id).exists() {
+            if !self.has_layer(id) {
                 let size = layer.len() as u64;
                 self.ingest_layer(
                     Source::Registry(&r),
@@ -1444,12 +1569,23 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
     serde_json::from_slice(&bytes).map_err(|e| damaged(path, e))
 }
 
+/// Replace `path` with `value` as JSON, whole: through a temporary file of this writer's
+/// own (two pulls may write one layer's index at once), on disk before the rename.
 fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
-    let tmp = path.with_extension("tmp");
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let tmp = path.with_extension(format!(
+        "{}.{}.tmp",
+        std::process::id(),
+        COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     let bytes = serde_json::to_vec(value).map_err(|e| damaged(path, e))?;
-    let mut f = File::create(&tmp).map_err(|e| io_error(&tmp, e))?;
-    f.write_all(&bytes).map_err(|e| io_error(&tmp, e))?;
-    std::fs::rename(&tmp, path).map_err(|e| io_error(path, e))
+    let written = File::create(&tmp)
+        .and_then(|mut f| f.write_all(&bytes).and_then(|()| f.sync_all()))
+        .and_then(|()| std::fs::rename(&tmp, path));
+    written.map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        io_error(path, e)
+    })
 }
 
 #[cfg(test)]
@@ -1517,6 +1653,205 @@ mod tests {
         h.set_size(data.len() as u64);
         b.append_data(&mut h, path, data).unwrap();
         b.into_inner().unwrap()
+    }
+
+    /// Regular files with the given contents and modification times.
+    fn timed_layer(files: &[(&str, &[u8], u64)]) -> Vec<u8> {
+        let mut b = tar::Builder::new(Vec::new());
+        for (path, data, mtime) in files {
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(tar::EntryType::Regular);
+            h.set_mode(0o644);
+            h.set_uid(0);
+            h.set_gid(0);
+            h.set_mtime(*mtime);
+            h.set_size(data.len() as u64);
+            b.append_data(&mut h, path, *data).unwrap();
+        }
+        b.into_inner().unwrap()
+    }
+
+    fn mtime(path: &Path) -> u64 {
+        object::mtime_of(&std::fs::metadata(path).unwrap()).unwrap()
+    }
+
+    /// The same contents with another time need an inode of their own in a hard-link
+    /// tree. That copy is kept while an image needs it, and goes with the last one.
+    #[test]
+    fn a_time_copy_of_an_object_lives_as_long_as_an_image_needs_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = open(&tmp);
+        let a = s
+            .import_for_test("a", vec![timed_layer(&[("x", b"same", 100)])], 1)
+            .unwrap();
+        let b = s
+            .import_for_test("b", vec![timed_layer(&[("y", b"same", 200)])], 2)
+            .unwrap();
+        assert_eq!(mtime(&s.rootfs_path(&a.digest).join("x")), 100);
+        assert_eq!(mtime(&s.rootfs_path(&b.digest).join("y")), 200);
+        assert_eq!(s.objects.total_size().unwrap(), (2, 8));
+        // Image b still needs its copy, image a no longer needs the object's own inode.
+        s.remove_image("a", &HashMap::new).unwrap();
+        assert_eq!(s.objects.total_size().unwrap(), (1, 4));
+        s.remove_image("b", &HashMap::new).unwrap();
+        assert_eq!(s.objects.total_size().unwrap(), (0, 0));
+    }
+
+    /// When no tree links an object's own inode any more, a time copy that a tree links
+    /// takes its place: the store keeps one inode, not two.
+    #[test]
+    fn a_time_copy_takes_the_place_of_an_object_no_tree_links() {
+        use std::os::unix::fs::MetadataExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let s = open(&tmp);
+        s.import_for_test("a", vec![timed_layer(&[("x", b"same", 100)])], 1)
+            .unwrap();
+        let b = s
+            .import_for_test("b", vec![timed_layer(&[("y", b"same", 200)])], 2)
+            .unwrap();
+        s.remove_image("a", &HashMap::new).unwrap();
+        let sha: String = Sha256::digest(b"same")
+            .iter()
+            .map(|c| format!("{c:02x}"))
+            .collect();
+        let object = s.objects.path(&format!("{sha}.0.0.644"));
+        let y = s.rootfs_path(&b.digest).join("y");
+        assert_eq!(
+            std::fs::metadata(&object).unwrap().ino(),
+            std::fs::metadata(&y).unwrap().ino()
+        );
+        assert_eq!(mtime(&object), 200);
+    }
+
+    /// A crash leaves temporary files; garbage collection removes them.
+    #[test]
+    fn garbage_collection_removes_leftover_temporary_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = open(&tmp);
+        s.import_for_test("a", vec![timed_layer(&[("x", b"1", 1)])], 1)
+            .unwrap();
+        let leftovers = [
+            s.objects_dir().join("tmp").join("12345-0"),
+            s.root.join("refs.12345.0.tmp"),
+        ];
+        for f in &leftovers {
+            std::fs::write(f, b"").unwrap();
+        }
+        s.remove_image("a", &HashMap::new).unwrap();
+        for f in &leftovers {
+            assert!(!f.exists(), "{} is left", f.display());
+        }
+    }
+
+    /// A layer index from an older podbag has no file times: the next pull or load of an
+    /// image with that layer reads the layer again.
+    #[test]
+    fn a_layer_stored_without_times_is_read_again() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = open(&tmp);
+        let layer = timed_layer(&[("x", b"1", 100)]);
+        let rec = s.import_for_test("a", vec![layer.clone()], 1).unwrap();
+        let path = s.layer_path(&rec.diff_ids[0]);
+        let mut old: LayerIndex = read_json(&path).unwrap();
+        for e in &mut old.entries {
+            e.mtime = None;
+        }
+        write_json(&path, &old).unwrap();
+        s.import_for_test("b", vec![layer, timed_layer(&[("y", b"2", 5)])], 2)
+            .unwrap();
+        let index: LayerIndex = read_json(&path).unwrap();
+        let times: Vec<Option<u64>> = index.entries.iter().map(|e| e.mtime).collect();
+        assert_eq!(times, [Some(100)]);
+    }
+
+    /// Overwrite the object of `contents` (0644, root) with other bytes of the same size.
+    fn damage(s: &Store, contents: &[u8]) -> String {
+        let meta = object::Meta {
+            uid: 0,
+            gid: 0,
+            mode: 0o644,
+            xattrs: vec![],
+        };
+        let sha: String = Sha256::digest(contents)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let key = ObjectStore::key(&sha, &meta);
+        std::fs::write(s.objects.path(&key), vec![b'#'; contents.len()]).unwrap();
+        key
+    }
+
+    #[test]
+    fn verify_names_the_images_that_use_a_damaged_object() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = open(&tmp);
+        s.import_for_test("a", vec![timed_layer(&[("x", b"shared", 1)])], 1)
+            .unwrap();
+        s.import_for_test("b", vec![timed_layer(&[("y", b"shared", 1)])], 2)
+            .unwrap();
+        s.import_for_test("c", vec![timed_layer(&[("z", b"other", 1)])], 3)
+            .unwrap();
+        let key = damage(&s, b"shared");
+        let report = s.verify(false, &HashMap::new).unwrap();
+        assert_eq!(report.objects, 2);
+        assert_eq!(report.damaged, [key]);
+        assert_eq!(
+            report.images,
+            ["docker.io/library/a:latest", "docker.io/library/b:latest"]
+        );
+        assert!(report.removed.is_empty() && report.in_use.is_empty());
+        // Nothing was removed.
+        assert_eq!(s.list().unwrap().len(), 3);
+    }
+
+    /// `--fix` removes the images that use a damaged object, except those a container uses;
+    /// the object goes with the last image that uses it.
+    #[test]
+    fn verify_fix_removes_the_images_that_use_a_damaged_object() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = open(&tmp);
+        s.import_for_test("a", vec![timed_layer(&[("x", b"shared", 1)])], 1)
+            .unwrap();
+        let b = s
+            .import_for_test("b", vec![timed_layer(&[("y", b"shared", 1)])], 2)
+            .unwrap();
+        s.import_for_test("c", vec![timed_layer(&[("z", b"other", 1)])], 3)
+            .unwrap();
+        let key = damage(&s, b"shared");
+        let used = || HashMap::from([(b.digest.clone(), "c1".to_string())]);
+        let report = s.verify(true, &used).unwrap();
+        assert_eq!(report.removed, ["docker.io/library/a:latest"]);
+        assert_eq!(report.in_use, ["docker.io/library/b:latest"]);
+        assert!(s.objects.path(&key).exists(), "image b still uses it");
+        let report = s.verify(true, &HashMap::new).unwrap();
+        assert_eq!(report.removed, ["docker.io/library/b:latest"]);
+        assert!(!s.objects.path(&key).exists());
+        let report = s.verify(false, &HashMap::new).unwrap();
+        assert!(report.damaged.is_empty());
+        let names: Vec<String> = s.list().unwrap().into_iter().map(|(n, _, _)| n).collect();
+        assert_eq!(names, ["docker.io/library/c:latest"]);
+    }
+
+    /// Two pulls that share a new layer both write its index: neither may fail.
+    #[test]
+    fn writers_of_one_file_do_not_disturb_each_other() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("index.json");
+        let failures: usize = std::thread::scope(|s| {
+            let writers: Vec<_> = (0..8)
+                .map(|_| {
+                    s.spawn(|| {
+                        (0..40)
+                            .filter(|n| write_json(&path, &vec![*n; 100]).is_err())
+                            .count()
+                    })
+                })
+                .collect();
+            writers.into_iter().map(|w| w.join().unwrap()).sum()
+        });
+        assert_eq!(failures, 0);
+        let last: Vec<i32> = read_json(&path).unwrap();
+        assert_eq!(last.len(), 100);
     }
 
     #[test]

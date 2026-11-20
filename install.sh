@@ -1,7 +1,7 @@
 #!/bin/sh
 # Install podbag from its GitHub releases (Linux x86_64 and arm64, macOS on Apple silicon):
 #
-#   curl -fsSL https://raw.githubusercontent.com/SteelCrab/podbag/main/install.sh | sh
+#   curl -fsSL https://podbag.dev/install.sh | sh
 #
 # Settings:
 #   PODBAG_VERSION=v0.1.0      install this release (default: the latest)

@@ -280,6 +280,15 @@ pub fn prune() -> Result<PruneReport> {
     from_output(store_op(&crate::store::ops::StoreOp::Prune, false)?)
 }
 
+/// Read every stored object and check it. `fix`: remove the images that use a damaged
+/// one, except those a container uses (pull or load them again).
+pub fn verify_store(fix: bool) -> Result<VerifyReport> {
+    from_output(store_op(
+        &crate::store::ops::StoreOp::Verify { fix },
+        false,
+    )?)
+}
+
 /// Remove the images without a name (a newer load or tag took it) that no container uses.
 pub fn prune_dangling() -> Result<PruneReport> {
     from_output(store_op(&crate::store::ops::StoreOp::PruneDangling, false)?)
@@ -408,6 +417,21 @@ pub struct PruneReport {
     #[serde(default)]
     pub removed_ids: Vec<String>,
     pub freed_bytes: u64,
+}
+
+/// What `podbag system verify` found, and what `--fix` removed.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+pub struct VerifyReport {
+    /// Objects read, their time copies included.
+    pub objects: u64,
+    /// Objects whose contents do not match their names.
+    pub damaged: Vec<String>,
+    /// The images that use them, by name (by ID when they have none).
+    pub images: Vec<String>,
+    /// The images `--fix` removed.
+    pub removed: Vec<String>,
+    /// The images `--fix` kept because a container uses them.
+    pub in_use: Vec<String>,
 }
 
 /// A size the way Docker prints it: powers of 1000, three significant digits.
