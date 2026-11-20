@@ -32,24 +32,13 @@ Puedes usar la línea de comandos o [Podbag Desktop](#podbag-desktop).
 
 ## Características
 
-- **Sin daemon.** Cuando no hay contenedores, no se ejecuta nada.
-- **Un solo binario estático.** Unos 4 MB en Linux.
-- **Archivos, no capas.** Un archivo que comparten muchas imágenes se guarda y se cachea una sola vez.
-- **Rápido.** Un contenedor arranca en unos 4 ms en Linux.
-- **Funciona con las herramientas de Docker.** Imágenes Docker y OCI, el CLI `docker`, Compose, buildx y stacks de swarm en un solo nodo.
-- **Construye Dockerfiles.** `podbag build`, y `docker build` con el constructor clásico, sin BuildKit ni daemon.
-- **Kubernetes.** `podbag cri serve` es el runtime de contenedores de un nodo, para el kubelet o k3s.
-- **Con o sin root.** El mismo programa funciona de las dos formas.
-- **Linux, macOS y Windows.** x86_64 y arm64. El soporte de Windows es experimental.
-- **Una TUI y una aplicación de escritorio.** `podbag tui` en la terminal, y una ventana con un icono en la barra de menús, para contenedores, imágenes, volúmenes y redes.
-
-### Capas y archivos
+- **Archivos compartidos entre imágenes.** Los archivos idénticos pueden compartir espacio en disco y caché de páginas de Linux aunque pertenezcan a capas distintas.
+- **Motor Linux bajo demanda.** Un solo proceso supervisa los contenedores de cada usuario. Cuando se detiene el último, el proceso termina tras un periodo de inactividad.
+- **Apagado automático de la máquina virtual en macOS.** Por defecto, la máquina virtual Linux se apaga tras 60 segundos de inactividad. El siguiente comando de contenedores vuelve a iniciarla.
+- **Motor para nodos de Kubernetes (`main`).** En Linux, `podbag cri serve` permite que el kubelet ejecute pods directamente con Podbag.
+- **Migración entre motores (`main`).** Copia imágenes, volúmenes y contenedores detenidos entre motores compatibles con Docker. Los originales se conservan.
 
 <picture><source media="(max-width: 600px) and (prefers-color-scheme: dark)" srcset="docs/images/storage-es-tall-dark.svg"><source media="(max-width: 600px)" srcset="docs/images/storage-es-tall-light.svg"><source media="(prefers-color-scheme: dark)" srcset="docs/images/storage-es-dark.svg"><img alt="Animación. Dos imágenes comparten la mayoría de sus archivos. Con capas, una capa se guarda una vez solo si es igual; la capa superior de la imagen B tiene un archivo distinto, así que spring.jar y jackson.jar se guardan otra vez: 8 archivos. podbag guarda cada archivo una vez: 6 archivos. Medido con 8 servicios Spring en 2 versiones: 2.970 MiB de disco con capas (Docker), 902 MiB con podbag." src="docs/images/storage-es-light.svg"></picture>
-
-- Los almacenes por capas (Docker, Podman, Kiri) guardan una capa una sola vez solo si toda la capa es igual. Si un solo archivo es distinto, se guarda otra vez toda la capa, con los archivos que comparte con otras capas.
-- podbag guarda cada archivo una sola vez. Una imagen es una lista de rutas que apuntan a esos archivos.
-- Con 8 servicios Spring en 2 versiones: 902 MiB de disco frente a 2.970 MiB de Docker, y 324 MiB de caché de páginas frente a 982 MiB.
 
 ## Podbag Desktop
 
@@ -61,91 +50,87 @@ Gestiona contenedores, imágenes, volúmenes y redes en Linux y macOS. La compat
 
 ## Instalación
 
-### Script de instalación (Linux y macOS)
+### Linux (x86_64, arm64) y macOS (Apple silicon)
 
 ```sh
 curl -fsSL https://podbag.dev/install.sh | sh
+podbag --version
 ```
 
-- Descarga el archivo para tu sistema y comprueba su SHA-256.
-- Lo instala en `/usr/local/bin`, con `sudo` si hace falta.
-- En Ubuntu 24.04 y posteriores, añade el perfil de AppArmor que necesitan los contenedores sin root.
-- Opciones: `PODBAG_VERSION=v0.1.0`, `PODBAG_INSTALL_DIR=$HOME/.local/bin`,
-  `PODBAG_SKIP_APPARMOR=1`.
+El instalador verifica la suma SHA-256 del archivo publicado e instala la CLI en `/usr/local/bin`. Ejecuta el mismo script para actualizarla.
 
-### Descarga
+Linux requiere el kernel 5.12 o posterior y cgroup v2. Ejecuta `podbag check` para detectar los requisitos pendientes. Para usar redes de puente sin privilegios de root, comprueba que estén instalados `uidmap` y `passt`. [Requisitos de Linux](docs/usage.md#requirements-on-linux)
 
-Descarga un archivo de la [última versión](https://github.com/SteelCrab/podbag/releases/latest). Compruébalo con `SHA256SUMS`.
+Para instalarlo manualmente, descarga el archivo para tu sistema y CPU y verifica su suma con `SHA256SUMS`. [Descargas](https://github.com/SteelCrab/podbag/releases/latest)
 
-| Sistema | Archivo |
-|---|---|
-| Linux, x86_64 | `podbag-x86_64-linux` |
-| Linux, arm64 | `podbag-aarch64-linux` |
-| macOS, Apple silicon | `podbag-aarch64-macos` |
-| Windows, x86_64 (experimental) | `podbag-x86_64-windows.exe` |
-| Windows, arm64 (experimental) | `podbag-aarch64-windows.exe` |
+### Windows (experimental)
 
-Windows necesita WSL 2 (ejecuta `wsl --install` una vez):
+Ejecuta `wsl --install` en PowerShell como administrador y reinicia Windows. Descarga `podbag-x86_64-windows.exe` o `podbag-aarch64-windows.exe` según tu CPU. Compara su suma SHA-256 con `SHA256SUMS` y cambia el nombre del archivo a `podbag.exe`. [Descargas](https://github.com/SteelCrab/podbag/releases/latest)
 
 ```powershell
-curl.exe -fsSLo podbag.exe https://github.com/SteelCrab/podbag/releases/latest/download/podbag-x86_64-windows.exe
 .\podbag.exe run --rm alpine echo hello
 ```
 
-### Cargo
+### Otras opciones de instalación
 
-```sh
-cargo install podbag
-```
-
-- Para Linux. En macOS y Windows, usa los archivos de la versión: incluyen la VM y el motor de Linux.
-
-### Compilar desde el código fuente
-
-- Consulta [docs/build.md](docs/build.md) para Linux, macOS y Windows (en inglés).
-
-### Requisitos y AppArmor (Linux)
-
-- Linux 5.12 o posterior, con cgroup v2.
-- Sin root, podbag también necesita:
-  - `newuidmap` (paquete `uidmap`),
-  - `pasta` (paquete `passt`) para las redes,
-  - un perfil de AppArmor en Ubuntu 24.04 y posteriores. El script de instalación lo añade. A mano:
-
-    ```sh
-    podbag check --apparmor-profile | sudo tee /etc/apparmor.d/podbag >/dev/null
-    sudo apparmor_parser -r /etc/apparmor.d/podbag
-    ```
-
-- `podbag check` muestra lo que aún necesita tu sistema y cómo añadirlo.
+- **Cargo en Linux.** Ejecuta `cargo install --locked podbag` para instalar la versión publicada de la CLI.
+- **Aplicación de escritorio para Linux.** Descarga desde GitHub Actions el archivo para tu CPU. Descomprímelo e instala el paquete `.deb` o `.rpm` de tu distribución. El paquete incluye el motor. [Paquetes de escritorio](docs/build.md#linux-desktop-packages)
+- **Compilación desde el código fuente.** Compila la rama `main` para usar el motor de Kubernetes y la migración entre motores. [Guía de compilación](docs/build.md)
 
 ## Uso
 
-### Comandos básicos
+### Ejecutar un contenedor
+
+Este comando imprime `hello` y elimina el contenedor cuando termina.
 
 ```sh
-podbag run --rm alpine echo hello                 # descarga la imagen si hace falta, ejecuta y borra
-podbag run -d --name web -p 8080:80 nginx:alpine  # en segundo plano
-podbag ps                                         # lista los contenedores
-podbag logs -f web                                # sigue los registros
-podbag exec -it web sh                            # abre una shell en el contenedor
-podbag stats --no-stream                          # uso de CPU, memoria y red
-podbag stop web && podbag rm web                  # detén y borra
-podbag images                                     # lista las imágenes
-podbag build -t myapp .                           # construye una imagen desde un Dockerfile
-podbag login ghcr.io                              # inicia sesión en un registro (compartida con docker login)
-podbag push ghcr.io/me/app:1                      # envía una imagen a un registro
+podbag run --rm alpine echo hello
 ```
 
-### CLI docker, Compose y buildx
+Inicia nginx en el puerto 8080, envía una petición y consulta el registro de acceso.
 
 ```sh
-podbag system service &      # Linux (en macOS: podbag vm start)
-export DOCKER_HOST=unix://$XDG_RUNTIME_DIR/podbag/docker.sock   # macOS: unix://$HOME/.podbag/run/docker.sock
-docker compose up -d
+podbag run -d --name web -p 8080:80 nginx:alpine
+podbag ps
+curl -I http://localhost:8080/
+podbag logs web
+podbag exec web nginx -v
+podbag stop web && podbag rm web
 ```
 
-- Todos los comandos y opciones: [docs/usage.md](docs/usage.md) (en inglés).
+### CLI de Docker y Compose
+
+Linux sin privilegios de root y con `XDG_RUNTIME_DIR` definido
+
+```sh
+podbag system service &
+podbag_socket="unix://$XDG_RUNTIME_DIR/podbag/docker.sock"
+```
+
+macOS
+
+```sh
+podbag vm start
+podbag_socket="unix://$HOME/.podbag/run/docker.sock"
+```
+
+Una vez configurado el socket, ejecuta estos comandos en el directorio de un proyecto cuyo `compose.yaml` use imágenes publicadas.
+
+```sh
+docker --host "$podbag_socket" ps
+docker --host "$podbag_socket" compose up -d
+docker --host "$podbag_socket" compose down
+```
+
+### Copiar una imagen desde Docker (`main`)
+
+Inicia los dos motores. Si Docker ya tiene la imagen `alpine:latest`, puedes copiarla a Podbag con la CLI compilada desde `main`.
+
+```sh
+podbag migrate --from docker --to podbag image alpine:latest
+```
+
+[Guía de migración](docs/usage.md#migrate-between-engines-or-kubernetes-clusters) · [Referencia de comandos](docs/usage.md)
 
 ## Rendimiento
 
