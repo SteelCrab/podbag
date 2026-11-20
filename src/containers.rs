@@ -603,6 +603,89 @@ impl ContainerHandle {
         }
     }
 
+    /// What changed in the container's files since its image (`docker diff`), sorted.
+    pub fn changes(&self) -> Result<Vec<crate::build::Change>> {
+        #[cfg(target_os = "linux")]
+        {
+            let mut helper = self.archive_helper(
+                crate::linux::archive::ArchiveOp::Changes,
+                "/",
+                Default::default(),
+                std::process::Stdio::null(),
+                std::process::Stdio::null(),
+            )?;
+            serde_json::from_value(helper.wait_done()?).map_err(|e| {
+                Error::new(
+                    ErrorKind::Internal,
+                    "the archive helper sent an unreadable list",
+                    e.to_string(),
+                    "report this bug",
+                )
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err(Error::unsupported_os())
+        }
+    }
+
+    /// A new image of the container's image plus its changes (`docker commit`).
+    pub fn commit(&self, options: &crate::build::CommitOptions) -> Result<crate::build::Built> {
+        #[cfg(target_os = "linux")]
+        {
+            crate::build::commit::commit(self, options)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = options;
+            Err(Error::unsupported_os())
+        }
+    }
+
+    /// All the container's files, without its volumes, as a tar (`docker export`).
+    pub fn export(&self) -> Result<CopyOut> {
+        self.tar_of(
+            #[cfg(target_os = "linux")]
+            crate::linux::archive::ArchiveOp::Export,
+        )
+    }
+
+    /// What changed since its image, as a layer tar (builds and `commit`).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn layer(&self) -> Result<CopyOut> {
+        self.tar_of(
+            #[cfg(target_os = "linux")]
+            crate::linux::archive::ArchiveOp::Layer,
+        )
+    }
+
+    fn tar_of(
+        &self,
+        #[cfg(target_os = "linux")] op: crate::linux::archive::ArchiveOp,
+    ) -> Result<CopyOut> {
+        #[cfg(target_os = "linux")]
+        {
+            let mut helper = self.archive_helper(
+                op,
+                "/",
+                Default::default(),
+                std::process::Stdio::null(),
+                std::process::Stdio::piped(),
+            )?;
+            helper.wait_ready()?;
+            let tar = helper.take_stdout();
+            Ok(CopyOut {
+                helper,
+                tar,
+                ended: false,
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Err(Error::unsupported_os())
+        }
+    }
+
     #[cfg(target_os = "linux")]
     fn archive_helper(
         &self,

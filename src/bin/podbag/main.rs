@@ -1,19 +1,28 @@
 mod args;
+#[cfg(unix)]
+mod build;
 mod check;
 #[cfg(unix)]
 mod container;
 mod image;
 mod network;
+mod registry;
 #[cfg(unix)]
 mod run;
 #[cfg(unix)]
 mod service;
+#[cfg(unix)]
+mod tui;
 mod volume;
 
 use args::{Cli, Cmd};
 use clap::Parser;
 
 fn main() {
+    // A login a front end (macOS, Windows) sent with the command: kept in memory, gone
+    // from the environment before any thread or child process starts.
+    // SAFETY: the first thing in main; no other thread runs yet.
+    unsafe { podbag::image::auth::take_front_end_logins() };
     // PID 1 of the macOS VM: podbag is its initramfs's /init, which the kernel starts as
     // `/init __vm-init`. Anywhere else (a container's entry point, `unshare -pf`), PID 1
     // is a CLI like any other.
@@ -47,8 +56,10 @@ fn windows_front(args: Vec<String>) -> Option<i32> {
         // Checked here first: help and wrong arguments need no WSL.
         Some(_) => match parse(&args) {
             Err(e) => e.exit(),
+            // Logins stay on Windows: in its config and credential manager.
+            Ok(cli) if runs_here(&cli) => None,
             Ok(cli) => Some(match wsl_argv(&cli, args) {
-                Ok(argv) => podbag::windows::forward(&argv),
+                Ok(argv) => podbag::windows::forward(&argv, &forwarded_logins(&cli)),
                 Err(e) => {
                     eprintln!("podbag: {e}");
                     125
@@ -73,7 +84,25 @@ fn wsl_argv(cli: &Cli, mut argv: Vec<String>) -> Result<Vec<String>, String> {
         Cmd::Load { input: Some(_), .. } => rewrite(&mut argv, Some('i'), "--input", 1, wsl_path)?,
         Cmd::Save {
             output: Some(_), ..
+        }
+        | Cmd::Export {
+            output: Some(_), ..
         } => rewrite(&mut argv, Some('o'), "--output", 1, wsl_path)?,
+        Cmd::Build(a) => {
+            rewrite(
+                &mut argv,
+                Some('f'),
+                "--file",
+                usize::from(a.file.is_some()),
+                wsl_path,
+            )?;
+            // The context is the one positional argument: the last word that is it.
+            if a.context != "-"
+                && let Some(i) = argv.iter().rposition(|w| *w == a.context)
+            {
+                argv[i] = wsl_path(&a.context)?;
+            }
+        }
         _ => {}
     }
     Ok(argv)
@@ -127,13 +156,56 @@ fn macos_front(args: Vec<String>) -> Option<i32> {
         Some("__vm-standby") => Some(podbag::macos::standby::standby_main()),
         Some("vm") => Some(podbag::macos::cli::vm_command(&args[1..])),
         None | Some("-h" | "--help" | "help" | "-V" | "--version") => None,
+        // Clients of the Docker API: they use the Mac's docker.sock, which starts the VM.
+        Some("tui") => None,
+        Some("system") if args.get(1).is_some_and(|a| a == "dial-stdio") => None,
         // Helpers the library starts on this Mac (`__store`, `__shim`, …) run here.
         Some(helper) if helper.starts_with("__") => None,
         // Checked here first: help and wrong arguments need no VM.
         Some(_) => match parse(&args) {
             Err(e) => e.exit(),
+            // Logins stay on this Mac: in its config and keychain.
+            Ok(cli) if runs_here(&cli) => None,
             Ok(cli) => Some(podbag::macos::cli::forward(mac_command(&cli, args))),
         },
+    }
+}
+
+/// Commands a front end (macOS, Windows) runs itself: they use the logins kept on this
+/// side, and need no containers.
+#[cfg(any(target_os = "macos", windows))]
+fn runs_here(cli: &Cli) -> bool {
+    matches!(
+        cli.cmd,
+        Cmd::Login { .. } | Cmd::Logout { .. } | Cmd::Search { .. }
+    )
+}
+
+/// The login a forwarded command needs, as environment for the engine in the VM or WSL:
+/// Docker's config and its credential helpers (the keychain on a Mac) are on this side.
+/// `run` and `create` skip Docker Hub's official images, which need none: a credential
+/// helper would slow every start.
+#[cfg(any(target_os = "macos", windows))]
+fn forwarded_logins(cli: &Cli) -> Vec<(String, String)> {
+    use podbag::image::{auth, reference::Reference};
+    let image = match &cli.cmd {
+        Cmd::Pull { image } | Cmd::Push { image } => Some(image.as_str()),
+        Cmd::Run(a) | Cmd::Create(a) if a.rootfs.is_none() => a.args.first().map(String::as_str),
+        _ => None,
+    };
+    let Some(r) = image.and_then(|i| Reference::parse(i).ok()) else {
+        return Vec::new();
+    };
+    let official = r.registry == "docker.io" && r.repository.starts_with("library/");
+    if official && matches!(cli.cmd, Cmd::Run(_) | Cmd::Create(_)) {
+        return Vec::new();
+    }
+    match auth::lookup(&r.registry) {
+        Some(login) => vec![(
+            auth::AUTH_ENV.to_string(),
+            auth::encode_map(&[(r.registry, login)]),
+        )],
+        None => Vec::new(),
     }
 }
 
@@ -150,6 +222,7 @@ fn mac_command(cli: &Cli, argv: Vec<String>) -> podbag::macos::cli::Forward {
         argv,
         stdin: false,
         paths: Vec::new(),
+        env: forwarded_logins(cli),
     };
     match &cli.cmd {
         Cmd::Run(a) | Cmd::Create(a) => {
@@ -179,7 +252,18 @@ fn mac_command(cli: &Cli, argv: Vec<String>) -> podbag::macos::cli::Forward {
         },
         Cmd::Save {
             output: Some(p), ..
+        }
+        | Cmd::Export {
+            output: Some(p), ..
         } => f.paths.push(p.display().to_string()),
+        Cmd::Build(a) => {
+            if a.context == "-" {
+                f.stdin = true;
+            } else {
+                f.paths.push(a.context.clone());
+            }
+            f.paths.extend(a.file.clone());
+        }
         Cmd::System {
             cmd: args::SystemCmd::Service {
                 socket: Some(p), ..
@@ -253,12 +337,38 @@ fn dispatch(cmd: Cmd) -> i32 {
         } => container::start(&containers, attach, interactive),
         Cmd::Restart { time, containers } => container::restart(&containers, time),
         Cmd::Pull { image } => image::pull(&image),
+        Cmd::Push { image } => registry::push(&image),
+        Cmd::Tag { source, target } => registry::tag(&source, &target),
+        Cmd::Login {
+            server,
+            username,
+            password,
+            password_stdin,
+        } => registry::login(server.as_deref(), username, password, password_stdin),
+        Cmd::Logout { server } => registry::logout(server.as_deref()),
+        Cmd::Search {
+            term,
+            limit,
+            no_trunc,
+        } => registry::search(&term, limit, no_trunc),
         Cmd::Images => image::images(),
         Cmd::CheckImage { image } => image::check_image(&image),
         Cmd::Check { apparmor_profile } => check::run(apparmor_profile),
         Cmd::Rmi { images } => image::rmi(&images),
         Cmd::Load { input, quiet } => image::load(input.as_deref(), quiet),
         Cmd::Save { output, images } => image::save(output.as_deref(), &images),
+        Cmd::Build(a) => build::build(a),
+        Cmd::Commit {
+            change,
+            container: c,
+            image,
+            ..
+        } => build::commit(&c, image, change),
+        Cmd::Export {
+            output,
+            container: c,
+        } => build::export(&c, output.as_deref()),
+        Cmd::Diff { container: c } => build::diff(&c),
         Cmd::System {
             cmd:
                 args::SystemCmd::Service {
@@ -267,6 +377,10 @@ fn dispatch(cmd: Cmd) -> i32 {
                     print_units,
                 },
         } => service::service(socket, timeout, print_units),
+        Cmd::System {
+            cmd: args::SystemCmd::DialStdio,
+        } => service::dial_stdio(),
+        Cmd::Tui { once } => tui::run(once),
         Cmd::System { cmd } => image::system(cmd),
         Cmd::Cri { cmd } => cri(cmd),
         Cmd::Ps { all, quiet } => container::ps(all, quiet),
@@ -338,6 +452,20 @@ fn install_self(dest: &std::path::Path) -> i32 {
 fn dispatch(cmd: Cmd) -> i32 {
     match cmd {
         Cmd::Pull { image } => image::pull(&image),
+        Cmd::Push { image } => registry::push(&image),
+        Cmd::Tag { source, target } => registry::tag(&source, &target),
+        Cmd::Login {
+            server,
+            username,
+            password,
+            password_stdin,
+        } => registry::login(server.as_deref(), username, password, password_stdin),
+        Cmd::Logout { server } => registry::logout(server.as_deref()),
+        Cmd::Search {
+            term,
+            limit,
+            no_trunc,
+        } => registry::search(&term, limit, no_trunc),
         Cmd::Images => image::images(),
         Cmd::CheckImage { image } => image::check_image(&image),
         Cmd::Check { apparmor_profile } => check::run(apparmor_profile),
@@ -471,6 +599,30 @@ mod tests {
             ["save", "--output", "out/a.tar", "alpine"]
         );
         assert_eq!(via_wsl(&["ps", "-a"]).unwrap(), ["ps", "-a"]);
+    }
+
+    #[test]
+    fn build_context_dockerfile_and_export_files() {
+        assert_eq!(
+            via_wsl(&["build", "-t", "app", "-f", r"C:\src\Dockerfile", r"C:\src"]).unwrap(),
+            [
+                "build",
+                "-t",
+                "app",
+                "-f",
+                "/mnt/c/src/Dockerfile",
+                "/mnt/c/src"
+            ]
+        );
+        assert_eq!(
+            via_wsl(&["build", "-q", "."]).unwrap(),
+            ["build", "-q", "."]
+        );
+        assert_eq!(via_wsl(&["build", "-"]).unwrap(), ["build", "-"]);
+        assert_eq!(
+            via_wsl(&["export", "-o", r"out\c.tar", "c"]).unwrap(),
+            ["export", "-o", "out/c.tar", "c"]
+        );
     }
 
     #[test]

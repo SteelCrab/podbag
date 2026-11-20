@@ -1,5 +1,6 @@
 //! Container images: names, registries and the public image API.
 
+pub mod auth;
 pub mod manifest;
 pub mod reference;
 pub mod registry;
@@ -41,6 +42,51 @@ pub enum PullEvent {
     },
 }
 
+/// One step of a push, as [`Image::push_with_events`] reports it. Layers are named by
+/// their short ID (12 hex characters of their diff_id), as Docker does.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum PushEvent {
+    /// The push began: the repository (`localhost:5000/app`), and the layers, top first.
+    Started {
+        repository: String,
+        layers: Vec<String>,
+    },
+    /// The repository has the layer already.
+    LayerExists { id: String },
+    /// The registry copied it from another of its repositories (`from`).
+    LayerMounted { id: String, from: String },
+    /// It was uploaded: `bytes` compressed.
+    LayerPushed { id: String, bytes: u64 },
+    /// The manifest is in: the tag, its digest and size.
+    Done {
+        tag: String,
+        digest: String,
+        size: u64,
+    },
+}
+
+/// What a push sent.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct PushReport {
+    /// The full name pushed, like `localhost:5000/app:v1`.
+    pub name: String,
+    /// The digest of the manifest in the registry.
+    pub digest: String,
+    /// The manifest's size in bytes.
+    pub size: u64,
+}
+
+/// A layer's short ID: 12 hex characters of its digest.
+pub fn short_id(digest: &str) -> String {
+    digest
+        .strip_prefix("sha256:")
+        .unwrap_or(digest)
+        .chars()
+        .take(12)
+        .collect()
+}
+
 impl Image {
     /// Find programs and libraries in a stored image that cannot run: built for another
     /// C library or CPU, or missing a library. Files are read, never run.
@@ -53,29 +99,67 @@ impl Image {
         )?)
     }
 
-    /// Pull an image from its registry, or reuse it if it is already stored.
+    /// Pull an image from its registry, or reuse it if it is already stored. A login for
+    /// the registry comes from Docker's config (`docker login`, `podbag login`).
     pub fn pull(name: &str) -> Result<Image> {
-        pull(name, false)
+        from_output(pull_job(name, login_for(name).as_ref(), Report::Quiet)?)
     }
 
     /// Like [`Image::pull`], printing progress to stderr.
     #[doc(hidden)]
     pub fn pull_with_progress(name: &str) -> Result<Image> {
-        pull(name, true)
+        from_output(pull_job(name, login_for(name).as_ref(), Report::Progress)?)
     }
 
     /// Like [`Image::pull`], calling `on` for each step as it happens.
-    pub fn pull_with_events(name: &str, mut on: impl FnMut(PullEvent)) -> Result<Image> {
-        let op = crate::store::ops::StoreOp::Pull {
-            name: name.to_string(),
-            progress: false,
-            events: true,
-        };
-        from_output(store_op_lines(&op, &mut |line| {
-            if let Ok(ev) = serde_json::from_str::<PullEvent>(line) {
-                on(ev);
-            }
-        })?)
+    pub fn pull_with_events(name: &str, on: impl FnMut(PullEvent)) -> Result<Image> {
+        Image::pull_with_login(name, login_for(name).as_ref(), on)
+    }
+
+    /// Like [`Image::pull_with_events`], with this login (or none) instead of the config's.
+    pub fn pull_with_login(
+        name: &str,
+        login: Option<&auth::AuthConfig>,
+        mut on: impl FnMut(PullEvent),
+    ) -> Result<Image> {
+        from_output(pull_job(
+            name,
+            login,
+            Report::Events(&mut |line| {
+                if let Ok(ev) = serde_json::from_str::<PullEvent>(line) {
+                    on(ev);
+                }
+            }),
+        )?)
+    }
+
+    /// Push a stored image to the registry its name gives (`localhost:5000/app:v1`), with
+    /// the login Docker's config has for it. Layers the registry has are not sent again.
+    pub fn push(name: &str) -> Result<PushReport> {
+        from_output(push_job(name, login_for(name).as_ref(), Report::Quiet)?)
+    }
+
+    /// Like [`Image::push`], printing progress to stderr.
+    #[doc(hidden)]
+    pub fn push_with_progress(name: &str) -> Result<PushReport> {
+        from_output(push_job(name, login_for(name).as_ref(), Report::Progress)?)
+    }
+
+    /// Like [`Image::push`] with this login (or none), calling `on` for each step.
+    pub fn push_with_login(
+        name: &str,
+        login: Option<&auth::AuthConfig>,
+        mut on: impl FnMut(PushEvent),
+    ) -> Result<PushReport> {
+        from_output(push_job(
+            name,
+            login,
+            Report::Events(&mut |line| {
+                if let Ok(ev) = serde_json::from_str::<PushEvent>(line) {
+                    on(ev);
+                }
+            }),
+        )?)
     }
 
     /// Store the images of an archive read from `input`: `docker save`'s format, an OCI
@@ -210,16 +294,79 @@ pub fn prune_dangling() -> Result<PruneReport> {
     from_output(store_op(&crate::store::ops::StoreOp::PruneDangling, false)?)
 }
 
-fn pull(name: &str, progress: bool) -> Result<Image> {
-    let out = store_op(
-        &crate::store::ops::StoreOp::Pull {
-            name: name.to_string(),
-            progress,
-            events: false,
-        },
-        progress,
-    )?;
-    from_output(out)
+/// How a pull or push reports its steps.
+enum Report<'a> {
+    Quiet,
+    /// Lines for a person, on stderr.
+    Progress,
+    /// JSON events, one per line, to this function.
+    Events(&'a mut dyn FnMut(&str)),
+}
+
+/// The login for the registry an image name gives, from the front end or Docker's config.
+fn login_for(name: &str) -> Option<auth::AuthConfig> {
+    let r = reference::Reference::parse(name).ok()?;
+    auth::lookup(&r.registry)
+}
+
+fn pull_job(
+    name: &str,
+    login: Option<&auth::AuthConfig>,
+    report: Report,
+) -> Result<serde_json::Value> {
+    let op = crate::store::ops::StoreOp::Pull {
+        name: name.to_string(),
+        progress: matches!(report, Report::Progress),
+        events: matches!(report, Report::Events(_)),
+        auth: login.is_some(),
+    };
+    registry_job(&op, login, report)
+}
+
+fn push_job(
+    name: &str,
+    login: Option<&auth::AuthConfig>,
+    report: Report,
+) -> Result<serde_json::Value> {
+    let op = crate::store::ops::StoreOp::Push {
+        name: name.to_string(),
+        progress: matches!(report, Report::Progress),
+        events: matches!(report, Report::Events(_)),
+        auth: login.is_some(),
+    };
+    registry_job(&op, login, report)
+}
+
+/// Run a pull or push in the store helper; a login goes on its stdin.
+#[cfg(unix)]
+fn registry_job(
+    op: &crate::store::ops::StoreOp,
+    login: Option<&auth::AuthConfig>,
+    report: Report,
+) -> Result<serde_json::Value> {
+    use crate::helper::StoreOutput;
+    let secret = login
+        .map(|l| serde_json::to_vec(l).unwrap_or_default())
+        .unwrap_or_default();
+    let output = match report {
+        Report::Quiet => StoreOutput::Discard,
+        Report::Progress => StoreOutput::Inherit,
+        Report::Events(on) => StoreOutput::Lines(on),
+    };
+    crate::helper::run_store_op_with_secret(op, &secret, output)
+}
+
+#[cfg(not(unix))]
+fn registry_job(
+    _op: &crate::store::ops::StoreOp,
+    _login: Option<&auth::AuthConfig>,
+    report: Report,
+) -> Result<serde_json::Value> {
+    // No store helper here: nothing reports.
+    if let Report::Events(on) = report {
+        let _ = on;
+    }
+    Err(Error::unsupported_os())
 }
 
 #[cfg(unix)]
@@ -229,22 +376,6 @@ fn store_op(op: &crate::store::ops::StoreOp, progress: bool) -> Result<serde_jso
 
 #[cfg(not(unix))]
 fn store_op(_op: &crate::store::ops::StoreOp, _progress: bool) -> Result<serde_json::Value> {
-    Err(Error::unsupported_os())
-}
-
-#[cfg(unix)]
-fn store_op_lines(
-    op: &crate::store::ops::StoreOp,
-    on_line: &mut dyn FnMut(&str),
-) -> Result<serde_json::Value> {
-    crate::helper::run_store_op_lines(op, on_line)
-}
-
-#[cfg(not(unix))]
-fn store_op_lines(
-    _op: &crate::store::ops::StoreOp,
-    _on_line: &mut dyn FnMut(&str),
-) -> Result<serde_json::Value> {
     Err(Error::unsupported_os())
 }
 
@@ -345,6 +476,21 @@ pub struct ImageConfig {
     /// Its health check (`HEALTHCHECK`). Images pulled before podbag read it have none.
     #[serde(default)]
     pub healthcheck: Option<crate::health::HealthSettings>,
+    /// `LABEL`s. Images stored before podbag kept them have none.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub labels: std::collections::BTreeMap<String, String>,
+    /// `EXPOSE`d ports, like `80/tcp`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exposed_ports: Vec<String>,
+    /// `STOPSIGNAL`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_signal: Option<String>,
+    /// `ONBUILD` instructions, run by builds that start from this image.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub onbuild: Vec<String>,
+    /// `SHELL`: the shell for shell-form commands; empty means `/bin/sh -c`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shell: Vec<String>,
 }
 
 #[cfg(test)]

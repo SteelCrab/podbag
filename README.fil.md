@@ -35,9 +35,11 @@ Iniimbak nito ang mga image nang file-by-file: ang file na ginagamit ng maraming
 - **Mga file, hindi mga layer.** Ang file na ginagamit ng maraming image ay iniimbak at kina-cache nang isang beses lang.
 - **Mabilis.** Nagsisimula ang isang container sa mga 4 ms sa Linux.
 - **Gumagana sa mga tool ng Docker.** Mga Docker at OCI image, ang `docker` CLI, Compose at buildx.
+- **Nagbu-build ng mga Dockerfile.** `podbag build`, at `docker build` gamit ang classic builder, nang walang BuildKit o daemon.
 - **Kubernetes.** Ang `podbag cri serve` ang container runtime ng isang node, para sa kubelet o k3s.
 - **May root man o wala.** Iisang programa ang gumagana sa dalawang paraan.
 - **Linux, macOS at Windows.** x86_64 at arm64. Eksperimental pa ang suporta sa Windows.
+- **May TUI at desktop app.** `podbag tui` sa terminal, at isang window na may item sa menu bar, para sa mga container, image, volume at network.
 
 ### Mga layer at mga file
 
@@ -119,6 +121,9 @@ podbag logs -f web                                # sundan ang mga log
 podbag exec -it web sh                            # magbukas ng shell sa container
 podbag stop web && podbag rm web                  # ihinto at alisin
 podbag images                                     # ilista ang mga image
+podbag build -t myapp .                           # mag-build ng image mula sa isang Dockerfile
+podbag login ghcr.io                              # mag-log in sa isang registry (kahati ng docker login)
+podbag push ghcr.io/me/app:1                      # ipadala ang image sa isang registry
 ```
 
 ### docker CLI, Compose at buildx
@@ -174,7 +179,7 @@ docker compose up -d
 
 Nasa Ingles ang mga dokumento sa ibaba.
 
-- [Paggamit](docs/usage.md): mga command, volume, network, limit, Docker API, macOS, Windows.
+- [Paggamit](docs/usage.md): mga command, volume, network, limit, Docker API, TUI at GUI, macOS, Windows.
 - [Arkitektura](docs/architecture.md): paano naiiba ang podbag sa Docker.
 - [Pag-build mula sa source](docs/build.md): Linux, macOS, Windows.
 - [Mga benchmark](docs/benchmarks.md) at ang [benchmark ng Spring microservices](docs/benchmarks-msa.md).

@@ -9,6 +9,10 @@ pub const OCI_INDEX: &str = "application/vnd.oci.image.index.v1+json";
 pub const DOCKER_LIST: &str = "application/vnd.docker.distribution.manifest.list.v2+json";
 pub const OCI_MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json";
 pub const DOCKER_MANIFEST: &str = "application/vnd.docker.distribution.manifest.v2+json";
+pub const OCI_CONFIG: &str = "application/vnd.oci.image.config.v1+json";
+pub const DOCKER_CONFIG: &str = "application/vnd.docker.container.image.v1+json";
+pub const OCI_LAYER_GZIP: &str = "application/vnd.oci.image.layer.v1.tar+gzip";
+pub const DOCKER_LAYER_GZIP: &str = "application/vnd.docker.image.rootfs.diff.tar.gzip";
 
 /// The Accept header for manifest requests.
 pub const ACCEPT: &str = "application/vnd.oci.image.index.v1+json, \
@@ -245,6 +249,11 @@ struct RawRun {
     user: Option<String>,
     volumes: Option<std::collections::BTreeMap<String, serde_json::Value>>,
     healthcheck: Option<serde_json::Value>,
+    labels: Option<std::collections::BTreeMap<String, String>>,
+    exposed_ports: Option<std::collections::BTreeMap<String, serde_json::Value>>,
+    stop_signal: Option<String>,
+    on_build: Option<Vec<String>>,
+    shell: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -277,6 +286,26 @@ pub fn config_json(config: &ImageConfig, diff_ids: &[String], created: u64) -> V
     }
     if let Some(h) = &config.healthcheck {
         run["Healthcheck"] = h.to_docker();
+    }
+    if !config.labels.is_empty() {
+        run["Labels"] = serde_json::json!(config.labels);
+    }
+    if !config.exposed_ports.is_empty() {
+        let ports: serde_json::Map<String, serde_json::Value> = config
+            .exposed_ports
+            .iter()
+            .map(|p| (p.clone(), serde_json::json!({})))
+            .collect();
+        run["ExposedPorts"] = serde_json::Value::Object(ports);
+    }
+    if let Some(signal) = &config.stop_signal {
+        run["StopSignal"] = serde_json::json!(signal);
+    }
+    if !config.onbuild.is_empty() {
+        run["OnBuild"] = serde_json::json!(config.onbuild);
+    }
+    if !config.shell.is_empty() {
+        run["Shell"] = serde_json::json!(config.shell);
     }
     serde_json::to_vec(&serde_json::json!({
         "architecture": host_platform().0,
@@ -333,6 +362,11 @@ pub fn parse_config(body: &[u8]) -> Result<ConfigFile> {
                     .ok()
                     .flatten()
             }),
+            labels: run.labels.unwrap_or_default(),
+            exposed_ports: run.exposed_ports.unwrap_or_default().into_keys().collect(),
+            stop_signal: non_empty(run.stop_signal),
+            onbuild: run.on_build.unwrap_or_default(),
+            shell: run.shell.unwrap_or_default(),
         },
     })
 }
@@ -381,6 +415,11 @@ mod tests {
                 start_period_ms: Some(1000),
                 start_interval_ms: None,
             }),
+            labels: [("a.b".to_string(), "c".to_string())].into(),
+            exposed_ports: vec!["53/udp".into(), "80/tcp".into()],
+            stop_signal: Some("SIGINT".into()),
+            onbuild: vec!["RUN echo hi".into()],
+            shell: vec!["/bin/bash".into(), "-c".into()],
         };
         let ids = vec![format!("sha256:{}", "a".repeat(64))];
         let back = parse_config(&config_json(&config, &ids, 1_700_000_000)).unwrap();

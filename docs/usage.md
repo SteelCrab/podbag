@@ -7,11 +7,14 @@ The [README](../README.md) shows how to install podbag. This page shows what it 
 - [Commands](#commands)
 - [How containers run](#how-containers-run)
 - [Images](#images)
+- [Registries](#registries)
+- [Builds](#builds)
 - [Checks](#checks)
 - [Volumes](#volumes)
 - [Limits and security](#limits-and-security)
 - [Networks](#networks)
 - [Docker API](#docker-api)
+- [TUI and GUI](#tui-and-gui)
 - [Kubernetes](#kubernetes)
 - [macOS](#macos)
 - [Windows (experimental)](#windows-experimental)
@@ -38,6 +41,13 @@ podbag exec -it web sh
 podbag stop web && podbag rm web
 podbag pull alpine | podbag images | podbag rmi alpine
 podbag save -o app.tar myapp:1 && podbag load -i app.tar   # image archives
+podbag login ghcr.io                         # log in to a registry (shared with docker login)
+podbag tag myapp:1 ghcr.io/me/myapp:1 && podbag push ghcr.io/me/myapp:1
+podbag search nginx                          # search Docker Hub
+podbag build -t myapp:1 .                    # build an image from ./Dockerfile
+podbag commit web web-snapshot:1             # a container's changes as an image
+podbag diff web                              # the files a container changed
+podbag export -o web.tar web                 # all its files as a tar
 podbag run --rm --privileged alpine mount -t tmpfs none /mnt
 podbag system df | podbag system prune -f
 podbag system verify                         # check every stored file (exit code 1 if one is damaged)
@@ -46,6 +56,7 @@ podbag check                                 # is this system ready? (exit code 
 podbag check-image myapp:1                   # programs that cannot run in the image
 podbag system service &                      # the Docker API, for the docker CLI
 podbag vm status                             # macOS and Windows: podbag's Linux VM
+podbag tui                                   # containers, images, volumes and networks
 ```
 
 ## How containers run
@@ -151,6 +162,131 @@ podbag vm status                             # macOS and Windows: podbag's Linux
   `PODBAG_IMAGE_MOUNT=hardlink`.
 - When the method changes, an image gets what it needs the first time a container uses it.
 - Removing an image unmounts it.
+
+## Registries
+
+### Log in and out
+
+```sh
+podbag login                                         # Docker Hub: asks for the user name and password
+echo "$TOKEN" | podbag login ghcr.io -u me --password-stdin
+podbag logout ghcr.io
+```
+
+- podbag checks the login with the registry before it keeps it.
+- Logins live where Docker keeps them: `~/.docker/config.json`, or `config.json` in
+  `$DOCKER_CONFIG`. `docker login` and `podbag login` share them.
+- With `credsStore` or `credHelpers` in that file, a credential helper keeps the password,
+  for example in the macOS keychain. The helper is the program `docker-credential-<name>`.
+- Without a helper, the file keeps the login in base64. Only you can read the file (mode
+  `0600`), but the password is not encrypted.
+- When the registry gives a token for the login (an identity token), podbag keeps the
+  token, not the password.
+
+### Pull and push
+
+```sh
+podbag pull ghcr.io/me/private:1                     # uses the login for ghcr.io
+podbag tag myapp:1 localhost:5000/myapp:1
+podbag push localhost:5000/myapp:1
+podbag search --limit 5 nginx
+```
+
+- `pull`, `run` and `create` use the registry's login when there is one.
+- Without a login, a private image fails with the command that logs in. A wrong password
+  fails with "login failed".
+- Registries on `localhost`, `127.0.0.1` or `::1` use plain HTTP, as with Docker. All
+  others use HTTPS.
+- `search` uses Docker Hub's search. `search localhost:5000/name` asks that registry, if it
+  has the same search API.
+
+### How a push works
+
+- The store keeps files, not layer archives. For each layer, a push uses the first of these
+  that works:
+  - nothing: the repository has the layer already,
+  - a mount: the registry copies the layer from another of its repositories, for example
+    the base image you pulled from it,
+  - an upload: podbag writes the layer again from its files, as `save` does, and compresses
+    it with gzip.
+- A layer written again gets a new digest. The same files always give the same layer, so a
+  second push of the same image sends nothing.
+- The image keeps its format: OCI when it came as OCI, else Docker's.
+- Each layer goes in one request. podbag does not send layers in chunks.
+
+## Builds
+
+### Build an image
+
+```sh
+podbag build -t myapp:1 .                          # ./Dockerfile, with . as the context
+podbag build -f app.Dockerfile --build-arg VERSION=2 --target app -t myapp .
+tar -c . | podbag build -t myapp -                 # the context as a tar on stdin
+podbag build -t myapp - < Dockerfile               # only a Dockerfile, no context
+```
+
+- No BuildKit and no daemon: podbag reads the Dockerfile and does each step itself.
+- Options: `-t` (more than once), `-f`, `--build-arg`, `--target`, `--no-cache`, `--pull`,
+  `--label`, `--network`, `-q`.
+
+### How the steps work
+
+- `RUN` runs in a podbag container on the image so far, with the build arguments, `ENV`,
+  `USER`, `WORKDIR` and `SHELL` of the stage.
+  - The network is the default bridge; `--network host|none|<name>` changes it.
+  - The files it changed become a new layer. Deleted files stay deleted in the image.
+- `COPY` and `ADD` put the files in a new layer, owned by root unless `--chown` says
+  otherwise. `--chmod` sets the mode.
+  - `ADD` unpacks a local tar archive (plain, gzip or zstd) and downloads a URL.
+- `WORKDIR` makes the folder when it is missing.
+- Steps that change only settings (`ENV`, `CMD`, `LABEL`, `EXPOSE`, …) make no layer.
+- The new layers go into the store like pulled ones: each file is kept once.
+
+### Dockerfiles
+
+- All the classic instructions: `FROM` (`AS`), `RUN`, `CMD`, `ENTRYPOINT`, `ENV`, `ARG`,
+  `LABEL`, `EXPOSE`, `VOLUME`, `USER`, `WORKDIR`, `COPY`, `ADD`, `ONBUILD`, `STOPSIGNAL`,
+  `HEALTHCHECK`, `SHELL`.
+- Variables (`$V`, `${V:-default}`, `${V:+set}`), `ARG` before `FROM`, `# escape=`, line
+  continuations, JSON and shell forms, `RUN <<EOF` heredocs.
+- Several stages: only the stages the target needs are built. `COPY --from` takes a stage
+  name, a stage number or an image.
+- `.dockerignore` (or `<Dockerfile>.dockerignore`) leaves files out of the context, with
+  Docker's patterns (`**`, `!` exceptions).
+- `ARG TARGETARCH` and the other platform arguments have this machine's values.
+
+### The cache
+
+- Each step's result is kept. A step is found again by:
+  - the image before it,
+  - the instruction, after its variables,
+  - the build arguments a `RUN` sees,
+  - the contents of the files a `COPY` or `ADD` copies.
+- A second build prints `Using cache` for the steps it did not do again.
+- `--no-cache` does every step again.
+- The steps' images have no name: `podbag system prune` (or `docker image prune`) removes
+  them, and the cache entries with them. `docker builder prune` forgets the cache.
+
+### commit, export and diff
+
+- `podbag commit CONTAINER [NAME]`: the container's image plus its changes, as a new image.
+  - `-c` sets the config with a Dockerfile instruction: `-c 'CMD ["app"]'`.
+  - It works on running containers too, without stopping them.
+  - It does not pause a running container (Docker pauses by default), so a file that is
+    being written at that moment can be cut.
+- `podbag export [-o FILE] CONTAINER`: all its files as a tar, without its volumes.
+- `podbag diff CONTAINER`: the paths it changed: `A` added, `C` changed, `D` deleted.
+
+### Not supported in builds
+
+- BuildKit features: `RUN --mount`, secrets, SSH, `--output`, cache export and import,
+  builds for other platforms, `COPY --parents` and `--exclude`, `ADD --checksum`, `ADD` of a
+  Git repository, heredocs in `COPY` and `ADD`. podbag stops with a message; build such
+  Dockerfiles with buildx (see [buildx](#buildx)).
+- `ADD` of bzip2 or xz archives.
+- Base images from private registries: pulls are anonymous for now.
+- Image history (`docker history`).
+- Changes that a `RUN` makes in a `VOLUME` path stay in the image (Docker drops them).
 
 ## Checks
 
@@ -326,11 +462,16 @@ docker context create podbag --docker host=$DOCKER_HOST         # or keep it as 
 ### What works
 
 - System: `version`, `info`, `system df`, `events` (live only; there is no history).
-- Images: `pull`, `images`, `image inspect`, `tag`, `rmi`, `image prune`, `save`, `load`.
+- Images: `pull`, `push`, `images`, `image inspect`, `tag`, `rmi`, `image prune`, `save`,
+  `load`, `search`, `build` with the classic builder (see
+  [Builds with the docker CLI](#builds-with-the-docker-cli)), `builder prune`.
+- Registries: `login` (the docker CLI keeps the login; podbag checks it), and private
+  pulls and pushes with the login the docker CLI sends.
 - Containers: `run` (attached, `-d`, `-i`, `-t`, `--rm`), `create`, `start [-a]`, `stop`,
   `restart`, `kill`, `wait`, `rm`, `logs` (`-f`, `--tail`, `-t`, `--since`), `attach`,
   `ps` (filters `label`, `name`, `id`, `status`), `inspect`, `port`,
-  `exec` (`-i`, `-t`, `-d`, `-e`, `-w`, `-u`), `cp`, `container prune`.
+  `exec` (`-i`, `-t`, `-d`, `-e`, `-w`, `-u`), `cp`, `commit`, `export`, `diff`,
+  `container prune`.
 - Volumes and networks: `create`, `ls`, `inspect`, `rm`, `prune`.
 
 ### What does not work
@@ -339,9 +480,9 @@ docker context create podbag --docker host=$DOCKER_HOST         # or keep it as 
   `--link`, port ranges, other network or volume drivers.
 - Accepted with a warning, because ignoring them is safe: `--dns`, `--add-host`, ulimits,
   log drivers, fixed addresses.
-- Answered with 501 and what to do instead: the classic builder (`POST /build`; use
-  buildx), `commit`, `export`, `diff`, `top`, `stats`, `pause`, `rename`, `update`, `push`,
-  `search`, swarm and plugins.
+- Answered with 501 and what to do instead: BuildKit's build API (use buildx with the
+  `docker-container` driver), `top`, `stats`, `pause`, `rename`, `update`, swarm and
+  plugins.
 
 ### cp, save and load
 
@@ -354,8 +495,9 @@ docker context create podbag --docker host=$DOCKER_HOST         # or keep it as 
 - `docker save` writes Docker's archive format:
   - the store keeps files, not layer archives, so the saved layers (and the image ID) get
     new digests,
-  - it keeps the image's command, environment, user, working folder, volumes and health
-    check, but not its labels or history.
+  - it keeps the image's command, environment, user, working folder, volumes, health
+    check, labels, exposed ports and stop signal, but not its history (images stored
+    before podbag kept labels have none).
 - `docker load` reads `docker save` archives and OCI image layouts, plain or gzip:
   - it checks every digest,
   - it refuses an archive that is larger than the store limit.
@@ -376,7 +518,24 @@ docker context create podbag --docker host=$DOCKER_HOST         # or keep it as 
   health checks.
 - Names live in each container's `/etc/hosts` (no DNS server). When replicas share a name,
   the first one answers.
-- `docker compose build` uses a buildx builder (`--builder`; see below).
+- `docker compose build` works with the classic builder (see below), or with a buildx
+  builder (`--builder`).
+
+### Builds with the docker CLI
+
+```sh
+export DOCKER_BUILDKIT=0          # the classic builder: podbag builds the image
+docker build -t myapp .
+docker compose build
+```
+
+- podbag serves the classic builder (`POST /build`), and its `_ping` answers
+  `Builder-Version: 1`.
+- A docker CLI with the buildx plugin still sends `docker build` to buildx, whatever the
+  server says. `DOCKER_BUILDKIT=0` makes it use the classic builder.
+- Without `DOCKER_BUILDKIT=0`, buildx starts its own BuildKit in a podbag container, and
+  keeps the result in its cache (add `--load` to get the image).
+- The build works as `podbag build` does: see [Builds](#builds).
 
 ### buildx
 
@@ -392,6 +551,85 @@ docker compose build --builder podbag
 - The builder keeps running after the service stops: it is an ordinary container.
 - Its cache stays in its volume until `docker buildx rm`.
 - The default `docker` driver (the daemon's own BuildKit) is not available.
+
+## TUI and GUI
+
+- `podbag tui` shows containers, images, volumes and networks in the terminal.
+- `podbag-desktop` shows them in a window, with a tray (menu bar) item.
+- Both are clients of the Docker API. They work the same on Linux, macOS and Windows.
+
+### Which engine they use
+
+- `DOCKER_HOST`, when it is a Unix socket (`unix://…`).
+- Otherwise podbag's own socket:
+  - Linux: `$XDG_RUNTIME_DIR/podbag/docker.sock` (as root: `/run/podbag/docker.sock`).
+    When nothing answers, they start `podbag system service`. It stops a minute after the
+    last client.
+  - macOS: `~/.podbag/run/docker.sock`. The TUI starts the VM when it is off. The desktop
+    app asks first, with a Start VM button.
+  - Windows: `podbag tui` runs in the WSL distribution. The desktop app reaches the API
+    through `podbag.exe system dial-stdio`.
+
+### podbag tui
+
+- Four lists: containers, images, volumes and networks. The selected one's details show
+  under the list.
+- The lists change as the engine's events come. Without events, they are read every 2
+  seconds.
+- It fits a terminal of 80×24.
+
+| Key | What it does |
+|---|---|
+| `1`–`4`, `Tab`, `←` `→` | Switch the list |
+| `↑` `↓`, `PgUp` `PgDn` | Move |
+| `Enter` or `i` | All details (inspect) |
+| `s`, `x`, `r` | Start, stop, restart a container |
+| `l` | Logs, as they come |
+| `e` | A shell: `podbag exec -it <container> sh`, then back to the TUI |
+| `d` | Remove (it asks first) |
+| `p` | Pull an image (in Images) |
+| `c` | Remove all that is not used (it asks first) |
+| `/` | Search. `Esc` clears it |
+| `?` | All keys |
+| `q` | Quit |
+
+### podbag-desktop
+
+- A window with Containers, Images, Volumes, Networks and Settings.
+- Each list has a search box, and the same actions as the TUI.
+- A container's page has its details, its logs (as they come) and all its data.
+- With no containers, the window shows how to start one.
+- The tray item shows the engine's state and how many containers run. It has Open podbag
+  and Quit. On macOS, it also has Start VM or Stop VM.
+- Closing the window keeps the tray item. Quit ends the app.
+- While the window is closed, the app asks the engine nothing. So it keeps no VM or
+  service awake. On macOS, the tray still shows the VM's state: it reads it from files.
+- Open shell opens a terminal window: Terminal on macOS, the first terminal found on
+  Linux, a console window on Windows.
+- Light and dark themes follow the system. Settings can change the theme.
+- Languages: English, 한국어, 日本語, 简体中文, Filipino, Español and Tiếng Việt. The app
+  follows the system language. Settings can change it.
+
+### Build the desktop app
+
+- It is a separate program in `desktop/` (Tauri 2). The `podbag` binary does not carry
+  it, and `cargo build` leaves it out.
+- On Linux, it needs WebKitGTK 4.1 and an app indicator library:
+
+```sh
+sudo apt install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
+cargo build --release -p podbag-desktop
+./target/release/podbag-desktop
+```
+
+- It finds the `podbag` program next to itself, in `PATH`, or in `/usr/local/bin`,
+  `/opt/homebrew/bin` and `~/.local/bin`. `PODBAG_BIN` sets another one.
+- There are no installers yet (.dmg, .msi, AppImage).
+
+### What is hidden
+
+- The API has no `pause`, `rename`, `stats` or `top` yet. Both UIs ask the engine when they
+  start, and hide what it does not have.
 
 ## Kubernetes
 
@@ -484,6 +722,16 @@ sudo k3s server --container-runtime-endpoint unix:///run/podbag/cri.sock
 - `podbag vm stop`, or logging out, powers the VM off cleanly.
 - Containers cannot reach the VM's agent.
 
+### Registry logins
+
+- `login`, `logout` and `search` run on the Mac. Logins stay in the Mac's Docker config
+  and its keychain (`credsStore: "osxkeychain"`).
+- `pull`, `push`, `run` and `create` take the Mac's login for the image's registry to the
+  VM with the command. It stays in memory there: nothing is written to the VM's disk.
+- `run` and `create` of Docker Hub's official images (like `alpine`) take no login, so they
+  need no credential helper and start quickly.
+- The docker CLI sends its own logins, as with Docker.
+
 ### Resources
 
 - Memory: 2 GiB (`PODBAG_VM_MEMORY`, in MiB). CPUs: the Mac's, up to 8 (`PODBAG_VM_CPUS`).
@@ -543,6 +791,10 @@ docker buildx build --load -t app .
 - Named volumes and images live in the distribution.
 - `podbag vm status|start|stop|rm` shows, starts, stops or removes the distribution.
   `vm rm` deletes its images, containers and volumes.
+- `login`, `logout` and `search` run on Windows. Logins stay in the Windows user's Docker
+  config and its credential helper.
+- `pull`, `push`, `run` and `create` take the login for the image's registry to the engine
+  through `WSLENV`, in memory. Nothing is written to the distribution's disk.
 
 ### Limits
 

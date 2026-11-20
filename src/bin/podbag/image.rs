@@ -150,7 +150,7 @@ pub fn system(cmd: SystemCmd) -> i32 {
             Err(e) => report(&e),
         },
         // Handled in main on Unix; there is no service elsewhere.
-        SystemCmd::Service { .. } => report(&Error::new(
+        SystemCmd::Service { .. } | SystemCmd::DialStdio => report(&Error::new(
             ErrorKind::Unsupported,
             "cannot serve the Docker API on this operating system",
             "the service needs Unix sockets and Linux containers",
@@ -210,7 +210,7 @@ fn short_digest(d: &str) -> String {
         .collect()
 }
 
-fn print_table<const N: usize>(header: &[&str; N], rows: &[[String; N]]) {
+pub fn print_table<const N: usize>(header: &[&str; N], rows: &[[String; N]]) {
     let mut widths: Vec<usize> = header.iter().map(|h| h.len()).collect();
     for row in rows {
         for (w, cell) in widths.iter_mut().zip(row) {

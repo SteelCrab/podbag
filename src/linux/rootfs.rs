@@ -366,6 +366,44 @@ pub(super) fn enter_files(spec: &crate::spec::ContainerSpec, rootless: bool) -> 
     step(rootless, "enter the root", rustix::process::chdir("/"))
 }
 
+/// For reading what a container that does not run changed: in a mount namespace of this
+/// process's own, mount its root filesystem (without volumes). Returns the upper
+/// directory, the merged view and the image (lower) directory.
+pub(super) fn mount_changes(
+    spec: &crate::spec::ContainerSpec,
+    rootless: bool,
+) -> Result<(String, String, String)> {
+    let Rootfs::Overlay {
+        lower,
+        upper,
+        merged,
+        ..
+    } = &spec.rootfs
+    else {
+        return Err(no_image_layer(&spec.name));
+    };
+    step(
+        rootless,
+        "make mounts private",
+        rustix::mount::mount_change(
+            "/",
+            MountPropagationFlags::REC | MountPropagationFlags::PRIVATE,
+        ),
+    )?;
+    mount_root(&spec.rootfs, rootless)?;
+    Ok((upper.clone(), merged.clone(), lower.clone()))
+}
+
+/// A container on a plain folder (`run --rootfs`) has no image to compare with.
+pub(super) fn no_image_layer(name: &str) -> Error {
+    Error::new(
+        ErrorKind::Unsupported,
+        format!("cannot read the changes of container {name}"),
+        "it runs on a plain folder (--rootfs), not on an image",
+        "copy its files with `podbag cp`",
+    )
+}
+
 /// Cover the masked paths under `root` that start with `prefix`. Paths this kernel does
 /// not have are skipped.
 /// overlayfs options for a container's root. `data` is the object store when `lower` is an

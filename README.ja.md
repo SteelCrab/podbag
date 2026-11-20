@@ -35,9 +35,11 @@
 - **レイヤーではなくファイル。** 複数のイメージが同じファイルを使う場合、ディスクとメモリに1回だけ置きます。
 - **速い。** Linux ではコンテナが約 4 ms で起動します。
 - **Docker のツールと一緒に使えます。** Docker・OCI イメージ、`docker` CLI、Compose、buildx に対応しています。
+- **Dockerfile をビルドします。** `podbag build` と、クラシックビルダーの `docker build` が使えます。BuildKit もデーモンも要りません。
 - **Kubernetes。** `podbag cri serve` が、kubelet や k3s のためのノードのコンテナランタイムになります。
 - **root なしでも、root でも。** 同じプログラムが両方の方式で動きます。
 - **Linux、macOS、Windows。** x86_64 と arm64 に対応しています。Windows 対応は実験段階です。
+- **TUI とデスクトップアプリがあります。** ターミナルでは `podbag tui`、デスクトップではメニューバー項目つきのウィンドウで、コンテナ、イメージ、ボリューム、ネットワークを扱えます。
 
 ### レイヤーとファイル
 
@@ -119,6 +121,9 @@ podbag logs -f web                                # ログを追いかけて表�
 podbag exec -it web sh                            # コンテナの中でシェルを開きます
 podbag stop web && podbag rm web                  # 停止して削除します
 podbag images                                     # イメージの一覧
+podbag build -t myapp .                           # Dockerfile からイメージをビルドします
+podbag login ghcr.io                              # レジストリにログインします（docker login と共有）
+podbag push ghcr.io/me/app:1                      # イメージをレジストリに送ります
 ```
 
 ### docker CLI、Compose、buildx
@@ -174,7 +179,7 @@ docker compose up -d
 
 以下のドキュメントは英語です。
 
-- [使い方](docs/usage.md): コマンド、ボリューム、ネットワーク、制限、Docker API、macOS、Windows。
+- [使い方](docs/usage.md): コマンド、ボリューム、ネットワーク、制限、Docker API、TUI と GUI、macOS、Windows。
 - [アーキテクチャ](docs/architecture.md): podbag と Docker の違い。
 - [ソースからビルド](docs/build.md): Linux、macOS、Windows。
 - [ベンチマーク](docs/benchmarks.md) と [Spring マイクロサービスのベンチマーク](docs/benchmarks-msa.md)。

@@ -95,6 +95,9 @@ base, with the same jars:
 
 - Downloads stay the same: registries serve layers, and podbag downloads them whole before
   it splits them into files.
+- Pushes: a layer that the registry does not have already is written again from its
+  files, so it gets a new digest, as with `docker save`. A layer that came from the same
+  registry is mounted there, not sent.
 
 ## Networks
 
@@ -138,6 +141,7 @@ base, with the same jars:
 - **docker run on a Mac.** 14.4 ms (Kiri: 11.8 ms).
 - **Kubernetes.** The CRI is new. Pods have no user namespaces, SELinux labels, AppArmor
   profiles or seccomp profile files yet: see [usage.md](usage.md#kubernetes).
-- **Docker API.** No classic builder (use buildx), `commit`, `export`, `diff`, `top`,
-  `stats`, `pause`, `rename`, `update`, `push`, `search`, swarm or plugins.
+- **Builds.** podbag builds Dockerfiles itself, with the classic builder's features. For
+  BuildKit's (`RUN --mount`, secrets, other platforms), use buildx.
+- **Docker API.** No `top`, `stats`, `pause`, `rename`, `update`, swarm or plugins.
 - **Windows.** Not yet tried on a Windows machine.

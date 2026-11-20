@@ -1,5 +1,7 @@
 //! The image store: content objects, layer indexes, image trees and names.
 
+#[cfg(unix)]
+mod build;
 #[cfg(target_os = "linux")]
 pub mod composefs;
 pub mod erofs;
@@ -10,8 +12,12 @@ pub mod object;
 pub mod ops;
 pub(crate) mod perm;
 #[cfg(unix)]
+mod push;
+#[cfg(unix)]
 mod save;
 pub mod tree;
+#[cfg(unix)]
+pub use build::{Committed, SharedLock, copy_all};
 pub mod zstd;
 
 use crate::config::ImageMount;
@@ -47,6 +53,33 @@ pub struct ImageRecord {
     pub size: u64,
     /// Seconds since the epoch.
     pub created: u64,
+    /// It came in OCI's format (else Docker's schema 2): a push keeps the format.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub oci: bool,
+}
+
+/// The compressed blobs known to hold one stored layer, and where: what a push sends or
+/// mounts instead of writing the layer again. Kept in `registry/<diff_id hex>.json`.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct LayerBlobs {
+    pub blobs: Vec<KnownBlob>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct KnownBlob {
+    pub digest: String,
+    pub size: u64,
+    pub media_type: String,
+    /// The digest of its uncompressed content: the layer's own for a blob that was
+    /// pulled; another one for a blob podbag wrote from the stored files.
+    pub diff_id: String,
+    /// For a blob podbag wrote: the time stamp it gave every entry (the image's
+    /// creation time). The same files and time give the same blob.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub written_at: Option<u64>,
+    /// Repositories known to hold it: `registry/repository`.
+    #[serde(default)]
+    pub repos: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -146,7 +179,7 @@ impl Store {
     }
 
     pub fn open_at(root: PathBuf, set_owner: bool, can_mknod: bool) -> Result<Store> {
-        for sub in ["layers", "images"] {
+        for sub in ["layers", "images", "registry"] {
             std::fs::create_dir_all(root.join(sub)).map_err(|e| io_error(&root, e))?;
         }
         let objects = ObjectStore::new(root.join("objects"), set_owner)?;
@@ -549,6 +582,21 @@ impl Store {
         resolved: &crate::image::registry::Resolved,
         progress: &mut dyn FnMut(Progress),
     ) -> Result<()> {
+        // Where these blobs are, for a push to the same registry later.
+        let repo = format!("{}/{}", r.registry, r.repository);
+        for (desc, diff_id) in resolved.layers.iter().zip(&resolved.config.diff_ids) {
+            self.note_blob(
+                diff_id,
+                KnownBlob {
+                    digest: desc.digest.clone(),
+                    size: desc.size,
+                    media_type: desc.media_type.clone(),
+                    diff_id: diff_id.clone(),
+                    written_at: None,
+                    repos: vec![repo.clone()],
+                },
+            );
+        }
         if self
             .image_dir(&resolved.manifest_digest)
             .join("image.json")
@@ -587,6 +635,8 @@ impl Store {
             resolved.config.config.clone(),
             resolved.config.diff_ids.clone(),
             Some(resolved.config_digest.clone()),
+            resolved.oci,
+            true,
         )
     }
 
@@ -665,12 +715,39 @@ impl Store {
     }
 
     /// Merge stored layers into the image tree and write the image record.
+    /// Without `artifact`, only the record: [`Store::ensure_artifact`] builds the rest
+    /// when a container needs it (build steps that no `RUN` follows).
     fn assemble(
         &self,
         digest: &str,
         config: ImageConfig,
         diff_ids: Vec<String>,
         config_digest: Option<String>,
+        oci: bool,
+        artifact: bool,
+    ) -> Result<()> {
+        self.assemble_at(
+            digest,
+            config,
+            diff_ids,
+            config_digest,
+            oci,
+            artifact,
+            now(),
+        )
+    }
+
+    /// [`Store::assemble`] with the image's creation time.
+    #[allow(clippy::too_many_arguments)]
+    fn assemble_at(
+        &self,
+        digest: &str,
+        config: ImageConfig,
+        diff_ids: Vec<String>,
+        config_digest: Option<String>,
+        oci: bool,
+        artifact: bool,
+        created: u64,
     ) -> Result<()> {
         let mut layers = Vec::new();
         for id in &diff_ids {
@@ -696,12 +773,13 @@ impl Store {
         let _ = remove_tree(&staging);
         std::fs::create_dir(&staging).map_err(|e| io_error(&staging, e))?;
         let result = (|| {
-            let created = now();
             let want = match self.method {
                 MountMethod::Composefs => Artifact::Erofs,
                 MountMethod::Hardlink => Artifact::Tree,
             };
-            self.build_in(&staging, want, &tree, created)?;
+            if artifact {
+                self.build_in(&staging, want, &tree, created)?;
+            }
             let record = ImageRecord {
                 digest: digest.to_string(),
                 config_digest,
@@ -709,6 +787,7 @@ impl Store {
                 diff_ids,
                 size,
                 created,
+                oci,
             };
             write_json(&staging.join("image.json"), &record)?;
             match std::fs::rename(&staging, &dir) {
@@ -1103,6 +1182,20 @@ impl Store {
                 let _ = std::fs::remove_file(f.path());
             }
         }
+        // What is known of the blobs of layers that went (and files a write left).
+        for f in std::fs::read_dir(self.root.join("registry"))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let name = f.file_name().to_string_lossy().to_string();
+            let used = name
+                .strip_suffix(".json")
+                .is_some_and(|id| used_layers.contains(id));
+            if !used {
+                let _ = std::fs::remove_file(f.path());
+            }
+        }
         self.objects.adopt_copies(&keep)?;
         self.objects.sweep(&keep)?;
         // What unfinished jobs left: inserts, record writes, and scratch directories.
@@ -1118,7 +1211,52 @@ impl Store {
             }
         }
         let _ = remove_tree(&self.root.join("tmp"));
+        #[cfg(unix)]
+        self.sweep_build_cache();
         Ok(())
+    }
+
+    fn blobs_path(&self, diff_id: &str) -> PathBuf {
+        self.root
+            .join("registry")
+            .join(format!("{}.json", hex_of(diff_id)))
+    }
+
+    /// The blobs known for a layer; none when nothing is known (or the file is damaged:
+    /// it only saves work).
+    pub fn layer_blobs(&self, diff_id: &str) -> LayerBlobs {
+        read_json(&self.blobs_path(diff_id)).unwrap_or_default()
+    }
+
+    /// Write what is known of a layer's blobs. Failures are ignored: the next push writes
+    /// the layer again.
+    fn write_layer_blobs(&self, diff_id: &str, blobs: &LayerBlobs) {
+        let path = self.blobs_path(diff_id);
+        // Unique per process: pulls of images that share a layer write at the same time.
+        let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+        let written = serde_json::to_vec(blobs)
+            .map_err(std::io::Error::other)
+            .and_then(|bytes| std::fs::write(&tmp, bytes))
+            .and_then(|()| std::fs::rename(&tmp, &path));
+        if written.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+
+    /// Add a blob (or a repository that holds it) to what is known of a layer.
+    pub fn note_blob(&self, diff_id: &str, blob: KnownBlob) {
+        let mut known = self.layer_blobs(diff_id);
+        match known.blobs.iter_mut().find(|b| b.digest == blob.digest) {
+            Some(b) => {
+                for repo in blob.repos {
+                    if !b.repos.contains(&repo) {
+                        b.repos.push(repo);
+                    }
+                }
+            }
+            None => known.blobs.push(blob),
+        }
+        self.write_layer_blobs(diff_id, &known);
     }
 
     /// True when the layer is stored, with file times. An index from an older podbag has
@@ -1231,7 +1369,7 @@ impl Store {
             }
         }
         if !self.image_dir(&digest).exists() {
-            self.assemble(&digest, ImageConfig::default(), diff_ids, None)?;
+            self.assemble(&digest, ImageConfig::default(), diff_ids, None, false, true)?;
         } else {
             self.ensure_artifact(&digest)?;
         }
@@ -1245,6 +1383,9 @@ impl Store {
 enum Source<'a> {
     Registry(&'a Reference),
     Archive,
+    /// A layer a build step made.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    Build,
 }
 
 impl Source<'_> {
@@ -1252,6 +1393,7 @@ impl Source<'_> {
         match self {
             Source::Registry(r) => format!("cannot pull {}", r.name()),
             Source::Archive => "cannot load the image archive".to_string(),
+            Source::Build => "cannot store the build step's files".to_string(),
         }
     }
 
@@ -1259,6 +1401,7 @@ impl Source<'_> {
         match self {
             Source::Registry(_) => "the registry's blob",
             Source::Archive => "the archive's blob",
+            Source::Build => "the step's layer",
         }
     }
 
@@ -1266,6 +1409,7 @@ impl Source<'_> {
         match self {
             Source::Registry(_) => "the manifest",
             Source::Archive => "its record",
+            Source::Build => "its writer",
         }
     }
 
@@ -1277,6 +1421,12 @@ impl Source<'_> {
                 "cannot load the image archive",
                 format!("sha256 mismatch for {digest}: the archive's content is not what it names"),
                 "the archive is damaged or was changed; save it again",
+            ),
+            Source::Build => Error::new(
+                ErrorKind::Internal,
+                "cannot store the build step's files",
+                format!("sha256 mismatch for {digest}"),
+                "build again; if it keeps failing, report this bug",
             ),
         }
     }
@@ -1836,10 +1986,28 @@ mod tests {
         .unwrap();
         s.import_for_test("b", vec![shared], 2).unwrap();
         assert_eq!(s.objects.total_size().unwrap().0, 2);
+        // What is known of each layer's blobs goes with the layer.
+        for id in s.find("a").unwrap().1.diff_ids {
+            s.note_blob(
+                &id,
+                KnownBlob {
+                    digest: id.clone(),
+                    size: 1,
+                    media_type: manifest::DOCKER_LAYER_GZIP.into(),
+                    diff_id: id.clone(),
+                    written_at: None,
+                    repos: vec!["example.com/a".into()],
+                },
+            );
+        }
         let removed = s.remove_image("a", &HashMap::new).unwrap();
         assert_eq!(removed, ["docker.io/library/a:latest"]);
         assert_eq!(s.objects.total_size().unwrap(), (1, 6));
         assert_eq!(std::fs::read_dir(s.root.join("layers")).unwrap().count(), 1);
+        assert_eq!(
+            std::fs::read_dir(s.root.join("registry")).unwrap().count(),
+            1
+        );
     }
 
     #[test]

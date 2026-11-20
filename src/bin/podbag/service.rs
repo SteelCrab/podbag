@@ -28,3 +28,43 @@ pub fn service(socket: Option<PathBuf>, timeout: u64, print_units: bool) -> i32 
         Err(e) => crate::image::report(&e),
     }
 }
+
+/// `podbag system dial-stdio`: stdin and stdout as one connection to the API socket,
+/// until the socket closes.
+pub fn dial_stdio() -> i32 {
+    use podbag::client::{Endpoint, podbag_program};
+    use std::io::Write;
+    let exe = podbag_program();
+    let path = match Endpoint::find(&exe).and_then(|e| {
+        e.ensure_running(&exe, true)?;
+        match e {
+            Endpoint::Socket { path, .. } => Ok(path),
+            Endpoint::Command(_) => Err("the Docker API is not on a socket here".into()),
+        }
+    }) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("podbag: {e}");
+            return 1;
+        }
+    };
+    let socket = match std::os::unix::net::UnixStream::connect(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("podbag: cannot connect to {}: {e}", path.display());
+            return 1;
+        }
+    };
+    let Ok(mut to_socket) = socket.try_clone() else {
+        return 1;
+    };
+    std::thread::spawn(move || {
+        let _ = std::io::copy(&mut std::io::stdin().lock(), &mut to_socket);
+        let _ = to_socket.shutdown(std::net::Shutdown::Write);
+    });
+    let mut out = std::io::stdout().lock();
+    let mut from_socket = socket;
+    let copied = std::io::copy(&mut from_socket, &mut out);
+    let _ = out.flush();
+    i32::from(copied.is_err())
+}
