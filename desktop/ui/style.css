@@ -637,3 +637,20 @@ dialog.import { width: min(520px, calc(100vw - 48px)); }
 @keyframes migration-enter { from { opacity: 0; transform: translateY(5px) scale(.98); } to { opacity: 1; transform: none; } }
 @keyframes migration-transfer { from { transform: translateX(0); } to { transform: translateX(212%); } }
 @keyframes migration-check { 0% { opacity: .3; transform: scale(.78); } 70% { transform: scale(1.08); } 100% { opacity: 1; transform: scale(1); } }
+/* An installed tutorial uses its own practice data, even when the engine is offline. */
+.tutorial { padding-block-start: 20px; }
+.tutorial-card { max-width: 680px; padding: 22px; overflow-wrap: anywhere; }
+.tutorial-title { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+.tutorial-title > .icon { flex: none; width: 28px; height: 28px; color: var(--accent-text); }
+.tutorial-title h2 { margin: 0; font-size: 20px; line-height: 1.35; }
+.tutorial-card p + p { margin-top: 8px; }
+.tutorial-card .tutorial-progress { color: var(--accent-text); font-weight: 600; }
+.lab-label { display: block; margin: 14px 0 6px; font-weight: 600; }
+.tutorial-card textarea, .tutorial-card input[type="text"] {
+  width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px;
+  color: var(--ink); background: var(--surface); font: 14px/1.5 var(--mono);
+}
+.tutorial-card textarea { resize: vertical; }
+.lab-output { white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; border-radius: 6px;
+  background: var(--sunken); color: var(--ink); font: 14px/1.5 var(--mono); }
+.tutorial-status:not(:empty) { margin-top: 14px; color: var(--ink); }

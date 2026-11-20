@@ -10,6 +10,7 @@ mod commands;
 mod dockercmd;
 mod images;
 mod kubernetes;
+mod lab;
 mod migration;
 mod settings;
 mod strings;
@@ -1079,6 +1080,17 @@ fn build_app_menu(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
+#[tauri::command]
+fn tutorial_lab(
+    lab: State<'_, Mutex<lab::Lab>>,
+    action: lab::Action,
+    value: Option<String>,
+) -> Result<lab::Snapshot, String> {
+    lock(&lab)
+        .run(action, value.as_deref())
+        .map_err(|e| e.to_string())
+}
+
 fn main() {
     let builder = tauri::Builder::default();
     #[cfg(target_os = "macos")]
@@ -1086,8 +1098,10 @@ fn main() {
     let app = builder
         .plugin(tauri_plugin_autostart::Builder::new().build())
         .manage(AppState::new())
+        .manage(Mutex::new(lab::Lab::default()))
         .invoke_handler(tauri::generate_handler![
             engine,
+            tutorial_lab,
             list,
             kubernetes::kube_counts,
             migration::migration_sources,
@@ -1199,6 +1213,10 @@ fn main() {
             std::process::exit(1);
         });
     app.run(|app, event| {
+        if matches!(event, tauri::RunEvent::Exit) {
+            let lab = app.state::<Mutex<lab::Lab>>();
+            let _ = lock(&lab).run(lab::Action::End, None);
+        }
         // macOS: a click on the Dock icon brings the window back.
         #[cfg(target_os = "macos")]
         if let tauri::RunEvent::Reopen { .. } = event {

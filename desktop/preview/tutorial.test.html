@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Install a tutorial with the engine offline</title>
+<iframe src="preview.html?view=offline&amp;lang=en" title="Desktop preview"></iframe>
+<pre id="result">Running</pre>
+<script>
+"use strict";
+const frame = document.querySelector("iframe");
+const result = document.getElementById("result");
+async function test() {
+  const win = frame.contentWindow, doc = frame.contentDocument;
+  const key = "podbag.tutorial.volume-api.v1", previous = win.localStorage.getItem(key);
+  const check = (condition, message) => { if (!condition) throw Error(message); };
+  const btn = (label) => [...doc.querySelectorAll("button")].find((b) => b.textContent === label);
+  const select = async (contents) => {
+    const input = doc.querySelector('input[type="file"]');
+    const files = new win.DataTransfer();
+    files.items.add(new win.File([contents], "lesson.podbag"));
+    input.files = files.files;
+    await input.onchange();
+  };
+  const pack = {
+    format: "podbag-volume-api-lab-v1", starter: '{"message":"hello"}',
+    translations: { en: { title: "Lab 1 · My HTTP lab", goal: "Serve a file.", create: "Name a volume.",
+      write: "Write JSON.", serve: "Start the service.", request: "Send a request." } },
+  };
+  try {
+    win.localStorage.removeItem(key);
+    btn("Tutorials").click();
+    check(!btn("Start lab"), "The lab needs installation");
+    await select("broken");
+    check(doc.querySelector(".tutorial-status").textContent, "Explain an invalid package");
+    await select(JSON.stringify(pack));
+    check(doc.getElementById("tutorial-heading").textContent === "Lab · My HTTP lab", "Preview the original module without its number");
+    check(!win.localStorage.getItem(key), "Selecting a file must not install it");
+    btn("Cancel").click();
+    await select(JSON.stringify(pack));
+    btn("Install module").click();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    check(!!btn("Start lab"), "Installed lab is available");
+    win.podbag.go("containers");
+    btn("Tutorials").click();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    check(doc.getElementById("tutorial-heading").textContent === "Lab · My HTTP lab", "Show an unnumbered title after reopening the installed module");
+    btn("Remove module").click();
+    doc.getElementById("confirm-yes").click();
+    await new Promise(resolve => setTimeout(resolve, 30));
+    check(!win.localStorage.getItem(key) && !!btn("Choose file"), "Removal clears the module");
+  } finally {
+    if (previous === null) win.localStorage.removeItem(key);
+    else win.localStorage.setItem(key, previous);
+  }
+}
+frame.addEventListener("load", () => {
+  const root = frame.contentDocument.documentElement;
+  const observer = new MutationObserver(start);
+  function start() {
+    if (root.dataset.ready !== "1") return;
+    observer.disconnect();
+    test().then(() => { result.textContent = "PASS"; }, err => { result.textContent = "FAIL: " + err.message; });
+  }
+  observer.observe(root, { attributes: true, attributeFilter: ["data-ready"] });
+  start();
+});
+</script>
+</html>
