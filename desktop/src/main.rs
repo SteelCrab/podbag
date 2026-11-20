@@ -504,6 +504,7 @@ fn main() {
     #[cfg(target_os = "macos")]
     let builder = builder.append_invoke_initialization_script("window.podbagWindowToolbar = true;");
     let app = builder
+        .plugin(tauri_plugin_autostart::Builder::new().build())
         .manage(AppState::new())
         .invoke_handler(tauri::generate_handler![
             engine,

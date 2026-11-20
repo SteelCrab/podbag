@@ -127,6 +127,8 @@
   "vm.envOverride": "启动时，已设置的环境变量优先于对应的设置。",
   "vm.saved": "虚拟机设置已保存。",
   "settings.title": "设置",
+  "settings.startup": "启动",
+  "settings.launchAtLogin": "登录时打开 Podbag Desktop",
   "settings.language": "语言",
   "settings.system": "跟随系统",
   "settings.theme": "主题",

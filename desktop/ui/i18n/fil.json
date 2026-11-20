@@ -127,6 +127,8 @@
   "vm.envOverride": "Sa pagsisimula, uunahin ang mga environment variable para sa katumbas na setting.",
   "vm.saved": "Na-save ang mga setting ng VM.",
   "settings.title": "Mga setting",
+  "settings.startup": "Pagsisimula",
+  "settings.launchAtLogin": "Buksan ang Podbag Desktop kapag nag-sign in ako",
   "settings.language": "Wika",
   "settings.system": "Kapareho ng system",
   "settings.theme": "Tema",

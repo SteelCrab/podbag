@@ -25,6 +25,8 @@ const API = (() => {
     openShell: (id) => invoke("open_shell", { id }),
     vm: (action) => invoke("vm", { action }),
     vmResources: (values) => invoke("vm_resources", { values: values || null }),
+    launchAtLogin: () => invoke("plugin:autostart|is_enabled"),
+    setLaunchAtLogin: (enabled) => invoke(enabled ? "plugin:autostart|enable" : "plugin:autostart|disable"),
     getSettings: () => invoke("get_settings"),
     setSettings: (settings) => invoke("set_settings", { settings }),
     // Events: changed, live, logs, pull-progress, shown, engine-changed, vm-status.

@@ -66,7 +66,11 @@
   ];
 
   let resources = { cpus: 4, memoryMib: 2048 };
+  let launchAtLogin = false;
   const commands = {
+    "plugin:autostart|is_enabled": () => launchAtLogin,
+    "plugin:autostart|enable": () => { launchAtLogin = true; },
+    "plugin:autostart|disable": () => { launchAtLogin = false; },
     engine: () => engine,
     list: ({ kind }) => lists[kind],
     kube_list: ({ kind, allNamespaces }) => ({
