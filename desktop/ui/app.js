@@ -34,12 +34,11 @@ const S = {
   updates: null, // versions and the last update check
   upgrade: null, // what the last "Update podbag" did
   history: { stack: [], index: -1 },
-  autoCollapsed: false, // the window is too narrow for the sidebar
   docker: null, // where the docker command goes
 };
 
 const IS_MAC = /Mac/.test(navigator.platform || navigator.userAgent);
-const SIDEBAR = { width: 216, min: 160, max: 360 };
+const SIDEBAR = { width: 216, min: 160, max: 360, rail: 56, collapseAt: 128, expandAt: 80 };
 
 // ---- small helpers ----
 
@@ -599,7 +598,7 @@ function renderNav() {
   const nav = document.getElementById("nav");
   const item = (view, label, count, symbol = view) => h("li", {}, h("button", {
     type: "button", class: "nav-item", "aria-current": S.view === view ? "page" : null, onclick: () => go(view),
-    title: label,
+    "aria-label": label, title: count == null ? label : `${label} (${count})`,
   }, icon(symbol), h("span", { class: "label", text: label }), h("span", { class: "count", text: count ?? "" })));
   updateMigrationNav();
   nav.replaceChildren(...KINDS.map(k => item(k, t(`nav.${k}`), S.loaded && !S.listErrors[k] ? S.lists[k].length : null)));
@@ -671,21 +670,25 @@ function engineChoice() {
 // ---- the sidebar's width, collapse and divider ----
 
 const narrowWindow = window.matchMedia("(max-width: 720px)");
+const clampWidth = (w) => Math.min(SIDEBAR.max, Math.max(SIDEBAR.min, Math.round(Number(w) || SIDEBAR.width)));
+let sidebarDrag = null;
+let sidebarExpandedInNarrowWindow = false;
 
-function sidebarCollapsed() {
-  return S.settings.sidebarCollapsed || S.autoCollapsed;
+function sidebarWidth() {
+  if (sidebarDrag) return sidebarDrag.width;
+  return S.settings.sidebarCollapsed || (narrowWindow.matches && !sidebarExpandedInNarrowWindow)
+    ? SIDEBAR.rail : clampWidth(S.settings.sidebarWidth);
 }
 
 function applySidebar() {
   const app = document.getElementById("app");
-  const collapsed = sidebarCollapsed();
-  const width = clampWidth(S.settings.sidebarWidth);
+  const width = sidebarWidth();
+  const collapsed = width === SIDEBAR.rail;
   app.style.setProperty("--sidebar-w", `${width}px`);
   app.classList.toggle("collapsed", collapsed);
   const splitter = document.getElementById("splitter");
   splitter.setAttribute("aria-valuenow", String(width));
   splitter.setAttribute("aria-label", t("sidebar.resize"));
-  splitter.hidden = collapsed;
   const toggle = document.getElementById("sidebar-toggle");
   const label = collapsed ? t("sidebar.show") : t("sidebar.hide");
   if (!toggle.firstChild) toggle.append(icon("sidebar"));
@@ -694,87 +697,77 @@ function applySidebar() {
   toggle.title = `${label} (${IS_MAC ? "⌃⌘S" : "Ctrl+B"})`;
 }
 
-const clampWidth = (w) => Math.min(SIDEBAR.max, Math.max(SIDEBAR.min, Math.round(Number(w) || SIDEBAR.width)));
-
 let saveSidebarTimer = null;
-function saveSidebarSoon() {
+function setSidebarWidth(width) {
+  const collapsed = width === SIDEBAR.rail;
+  S.settings.sidebarCollapsed = collapsed;
+  if (!collapsed) S.settings.sidebarWidth = clampWidth(width);
+  sidebarExpandedInNarrowWindow = !collapsed && (narrowWindow.matches || sidebarExpandedInNarrowWindow);
+  applySidebar();
   clearTimeout(saveSidebarTimer);
   saveSidebarTimer = setTimeout(() => API.setSettings(S.settings).catch(() => {}), 300);
 }
 
-function setSidebarWidth(w, save) {
-  S.settings.sidebarWidth = clampWidth(w);
-  applySidebar();
-  if (save) saveSidebarSoon();
-}
-
 function toggleSidebar() {
-  if (sidebarCollapsed()) {
-    S.autoCollapsed = false;
-    S.settings.sidebarCollapsed = false;
-  } else if (narrowWindow.matches) {
-    // Too narrow: hide it for now, without changing the saved choice.
-    S.autoCollapsed = true;
-  } else {
-    S.settings.sidebarCollapsed = true;
-  }
-  applySidebar();
-  saveSidebarSoon();
+  if (sidebarDrag) return;
+  setSidebarWidth(sidebarWidth() === SIDEBAR.rail ? clampWidth(S.settings.sidebarWidth) : SIDEBAR.rail);
 }
 
 function setupSidebar() {
   const splitter = document.getElementById("splitter");
   const app = document.getElementById("app");
-  let drag = null;
   splitter.addEventListener("pointerdown", (e) => {
-    if (e.button !== 0) return;
+    if (e.button !== 0 || sidebarDrag) return;
     e.preventDefault();
     splitter.setPointerCapture(e.pointerId);
-    drag = { x: e.clientX, width: clampWidth(S.settings.sidebarWidth) };
+    const width = sidebarWidth();
+    sidebarDrag = { id: e.pointerId, x: e.clientX, startWidth: width, width };
     app.classList.add("resizing");
   });
   splitter.addEventListener("pointermove", (e) => {
-    if (!drag || !splitter.hasPointerCapture(e.pointerId)) return;
+    if (sidebarDrag?.id !== e.pointerId) return;
     const dir = document.documentElement.dir === "rtl" ? -1 : 1;
-    setSidebarWidth(drag.width + (e.clientX - drag.x) * dir, false);
+    const width = sidebarDrag.startWidth + (e.clientX - sidebarDrag.x) * dir;
+    const threshold = sidebarDrag.startWidth === SIDEBAR.rail ? SIDEBAR.expandAt : SIDEBAR.collapseAt;
+    sidebarDrag.width = width <= threshold ? SIDEBAR.rail : clampWidth(width);
+    applySidebar();
   });
   const end = (e) => {
-    if (!drag) return;
-    drag = null;
+    if (sidebarDrag?.id !== e.pointerId) return;
+    const { startWidth, width } = sidebarDrag;
+    sidebarDrag = null;
     app.classList.remove("resizing");
-    if (splitter.hasPointerCapture(e.pointerId)) splitter.releasePointerCapture(e.pointerId);
-    saveSidebarSoon();
+    if (e.type === "pointerup" && width !== startWidth) setSidebarWidth(width);
+    else applySidebar();
   };
   splitter.addEventListener("pointerup", end);
   splitter.addEventListener("pointercancel", end);
   splitter.addEventListener("lostpointercapture", end);
-  splitter.addEventListener("dblclick", () => setSidebarWidth(SIDEBAR.width, true));
+  splitter.addEventListener("dblclick", () => setSidebarWidth(SIDEBAR.width));
   splitter.addEventListener("keydown", (e) => {
+    if (sidebarDrag) return;
     const step = e.shiftKey ? 40 : 10;
-    const w = clampWidth(S.settings.sidebarWidth);
+    const width = sidebarWidth();
+    const smaller = width <= SIDEBAR.min ? SIDEBAR.rail : Math.max(SIDEBAR.min, width - step);
+    const larger = Math.max(SIDEBAR.min, width + step);
+    const rtl = document.documentElement.dir === "rtl";
     const keys = {
-      ArrowLeft: w - step, ArrowRight: w + step, ArrowUp: w + step, ArrowDown: w - step,
-      Home: SIDEBAR.min, End: SIDEBAR.max,
+      ArrowLeft: rtl ? larger : smaller, ArrowRight: rtl ? smaller : larger,
+      ArrowUp: larger, ArrowDown: smaller, Home: SIDEBAR.rail, End: SIDEBAR.max,
     };
     if (e.key === "Enter") {
       e.preventDefault();
       toggleSidebar();
-      document.getElementById("sidebar-toggle").focus();
-    } else if (e.key in keys) {
+    } else if (Object.hasOwn(keys, e.key)) {
       e.preventDefault();
-      setSidebarWidth(keys[e.key], true);
+      setSidebarWidth(keys[e.key]);
     }
   });
   document.getElementById("sidebar-toggle").addEventListener("click", toggleSidebar);
   document.getElementById("nav-back").addEventListener("click", () => travel(-1));
   document.getElementById("nav-forward").addEventListener("click", () => travel(1));
-  // Narrow windows collapse it; it comes back when there is room.
-  const onWidth = () => {
-    S.autoCollapsed = narrowWindow.matches;
-    applySidebar();
-  };
-  narrowWindow.addEventListener("change", onWidth);
-  S.autoCollapsed = narrowWindow.matches;
+  // Follow the window width until the user expands the sidebar in a narrow window.
+  narrowWindow.addEventListener("change", applySidebar);
   applySidebar();
   renderHistory();
 }
