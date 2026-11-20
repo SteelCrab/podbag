@@ -769,6 +769,15 @@ fn open_repository() -> Result<(), String> {
     open::that_detached(env!("CARGO_PKG_REPOSITORY")).map_err(|e| e.to_string())
 }
 
+#[tauri::command(async)]
+fn open_training_guide(id: &str, lang: &str) -> Result<(), String> {
+    let module = podbag::volume_lesson::Module::parse(id).map_err(|e| e.to_string())?;
+    let url = module
+        .guide_url(lang)
+        .ok_or("The module has no web guide.")?;
+    open::that_detached(url).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn get_settings(state: State<'_, AppState>) -> Settings {
     lock(&state.settings).clone()
@@ -1209,9 +1218,7 @@ fn volume_tools_lab(
         {
             continue;
         }
-        if action == "summary" {
-            record.package.animation = None;
-        }
+        record.package.animation = None;
         records.push(LessonRecord { id: key, record });
     }
     Ok(records)
@@ -1287,6 +1294,7 @@ fn main() {
             vm_resources,
             take_star_prompt,
             open_repository,
+            open_training_guide,
             get_settings,
             set_settings,
         ])

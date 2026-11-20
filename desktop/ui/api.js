@@ -64,6 +64,7 @@ const API = (() => {
     openTerminal: (what) => invoke("open_terminal", { what }),
     takeStarPrompt: () => invoke("take_star_prompt"),
     openRepository: () => invoke("open_repository"),
+    openTrainingGuide: (id) => invoke("open_training_guide", { id, lang: I18N.lang }),
     getSettings: () => invoke("get_settings"),
     setSettings: (settings) => invoke("set_settings", { settings }),
     // Events: changed, live, logs, pull-progress, shown, engine-changed, open-updates,

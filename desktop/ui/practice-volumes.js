@@ -5,22 +5,19 @@ const volumePractice = {
   id: "volume-basics",
   namespace: "practice.",
   steps: ["start", "create", "inspect", "remove", "verify", "finish"],
-  commands: { create: "podbag volume create my-api", verify: "podbag volume ls", finish: "exit" },
   request: (...args) => API.practiceVolumes(...args),
 };
 const containerPractice = {
   id: "container-basics",
   namespace: "training.container.",
   steps: ["start", "run", "stop", "check", "finish"],
-  commands: { run: "podbag run -d --name hello-web --network none docker.io/library/busybox:1.37.0 httpd -f -p 8080",
-    check: "podbag ps -a", finish: "exit" },
   request: (action, session, name) => API.practiceVolumes(action, session, name, true),
 };
 
 function showPracticeProgress(panel, stage, practice) {
   if (panel.dataset.stage === stage) return;
   panel.dataset.stage = stage;
-  const { namespace, steps, commands } = practice;
+  const { namespace, steps } = practice;
   const index = stage === "complete" ? steps.length : steps.indexOf(stage === "restart" ? "stop" : stage);
   const items = steps.map((step, i) => {
     const state = i < index ? "done" : i === index ? "current" : "pending";
@@ -29,13 +26,27 @@ function showPracticeProgress(panel, stage, practice) {
       h("span", { class: "practice-step-name", text: t(namespace + step) }),
       h("small", { text: t("practice." + state) }));
   });
-  const command = commands[stage];
+  const outcome = stage === "complete" || stage === "restart";
   put(panel, h("h2", { text: t("practice.progress") }), h("ol", { class: "practice-steps", role: "list" }, items),
-    h("p", { role: "status", text: t(namespace + "hint." + stage) }), command && codeLine(command));
+    h("p", { role: "status", class: outcome ? "" : "visually-hidden",
+      text: t(outcome ? namespace + "hint." + stage : namespace + stage) }));
+}
+
+function showModuleStatus(status, stage) {
+  const label = stage === "complete" ? "tutorial.complete"
+    : stage === "start" ? "tutorial.installed" : "practice.current";
+  const text = t(label);
+  if (status.textContent !== text) status.textContent = text;
+}
+
+function trainingGuideButton(id, style) {
+  return button("globe", t("training.guide"), async () => {
+    try { await API.openTrainingGuide(id); } catch (e) { toast(String(e), true); }
+  }, style);
 }
 
 // Poll only while this view is mounted. Redraw on transitions so keyboard focus stays on the row or action.
-function watchPractice(panel, completed, onChange, practice = volumePractice) {
+function watchPractice(panel, completed, onChange, practice = volumePractice, draw = showPracticeProgress) {
   let last, timer, revision = 0;
   const error = h("p", { role: "alert", class: "error-text" });
   panel.after(error);
@@ -49,7 +60,7 @@ function watchPractice(panel, completed, onChange, practice = volumePractice) {
       if (!state) completed = !!(await API.volumeToolsLab("summary", null, practice.id))[0]?.completed;
       if (!panel.isConnected || ticket !== revision) return;
       const stage = state?.stage || (completed ? "complete" : "start");
-      showPracticeProgress(panel, stage, practice);
+      draw(panel, stage, practice);
       const key = JSON.stringify(state);
       if (last !== key) onChange?.(state);
       last = key;
@@ -60,7 +71,7 @@ function watchPractice(panel, completed, onChange, practice = volumePractice) {
       if (panel.isConnected && ticket === revision) timer = setTimeout(refresh, 800);
     }
   }
-  showPracticeProgress(panel, completed ? "complete" : "start", practice);
+  draw(panel, completed ? "complete" : "start", practice);
   refresh();
   return refresh;
 }
@@ -71,10 +82,10 @@ function renderPracticeVolumes(main) {
   const terminal = button("shell", t("status.terminal"), async () => {
     try { await API.volumeToolsLab("start", null, volumePractice.id); } catch (e) { toast(String(e), true); }
   });
-  const holder = h("div", { class: "content practice-workspace" }, panel, resources);
+  const holder = h("div", { class: "content practice-workspace" }, resources, panel);
   put(main, h("header", { class: "toolbar" },
     iconButton("back", t("nav.tutorials"), () => go("tutorials")),
-    h("h1", { text: t("practice.volumes") }), terminal), holder);
+    h("h1", { text: t("practice.volumes") }), trainingGuideButton(volumePractice.id), terminal), holder);
   let state, detail, busy = false;
   const refresh = watchPractice(panel, false, next => {
     if (!next || next.session !== state?.session || !next.volumes.some(v => v.Name === detail?.Name)) detail = null;
@@ -83,6 +94,7 @@ function renderPracticeVolumes(main) {
     render();
   });
   function render() {
+    resources.hidden = !state;
     if (!state) { resources.replaceChildren(); return; }
     const target = state.session;
     const canRemove = row => row.Name !== "my-api" || state.stage === "remove";
@@ -95,7 +107,7 @@ function renderPracticeVolumes(main) {
       put(resources, h("header", { class: "toolbar" }, iconButton("back", t("action.back"), () => { detail = null; render(); }),
         h("h2", { text: detail.Name }), removeButton(detail)), infoPanel("volumes", detail));
     } else {
-      put(resources, h("h2", { text: t("nav.volumes") }), state.volumes.length
+      put(resources, state.volumes.length
         ? resourceTable("volumes", state.volumes, row => act("inspect", row, target), row => h("div", { class: "actions" }, removeButton(row)))
         : h("p", { class: "nothing", text: t("empty.volumes.title") }));
     }
@@ -125,8 +137,8 @@ function renderPracticeContainers(main) {
   });
   put(main, h("header", { class: "toolbar" },
     iconButton("back", t("nav.tutorials"), () => go("tutorials")),
-    h("h1", { text: t("training.containers") }), terminal),
-  h("div", { class: "content practice-workspace" }, panel, resources));
+    h("h1", { text: t("training.containers") }), trainingGuideButton(containerPractice.id), terminal),
+  h("div", { class: "content practice-workspace" }, resources, panel));
   let state, detailId, busy = false;
   const refresh = watchPractice(panel, false, next => {
     if (next?.session !== state?.session) detailId = null;
@@ -136,6 +148,7 @@ function renderPracticeContainers(main) {
   }, containerPractice);
 
   function render() {
+    resources.hidden = !state;
     if (!state) { resources.replaceChildren(); return; }
     const action = state.stage === "restart" ? "start" : state.stage === "stop" ? "stop" : null;
     const resourceAction = row => action && iconButton(action, t("action." + action),
@@ -147,7 +160,7 @@ function renderPracticeContainers(main) {
         h("h2", { text: containerName(detail) }), resourceAction(detail)), infoPanel("containers", detail));
       return;
     }
-    put(resources, h("h2", { text: t("nav.containers") }), state.containers.length
+    put(resources, state.containers.length
       ? resourceTable("containers", state.containers, row => { detailId = row.Id; render(); },
         row => h("div", { class: "actions" }, resourceAction(row)))
       : h("p", { class: "nothing", text: t("empty.containers.title") }));

@@ -642,10 +642,6 @@ dialog.import { width: min(520px, calc(100vw - 48px)); }
 .tutorial-card { max-width: 680px; padding: 22px; overflow-wrap: anywhere; }
 .tutorial-card + .tutorial-card { margin-top: 16px; }
 .training-library:not([hidden]) { margin-bottom: 16px; }
-.lesson-intro { margin: 0 0 18px; }
-.lesson-intro h3 { margin: 0 0 5px; font-size: 16px; }
-.lesson-intro video { display: block; width: 100%; height: auto; max-width: 530px;
-  margin-top: 10px; background: var(--sunken); border: 1px solid var(--line); border-radius: var(--radius); }
 .lab-guide { white-space: pre-line; }
 .tutorial-title { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
 .tutorial-title > .icon { flex: none; width: 28px; height: 28px; color: var(--accent-text); }
@@ -690,5 +686,5 @@ dialog.import { width: min(520px, calc(100vw - 48px)); }
 .practice-steps small { color: var(--ink-2); text-align: end; }
 .practice-steps .practice-current { background: var(--accent-soft); }
 .practice-current :is(.practice-step-name, small) { color: var(--accent-text); font-weight: 600; }
-.practice-workspace [role="alert"]:empty { display: none; }
+.practice-workspace [role="alert"]:empty, .practice-resources[hidden] { display: none; }
 .practice-resources { min-width: 0; overflow-x: auto; }

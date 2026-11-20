@@ -106,7 +106,7 @@ pub fn command(cmd: LabCmd) -> i32 {
                     let installed = volume_lesson::read(&dir, module)?.ok_or_else(|| {
                         io::Error::other("Install the module with podbag lab install FILE first.")
                     })?;
-                    if session(installed.words(&lang), &dir, module)? {
+                    if session(installed.words(&lang), &dir, module, &lang)? {
                         installed.finish(&dir)?;
                     }
                 }
@@ -197,7 +197,12 @@ fn workspace() -> io::Result<()> {
 }
 
 #[cfg(unix)]
-fn session(words: &volume_lesson::Words, library: &Path, module: Module) -> io::Result<bool> {
+fn session(
+    words: &volume_lesson::Words,
+    library: &Path,
+    module: Module,
+    lang: &str,
+) -> io::Result<bool> {
     use std::io::{BufRead, BufReader, IsTerminal};
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
@@ -236,10 +241,11 @@ fn session(words: &volume_lesson::Words, library: &Path, module: Module) -> io::
             Module::Volumes => Some(volume_lesson::gui::Registration::open(library, dir)?),
             Module::Tui => None,
         };
-        if let Some(intro) = &words.intro {
-            println!("\n{}\n{}", intro.title, intro.text);
+        if let Some(url) = module.guide_url(lang) {
+            println!("\n{}\n{url}\n", words.title);
+        } else {
+            println!("\n{}\n", words.guide);
         }
-        println!("\n{}\n", words.guide);
         if Path::new("/bin/sh").is_file() {
             practice_command(Path::new("/bin/sh"), dir)?
                 .arg("-i")

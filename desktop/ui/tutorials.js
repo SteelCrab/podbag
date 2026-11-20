@@ -13,18 +13,6 @@ function validTutorial(pack) {
     ["title", "goal", "create", "write", "serve", "request"].every((key) => text(words?.[key])));
 }
 
-function lessonIntroduction(pack, lesson) {
-  const intro = lesson.intro || pack.translations.en.intro;
-  if (!intro) return null;
-  const animation = pack.animation;
-  const video = animation && h("video", {
-    controls: true, playsinline: true, preload: "none", "aria-label": intro.title,
-    poster: "data:image/webp;base64," + animation.webp, src: "data:video/mp4;base64," + animation.mp4,
-  });
-  return h("section", { class: "lesson-intro" },
-    h("h3", { text: intro.title }), h("p", { text: intro.text }), video);
-}
-
 const CONTAINER_FORMAT = "podbag-container-basics-v1";
 
 function setInstalledPractice(records) {
@@ -80,17 +68,18 @@ function renderTutorials(main) {
         const lesson = words(record.package);
         const container = record.id === containerPractice.id;
         const practice = container ? containerPractice : record.id === volumePractice.id ? volumePractice : null;
-        const progress = practice ? h("section", { class: "practice-progress" }) : null;
+        const progress = h("p", { class: "tutorial-progress", role: "status",
+          text: t(record.completed ? "tutorial.complete" : "tutorial.installed") });
         const resource = container ? ["containers", "training.containers", "lab-containers"]
           : ["volumes", "practice.volumes", "lab-volumes"];
         return { record, practice, progress, card: h("section", { class: "card tutorial-card" },
           h("div", { class: "tutorial-title" }, icon("shell"), h("h2", { tabindex: "-1", text: lesson.title })),
-          practice ? null : h("p", { class: "tutorial-progress", text: t(record.completed ? "tutorial.complete" : "tutorial.installed") }),
-          lessonIntroduction(record.package, lesson),
-          practice ? progress : h("p", { class: "lab-guide", text: lesson.guide }),
+          progress,
+          practice ? null : h("p", { class: "lab-guide", text: lesson.guide }),
           practice ? null : codeLine("podbag lab start " + record.id),
           h("div", { class: "buttons-row" },
-            button("shell", t("status.terminal"), () => toolsAction("start", null, record.id), "primary"),
+            practice ? trainingGuideButton(practice.id, "primary") : null,
+            button("shell", t("status.terminal"), () => toolsAction("start", null, record.id), practice ? "" : "primary"),
             practice ? button(resource[0], t(resource[1]), () => go(resource[2]))
               : button("refresh", t("action.refresh"), () => toolsAction("status")),
             button("remove", t("tutorial.uninstall"), async () => {
@@ -101,7 +90,7 @@ function renderTutorials(main) {
       });
       tools.replaceChildren(...cards.map(item => item.card));
       for (const {record, practice, progress} of cards) {
-        if (practice) watchPractice(progress, record.completed, null, practice);
+        if (practice) watchPractice(progress, record.completed, null, practice, showModuleStatus);
       }
       return true;
     } catch (error) {

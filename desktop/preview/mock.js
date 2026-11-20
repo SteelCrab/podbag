@@ -242,6 +242,7 @@
       return true;
     },
     open_repository: () => null,
+    open_training_guide: () => null,
     practice_volumes: () => null,
     volume_tools_lab: ({ action, package: file, id }) => {
       if (action === "install") {

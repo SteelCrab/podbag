@@ -48,6 +48,32 @@ impl Module {
         }
     }
 
+    pub fn guide_url(self, lang: &str) -> Option<String> {
+        let lang = lang.split(['-', '_', '.']).next().unwrap_or("en");
+        let (post, locale) = match self {
+            Self::Containers => ("container-basics", if lang == "ko" { "ko/" } else { "" }),
+            Self::Volumes => (
+                "cli-tui-volumes",
+                match lang {
+                    "ko" => "ko/",
+                    "ja" => "ja/",
+                    "zh" => "zh-CN/",
+                    "es" => "es/",
+                    "fil" => "fil/",
+                    "vi" => "vi/",
+                    _ => "",
+                },
+            ),
+            Self::Tui => return None,
+        };
+        let origin = if cfg!(debug_assertions) {
+            option_env!("PODBAG_TRAINING_PREVIEW_ORIGIN").unwrap_or("https://podbag.dev")
+        } else {
+            "https://podbag.dev"
+        };
+        Some(format!("{origin}/{locale}blog/{post}/"))
+    }
+
     fn path(self, dir: &Path) -> PathBuf {
         dir.join(format!("{}.json", self.id()))
     }
@@ -255,6 +281,31 @@ impl Installed {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guide_links_use_published_languages() {
+        let path = |module: Module, lang| {
+            let url = module.guide_url(lang).unwrap();
+            url.split_once("://")
+                .unwrap()
+                .1
+                .split_once('/')
+                .unwrap()
+                .1
+                .to_owned()
+        };
+        assert_eq!(
+            path(Module::Containers, "ko_KR.UTF-8"),
+            "ko/blog/container-basics/"
+        );
+        assert_eq!(path(Module::Containers, "ja"), "blog/container-basics/");
+        assert_eq!(
+            path(Module::Volumes, "zh-CN"),
+            "zh-CN/blog/cli-tui-volumes/"
+        );
+        assert_eq!(path(Module::Volumes, "es_ES"), "es/blog/cli-tui-volumes/");
+        assert!(Module::Tui.guide_url("en").is_none());
+    }
 
     #[test]
     fn removing_and_reinstalling_cannot_restore_an_earlier_sessions_progress() {
