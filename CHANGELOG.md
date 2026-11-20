@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.3.0 (2026-11-21)
+
+- Install Podbag Desktop on Windows with a native x86_64 or ARM64 MSI. Each
+  installer includes the matching Podbag CLI and Linux engine. Enable WSL 2
+  to run containers.
+- Import a `.podbag` lesson from Tutorials in Podbag Desktop. The volume lab
+  walks through creating a volume, saving a JSON file, and checking the
+  response from a local HTTP server. Ending the lab removes its temporary data.
+
 ## v0.2.0 (2026-11-20)
 
 ### Containers and images
