@@ -366,3 +366,20 @@ fn a_load_error_is_an_error() {
         .unwrap_err();
     assert_eq!((e.status, e.message.as_str()), (500, "disk full"));
 }
+
+#[test]
+fn a_failing_body_stops_the_load_without_waiting() {
+    struct Broken(bool);
+    impl Read for Broken {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if std::mem::replace(&mut self.0, true) {
+                return Err(io::Error::other("the source went away"));
+            }
+            buf[0] = b'x';
+            Ok(1)
+        }
+    }
+    let (_e, client, _) = fake_engine(fake::small_engine);
+    let e = client.load_images(Broken(false)).unwrap_err();
+    assert_eq!(e.message, "the source went away");
+}

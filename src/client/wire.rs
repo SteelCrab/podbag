@@ -97,7 +97,7 @@ pub fn send(
     let sent = match body {
         Body::None => Ok(()),
         Body::Json(b) => conn.write_all(b),
-        Body::Stream(_, r) => write_chunked(&mut conn, r),
+        Body::Stream(_, r) => write_chunked(&mut conn, r)?,
     };
     let sent = sent.and_then(|()| conn.flush());
     let head_only = method == "HEAD";
@@ -109,8 +109,10 @@ pub fn send(
     }
 }
 
-/// Copy `r` to `w` as HTTP chunks, then the last (empty) chunk.
-fn write_chunked(w: &mut dyn Write, r: &mut dyn Read) -> io::Result<()> {
+/// Copy `r` to `w` as HTTP chunks, then the last (empty) chunk. The outer error: `r`
+/// failed (the engine still waits for the body, so do not wait for its answer); the
+/// inner one: writing failed.
+fn write_chunked(w: &mut dyn Write, r: &mut dyn Read) -> io::Result<io::Result<()>> {
     let mut buf = vec![0u8; 64 * 1024];
     loop {
         let n = match r.read(&mut buf) {
@@ -119,11 +121,14 @@ fn write_chunked(w: &mut dyn Write, r: &mut dyn Read) -> io::Result<()> {
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(e),
         };
-        write!(w, "{n:x}\r\n")?;
-        w.write_all(&buf[..n])?;
-        w.write_all(b"\r\n")?;
+        let wrote = write!(w, "{n:x}\r\n")
+            .and_then(|()| w.write_all(&buf[..n]))
+            .and_then(|()| w.write_all(b"\r\n"));
+        if wrote.is_err() {
+            return Ok(wrote);
+        }
     }
-    w.write_all(b"0\r\n\r\n")
+    Ok(w.write_all(b"0\r\n\r\n"))
 }
 
 fn read_response(mut inner: BufReader<Box<dyn Conn>>, head_only: bool) -> io::Result<Response> {
