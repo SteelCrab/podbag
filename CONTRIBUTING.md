@@ -26,7 +26,7 @@ Open an issue. Include:
 cargo build    # the program and the library
 ```
 
-- Release builds for Linux, macOS and Windows: [docs/build.md](docs/build.md).
+- Build instructions for Linux, Android, macOS and Windows: [docs/build.md](docs/build.md).
 
 ## Test
 

@@ -64,6 +64,27 @@ jobs:
           path: target/${{ env.TARGET }}/release/podbag
           if-no-files-found: error
 
+  android:
+    name: Android aarch64
+    runs-on: ubuntu-24.04
+    env:
+      TARGET: aarch64-linux-android
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.TARGET }}
+      - name: Build CLI with the Android NDK
+        run: |
+          export PATH="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+          cargo build --locked --release --target "$TARGET" --bin podbag
+          file "target/$TARGET/release/podbag" | grep -F 'interpreter /system/bin/linker64'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: podbag-aarch64-android
+          path: target/${{ env.TARGET }}/release/podbag
+          if-no-files-found: error
+
   # The image store against the kernel: the store's integration tests and the library
   # tests that need root, rootless and as root. The container jobs run on Ubuntu 26.04:
   # rootless networks need pasta's --map-host-loopback, which 24.04's pasta lacks.
