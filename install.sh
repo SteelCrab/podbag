@@ -28,10 +28,11 @@ case $arch in
   *) fail "there is no podbag build for this CPU ($arch)" ;;
 esac
 case $os in
-  Linux) file=podbag-$arch-linux ;;
+  # The static program; older releases have only podbag-<arch>-linux.
+  Linux) files="podbag-$arch-linux-musl podbag-$arch-linux" ;;
   Darwin)
     [ "$arch" = aarch64 ] || fail "on a Mac, podbag needs Apple silicon"
-    file=podbag-aarch64-macos
+    files=podbag-aarch64-macos
     ;;
   *) fail "no installer for $os; on Windows, download podbag.exe from https://github.com/$repo/releases" ;;
 esac
@@ -41,7 +42,7 @@ case $version in
   *) url=https://github.com/$repo/releases/download/v$version ;;
 esac
 
-# 2. Download the program and the release's checksums.
+# 2. Download the release's checksums, then the program.
 if command -v curl >/dev/null 2>&1; then
   get() { curl -fsSL --proto '=https' --tlsv1.2 -o "$2" "$1"; }
 elif command -v wget >/dev/null 2>&1; then
@@ -52,13 +53,20 @@ fi
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 trap 'exit 1' INT TERM
+get "$url/SHA256SUMS" "$tmp/SHA256SUMS" || fail "cannot download $url/SHA256SUMS"
+file=
+for f in $files; do
+  want=$(awk -v f="$f" '$2 == f { print $1 }' "$tmp/SHA256SUMS")
+  if [ -n "$want" ]; then
+    file=$f
+    break
+  fi
+done
+[ -n "$file" ] || fail "SHA256SUMS has no line for ${files%% *}"
 say "Downloading $file ($version)"
 get "$url/$file" "$tmp/podbag" || fail "cannot download $url/$file"
-get "$url/SHA256SUMS" "$tmp/SHA256SUMS" || fail "cannot download $url/SHA256SUMS"
 
 # 3. Check it.
-want=$(awk -v f="$file" '$2 == f { print $1 }' "$tmp/SHA256SUMS")
-[ -n "$want" ] || fail "SHA256SUMS has no line for $file"
 if command -v sha256sum >/dev/null 2>&1; then
   got=$(sha256sum "$tmp/podbag" | cut -d ' ' -f 1)
 else
