@@ -121,6 +121,8 @@ podbag exec -it web sh                            # コンテナの中でシェ�
 podbag stop web && podbag rm web                  # 停止して削除します
 podbag images                                     # イメージの一覧
 podbag build -t myapp .                           # Dockerfile からイメージをビルドします
+podbag login ghcr.io                              # レジストリにログインします（docker login と共有）
+podbag push ghcr.io/me/app:1                      # イメージをレジストリに送ります
 ```
 
 ### docker CLI、Compose、buildx

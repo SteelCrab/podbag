@@ -20,12 +20,31 @@ const NO_ENGINE: &str = "this podbag.exe carries no Linux engine for WSL: downlo
                          PODBAG_LINUX_BIN set to a static Linux podbag";
 
 /// Run a podbag command in the distribution; its exit code.
-pub fn forward(argv: &[String]) -> i32 {
+/// `env` is more environment for it (a login for its registry): it reaches the engine
+/// through WSLENV, in memory, never on the distribution's disk.
+pub fn forward(argv: &[String], env: &[(String, String)]) -> i32 {
     if let Err(e) = ensure() {
         eprintln!("podbag: {e}");
         return 125;
     }
     let mut cmd = wsl();
+    if !env.is_empty() {
+        let mut shared: Vec<String> = std::env::var("WSLENV")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .map(|v| v.split(':').map(String::from).collect())
+            .unwrap_or_default();
+        for (k, v) in env {
+            cmd.env(k, v);
+            if !shared
+                .iter()
+                .any(|s| s.split('/').next() == Some(k.as_str()))
+            {
+                shared.push(k.clone());
+            }
+        }
+        cmd.env("WSLENV", shared.join(":"));
+    }
     cmd.args(["-d", DISTRO]);
     // The engine starts where the command was given, so relative paths mean the same.
     if let Ok(dir) = std::env::current_dir() {

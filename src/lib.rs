@@ -7,6 +7,8 @@
 pub mod api;
 /// Files in and out of a container as tar archives (`docker cp`).
 pub mod archive;
+#[doc(hidden)]
+pub mod base64;
 /// Image builds from a Dockerfile.
 pub mod build;
 #[doc(hidden)]

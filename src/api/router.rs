@@ -142,6 +142,7 @@ pub fn route(req: &Request, ctx: &Ctx) -> Reply {
         ("GET", ["version"]) => super::system::version(),
         ("GET", ["info"]) => super::system::info(ctx),
         ("GET", ["system", "df"]) => super::system::df(),
+        ("POST", ["auth"]) => super::images::login(req),
         ("GET", ["events"]) => super::events::stream(req),
         (_, ["containers", _, "top"]) => not_supported(
             "listing a container's processes (top)",

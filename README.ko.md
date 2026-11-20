@@ -121,6 +121,8 @@ podbag exec -it web sh                            # 컨테이너 안에서 셸�
 podbag stop web && podbag rm web                  # 멈추고 지웁니다
 podbag images                                     # 이미지 목록
 podbag build -t myapp .                           # Dockerfile로 이미지를 빌드합니다
+podbag login ghcr.io                              # 레지스트리에 로그인합니다 (docker login과 공유)
+podbag push ghcr.io/me/app:1                      # 이미지를 레지스트리로 보냅니다
 ```
 
 ### docker CLI, Compose, buildx

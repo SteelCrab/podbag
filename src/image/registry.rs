@@ -1,18 +1,29 @@
-//! A minimal client for the OCI distribution API: manifests, configs and layer blobs.
+//! A minimal client for the OCI distribution API: manifests, configs and layer blobs, to
+//! pull and to push.
 //!
 //! Every manifest and config is checked against its sha256 digest here. Layer blobs are
 //! returned as streams; the caller hashes them while reading.
+//!
+//! A registry asks who is calling with a 401 and a `WWW-Authenticate` challenge: `Basic`
+//! (send the user name and password), or `Bearer` (get a token for the scopes needed, like
+//! `repository:app:pull,push`, from the token server it names; with a login, the token
+//! server checks the password or the identity token). The client answers the challenge
+//! once and keeps what it got for the next requests.
 
+use super::auth::AuthConfig;
 use super::manifest::{self, ConfigFile, Descriptor, Fetched};
-use super::reference::Reference;
+use super::reference::{self, Reference};
 use crate::{Error, ErrorKind, Result};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::time::Duration;
 
 /// Manifests and configs are small; refuse anything larger.
 const MAX_DOCUMENT: u64 = 4 * 1024 * 1024;
+
+/// The client ID podbag gives token servers (Docker's is `docker`).
+const CLIENT_ID: &str = "podbag";
 
 /// The lowercase hex sha256 of `bytes`.
 pub fn sha256_hex(bytes: &[u8]) -> String {
@@ -31,12 +42,22 @@ pub struct Resolved {
     pub config_digest: String,
     pub config: ConfigFile,
     pub layers: Vec<Descriptor>,
+    /// The image came in OCI's format (else Docker's schema 2).
+    pub oci: bool,
 }
 
 pub struct Registry {
     agent: ureq::Agent,
-    /// Bearer tokens per "registry/repository".
+    /// The login for the registry this client talks to.
+    auth: Option<AuthConfig>,
+    /// Bearer tokens per host and scopes.
     tokens: HashMap<String, String>,
+    /// Hosts that asked for Basic authentication.
+    basic: HashSet<String>,
+    /// Ask token servers for a refresh token too (a login).
+    offline: bool,
+    /// A refresh token a token server gave.
+    refresh_token: Option<String>,
 }
 
 impl Default for Registry {
@@ -45,8 +66,22 @@ impl Default for Registry {
     }
 }
 
+type Response = http::Response<ureq::Body>;
+
+/// What an upload sends.
+#[derive(Clone, Copy)]
+pub enum Blob<'a> {
+    File(&'a std::path::Path),
+    Bytes(&'a [u8]),
+}
+
 impl Registry {
     pub fn new() -> Registry {
+        Registry::with_auth(None)
+    }
+
+    /// A client that logs in with `auth` when the registry asks.
+    pub fn with_auth(auth: Option<AuthConfig>) -> Registry {
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .http_status_as_error(false)
             .user_agent(format!("podbag/{}", env!("CARGO_PKG_VERSION")))
@@ -58,7 +93,39 @@ impl Registry {
             .into();
         Registry {
             agent,
+            auth: auth.map(AuthConfig::normalized).filter(|a| !a.is_empty()),
             tokens: HashMap::new(),
+            basic: HashSet::new(),
+            offline: false,
+            refresh_token: None,
+        }
+    }
+
+    /// Check the login against `registry` (`docker.io`, `localhost:5000`): `GET /v2/`,
+    /// answering its challenge. Returns the identity token the registry gave, if any, to
+    /// keep instead of the password.
+    pub fn login(&mut self, registry: &str) -> Result<Option<String>> {
+        let registry = super::auth::registry_of(registry);
+        let host = reference::api_host(&registry).to_string();
+        let url = format!("{}://{host}/v2/", scheme(&registry));
+        self.offline = true;
+        let agent = self.agent.clone();
+        let what = format!("registry {registry}");
+        let response = self.send(&registry, &[], &what, &mut |auth| {
+            let mut req = agent.get(&url);
+            if let Some(a) = auth {
+                req = req.header("Authorization", a);
+            }
+            req.call()
+        })?;
+        match response.status().as_u16() {
+            200..=299 => Ok(self.refresh_token.clone()),
+            other => Err(Error::new(
+                ErrorKind::Runtime,
+                format!("cannot log in to {registry}"),
+                format!("{host} answered HTTP {other} at /v2/"),
+                "check the registry's address",
+            )),
         }
     }
 
@@ -102,6 +169,7 @@ impl Registry {
         let (_, config_body) = self.document(r, "blobs", &config.digest, None)?;
         verify(r, &config.digest, &config_body)?;
         let config_digest = config.digest.clone();
+        let oci = config.media_type == manifest::OCI_CONFIG;
         let config = manifest::parse_config(&config_body)?;
         // A tag can point straight at a single-platform manifest: check its platform too.
         let (arch, _) = manifest::host_platform();
@@ -132,6 +200,7 @@ impl Registry {
             config_digest,
             config,
             layers,
+            oci,
         })
     }
 
@@ -152,113 +221,495 @@ impl Registry {
     ) -> Result<(Option<String>, Vec<u8>)> {
         let response = self.get(r, &url(r, kind, reference), accept)?;
         check_status(r, response.status().as_u16(), kind, reference)?;
-        let content_type = response
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_string);
-        let body = response
-            .into_body()
-            .with_config()
-            .limit(MAX_DOCUMENT)
-            .read_to_vec()
-            .map_err(|e| unreachable_registry(r, e))?;
+        let content_type = header(&response, "content-type");
+        let body = read_small(response).map_err(|e| unreachable_registry(r.api_host(), e))?;
         Ok((content_type, body))
     }
 
-    /// GET with this repository's token. On a Bearer challenge, fetch a token and retry once.
-    fn get(
+    fn get(&mut self, r: &Reference, url: &str, accept: Option<&str>) -> Result<Response> {
+        let agent = self.agent.clone();
+        let scopes = [pull_scope(&r.repository)];
+        self.send(&r.registry, &scopes, &r.name(), &mut |auth| {
+            let mut req = agent.get(url);
+            if let Some(a) = accept {
+                req = req.header("Accept", a);
+            }
+            if let Some(a) = auth {
+                req = req.header("Authorization", a);
+            }
+            req.call()
+        })
+    }
+
+    /// Whether the repository has this blob already (`HEAD`).
+    pub fn blob_exists(&mut self, r: &Reference, digest: &str) -> Result<bool> {
+        let agent = self.agent.clone();
+        let target = url(r, "blobs", digest);
+        let response = self.send(&r.registry, &push_scopes(r, None), &r.name(), &mut |auth| {
+            let mut req = agent.head(&target);
+            if let Some(a) = auth {
+                req = req.header("Authorization", a);
+            }
+            req.call()
+        })?;
+        match response.status().as_u16() {
+            200..=299 => Ok(true),
+            404 => Ok(false),
+            other => Err(push_failed(
+                r,
+                other,
+                &format!("checking blob {digest}"),
+                "",
+            )),
+        }
+    }
+
+    /// Mount a blob from another repository of the same registry, without sending it.
+    /// False when the registry did not mount it (it lacks the blob there, or does not
+    /// mount): then it must be uploaded.
+    pub fn mount_blob(&mut self, r: &Reference, digest: &str, from: &str) -> Result<bool> {
+        let agent = self.agent.clone();
+        let base = format!("{}://{}", scheme(&r.registry), r.api_host());
+        let target = format!(
+            "{base}/v2/{}/blobs/uploads/?mount={}&from={}",
+            r.repository,
+            encode(digest),
+            encode(from)
+        );
+        let scopes = push_scopes(r, Some(from));
+        let response = self.send(&r.registry, &scopes, &r.name(), &mut |auth| {
+            let mut req = agent.post(&target);
+            if let Some(a) = auth {
+                req = req.header("Authorization", a);
+            }
+            req.send_empty()
+        })?;
+        match response.status().as_u16() {
+            201 => Ok(true),
+            202 => {
+                // An upload began instead: cancel it.
+                if let Some(location) = header(&response, "location") {
+                    let session = absolute(&base, &location);
+                    let _ = self.send(&r.registry, &scopes, &r.name(), &mut |auth| {
+                        let mut req = agent.delete(&session);
+                        if let Some(a) = auth {
+                            req = req.header("Authorization", a);
+                        }
+                        req.call()
+                    });
+                }
+                Ok(false)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    /// Upload a blob in one request (`POST`, then `PUT` with all of it).
+    pub fn upload_blob(&mut self, r: &Reference, digest: &str, blob: Blob<'_>) -> Result<()> {
+        let agent = self.agent.clone();
+        let base = format!("{}://{}", scheme(&r.registry), r.api_host());
+        let start = format!("{base}/v2/{}/blobs/uploads/", r.repository);
+        let scopes = push_scopes(r, None);
+        let response = self.send(&r.registry, &scopes, &r.name(), &mut |auth| {
+            let mut req = agent.post(&start);
+            if let Some(a) = auth {
+                req = req.header("Authorization", a);
+            }
+            req.send_empty()
+        })?;
+        let status = response.status().as_u16();
+        let location = header(&response, "location");
+        let (202, Some(location)) = (status, location) else {
+            let said = registry_said(response);
+            return Err(push_failed(r, status, "starting an upload", &said));
+        };
+        let session = absolute(&base, &location);
+        let sep = if session.contains('?') { '&' } else { '?' };
+        let target = format!("{session}{sep}digest={}", encode(digest));
+        let response = self.send(&r.registry, &scopes, &r.name(), &mut |auth| {
+            let mut req = agent
+                .put(&target)
+                .header("Content-Type", "application/octet-stream");
+            if let Some(a) = auth {
+                req = req.header("Authorization", a);
+            }
+            match blob {
+                // Opened for each try: a retry sends it from the start.
+                Blob::File(path) => req.send(std::fs::File::open(path).map_err(ureq::Error::Io)?),
+                Blob::Bytes(data) => req.send(data),
+            }
+        })?;
+        match response.status().as_u16() {
+            200..=299 => Ok(()),
+            other => {
+                let said = registry_said(response);
+                Err(push_failed(r, other, &format!("uploading {digest}"), &said))
+            }
+        }
+    }
+
+    /// PUT a manifest under the reference's tag. Returns its digest.
+    pub fn put_manifest(&mut self, r: &Reference, media_type: &str, body: &[u8]) -> Result<String> {
+        let agent = self.agent.clone();
+        let target = url(r, "manifests", r.reference());
+        let scopes = push_scopes(r, None);
+        let response = self.send(&r.registry, &scopes, &r.name(), &mut |auth| {
+            let mut req = agent.put(&target).header("Content-Type", media_type);
+            if let Some(a) = auth {
+                req = req.header("Authorization", a);
+            }
+            req.send(body)
+        })?;
+        match response.status().as_u16() {
+            200..=299 => Ok(format!("sha256:{}", sha256_hex(body))),
+            other => {
+                let said = registry_said(response);
+                Err(push_failed(r, other, "sending the manifest", &said))
+            }
+        }
+    }
+
+    /// Send a request (`send` makes it, with the Authorization value to use), answering a
+    /// 401 challenge once. `scopes` are the token scopes it needs; `what` names it in errors.
+    fn send(
         &mut self,
-        r: &Reference,
-        url: &str,
-        accept: Option<&str>,
-    ) -> Result<http::Response<ureq::Body>> {
-        let key = format!("{}/{}", r.registry, r.repository);
-        let response = self.send(r, url, accept, self.tokens.get(&key).cloned())?;
+        registry: &str,
+        scopes: &[String],
+        what: &str,
+        send: &mut dyn FnMut(Option<&str>) -> std::result::Result<Response, ureq::Error>,
+    ) -> Result<Response> {
+        let host = reference::api_host(registry).to_string();
+        let key = format!("{host} {}", scopes.join(" "));
+        let known = self.known_header(&host, &key);
+        let response = send(known.as_deref()).map_err(|e| unreachable_registry(&host, e))?;
         if response.status().as_u16() != 401 {
             return Ok(response);
         }
-        let challenge = response
-            .headers()
-            .get("www-authenticate")
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_string)
-            .unwrap_or_default();
-        let token = self.fetch_token(r, &challenge)?;
-        self.tokens.insert(key, token.clone());
-        let response = self.send(r, url, accept, Some(token))?;
+        let challenge = header(&response, "www-authenticate").unwrap_or_default();
+        let scheme_name = challenge
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let answer = match scheme_name.as_str() {
+            "basic" => {
+                let Some(basic) = self.basic_header() else {
+                    return Err(login_required(what, registry));
+                };
+                self.basic.insert(host.clone());
+                basic
+            }
+            "bearer" => {
+                let token = self.fetch_token(registry, scopes, &challenge, what)?;
+                self.tokens.insert(key, token.clone());
+                format!("Bearer {token}")
+            }
+            _ => return Err(login_required(what, registry)),
+        };
+        let response = send(Some(&answer)).map_err(|e| unreachable_registry(&host, e))?;
         if response.status().as_u16() == 401 {
-            return Err(login_required(r));
+            return Err(match (&self.auth, scheme_name.as_str()) {
+                // The user name and password themselves were refused.
+                (Some(_), "basic") => login_failed(registry, 401),
+                // The token server took the login, and the registry still refuses.
+                (Some(a), _) => access_denied(what, registry, &a.username),
+                (None, _) => login_required(what, registry),
+            });
         }
         Ok(response)
     }
 
-    fn send(
-        &self,
-        r: &Reference,
-        url: &str,
-        accept: Option<&str>,
-        token: Option<String>,
-    ) -> Result<http::Response<ureq::Body>> {
-        let mut request = self.agent.get(url);
-        if let Some(a) = accept {
-            request = request.header("Accept", a);
+    /// The Authorization value this client already has for a request.
+    fn known_header(&self, host: &str, key: &str) -> Option<String> {
+        if let Some(t) = self
+            .auth
+            .as_ref()
+            .map(|a| &a.registrytoken)
+            .filter(|t| !t.is_empty())
+        {
+            return Some(format!("Bearer {t}"));
         }
-        if let Some(t) = token {
-            request = request.header("Authorization", format!("Bearer {t}"));
+        if self.basic.contains(host) {
+            return self.basic_header();
         }
-        request.call().map_err(|e| unreachable_registry(r, e))
+        self.tokens.get(key).map(|t| format!("Bearer {t}"))
     }
 
-    /// The anonymous token flow: GET realm?service=…&scope=…
-    fn fetch_token(&self, r: &Reference, challenge: &str) -> Result<String> {
-        let params = parse_challenge(challenge).ok_or_else(|| login_required(r))?;
-        let realm = params.get("realm").ok_or_else(|| login_required(r))?;
-        let mut query = Vec::new();
-        for key in ["service", "scope"] {
-            if let Some(v) = params.get(key) {
-                query.push(format!("{key}={}", encode(v)));
-            }
-        }
-        let token_url = if query.is_empty() {
-            realm.clone()
+    fn basic_header(&self) -> Option<String> {
+        let a = self.auth.as_ref().filter(|a| !a.username.is_empty())?;
+        let pair = format!("{}:{}", a.username, a.password);
+        Some(format!("Basic {}", crate::base64::encode(pair.as_bytes())))
+    }
+
+    /// A token from the server the challenge names: anonymous, with the user name and
+    /// password (Basic, `account=`), or with the identity token (OAuth `refresh_token`).
+    fn fetch_token(
+        &mut self,
+        registry: &str,
+        scopes: &[String],
+        challenge: &str,
+        what: &str,
+    ) -> Result<String> {
+        let params = parse_challenge(challenge).ok_or_else(|| login_required(what, registry))?;
+        let realm = params
+            .get("realm")
+            .ok_or_else(|| login_required(what, registry))?;
+        let scopes: Vec<String> = if scopes.is_empty() {
+            params
+                .get("scope")
+                .map(|s| s.split(' ').map(String::from).collect())
+                .unwrap_or_default()
         } else {
-            format!("{realm}?{}", query.join("&"))
+            scopes.to_vec()
         };
-        let response = self
-            .agent
-            .get(&token_url)
-            .call()
-            .map_err(|e| unreachable_registry(r, e))?;
-        if !response.status().is_success() {
-            return Err(login_required(r));
+        let service = params.get("service").cloned();
+        let auth = self.auth.clone();
+        let realm_host = realm
+            .split("://")
+            .nth(1)
+            .and_then(|r| r.split('/').next())
+            .unwrap_or(realm)
+            .to_string();
+        let fail = |e: ureq::Error| unreachable_registry(&realm_host, e);
+        let response = match &auth {
+            Some(a) if !a.identitytoken.is_empty() => {
+                let mut form = vec![
+                    "grant_type=refresh_token".to_string(),
+                    format!("refresh_token={}", encode(&a.identitytoken)),
+                    format!("client_id={CLIENT_ID}"),
+                ];
+                if let Some(s) = &service {
+                    form.push(format!("service={}", encode(s)));
+                }
+                if !scopes.is_empty() {
+                    form.push(format!("scope={}", encode(&scopes.join(" "))));
+                }
+                self.agent
+                    .post(realm)
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .send(form.join("&"))
+                    .map_err(fail)?
+            }
+            _ => {
+                let mut query = Vec::new();
+                if let Some(s) = &service {
+                    query.push(format!("service={}", encode(s)));
+                }
+                for s in &scopes {
+                    query.push(format!("scope={}", encode(s)));
+                }
+                if let Some(a) = auth.as_ref().filter(|a| !a.username.is_empty()) {
+                    query.push(format!("account={}", encode(&a.username)));
+                    if self.offline {
+                        query.push(format!("client_id={CLIENT_ID}"));
+                        query.push("offline_token=true".to_string());
+                    }
+                }
+                let token_url = if query.is_empty() {
+                    realm.clone()
+                } else {
+                    let sep = if realm.contains('?') { '&' } else { '?' };
+                    format!("{realm}{sep}{}", query.join("&"))
+                };
+                let mut req = self.agent.get(&token_url);
+                if let Some(basic) = self.basic_header() {
+                    req = req.header("Authorization", basic);
+                }
+                req.call().map_err(fail)?
+            }
+        };
+        let status = response.status().as_u16();
+        if status == 401 || status == 403 {
+            return Err(match &auth {
+                Some(_) => login_failed(registry, status),
+                None => login_required(what, registry),
+            });
         }
-        let body = response
-            .into_body()
-            .with_config()
-            .limit(MAX_DOCUMENT)
-            .read_to_vec()
-            .map_err(|e| unreachable_registry(r, e))?;
+        if !response.status().is_success() {
+            return Err(Error::new(
+                ErrorKind::Runtime,
+                format!("cannot get a token for {what}"),
+                format!("the token server {realm_host} answered HTTP {status}"),
+                "try again later",
+            ));
+        }
+        let body = read_small(response).map_err(fail)?;
         #[derive(serde::Deserialize)]
         struct TokenReply {
             token: Option<String>,
             access_token: Option<String>,
+            refresh_token: Option<String>,
         }
-        let reply: TokenReply = serde_json::from_slice(&body).map_err(|_| login_required(r))?;
+        let reply: TokenReply =
+            serde_json::from_slice(&body).map_err(|_| login_required(what, registry))?;
+        if let Some(r) = reply.refresh_token.filter(|r| !r.is_empty()) {
+            self.refresh_token = Some(r);
+        }
         reply
             .token
             .or(reply.access_token)
-            .ok_or_else(|| login_required(r))
+            .filter(|t| !t.is_empty())
+            .ok_or_else(|| login_required(what, registry))
     }
 }
 
+/// One result of [`search`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SearchResult {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub star_count: u64,
+    #[serde(default)]
+    pub is_official: bool,
+    #[serde(default)]
+    pub is_automated: bool,
+}
+
+/// Search a registry's index (`GET /v1/search`, Docker Hub's search API). A term that
+/// starts with a registry (`localhost:5000/app`) searches that registry; any other
+/// searches Docker Hub.
+pub fn search(term: &str, limit: u32) -> Result<Vec<SearchResult>> {
+    let (registry, query) = match term.split_once('/') {
+        Some((first, rest))
+            if first.contains('.') || first.contains(':') || first == "localhost" =>
+        {
+            (first.to_string(), rest.to_string())
+        }
+        _ => ("docker.io".to_string(), term.to_string()),
+    };
+    let host = match registry.as_str() {
+        "docker.io" => "index.docker.io",
+        other => other,
+    };
+    let url = format!(
+        "{}://{host}/v1/search?q={}&n={limit}",
+        scheme(&registry),
+        encode(&query)
+    );
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .user_agent(format!("podbag/{}", env!("CARGO_PKG_VERSION")))
+        .timeout_global(Some(Duration::from_secs(60)))
+        .build()
+        .into();
+    let response = agent
+        .get(&url)
+        .call()
+        .map_err(|e| unreachable_registry(host, e))?;
+    let status = response.status().as_u16();
+    if !response.status().is_success() {
+        return Err(Error::new(
+            ErrorKind::Unsupported,
+            format!("cannot search {registry}"),
+            format!("{host} answered HTTP {status} to a search"),
+            "search on the registry's web site",
+        ));
+    }
+    #[derive(serde::Deserialize)]
+    struct Reply {
+        #[serde(default)]
+        results: Vec<SearchResult>,
+    }
+    let body = read_small(response).map_err(|e| unreachable_registry(host, e))?;
+    let reply: Reply = serde_json::from_slice(&body).map_err(|e| {
+        Error::new(
+            ErrorKind::Runtime,
+            format!("cannot search {registry}"),
+            format!("the answer is not the expected JSON: {e}"),
+            "search on the registry's web site",
+        )
+    })?;
+    let mut results = reply.results;
+    results.truncate(limit as usize);
+    Ok(results)
+}
+
+/// `http` for local registries (as Docker does), else `https`.
+fn scheme(registry: &str) -> &'static str {
+    if reference::is_insecure(registry) {
+        "http"
+    } else {
+        "https"
+    }
+}
+
+fn pull_scope(repository: &str) -> String {
+    format!("repository:{repository}:pull")
+}
+
+/// The scopes of a push: the repository, and the one a blob is mounted from.
+fn push_scopes(r: &Reference, mount_from: Option<&str>) -> Vec<String> {
+    let mut scopes = vec![format!("repository:{}:pull,push", r.repository)];
+    scopes.extend(mount_from.map(pull_scope));
+    scopes
+}
+
 fn url(r: &Reference, kind: &str, reference: &str) -> String {
-    let scheme = if r.insecure() { "http" } else { "https" };
     format!(
-        "{scheme}://{}/v2/{}/{kind}/{reference}",
+        "{}://{}/v2/{}/{kind}/{reference}",
+        scheme(&r.registry),
         r.api_host(),
         r.repository
     )
+}
+
+/// A Location header as a full URL.
+fn absolute(base: &str, location: &str) -> String {
+    if location.starts_with("http://") || location.starts_with("https://") {
+        location.to_string()
+    } else if location.starts_with('/') {
+        format!("{base}{location}")
+    } else {
+        format!("{base}/{location}")
+    }
+}
+
+fn header(response: &Response, name: &str) -> Option<String> {
+    response
+        .headers()
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+}
+
+fn read_small(response: Response) -> std::result::Result<Vec<u8>, ureq::Error> {
+    response
+        .into_body()
+        .with_config()
+        .limit(MAX_DOCUMENT)
+        .read_to_vec()
+}
+
+/// The first message of a registry's error reply (`{"errors": [{"message": …}]}`).
+fn registry_said(response: Response) -> String {
+    #[derive(serde::Deserialize)]
+    struct Errors {
+        #[serde(default)]
+        errors: Vec<One>,
+    }
+    #[derive(serde::Deserialize)]
+    struct One {
+        #[serde(default)]
+        code: String,
+        #[serde(default)]
+        message: String,
+    }
+    let body = read_small(response).unwrap_or_default();
+    match serde_json::from_slice::<Errors>(&body) {
+        Ok(e) => e
+            .errors
+            .first()
+            .map(|e| format!("{} ({})", e.message, e.code))
+            .unwrap_or_default(),
+        Err(_) => String::from_utf8_lossy(&body)
+            .chars()
+            .take(200)
+            .collect::<String>()
+            .trim()
+            .to_string(),
+    }
 }
 
 fn check_status(r: &Reference, status: u16, kind: &str, reference: &str) -> Result<()> {
@@ -299,27 +750,90 @@ pub fn digest_mismatch(r: &Reference, digest: &str) -> Error {
     )
 }
 
-fn unreachable_registry(r: &Reference, e: ureq::Error) -> Error {
+fn unreachable_registry(host: &str, e: ureq::Error) -> Error {
     Error::new(
         ErrorKind::Runtime,
-        format!("cannot reach registry {}", r.api_host()),
+        format!("cannot reach registry {host}"),
         e.to_string(),
         "check the network connection",
     )
 }
 
-fn login_required(r: &Reference) -> Error {
+/// `podbag login`, or `podbag login <registry>` for any but Docker Hub.
+fn login_command(registry: &str) -> String {
+    match registry {
+        "docker.io" => "podbag login".to_string(),
+        other => format!("podbag login {other}"),
+    }
+}
+
+fn login_required(what: &str, registry: &str) -> Error {
     Error::new(
         ErrorKind::MissingRequirement,
-        format!("cannot access image {}", r.name()),
-        "the registry requires a login",
-        "private registries are not supported yet; use a public image",
+        format!("cannot access {what}"),
+        "the registry requires a login, or the repository does not exist",
+        format!(
+            "check the name, or log in with `{}`",
+            login_command(registry)
+        ),
+    )
+}
+
+/// The registry (or its token server) refused the user name and password.
+fn login_failed(registry: &str, status: u16) -> Error {
+    Error::new(
+        ErrorKind::InvalidInput,
+        format!("login to {registry} failed"),
+        format!("the registry refused the user name and password (HTTP {status})"),
+        format!("check them, then run `{}` again", login_command(registry)),
+    )
+}
+
+/// Whether an error is [`login_failed`]'s: a refused login.
+pub fn is_login_failure(e: &Error) -> bool {
+    e.kind == ErrorKind::InvalidInput
+        && e.what.starts_with("login to ")
+        && e.what.ends_with(" failed")
+}
+
+fn access_denied(what: &str, registry: &str, user: &str) -> Error {
+    let who = if user.is_empty() {
+        "this login".to_string()
+    } else {
+        format!("user {user}")
+    };
+    Error::new(
+        ErrorKind::MissingRequirement,
+        format!("cannot access {what}"),
+        format!("the registry refused {who}: no access to the repository, or it does not exist"),
+        format!(
+            "check the name and your access, or log in again with `{}`",
+            login_command(registry)
+        ),
+    )
+}
+
+fn push_failed(r: &Reference, status: u16, doing: &str, said: &str) -> Error {
+    let why = if said.is_empty() {
+        format!("the registry answered HTTP {status} {doing}")
+    } else {
+        format!("the registry answered HTTP {status} {doing}: {said}")
+    };
+    Error::new(
+        ErrorKind::Runtime,
+        format!("cannot push {}", r.name()),
+        why,
+        "check the name and your access to the repository",
     )
 }
 
 /// Parse `Bearer realm="…",service="…",scope="…"` into its parameters.
 fn parse_challenge(header: &str) -> Option<HashMap<String, String>> {
-    let rest = header.trim().strip_prefix("Bearer")?.trim_start();
+    let header = header.trim();
+    let rest = header
+        .get(..6)
+        .filter(|s| s.eq_ignore_ascii_case("bearer"))
+        .map(|_| header[6..].trim_start())?;
     let mut params = HashMap::new();
     let mut chars = rest.chars().peekable();
     loop {
@@ -381,6 +895,7 @@ mod tests {
         assert_eq!(p["service"], "registry.docker.io");
         assert_eq!(p["scope"], "repository:library/alpine:pull,push");
         assert!(parse_challenge("Basic realm=x").is_none());
+        assert!(parse_challenge(r#"bearer realm="x""#).is_some());
     }
 
     #[test]
@@ -388,6 +903,30 @@ mod tests {
         assert_eq!(
             encode("repository:library/alpine:pull,push"),
             "repository:library/alpine:pull%2Cpush"
+        );
+        assert_eq!(encode("a b"), "a%20b");
+    }
+
+    #[test]
+    fn locations_become_full_urls() {
+        let base = "http://127.0.0.1:5000";
+        assert_eq!(
+            absolute(base, "/v2/a/blobs/uploads/1?x=y"),
+            "http://127.0.0.1:5000/v2/a/blobs/uploads/1?x=y"
+        );
+        assert_eq!(
+            absolute(base, "https://s3.example/up"),
+            "https://s3.example/up"
+        );
+    }
+
+    #[test]
+    fn a_refused_login_is_recognized() {
+        assert!(is_login_failure(&login_failed("ghcr.io", 401)));
+        assert!(!is_login_failure(&login_required("x", "ghcr.io")));
+        assert_eq!(
+            login_required("x", "docker.io").next,
+            "check the name, or log in with `podbag login`"
         );
     }
 }

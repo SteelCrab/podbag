@@ -7,6 +7,7 @@ The [README](../README.md) shows how to install podbag. This page shows what it 
 - [Commands](#commands)
 - [How containers run](#how-containers-run)
 - [Images](#images)
+- [Registries](#registries)
 - [Builds](#builds)
 - [Checks](#checks)
 - [Volumes](#volumes)
@@ -40,6 +41,9 @@ podbag exec -it web sh
 podbag stop web && podbag rm web
 podbag pull alpine | podbag images | podbag rmi alpine
 podbag save -o app.tar myapp:1 && podbag load -i app.tar   # image archives
+podbag login ghcr.io                         # log in to a registry (shared with docker login)
+podbag tag myapp:1 ghcr.io/me/myapp:1 && podbag push ghcr.io/me/myapp:1
+podbag search nginx                          # search Docker Hub
 podbag build -t myapp:1 .                    # build an image from ./Dockerfile
 podbag commit web web-snapshot:1             # a container's changes as an image
 podbag diff web                              # the files a container changed
@@ -158,6 +162,57 @@ podbag tui                                   # containers, images, volumes and n
   `PODBAG_IMAGE_MOUNT=hardlink`.
 - When the method changes, an image gets what it needs the first time a container uses it.
 - Removing an image unmounts it.
+
+## Registries
+
+### Log in and out
+
+```sh
+podbag login                                         # Docker Hub: asks for the user name and password
+echo "$TOKEN" | podbag login ghcr.io -u me --password-stdin
+podbag logout ghcr.io
+```
+
+- podbag checks the login with the registry before it keeps it.
+- Logins live where Docker keeps them: `~/.docker/config.json`, or `config.json` in
+  `$DOCKER_CONFIG`. `docker login` and `podbag login` share them.
+- With `credsStore` or `credHelpers` in that file, a credential helper keeps the password,
+  for example in the macOS keychain. The helper is the program `docker-credential-<name>`.
+- Without a helper, the file keeps the login in base64. Only you can read the file (mode
+  `0600`), but the password is not encrypted.
+- When the registry gives a token for the login (an identity token), podbag keeps the
+  token, not the password.
+
+### Pull and push
+
+```sh
+podbag pull ghcr.io/me/private:1                     # uses the login for ghcr.io
+podbag tag myapp:1 localhost:5000/myapp:1
+podbag push localhost:5000/myapp:1
+podbag search --limit 5 nginx
+```
+
+- `pull`, `run` and `create` use the registry's login when there is one.
+- Without a login, a private image fails with the command that logs in. A wrong password
+  fails with "login failed".
+- Registries on `localhost`, `127.0.0.1` or `::1` use plain HTTP, as with Docker. All
+  others use HTTPS.
+- `search` uses Docker Hub's search. `search localhost:5000/name` asks that registry, if it
+  has the same search API.
+
+### How a push works
+
+- The store keeps files, not layer archives. For each layer, a push uses the first of these
+  that works:
+  - nothing: the repository has the layer already,
+  - a mount: the registry copies the layer from another of its repositories, for example
+    the base image you pulled from it,
+  - an upload: podbag writes the layer again from its files, as `save` does, and compresses
+    it with gzip.
+- A layer written again gets a new digest. The same files always give the same layer, so a
+  second push of the same image sends nothing.
+- The image keeps its format: OCI when it came as OCI, else Docker's.
+- Each layer goes in one request. podbag does not send layers in chunks.
 
 ## Builds
 
@@ -420,9 +475,11 @@ podbag system docker restore    # back to the context you had (Docker Desktop, â
 ### What works
 
 - System: `version`, `info`, `system df`, `events` (live only; there is no history).
-- Images: `pull`, `images`, `image inspect`, `tag`, `rmi`, `image prune`, `save`, `load`,
-  `build` with the classic builder (see [Builds with the docker CLI](#builds-with-the-docker-cli)),
-  `builder prune`.
+- Images: `pull`, `push`, `images`, `image inspect`, `tag`, `rmi`, `image prune`, `save`,
+  `load`, `search`, `build` with the classic builder (see
+  [Builds with the docker CLI](#builds-with-the-docker-cli)), `builder prune`.
+- Registries: `login` (the docker CLI keeps the login; podbag checks it), and private
+  pulls and pushes with the login the docker CLI sends.
 - Containers: `run` (attached, `-d`, `-i`, `-t`, `--rm`), `create`, `start [-a]`, `stop`,
   `restart`, `kill`, `wait`, `rm`, `logs` (`-f`, `--tail`, `-t`, `--since`), `attach`,
   `ps` (filters `label`, `name`, `id`, `status`), `inspect`, `port`,
@@ -437,8 +494,8 @@ podbag system docker restore    # back to the context you had (Docker Desktop, â
 - Accepted with a warning, because ignoring them is safe: `--dns`, `--add-host`, ulimits,
   log drivers, fixed addresses.
 - Answered with 501 and what to do instead: BuildKit's build API (use buildx with the
-  `docker-container` driver), `top`, `stats`, `pause`, `rename`, `update`, `push`,
-  `search`, swarm and plugins.
+  `docker-container` driver), `top`, `stats`, `pause`, `rename`, `update`, swarm and
+  plugins.
 
 ### cp, save and load
 
@@ -784,6 +841,16 @@ open target/release/podbag.app
   `vm status` wakes no VM.
 - Containers cannot reach the VM's agent.
 
+### Registry logins
+
+- `login`, `logout` and `search` run on the Mac. Logins stay in the Mac's Docker config
+  and its keychain (`credsStore: "osxkeychain"`).
+- `pull`, `push`, `run` and `create` take the Mac's login for the image's registry to the
+  VM with the command. It stays in memory there: nothing is written to the VM's disk.
+- `run` and `create` of Docker Hub's official images (like `alpine`) take no login, so they
+  need no credential helper and start quickly.
+- The docker CLI sends its own logins, as with Docker.
+
 ### Resources
 
 - Memory: 2 GiB. CPUs: the Mac's, up to 8. Idle power-off: 60 seconds.
@@ -871,6 +938,10 @@ docker buildx build --load -t app .
 - WSL's CPUs and memory are set for all distributions at once, in
   `%UserProfile%\.wslconfig`. podbag does not change them, so there is no `vm set` on
   Windows.
+- `login`, `logout` and `search` run on Windows. Logins stay in the Windows user's Docker
+  config and its credential helper.
+- `pull`, `push`, `run` and `create` take the login for the image's registry to the engine
+  through `WSLENV`, in memory. Nothing is written to the distribution's disk.
 
 ### Limits
 

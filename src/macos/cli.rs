@@ -21,6 +21,9 @@ pub struct Forward {
     pub stdin: bool,
     /// Mac paths it names (bind mount sources, files), as given.
     pub paths: Vec<String>,
+    /// More environment for the command: a login for its registry ([`crate::image::auth::AUTH_ENV`]).
+    /// It goes to the VM in memory, never to its disk.
+    pub env: Vec<(String, String)>,
 }
 
 /// How long a command waits for a VM: one that stops first (30 s at most), then a new
@@ -183,11 +186,13 @@ pub fn vm_command(args: &[String]) -> i32 {
 }
 
 /// A round trip to the VM's agent: the VM is up, and works. Its exit code.
+/// A round trip to the VM's agent: the VM is up, and works.
 fn start() -> i32 {
     forward(Forward {
         argv: vec!["__vm-check".into()],
         stdin: false,
         paths: Vec::new(),
+        env: Vec::new(),
     })
 }
 
@@ -687,6 +692,7 @@ fn run_remote(mut stream: UnixStream, f: &Forward, tty: bool, cwd: &str) -> Resu
         argv: f.argv.clone(),
         env: std::env::vars()
             .filter(|(k, _)| SETTINGS.contains(&k.as_str()))
+            .chain(f.env.iter().cloned())
             .collect(),
         cwd: cwd.to_string(),
         tty,
