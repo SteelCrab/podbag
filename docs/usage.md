@@ -653,7 +653,7 @@ docker compose build --builder podbag
   `/run/podman/podman.sock`. The Kiri preset uses Kiri's standard socket or Windows pipe.
 - For OrbStack, Colima and other Docker API engines, select their Docker context.
   Use a custom Unix socket for an alternate machine or socket path. SSH, TLS and Windows
-  pipe connections use the Docker CLI. The Windows TUI sees resources available in WSL.
+  pipe connections use the host Docker CLI. On Windows, a Unix socket selects the TUI inside WSL.
 
 ```sh
 podbag tui --engine podman
@@ -667,11 +667,13 @@ podbag tui --engine unix:///run/kiri/docker.sock
     last client.
   - macOS: `~/.podbag/run/docker.sock`. The TUI starts the VM when it is off. The desktop
     app asks first, with a Start VM button.
-  - Windows: `podbag tui` runs in the WSL distribution. The desktop app reaches the API
-    through `podbag.exe system dial-stdio`.
+  - Windows: the TUI and Desktop use `podbag.exe system dial-stdio` to reach the WSL engine.
+    Both can use the Windows kubeconfig, registry credentials and VM controls.
+    To point the Docker CLI at Podbag’s Unix socket, run that Docker CLI inside WSL.
 
 ### Migrate between engines or Kubernetes clusters
 
+In the TUI, press `a` and choose **Migrate**. Select **Engine** or **Kubernetes**.
 In Podbag Desktop, open **Migrate**. The list shows the resources found on your local engines.
 Expand **Migrate** in the sidebar. Select **Engine** or **Kubernetes**, then choose
 a populated resource type to filter the list. For Kubernetes, choose a source cluster
@@ -710,6 +712,85 @@ podbag migrate --from podman --to podbag volume app-data
 podbag migrate --from context:staging --to podbag container web
 ```
 
+### Dashboard operations from the CLI
+
+These commands run without a terminal UI. List, inspect and settings commands print
+JSON. Migration progress and errors go to standard error.
+
+| Command | Operation |
+|---|---|
+| `podbag engine choices`, `podbag engine local` | List engine presets, Docker contexts and local migration sources |
+| `podbag engine use context:staging`, `podbag engine status` | Save the selected engine for both dashboards and show its API version |
+| `podbag engine --target docker list container` | List containers on a specific engine without changing the saved choice |
+| `podbag engine inspect image example/app:1` | Read the resource's details from the selected engine |
+| `podbag engine --target docker exec -it web sh` | Run a shell in a container |
+| `podbag engine action restart web`, `podbag engine logs web --follow` | Control a container or read its logs |
+| `podbag engine events` | Stream changes to the selected engine in JSON lines |
+| `podbag engine create-volume app-data`, `podbag engine prune volume --force` | Create a volume or remove unused volumes |
+| `podbag import list`, `podbag import images example/app:1 example/app:2` | List available tags and copy selected images from Docker to Podbag |
+| `podbag settings language ko`, `podbag settings theme dark` | Change the TUI language and theme. Omit the value to read the setting |
+| `podbag settings sidebar --visible true --width 24` | Show and resize the TUI sidebar |
+| `podbag settings startup enable` | Start Podbag Desktop at login. Use `status` or `disable` to inspect or turn it off |
+| `podbag settings registry list`, `podbag settings registry host custom registry.example.com` | List registry presets and accounts or configure a preset's host |
+
+Use `podbag engine --help` for removal, rename, pull, search, stats and process commands.
+The engine commands use the same default selection as the dashboards. Use `--target`
+for an explicit engine and `--from` or `--to` to override the import endpoints.
+On Windows, a custom Unix socket refers to a socket inside Podbag's WSL distribution.
+To run `engine exec` on that socket, install the Docker CLI inside that distribution.
+
+Use `podbag login` with the registry host. Use `podbag settings registry show` with a
+preset name to see its account and any cloud login command. Once a configurable host
+is saved, `podbag engine pull team/app:1 --registry custom` uses that host.
+
+#### Kubernetes
+
+Install `kubectl` on the host. Use `--context` to select a kubeconfig context. The
+context's default namespace applies unless you pass `--namespace` or list all
+namespaces with `-A`. Available resource types are `pod`, `service`, `deployment`
+and `claim` (alias `pvc`).
+
+```sh
+podbag kube contexts
+podbag kube counts --context dev -A
+podbag kube list pod --context dev -n apps
+podbag kube inspect pod web --context dev -n apps
+podbag kube migrate pod web --from dev --to staging --from-namespace apps --to-namespace review
+```
+
+Migration reads the source, creates the destination resource and verifies it. Use
+`--uid` with the value from an earlier inspection to require that exact source
+object. If you omit either namespace flag, the corresponding context's default applies.
+
+#### Volume and HTTP tutorial
+
+Install a local `.podbag` lesson, then use `run` to complete the exercise in a
+disposable volume. Use `--input response.json` to supply your own response, or
+`--input -` to read it from standard input. CLI and TUI share the installed module
+and its completion record.
+
+```sh
+podbag tutorial install volume-api.podbag
+podbag tutorial status
+podbag tutorial run practice --input response.json
+podbag tutorial remove
+```
+
+Use `podbag tutorial session` to control each step separately. It accepts one JSON
+action per line and writes one JSON response per line. The HTTP URL returned by
+`serve` is available until `end` or until the session's input closes.
+
+```sh
+printf '%s\n' \
+  '{"action":"start"}' \
+  '{"action":"create","value":"practice"}' \
+  '{"action":"save","value":"{\"message\":\"hello\"}"}' \
+  '{"action":"serve"}' \
+  '{"action":"request"}' \
+  '{"action":"end"}' |
+  podbag tutorial session
+```
+
 ### podbag tui
 
 - Four lists: containers, images, volumes and networks. The selected one's details show
@@ -727,7 +808,13 @@ podbag migrate --from context:staging --to podbag container web
 
 | Key | What it does |
 |---|---|
+| `a` or `F2` | Open the actions menu from a resource list |
 | `1`–`4`, `Tab`, `←` `→` | Switch the list |
+| `Alt+←`, `Alt+→` | Go back or forward through the lists visited |
+| `v` | Create a named volume from Volumes |
+| `F5` | Refresh the current resources |
+| `F6` / `F7` / `F8` / `F9` | Open Kubernetes / migration / tutorials / settings |
+| `b`, `[`, `]` | Show or hide the sidebar, make it narrower or wider |
 | `↑` `↓`, `PgUp` `PgDn` | Move |
 | `Enter` or `i` | All details (inspect) |
 | `s`, `x`, `r` | Start, stop, restart a container |
@@ -743,8 +830,29 @@ podbag migrate --from context:staging --to podbag container web
 | `?` | All keys |
 | `q` | Quit |
 
+#### Actions
+
+Press `a` from any resource list. Type part of a menu entry to filter it. Use the arrow
+keys and `Enter` to choose it. `Esc` returns to the resource list.
+
+| Entry | What you can do |
+|---|---|
+| Create volume | Create a named volume on the selected engine |
+| Pull image / Log in | Choose a registry, sign in, search Docker Hub or pull a reference |
+| Import from Docker | With Podbag selected, copy one or more tagged images from Docker. Press `Space` to mark tags and `Enter` to review |
+| Kubernetes | Choose a context, current or all namespaces, and Pods, Services, Deployments or PVCs. Filter rows, inspect JSON or refresh |
+| Migrate | Browse all local engines or select a source. Choose a resource and destination. For Kubernetes, choose the destination namespace. Review the transfer, follow its progress and verify the destination |
+| Tutorials | Install a local `.podbag` lesson, create a practice volume, edit JSON, serve it over HTTP, read the response and remove the module. `Ctrl+S` saves the file |
+| Settings | Connect to an engine, inspect it, check for updates, install an update, open a host shell or the project page. Set the terminal language and theme. Manage sign-in startup when Podbag Desktop is installed |
+| Settings → Virtual machine | With Podbag selected on macOS or Windows, inspect, start, stop or restart the VM. On macOS, change CPU, memory and idle timeout. Choose whether to restart immediately or apply the changes at the next start |
+
+Kubernetes uses `kubectl` on the TUI host. In a detail or command dialog, press `y` to
+copy the text if your terminal allows clipboard writes (OSC 52). Terminal appearance and
+installed lessons are saved in the Podbag UI configuration directory.
+
 #### The engine
 
+- In **Actions → Settings → Engine → Connect**, choose any supported engine or context.
 - `E`, or a click on the engine's name, switches between podbag and Docker. From a socket,
   it goes to podbag.
 - The choice is saved in `ui.json`, so the next `podbag tui` and the desktop app use it
@@ -765,6 +873,8 @@ podbag migrate --from context:staging --to podbag container web
 #### Pull
 
 - `p` in Images opens the pull form.
+- `F2` searches registry services by name or host. `F3` opens login for the selected service.
+  The TUI masks passwords and sends them to the login command through standard input.
 - `Tab` cycles through the registry presets and the custom registry. `Shift+Tab` goes back.
 - The form shows who is logged in there. It reads the docker CLI's logins. It never shows
   a password.
@@ -772,7 +882,7 @@ podbag migrate --from context:staging --to podbag container web
 - ECR, GAR and ACR also show the command to log in.
 - A short name gets the registry's host: `me/app:1` from GitHub is `ghcr.io/me/app:1`.
 - From Docker Hub, typing searches Docker Hub, when the engine can search. `↑` `↓` choose
-  a result. podbag cannot search yet, so there is no search with podbag.
+  a result. Press `Enter` and enter a tag, or accept `latest`. podbag cannot search yet, so there is no search with podbag.
 - The pull sends your login for that registry to the engine.
 
 #### The mouse
@@ -937,6 +1047,15 @@ open target/release/podbag.app
 ```
 
 - The script makes the bundle itself (Tauri's bundler needs the separate `tauri-cli`).
+- To include the CLI and its Linux guest, build the guest first and use `--with-cli`.
+  Rebuild this bundle to update the included CLI and keep the app signature valid.
+
+  ```sh
+  dev/vm.sh up                     # set up the Linux build VM once
+  dev/vm.sh run dev/macos/build-guest.sh
+  desktop/bundle-macos.sh release --with-cli
+  ```
+
 - Run bare, the executable's menu says About, Hide and Quit podbag, but macOS shows
   `podbag-desktop` as the menu bar's title and in the Dock. Only a bundle changes that.
 - Windows: the .exe's product name and file description are podbag.

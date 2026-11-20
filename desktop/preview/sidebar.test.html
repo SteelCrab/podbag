@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Sidebar resize test</title>
+<iframe src="preview.html?view=pods&amp;lang=en" width="900" height="540" title="Desktop preview"></iframe>
+<pre id="result">Running</pre>
+<script>
+"use strict";
+const frame = document.querySelector("iframe");
+async function test() {
+  const win = frame.contentWindow;
+  const doc = frame.contentDocument;
+  const sidebar = doc.getElementById("sidebar");
+  const splitter = doc.getElementById("splitter");
+  const toggle = doc.getElementById("sidebar-toggle");
+  const check = (condition, message) => { if (!condition) throw Error(message); };
+  const key = (key, shiftKey = false) => splitter.dispatchEvent(new win.KeyboardEvent("keydown", { key, shiftKey }));
+  const width = () => sidebar.getBoundingClientRect().width;
+  const checkRail = () => {
+    check(width() === 56 && toggle.getAttribute("aria-expanded") === "false", "Show the icon rail");
+    check(splitter.getClientRects().length && splitter.getAttribute("aria-valuenow") === "56", "Keep the divider available in the rail");
+    const item = doc.querySelector("#nav .nav-item");
+    check(!item.querySelector(".label").getClientRects().length && item.getAttribute("aria-label"), "Hide text and keep an accessible name");
+  };
+
+  splitter.focus();
+  key("ArrowDown", true);
+  key("ArrowDown", true);
+  check(width() === 160, "Reach the minimum expanded width");
+  check(sidebar.scrollWidth === sidebar.clientWidth, "Keep the narrow sidebar within its content width");
+  for (const field of sidebar.querySelectorAll(".nav-item .label, .vm-name, .vm-state, .vm-rows dd, .vm-button span")) {
+    if (!field.getClientRects().length) continue;
+    const range = doc.createRange();
+    range.selectNodeContents(field);
+    const left = sidebar.getBoundingClientRect().left;
+    for (const line of range.getClientRects()) {
+      check(line.left >= left && line.right <= left + sidebar.clientWidth, `Fit the text ${field.textContent}`);
+    }
+  }
+  key("ArrowDown");
+  checkRail();
+  check(doc.activeElement === splitter, "Keep keyboard focus on the divider");
+  key("Enter");
+  check(width() === 160, "Restore the saved width with Enter");
+
+  // Synthetic pointer events cannot take browser pointer capture.
+  const capture = splitter.setPointerCapture;
+  splitter.setPointerCapture = () => {};
+  const pointer = (type, clientX) => splitter.dispatchEvent(new win.PointerEvent(type, { pointerId: 1, clientX }));
+  try {
+    pointer("pointerdown", 160);
+    pointer("pointermove", 120);
+    checkRail();
+    pointer("pointercancel", 120);
+    check(width() === 160, "Restore the original width if a drag is canceled");
+    pointer("pointerdown", 160);
+    pointer("pointermove", 120);
+    pointer("pointerup", 120);
+    checkRail();
+    pointer("pointerdown", 56);
+    pointer("pointermove", 84);
+    pointer("pointerup", 84);
+    check(width() === 160, "Reopen the sidebar by dragging the divider");
+  } finally {
+    splitter.setPointerCapture = capture;
+  }
+
+  const media = win.matchMedia("(max-width: 720px)");
+  const resize = (px) => new Promise((resolve) => {
+    media.addEventListener("change", resolve, { once: true });
+    frame.width = px;
+  });
+  await resize(660);
+  checkRail();
+  toggle.click();
+  check(width() === 160 && toggle.getAttribute("aria-expanded") === "true", "Expand in a narrow window");
+  await resize(900);
+  await resize(660);
+  check(width() === 160, "Keep the sidebar expanded after resizing the window");
+  toggle.click();
+  checkRail();
+  toggle.click();
+  check(width() === 160, "Reopen with the toolbar button");
+}
+
+frame.addEventListener("load", () => {
+  const root = frame.contentDocument.documentElement;
+  const result = document.getElementById("result");
+  const observer = new MutationObserver(startWhenReady);
+  function startWhenReady() {
+    if (root.dataset.ready !== "1") return;
+    observer.disconnect();
+    test().then(() => { result.textContent = "PASS"; }, (error) => { result.textContent = "FAIL: " + error.message; });
+  }
+  observer.observe(root, { attributes: true, attributeFilter: ["data-ready"] });
+  startWhenReady();
+});
+</script>
+</html>

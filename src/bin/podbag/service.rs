@@ -31,11 +31,15 @@ pub fn service(socket: Option<PathBuf>, timeout: u64, print_units: bool) -> i32 
 
 /// `podbag system dial-stdio`: stdin and stdout as one connection to the API socket,
 /// until the socket closes.
-pub fn dial_stdio() -> i32 {
+pub fn dial_stdio(socket: Option<PathBuf>) -> i32 {
     use podbag::client::{Endpoint, podbag_program};
     use std::io::Write;
     let exe = podbag_program();
-    let path = match Endpoint::find(&exe).and_then(|e| {
+    let endpoint = match socket {
+        Some(path) => Ok(Endpoint::Socket { path, own: false }),
+        None => Endpoint::find(&exe),
+    };
+    let path = match endpoint.and_then(|e| {
         e.ensure_running(&exe, true)?;
         match e {
             Endpoint::Socket { path, .. } => Ok(path),

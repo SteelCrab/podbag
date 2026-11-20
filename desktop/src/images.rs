@@ -23,32 +23,18 @@ pub struct LocationInfo {
     pub hint: Option<String>,
 }
 
-pub fn location_id(l: &Location) -> &'static str {
-    match l {
-        Location::DockerHub => "dockerhub",
-        Location::GitHub => "github",
-        Location::Ecr(_) => "ecr",
-        Location::Quay => "quay",
-        Location::Gar(_) => "gar",
-        Location::GitLab => "gitlab",
-        Location::Acr(_) => "acr",
-        Location::Preset(preset, _) => preset.id,
-        Location::Custom(_) => "custom",
-    }
-}
-
 /// The location `id`, at `host` where it needs one.
 pub fn location(id: &str, host: &str) -> Result<Location, String> {
     Location::all()
         .into_iter()
-        .find(|l| location_id(l) == id)
+        .find(|l| l.id() == id)
         .map(|l| l.with_host(host))
         .ok_or_else(|| format!("unknown location {id}"))
 }
 
 fn info(l: &Location, logins: &[(String, String)]) -> LocationInfo {
     LocationInfo {
-        id: location_id(l),
+        id: l.id(),
         label: l.label(),
         host: l.host(),
         host_example: l.host_example(),
@@ -66,7 +52,7 @@ pub fn locations(logins: &[(String, String)], hosts: &[(String, String)]) -> Vec
         .map(|l| {
             let host = hosts
                 .iter()
-                .find(|(id, _)| id == location_id(l))
+                .find(|(id, _)| id == l.id())
                 .map(|(_, h)| h.as_str())
                 .unwrap_or("");
             info(&l.with_host(host), logins)
@@ -164,7 +150,7 @@ impl ImportImage {
             .iter()
             .find(|l| l.host() == host)
             .unwrap_or(&detected);
-        let registry = location_id(location);
+        let registry = location.id();
         Some(Self {
             name,
             size: image.size,
@@ -176,12 +162,7 @@ impl ImportImage {
 /// Copy images from one engine to another (`GET /images/get` into `POST
 /// /images/load`). Only read from `from`.
 pub fn import(from: &Client, to: &Client, names: &[String]) -> Result<(), String> {
-    if names.is_empty() {
-        return Err("no images chosen".into());
-    }
-    let names: Vec<&str> = names.iter().map(String::as_str).collect();
-    let archive = from.export_images(&names).map_err(|e| e.message)?;
-    to.load_images(archive).map_err(|e| e.message)
+    to.import_images(from, names)
 }
 
 #[cfg(all(test, unix))]

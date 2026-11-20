@@ -9,6 +9,11 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Cmd {
+    /// Install or run a hands-on volume lesson
+    Lab {
+        #[command(subcommand)]
+        cmd: LabCmd,
+    },
     /// Run a command in a new container
     Run(RunArgs),
     /// Create a container without starting it
@@ -181,6 +186,8 @@ pub enum Cmd {
         kind: String,
         name: String,
     },
+    #[command(flatten)]
+    Dashboard(crate::control::Cmd),
     /// Manage containers, images, volumes and networks in the terminal
     ///
     /// A client of the Docker API: podbag, Docker, or a socket (the saved choice, else
@@ -291,6 +298,13 @@ pub enum Cmd {
     /// distribution this way)
     #[command(name = "__install-self", hide = true)]
     InstallSelf { dest: std::path::PathBuf },
+    /// Manage the Podbag VM. Run podbag vm --help for platform-specific commands
+    #[cfg(any(target_os = "macos", windows))]
+    #[command(disable_help_flag = true)]
+    Vm {
+        #[arg(allow_hyphen_values = true, trailing_var_arg = true)]
+        args: Vec<String>,
+    },
     /// Replace podbag with a newer release from GitHub
     ///
     /// The download must match the release's SHA256SUMS before it runs; the old program
@@ -342,6 +356,42 @@ pub enum NetworkCmd {
     },
     /// Disconnect a stopped container from a further network
     Disconnect { network: String, container: String },
+}
+
+#[derive(Subcommand)]
+pub enum LabCmd {
+    #[cfg(unix)]
+    #[command(hide = true)]
+    Workspace {
+        #[arg(long)]
+        containers: bool,
+    },
+    #[cfg(unix)]
+    #[command(hide = true)]
+    DesktopView {
+        library: std::path::PathBuf,
+        action: String,
+        session: Option<String>,
+        name: Option<String>,
+        #[arg(long, conflicts_with = "course")]
+        containers: bool,
+        #[arg(long)]
+        course: bool,
+    },
+    /// Install the downloaded .podbag module
+    Install { file: std::path::PathBuf },
+    /// List installed practice modules
+    List,
+    /// Open a shell in a new temporary practice store
+    Start {
+        module: Option<String>,
+        #[arg(long)]
+        lang: Option<String>,
+        #[arg(long, hide = true)]
+        library: Option<std::path::PathBuf>,
+    },
+    /// Remove the installed module and its progress
+    Remove { module: Option<String> },
 }
 
 #[derive(Subcommand)]
@@ -437,7 +487,11 @@ pub enum SystemCmd {
     ///
     /// For programs that cannot reach the socket themselves, such as the desktop app on
     /// Windows. It starts the service when none runs.
-    DialStdio,
+    DialStdio {
+        /// Connect to this existing Unix socket
+        #[arg(long)]
+        socket: Option<std::path::PathBuf>,
+    },
     /// Where the docker command goes, and switch it to podbag or back
     Docker {
         #[command(subcommand)]
@@ -679,7 +733,7 @@ pub fn parse_env(arg: &str, lookup: impl Fn(&str) -> Option<String>) -> Option<(
 }
 
 /// `--engine`: podbag, docker, or a socket.
-fn parse_engine(text: &str) -> Result<podbag::client::Choice, String> {
+pub(crate) fn parse_engine(text: &str) -> Result<podbag::client::Choice, String> {
     podbag::client::Choice::parse(text)
         .ok_or_else(|| "use podbag, docker, podman, kiri, context:NAME or unix:///path".to_string())
 }

@@ -1,6 +1,6 @@
 //! Re-create resources through the destination API. Bound filesystem claims also transfer their files.
 use super::kubernetes::kubectl_command;
-use podbag::client::migration::file_manifest;
+use crate::client::migration::file_manifest;
 use serde_json::{Value, json};
 use std::fs::File;
 use std::io::{Seek, Write};
@@ -63,7 +63,7 @@ impl Scope<'_> {
         self.json(&["delete","--raw",&url,"-f","-"],&json!({"apiVersion":"v1","kind":"DeleteOptions","preconditions":{"uid":uid},"gracePeriodSeconds":0})).map(drop)
     }
 }
-fn dns_name(s: &str) -> bool {
+pub(super) fn dns_name(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 253
         && !s.starts_with('-')
@@ -303,7 +303,7 @@ pub fn migrate(
     dst: Scope,
     kind: &str,
     name: &str,
-    uid: &str,
+    uid: Option<&str>,
     progress: impl Fn(&str),
 ) -> Result<(), String> {
     let resource = match kind {
@@ -318,7 +318,8 @@ pub fn migrate(
     }
     progress("prepare");
     let object = src.get(&["get", resource, name])?;
-    if uid.is_empty() || object["metadata"]["uid"] != uid {
+    let observed_uid = required(object.pointer("/metadata/uid"), "source UID")?;
+    if uid.is_some_and(|uid| uid != observed_uid) {
         return Err("The source object changed. Select it again".into());
     }
     let mut manifest = portable(&object, dst.namespace)?;
@@ -475,7 +476,7 @@ mod tests {
             },
             &kind,
             &name,
-            uid,
+            Some(uid),
             |s| println!("{s}"),
         )
         .unwrap();

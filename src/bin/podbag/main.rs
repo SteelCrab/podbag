@@ -4,17 +4,19 @@ mod build;
 mod check;
 #[cfg(unix)]
 mod container;
+mod control;
 mod dockerctx;
 mod image;
+mod lesson;
 #[cfg(unix)]
 mod manage;
 mod network;
+mod preferences;
 mod registry;
 #[cfg(unix)]
 mod run;
 #[cfg(unix)]
 mod service;
-#[cfg(unix)]
 mod tui;
 mod volume;
 
@@ -75,6 +77,13 @@ fn main() {
     {
         podbag::vm::guest::vm_init_main();
     }
+    #[cfg(unix)]
+    if let Some(root) = std::env::var_os(podbag::volume_lesson::SCOPE) {
+        std::process::exit(lesson::scoped(
+            std::path::Path::new(&root),
+            Cli::parse().cmd,
+        ));
+    }
     #[cfg(target_os = "macos")]
     if let Some(code) = macos_front(std::env::args().skip(1).collect()) {
         std::process::exit(code);
@@ -92,7 +101,32 @@ fn main() {
 #[cfg(windows)]
 fn windows_front(args: Vec<String>) -> Option<i32> {
     match args.first().map(String::as_str) {
-        Some("vm") => Some(podbag::windows::vm_command(&args[1..])),
+        Some("tui") => {
+            // A host TUI can run Windows tools. Unix sockets are reached inside WSL.
+            let cli = match parse(&args) {
+                Ok(cli) => cli,
+                Err(e) => e.exit(),
+            };
+            if let Cmd::Tui { engine, .. } = cli.cmd {
+                let requested = engine.or_else(podbag::client::choice::saved).or_else(|| {
+                    std::env::var("DOCKER_HOST")
+                        .ok()
+                        .filter(|v| v.starts_with("unix://"))
+                        .and_then(|v| podbag::client::Choice::parse(&v))
+                });
+                if let Some(choice @ podbag::client::Choice::Socket(_)) = requested {
+                    let mut args = args;
+                    if !args
+                        .iter()
+                        .any(|a| a == "--engine" || a.starts_with("--engine="))
+                    {
+                        args.extend(["--engine".into(), choice.to_setting()]);
+                    }
+                    return Some(podbag::windows::forward(&args, &[]));
+                }
+            }
+            None
+        }
         // podbag.exe itself is replaced; the next command updates the engine in WSL.
         None | Some("-h" | "--help" | "help" | "-V" | "--version" | "upgrade") => None,
         // Windows' docker CLI and its contexts.
@@ -198,7 +232,6 @@ fn macos_front(args: Vec<String>) -> Option<i32> {
     match args.first().map(String::as_str) {
         Some("__vm-host") => Some(podbag::macos::host::host_main()),
         Some("__vm-standby") => Some(podbag::macos::standby::standby_main()),
-        Some("vm") => Some(podbag::macos::cli::vm_command(&args[1..])),
         // The Mac's program is replaced; the VM runs the guest it carries.
         None | Some("-h" | "--help" | "help" | "-V" | "--version" | "upgrade") => None,
         // Clients of the Docker API: they use the Mac's docker.sock, which starts the VM.
@@ -224,7 +257,13 @@ fn macos_front(args: Vec<String>) -> Option<i32> {
 fn runs_here(cli: &Cli) -> bool {
     matches!(
         cli.cmd,
-        Cmd::Login { .. } | Cmd::Logout { .. } | Cmd::Search { .. } | Cmd::Migrate { .. }
+        Cmd::Lab { .. }
+            | Cmd::Login { .. }
+            | Cmd::Logout { .. }
+            | Cmd::Search { .. }
+            | Cmd::Migrate { .. }
+            | Cmd::Dashboard(_)
+            | Cmd::Vm { .. }
     )
 }
 
@@ -375,6 +414,7 @@ fn fill_env(argv: &[String], trailing: usize) -> Vec<String> {
 #[cfg(unix)]
 fn dispatch(cmd: Cmd) -> i32 {
     match cmd {
+        Cmd::Lab { cmd } => lesson::command(cmd),
         Cmd::Run(a) => run::run(a),
         Cmd::Create(a) => run::create(a),
         Cmd::Start {
@@ -383,6 +423,9 @@ fn dispatch(cmd: Cmd) -> i32 {
             containers,
         } => container::start(&containers, attach, interactive),
         Cmd::Restart { time, containers } => container::restart(&containers, time),
+        Cmd::Dashboard(cmd) => control::run(cmd),
+        #[cfg(target_os = "macos")]
+        Cmd::Vm { args } => podbag::macos::cli::vm_command(&args),
         Cmd::Migrate {
             from,
             to,
@@ -432,8 +475,8 @@ fn dispatch(cmd: Cmd) -> i32 {
                 },
         } => service::service(socket, timeout, print_units),
         Cmd::System {
-            cmd: args::SystemCmd::DialStdio,
-        } => service::dial_stdio(),
+            cmd: args::SystemCmd::DialStdio { socket },
+        } => service::dial_stdio(socket),
         Cmd::Tui {
             once,
             engine,
@@ -537,6 +580,15 @@ fn install_self(dest: &std::path::Path) -> i32 {
 #[cfg(not(unix))]
 fn dispatch(cmd: Cmd) -> i32 {
     match cmd {
+        Cmd::Lab { cmd } => lesson::command(cmd),
+        Cmd::Tui {
+            once,
+            engine,
+            no_mouse,
+        } => tui::run(once, engine, !no_mouse),
+        Cmd::Dashboard(cmd) => control::run(cmd),
+        #[cfg(windows)]
+        Cmd::Vm { args } => podbag::windows::vm_command(&args),
         Cmd::Migrate {
             from,
             to,

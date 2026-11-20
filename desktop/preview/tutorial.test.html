@@ -13,12 +13,29 @@ async function test() {
   const key = "podbag.tutorial.volume-api.v1", previous = win.localStorage.getItem(key);
   const check = (condition, message) => { if (!condition) throw Error(message); };
   const btn = (label) => [...doc.querySelectorAll("button")].find((b) => b.textContent === label);
-  const select = async (contents) => {
-    const input = doc.querySelector('input[type="file"]');
+  const open = () => doc.getElementById("nav-training-open").click();
+  const child = (id) => doc.querySelector(`#nav-training-children [data-view="training:${id}"]`);
+  const toolbar = () => doc.querySelector("#main .training-toolbar");
+  const choose = (contents) => {
+    const input = toolbar().querySelector('input[type="file"]');
     const files = new win.DataTransfer();
     files.items.add(new win.File([contents], "lesson.podbag"));
     input.files = files.files;
-    await input.onchange();
+    return input.onchange();
+  };
+  const wait = async (predicate, message, attempts = 30) => {
+    for (let i = 0; i < attempts; i++) {
+      if (predicate()) return;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    throw Error(message);
+  };
+  const install = async (contents, yes) => {
+    const pending = choose(contents);
+    await wait(() => doc.getElementById("confirm").open, "Open the install dialog");
+    check(!doc.querySelector(".tutorial-card input[type=file]"), "File import is a toolbar action");
+    (doc.getElementById(yes ? "confirm-yes" : "confirm-cancel")).click();
+    await pending;
   };
   const pack = {
     format: "podbag-volume-api-lab-v1", starter: '{"message":"hello"}',
@@ -27,26 +44,81 @@ async function test() {
   };
   try {
     win.localStorage.removeItem(key);
-    btn("Tutorials").click();
-    check(!btn("Start lab"), "The lab needs installation");
-    await select("broken");
+    open();
+    await wait(() => /No modules installed/.test(doc.getElementById("main").textContent), "Show the empty list");
+    check(toolbar().querySelector("button").textContent === "Install module", "Put installation in the toolbar");
+    check(!doc.querySelector(".training-library .tutorial-card"), "Do not show an installation card");
+    await choose("broken");
     check(doc.querySelector(".tutorial-status").textContent, "Explain an invalid package");
-    await select(JSON.stringify(pack));
-    check(doc.getElementById("tutorial-heading").textContent === "Lab · My HTTP lab", "Preview the original module without its number");
+    const cancelled = choose(JSON.stringify(pack));
+    await wait(() => doc.getElementById("confirm").open, "Show the selected module before installing");
+    check(doc.getElementById("confirm-text").textContent.includes("Lab · My HTTP lab"), "Remove the old title number");
     check(!win.localStorage.getItem(key), "Selecting a file must not install it");
-    btn("Cancel").click();
-    await select(JSON.stringify(pack));
-    btn("Install module").click();
-    await new Promise(resolve => setTimeout(resolve, 0));
-    check(!!btn("Start lab"), "Installed lab is available");
-    win.podbag.go("containers");
-    btn("Tutorials").click();
-    await new Promise(resolve => setTimeout(resolve, 0));
-    check(doc.getElementById("tutorial-heading").textContent === "Lab · My HTTP lab", "Show an unnumbered title after reopening the installed module");
+    doc.getElementById("confirm-cancel").click();
+    await cancelled;
+    await install(JSON.stringify(pack), true);
+    await wait(() => child("volume-api") && !!btn("Start lab"), "Select the installed JSON lab");
+    check(child("volume-api").getAttribute("aria-current") === "page", "Mark the selected child");
+    open();
+    await wait(() => toolbar().querySelector("h1").textContent === "Training", "Open the training overview");
+    await install(JSON.stringify({ format: "podbag-cli-tui-volumes-v1",
+      translations: { en: { title: "CLI volumes", guide: "Use the CLI and TUI." } } }), true);
+    await wait(() => child("tui-volumes") && toolbar().textContent.includes("CLI volumes"), "Add the new module to Training");
+    check(child("volume-api"), "Keep both modules installed");
+    doc.getElementById("nav-training-toggle").click();
+    check(doc.getElementById("nav-training-children").hidden, "Collapse the installed modules");
+    doc.getElementById("nav-training-toggle").click();
+    child("volume-api").click();
+    await wait(() => !!btn("Start lab"), "Open only the selected JSON lab");
+    check(!doc.getElementById("main").textContent.includes("CLI volumes"), "Hide unselected module details");
+    child("tui-volumes").click();
+    await wait(() => toolbar().textContent.includes("CLI volumes"), "Open the CLI volume details");
     btn("Remove module").click();
     doc.getElementById("confirm-yes").click();
-    await new Promise(resolve => setTimeout(resolve, 30));
-    check(!win.localStorage.getItem(key) && !!btn("Choose file"), "Removal clears the module");
+    await wait(() => !child("tui-volumes"), "Remove its sidebar item");
+    check(win.localStorage.getItem(key) && child("volume-api"), "Removal keeps the original lab");
+    child("volume-api").click();
+    await wait(() => !!btn("Start lab"), "Open the remaining module");
+    btn("Remove module").click();
+    doc.getElementById("confirm-yes").click();
+    await wait(() => !win.localStorage.getItem(key) && /No modules installed/.test(doc.getElementById("main").textContent),
+      "Show an empty list after uninstalling all modules");
+    const invoke = win.__TAURI__.core.invoke;
+    let stage = null, completed = false;
+    win.__TAURI__.core.invoke = async (command, args) => {
+      if (command === "practice_volumes") return stage ? { stage, session: "practice-test", containers: [] } : null;
+      if (command === "open_terminal" || command === "volume_tools_lab" && args.action === "start")
+        throw Error("Practice must not launch a terminal");
+      const records = await invoke(command, args);
+      if (command === "volume_tools_lab" && args.action === "summary" && completed) {
+        return records.map(record => ({ ...record, completed: true }));
+      }
+      return records;
+    };
+    try {
+      const active = () => doc.querySelector('[aria-current="step"]');
+      const command = () => active()?.querySelector("code")?.textContent;
+      await install(JSON.stringify({ format: "podbag-container-basics-v1",
+        translations: { en: { title: "Container basics" } } }), true);
+      await wait(() => command() === "podbag lab start container-basics", "Show the command for the existing terminal");
+      check(doc.querySelectorAll('.training-step[data-state="pending"]').length === 4, "Show pending steps");
+      check(active().querySelector('button[aria-label="Copy"]'), "Make the current command copyable");
+      stage = "check";
+      await wait(() => command() === "podbag ps -a", "Advance from the real practice stage", 60);
+      check(doc.querySelectorAll('.training-step[data-state="done"]').length === 3, "Mark earlier steps complete");
+      stage = "finish";
+      await wait(() => command() === "exit", "Show the cleanup command after verification", 60);
+      completed = true;
+      stage = null;
+      await wait(() => !active() && doc.querySelectorAll('.training-step[data-state="done"]').length === 5,
+        "Keep every step complete after the session closes", 60);
+      btn("Practice containers").click();
+      await wait(() => doc.querySelector(".practice-resources code")?.textContent === "podbag lab start container-basics",
+        "Show the same start command in the resource view");
+      check(!doc.querySelector('#main .toolbar button[aria-label="Terminal"]'), "Do not offer a terminal-launch action");
+    } finally {
+      win.__TAURI__.core.invoke = invoke;
+    }
   } finally {
     if (previous === null) win.localStorage.removeItem(key);
     else win.localStorage.setItem(key, previous);

@@ -73,6 +73,20 @@ impl Endpoint {
         }
     }
 
+    /// Whether two selections use the same socket or the same transport command.
+    pub fn same_target(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Socket { path: a, .. }, Self::Socket { path: b, .. }) => {
+                a == b
+                    || std::fs::canonicalize(a)
+                        .ok()
+                        .zip(std::fs::canonicalize(b).ok())
+                        .is_some_and(|(a, b)| a == b)
+            }
+            _ => self == other,
+        }
+    }
+
     /// What to show the user: the socket path, or the program.
     pub fn describe(&self) -> String {
         match self {

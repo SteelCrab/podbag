@@ -1,5 +1,5 @@
 //! One disposable Podbag volume and a loopback HTTP service for the desktop lab.
-use podbag::{Volume, paths::Dirs};
+use crate::{Volume, paths::Dirs};
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fs;
@@ -27,17 +27,17 @@ pub enum Action {
 
 #[derive(Default, Serialize)]
 pub struct Snapshot {
-    active: bool,
-    volume: Option<String>,
-    source: Option<String>,
-    url: Option<String>,
-    response: Option<Reply>,
+    pub active: bool,
+    pub volume: Option<String>,
+    pub source: Option<String>,
+    pub url: Option<String>,
+    pub response: Option<Reply>,
 }
 
 #[derive(Clone, Serialize)]
-struct Reply {
-    status: u16,
-    body: String,
+pub struct Reply {
+    pub status: u16,
+    pub body: String,
 }
 
 struct Service {

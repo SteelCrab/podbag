@@ -46,11 +46,19 @@ Linux와 macOS에서 컨테이너, 이미지, 볼륨, 네트워크를 관리합�
 
 ![Podbag Desktop의 예제 컨테이너 목록. 실행 중인 컨테이너 3개와 중지된 컨테이너 2개의 이미지와 포트가 보입니다.](docs/images/desktop-containers-en.png)
 
-[Linux 패키지 설치 안내](docs/build.md#linux-desktop-packages) · [데스크톱 앱 소스 빌드 안내](docs/usage.md#build-the-desktop-app)
+[Podbag Desktop 설치](#설치) · [데스크톱 앱 소스 빌드 안내](docs/usage.md#build-the-desktop-app)
 
 ## 설치
 
-### Linux(x86_64, arm64)와 macOS(Apple silicon)
+### Podbag Desktop (권장)
+
+[최신 릴리스](https://github.com/SteelCrab/podbag/releases/latest)에서 시스템에 맞는 패키지를 받습니다.
+
+- **Linux(x86_64, arm64).** Debian과 Ubuntu에서는 `.deb`를 설치합니다. Fedora에서는 `.rpm`을 설치합니다. 패키지에 엔진이 포함됩니다.
+- **macOS(Apple silicon).** 아래 명령으로 CLI를 설치합니다. `podbag-desktop-aarch64-macos.zip`의 압축을 풀고 `podbag.app`을 엽니다.
+- **Windows(x86_64, ARM64, 실험 단계).** CPU에 맞는 `.msi`를 실행합니다. 릴리스에 MSI가 없으면 성공한 [CI 실행](https://github.com/SteelCrab/podbag/actions/workflows/ci.yml?query=branch%3Amain)에서 받습니다. 컨테이너를 실행하려면 WSL 2를 활성화합니다.
+
+### Linux(x86_64, arm64)와 macOS(Apple silicon)용 CLI
 
 ```sh
 curl -fsSL https://podbag.dev/install.sh | sh
@@ -63,7 +71,7 @@ Linux 커널 5.12 이상과 cgroup v2가 필요합니다. `podbag check`로 빠�
 
 직접 설치하려면 운영체제와 CPU에 맞는 파일을 받고 `SHA256SUMS`로 검증합니다. [릴리스 다운로드](https://github.com/SteelCrab/podbag/releases/latest)
 
-### Windows(실험 단계)
+### Windows용 CLI(실험 단계)
 
 관리자 PowerShell에서 `wsl --install`을 실행한 뒤 Windows를 다시 시작합니다. CPU에 맞는 `podbag-x86_64-windows.exe` 또는 `podbag-aarch64-windows.exe`를 받습니다. SHA-256 값을 `SHA256SUMS`와 대조한 뒤 파일 이름을 `podbag.exe`로 바꿉니다. [릴리스 다운로드](https://github.com/SteelCrab/podbag/releases/latest)
 
@@ -74,7 +82,6 @@ Linux 커널 5.12 이상과 cgroup v2가 필요합니다. `podbag check`로 빠�
 ### 다른 설치 방법
 
 - **Linux용 Cargo 패키지.** `cargo install --locked podbag`으로 배포된 CLI를 설치합니다.
-- **Linux 데스크톱 앱.** GitHub Actions에서 CPU에 맞는 패키지를 받아 압축을 풉니다. 배포판에 맞는 `.deb` 또는 `.rpm`을 설치합니다. 패키지에는 엔진도 들어 있습니다. [데스크톱 패키지 설치 안내](docs/build.md#linux-desktop-packages)
 - **소스 빌드.** Rust로 CLI와 Podbag Desktop을 빌드합니다. [소스 빌드 안내](docs/build.md)
 
 ## 사용법

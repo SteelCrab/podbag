@@ -129,12 +129,12 @@ pub fn vm_action(podbag: &Path, action: &str) -> Result<(), String> {
 pub fn engine_version(podbag: &Path) -> Option<String> {
     let out = run_ok(podbag, &["--version"]).ok()?;
     let v = out.split_whitespace().nth(1)?.trim_start_matches('v');
-    podbag::upgrade::Version::parse(v).map(|v| v.to_string())
+    crate::upgrade::Version::parse(v).map(|v| v.to_string())
 }
 
 /// `latest` is newer than `current`.
 pub fn is_newer(latest: &str, current: &str) -> bool {
-    use podbag::upgrade::Version;
+    use crate::upgrade::Version;
     match (Version::parse(latest), Version::parse(current)) {
         (Some(l), Some(c)) => l > c,
         _ => false,

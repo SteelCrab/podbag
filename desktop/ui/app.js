@@ -16,6 +16,8 @@ const S = {
   contexts: [],
   listErrors: {},
   kubeExpanded: false,
+  trainingExpanded: false,
+  trainingRecords: [],
   detail: null, // { kind, id, tab }
   lists: { containers: [], images: [], volumes: [], networks: [] },
   loaded: false,
@@ -32,12 +34,11 @@ const S = {
   updates: null, // versions and the last update check
   upgrade: null, // what the last "Update podbag" did
   history: { stack: [], index: -1 },
-  autoCollapsed: false, // the window is too narrow for the sidebar
   docker: null, // where the docker command goes
 };
 
 const IS_MAC = /Mac/.test(navigator.platform || navigator.userAgent);
-const SIDEBAR = { width: 216, min: 160, max: 360 };
+const SIDEBAR = { width: 216, min: 160, max: 360, rail: 56, collapseAt: 128, expandAt: 80 };
 
 // ---- small helpers ----
 
@@ -147,12 +148,14 @@ function codeLine(text) {
 
 // ---- dialogs ----
 
-function confirmDialog(text, yesLabel) {
+function confirmDialog(text, yesLabel, { title = t("confirm.title"), style = "danger" } = {}) {
   const d = document.getElementById("confirm");
-  document.getElementById("confirm-title").textContent = t("confirm.title");
+  document.getElementById("confirm-title").textContent = title;
   document.getElementById("confirm-text").textContent = text;
   document.getElementById("confirm-cancel").textContent = t("action.cancel");
-  document.getElementById("confirm-yes").textContent = yesLabel || t("action.remove");
+  const yes = document.getElementById("confirm-yes");
+  yes.textContent = yesLabel || t("action.remove");
+  yes.className = "button " + style;
   d.returnValue = "";
   d.showModal();
   return new Promise((resolve) => {
@@ -439,7 +442,9 @@ function travel(step) {
   if (!entry) return;
   h.index += step;
   if (S.detail && S.detail.tab === "logs") API.logsStop();
-  S.view = entry.view;
+  S.view = entry.view.startsWith("training:")
+    && !trainingEntries().some(module => trainingView(module.id) === entry.view) ? "tutorials" : entry.view;
+  if (S.view === "tutorials" || S.view.startsWith("training:")) S.trainingExpanded = true;
   if (entry.kubeKind) { S.kubeKind = entry.kubeKind; S.kubeExpanded = true; }
   S.detail = entry.detail ? { ...entry.detail, json: null, extra: null } : null;
   renderNav();
@@ -463,6 +468,7 @@ function renderHistory() {
 }
 
 function go(view, kind = S.kubeKind) {
+  if (view === "tutorials" || view.startsWith("training:")) S.trainingExpanded = true;
   if (S.detail) closeDetail(true);
   if (view === "kubernetes") {
     S.kubeExpanded = true;
@@ -537,15 +543,69 @@ function updateKubeNav() {
   }
 }
 
+function setupTrainingNav() {
+  const label = t("nav.tutorials");
+  const open = h("button", {
+    type: "button", id: "nav-training-open", class: "nav-item", "aria-label": label, title: label,
+    onclick: () => go("tutorials"),
+  }, icon("tutorials"), h("span", { class: "label", text: label }));
+  const toggle = h("button", {
+    type: "button", id: "nav-training-toggle", class: "icon-button kube-toggle",
+    "aria-controls": "nav-training-children",
+    onclick: () => { S.trainingExpanded = !S.trainingExpanded; updateTrainingNav(); },
+  }, icon("back"));
+  const children = h("ul", { id: "nav-training-children", class: "nav kube-subnav", "aria-label": label });
+  document.getElementById("nav-training").replaceChildren(
+    h("li", {}, h("div", { class: "kube-nav-header" }, open, toggle), children));
+}
+
+function updateTrainingNav() {
+  const open = document.getElementById("nav-training-open");
+  if (!open) return;
+  const toggle = document.getElementById("nav-training-toggle");
+  const children = document.getElementById("nav-training-children");
+  const label = t("nav.tutorials");
+  const toggleLabel = t("training.modules");
+  open.title = label;
+  open.setAttribute("aria-label", label);
+  open.querySelector(".label").textContent = label;
+  toggle.title = toggleLabel;
+  toggle.setAttribute("aria-label", toggleLabel);
+  children.setAttribute("aria-label", toggleLabel);
+  const entries = trainingEntries();
+  const key = JSON.stringify(entries);
+  if (children.dataset.modules !== key) {
+    children.dataset.modules = key;
+    children.replaceChildren(...entries.map(entry => h("li", {}, h("button", {
+      type: "button", class: "nav-item", "data-view": trainingView(entry.id), title: entry.title,
+      "aria-label": entry.label, onclick: () => go(trainingView(entry.id)),
+    }, icon("tutorials"), h("span", { class: "label", text: entry.label })))));
+  }
+  const expanded = entries.length > 0 && S.trainingExpanded;
+  toggle.hidden = entries.length === 0;
+  toggle.setAttribute("aria-expanded", String(expanded));
+  children.hidden = !expanded;
+  open.toggleAttribute("data-active", S.view.startsWith("training:") && !expanded);
+  if (S.view === "tutorials") open.setAttribute("aria-current", "page");
+  else open.removeAttribute("aria-current");
+  for (const child of children.querySelectorAll("button")) {
+    if (child.dataset.view === S.view) child.setAttribute("aria-current", "page");
+    else child.removeAttribute("aria-current");
+  }
+}
+
 function renderNav() {
   const nav = document.getElementById("nav");
-  const item = (view, label, count) => h("li", {}, h("button", {
+  const item = (view, label, count, symbol = view) => h("li", {}, h("button", {
     type: "button", class: "nav-item", "aria-current": S.view === view ? "page" : null, onclick: () => go(view),
-    title: label,
-  }, icon(view), h("span", { class: "label", text: label }), h("span", { class: "count", text: count ?? "" })));
+    "aria-label": label, title: count == null ? label : `${label} (${count})`,
+  }, icon(symbol), h("span", { class: "label", text: label }), h("span", { class: "count", text: count ?? "" })));
   updateMigrationNav();
-  nav.replaceChildren(...KINDS.map(k => item(k, t(`nav.${k}`), S.loaded && !S.listErrors[k] ? S.lists[k].length : null)),
-    item("tutorials", t("nav.tutorials"), null));
+  nav.replaceChildren(...KINDS.map(k => item(k, t(`nav.${k}`), S.loaded && !S.listErrors[k] ? S.lists[k].length : null)));
+  updateTrainingNav();
+  document.getElementById("nav-practice").replaceChildren(
+    ...(S.practiceContainers ? [item("lab-containers", t("training.containers"), null, "containers")] : []),
+    ...(S.practiceInstalled ? [item("lab-volumes", t("practice.volumes"), null, "volumes")] : []));
   updateKubeNav();
   if (windowBar) {
     const [reload, settings] = document.getElementById("topbar-tools").children;
@@ -610,21 +670,25 @@ function engineChoice() {
 // ---- the sidebar's width, collapse and divider ----
 
 const narrowWindow = window.matchMedia("(max-width: 720px)");
+const clampWidth = (w) => Math.min(SIDEBAR.max, Math.max(SIDEBAR.min, Math.round(Number(w) || SIDEBAR.width)));
+let sidebarDrag = null;
+let sidebarExpandedInNarrowWindow = false;
 
-function sidebarCollapsed() {
-  return S.settings.sidebarCollapsed || S.autoCollapsed;
+function sidebarWidth() {
+  if (sidebarDrag) return sidebarDrag.width;
+  return S.settings.sidebarCollapsed || (narrowWindow.matches && !sidebarExpandedInNarrowWindow)
+    ? SIDEBAR.rail : clampWidth(S.settings.sidebarWidth);
 }
 
 function applySidebar() {
   const app = document.getElementById("app");
-  const collapsed = sidebarCollapsed();
-  const width = clampWidth(S.settings.sidebarWidth);
+  const width = sidebarWidth();
+  const collapsed = width === SIDEBAR.rail;
   app.style.setProperty("--sidebar-w", `${width}px`);
   app.classList.toggle("collapsed", collapsed);
   const splitter = document.getElementById("splitter");
   splitter.setAttribute("aria-valuenow", String(width));
   splitter.setAttribute("aria-label", t("sidebar.resize"));
-  splitter.hidden = collapsed;
   const toggle = document.getElementById("sidebar-toggle");
   const label = collapsed ? t("sidebar.show") : t("sidebar.hide");
   if (!toggle.firstChild) toggle.append(icon("sidebar"));
@@ -633,87 +697,77 @@ function applySidebar() {
   toggle.title = `${label} (${IS_MAC ? "⌃⌘S" : "Ctrl+B"})`;
 }
 
-const clampWidth = (w) => Math.min(SIDEBAR.max, Math.max(SIDEBAR.min, Math.round(Number(w) || SIDEBAR.width)));
-
 let saveSidebarTimer = null;
-function saveSidebarSoon() {
+function setSidebarWidth(width) {
+  const collapsed = width === SIDEBAR.rail;
+  S.settings.sidebarCollapsed = collapsed;
+  if (!collapsed) S.settings.sidebarWidth = clampWidth(width);
+  sidebarExpandedInNarrowWindow = !collapsed && (narrowWindow.matches || sidebarExpandedInNarrowWindow);
+  applySidebar();
   clearTimeout(saveSidebarTimer);
   saveSidebarTimer = setTimeout(() => API.setSettings(S.settings).catch(() => {}), 300);
 }
 
-function setSidebarWidth(w, save) {
-  S.settings.sidebarWidth = clampWidth(w);
-  applySidebar();
-  if (save) saveSidebarSoon();
-}
-
 function toggleSidebar() {
-  if (sidebarCollapsed()) {
-    S.autoCollapsed = false;
-    S.settings.sidebarCollapsed = false;
-  } else if (narrowWindow.matches) {
-    // Too narrow: hide it for now, without changing the saved choice.
-    S.autoCollapsed = true;
-  } else {
-    S.settings.sidebarCollapsed = true;
-  }
-  applySidebar();
-  saveSidebarSoon();
+  if (sidebarDrag) return;
+  setSidebarWidth(sidebarWidth() === SIDEBAR.rail ? clampWidth(S.settings.sidebarWidth) : SIDEBAR.rail);
 }
 
 function setupSidebar() {
   const splitter = document.getElementById("splitter");
   const app = document.getElementById("app");
-  let drag = null;
   splitter.addEventListener("pointerdown", (e) => {
-    if (e.button !== 0) return;
+    if (e.button !== 0 || sidebarDrag) return;
     e.preventDefault();
     splitter.setPointerCapture(e.pointerId);
-    drag = { x: e.clientX, width: clampWidth(S.settings.sidebarWidth) };
+    const width = sidebarWidth();
+    sidebarDrag = { id: e.pointerId, x: e.clientX, startWidth: width, width };
     app.classList.add("resizing");
   });
   splitter.addEventListener("pointermove", (e) => {
-    if (!drag || !splitter.hasPointerCapture(e.pointerId)) return;
+    if (sidebarDrag?.id !== e.pointerId) return;
     const dir = document.documentElement.dir === "rtl" ? -1 : 1;
-    setSidebarWidth(drag.width + (e.clientX - drag.x) * dir, false);
+    const width = sidebarDrag.startWidth + (e.clientX - sidebarDrag.x) * dir;
+    const threshold = sidebarDrag.startWidth === SIDEBAR.rail ? SIDEBAR.expandAt : SIDEBAR.collapseAt;
+    sidebarDrag.width = width <= threshold ? SIDEBAR.rail : clampWidth(width);
+    applySidebar();
   });
   const end = (e) => {
-    if (!drag) return;
-    drag = null;
+    if (sidebarDrag?.id !== e.pointerId) return;
+    const { startWidth, width } = sidebarDrag;
+    sidebarDrag = null;
     app.classList.remove("resizing");
-    if (splitter.hasPointerCapture(e.pointerId)) splitter.releasePointerCapture(e.pointerId);
-    saveSidebarSoon();
+    if (e.type === "pointerup" && width !== startWidth) setSidebarWidth(width);
+    else applySidebar();
   };
   splitter.addEventListener("pointerup", end);
   splitter.addEventListener("pointercancel", end);
   splitter.addEventListener("lostpointercapture", end);
-  splitter.addEventListener("dblclick", () => setSidebarWidth(SIDEBAR.width, true));
+  splitter.addEventListener("dblclick", () => setSidebarWidth(SIDEBAR.width));
   splitter.addEventListener("keydown", (e) => {
+    if (sidebarDrag) return;
     const step = e.shiftKey ? 40 : 10;
-    const w = clampWidth(S.settings.sidebarWidth);
+    const width = sidebarWidth();
+    const smaller = width <= SIDEBAR.min ? SIDEBAR.rail : Math.max(SIDEBAR.min, width - step);
+    const larger = Math.max(SIDEBAR.min, width + step);
+    const rtl = document.documentElement.dir === "rtl";
     const keys = {
-      ArrowLeft: w - step, ArrowRight: w + step, ArrowUp: w + step, ArrowDown: w - step,
-      Home: SIDEBAR.min, End: SIDEBAR.max,
+      ArrowLeft: rtl ? larger : smaller, ArrowRight: rtl ? smaller : larger,
+      ArrowUp: larger, ArrowDown: smaller, Home: SIDEBAR.rail, End: SIDEBAR.max,
     };
     if (e.key === "Enter") {
       e.preventDefault();
       toggleSidebar();
-      document.getElementById("sidebar-toggle").focus();
-    } else if (e.key in keys) {
+    } else if (Object.hasOwn(keys, e.key)) {
       e.preventDefault();
-      setSidebarWidth(keys[e.key], true);
+      setSidebarWidth(keys[e.key]);
     }
   });
   document.getElementById("sidebar-toggle").addEventListener("click", toggleSidebar);
   document.getElementById("nav-back").addEventListener("click", () => travel(-1));
   document.getElementById("nav-forward").addEventListener("click", () => travel(1));
-  // Narrow windows collapse it; it comes back when there is room.
-  const onWidth = () => {
-    S.autoCollapsed = narrowWindow.matches;
-    applySidebar();
-  };
-  narrowWindow.addEventListener("change", onWidth);
-  S.autoCollapsed = narrowWindow.matches;
+  // Follow the window width until the user expands the sidebar in a narrow window.
+  narrowWindow.addEventListener("change", applySidebar);
   applySidebar();
   renderHistory();
 }
@@ -888,10 +942,20 @@ function renderMain(fresh) {
     shownView = S.view;
     return;
   }
-  if (S.view === "tutorials") {
-    if (fresh || shownView !== S.view) renderTutorials(main);
+  if (S.view === "lab-containers") {
+    if (fresh || shownView !== S.view) renderPracticeContainers(main);
     shownView = S.view;
     return;
+  }
+  if (S.view === "lab-volumes") {
+    if (fresh || shownView !== S.view) renderPracticeVolumes(main);
+    shownView = S.view;
+    return;
+  }
+  if (S.view === "tutorials" || S.view.startsWith("training:")) {
+    const rendered = fresh || shownView !== S.view ? renderTutorials(main) : undefined;
+    shownView = S.view;
+    return rendered;
   }
   if (S.view === "settings") {
     const redraw = fresh || shownView !== "settings";
@@ -1052,25 +1116,29 @@ function renderList() {
     content.replaceChildren(h("p", { class: "nothing", text: t("empty.search", { q }) }));
     return;
   }
+  content.replaceChildren(resourceTable(kind, rows, o => openDetail(kind, objectId(kind, o), "info"), o => rowActions(kind, o)));
+}
+
+function resourceTable(kind, rows, open, actions) {
   const cols = COLUMNS[kind];
   const head = h("thead", {}, h("tr", {}, cols.map(([key, c]) => h("th", { class: `col-${c}`, scope: "col", text: t(key) })),
     h("th", { class: "col-actions", scope: "col" }, h("span", { class: "visually-hidden", text: t("col.actions") }))));
   const body = h("tbody", {}, rows.map((o) => {
-    const tr = h("tr", {}, cells(kind, o).map((cell, i) => h("td", { class: `col-${cols[i][1]}` }, cell)), h("td", { class: "col-actions" }, rowActions(kind, o)));
+    const tr = h("tr", {}, cells(kind, o).map((cell, i) => h("td", { class: `col-${cols[i][1]}` }, cell)), h("td", { class: "col-actions" }, actions(o)));
     // The name opens the details; the row is clickable too, for the mouse.
     const first = tr.querySelector("td .primary-text");
     if (first) {
-      const link = h("button", { type: "button", class: "link", onclick: () => openDetail(kind, objectId(kind, o), "info") });
+      const link = h("button", { type: "button", class: "link", onclick: () => open(o) });
       first.replaceWith(link);
       link.append(first);
     }
     tr.addEventListener("click", (e) => {
       if (e.target.closest("button")) return;
-      openDetail(kind, objectId(kind, o), "info");
+      open(o);
     });
     return tr;
   }));
-  content.replaceChildren(h("table", { class: `list list-${kind}` }, head, body));
+  return h("table", { class: `list list-${kind}` }, head, body);
 }
 
 function emptyState(kind) {
@@ -1750,8 +1818,11 @@ async function init() {
   } catch { /* the defaults */ }
   applyTheme();
   await I18N.load(S.settings.language);
+  try { setInstalledPractice(await API.volumeToolsLab("summary")); }
+  catch { /* The Training page can retry the library. */ }
   setupWindowBar();
   setupKubeNav();
+  setupTrainingNav();
   setupSidebar();
   renderAll();
   refreshKubeCounts();

@@ -66,6 +66,7 @@ impl Upgrade {
 /// What every handler can reach.
 pub struct Ctx {
     pub dirs: Dirs,
+    volume_lesson: bool,
     /// Clients attached to containers that wait for a start, and how starts ended.
     pub attachments: std::sync::Arc<super::stream::Attachments>,
     /// Commands made by `POST /containers/{id}/exec`.
@@ -79,6 +80,7 @@ impl Ctx {
     pub fn new(dirs: Dirs) -> Ctx {
         Ctx {
             dirs,
+            volume_lesson: std::env::var_os(crate::volume_lesson::SCOPE).is_some(),
             attachments: Default::default(),
             execs: Default::default(),
             binds_under: None,
@@ -126,6 +128,39 @@ pub fn streams_body(req: &Request) -> bool {
 /// Send the request to its handler.
 pub fn route(req: &Request, ctx: &Ctx) -> Reply {
     let path = strip_version(&req.path);
+    if ctx.volume_lesson {
+        let read = req.method == "GET"
+            && matches!(
+                path,
+                "/version"
+                    | "/_ping"
+                    | "/events"
+                    | "/containers/json"
+                    | "/images/json"
+                    | "/networks"
+                    | "/volumes"
+            );
+        let volume = matches!(req.method.as_str(), "GET" | "DELETE")
+            && path
+                .strip_prefix("/volumes/")
+                .is_some_and(|n| !n.is_empty() && !n.contains('/'));
+        if !(read || volume || (req.method == "HEAD" && path == "/_ping")) {
+            return message(
+                403,
+                "This session is for inspecting and removing practice volumes.",
+            );
+        }
+        if req.method == "DELETE" && path == "/volumes/my-api" {
+            let reply =
+                super::objects::volumes(req, ctx, &["my-api"]).expect("DELETE volume route");
+            if matches!(reply, Reply::Empty(204))
+                && let Err(e) = std::fs::write(ctx.dirs.runtime.join("removed"), [])
+            {
+                return message(500, &e.to_string());
+            }
+            return reply;
+        }
+    }
     if let Some(reply) = path
         .strip_prefix("/images/")
         .and_then(|rest| super::images::route(req, ctx, rest))

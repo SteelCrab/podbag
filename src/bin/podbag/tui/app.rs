@@ -18,6 +18,7 @@ pub struct Lists {
     pub images: Vec<ImageSummary>,
     pub volumes: Vec<VolumeSummary>,
     pub networks: Vec<NetworkSummary>,
+    pub errors: [Option<String>; 4],
 }
 
 /// How a row looks.
@@ -92,6 +93,12 @@ impl Verb {
 /// What the runtime must do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
+    Dashboard,
+    Page(super::dashboard::Page),
+    SaveLayout,
+    ChooseRegistry,
+    RegistryLogin(Location),
+    CreateVolume,
     None,
     Quit,
     Refresh,
@@ -166,6 +173,7 @@ pub enum Msg {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Purpose {
+    PullTag { repository: String },
     Rename { id: String },
 }
 
@@ -199,6 +207,7 @@ pub enum Mode {
 const MAX_LOG_LINES: usize = 5000;
 
 pub struct App {
+    pub appearance: super::preferences::Appearance,
     pub tab: Kind,
     pub lists: Lists,
     /// Whether the lists came at least once.
@@ -206,6 +215,9 @@ pub struct App {
     /// The selected row of each tab, in its shown (searched) rows.
     pub selected: [usize; 4],
     pub search: String,
+    searches: [String; 4],
+    history: Vec<Kind>,
+    history_index: usize,
     pub mode: Mode,
     /// The last message, and whether it is an error.
     pub message: Option<(String, bool)>,
@@ -246,7 +258,7 @@ pub struct App {
     pub page: usize,
 }
 
-fn tab_index(k: Kind) -> usize {
+pub(super) fn tab_index(k: Kind) -> usize {
     Kind::ALL.iter().position(|x| *x == k).unwrap_or(0)
 }
 
@@ -258,13 +270,13 @@ pub fn ago(now: i64, then: i64) -> String {
     let secs = u64::try_from(now - then).unwrap_or(0);
     format!(
         "{} ago",
-        podbag::api::docker::human_duration(secs).to_lowercase()
+        podbag::client::time::human_duration(secs).to_lowercase()
     )
 }
 
 /// RFC 3339 (`2026-11-01T10:00:00Z`) as Unix seconds.
 fn epoch(rfc3339: &str) -> i64 {
-    podbag::api::docker::epoch_of(rfc3339).map_or(0, |f| f as i64)
+    podbag::client::time::epoch_of(rfc3339).map_or(0, |f| f as i64)
 }
 
 pub fn size(bytes: i64) -> String {
@@ -274,11 +286,15 @@ pub fn size(bytes: i64) -> String {
 impl App {
     pub fn new(engine: String, endpoint: String) -> App {
         App {
+            appearance: super::preferences::Appearance::default(),
             tab: Kind::Containers,
             lists: Lists::default(),
             loaded: false,
             selected: [0; 4],
             search: String::new(),
+            searches: Default::default(),
+            history: vec![Kind::Containers],
+            history_index: 0,
             mode: Mode::List,
             message: None,
             busy: None,
@@ -385,15 +401,32 @@ impl App {
                 })
                 .collect(),
         };
-        let needle = self.search.to_lowercase();
+        let query = if self.tab == kind {
+            &self.search
+        } else {
+            &self.searches[tab_index(kind)]
+        };
+        let needle = query.trim().to_lowercase();
         if needle.is_empty() {
             return all;
         }
         all.into_iter()
-            .filter(|r| {
-                r.id.starts_with(&needle)
+            .enumerate()
+            .filter(|(index, r)| {
+                (kind == Kind::Images
+                    && self.lists.images[*index]
+                        .repo_tags
+                        .iter()
+                        .any(|tag| tag.to_lowercase().contains(&needle)))
+                    || (kind == Kind::Containers
+                        && self.lists.containers[*index]
+                            .state
+                            .to_lowercase()
+                            .contains(&needle))
+                    || r.id.to_lowercase().contains(&needle)
                     || r.cells.iter().any(|c| c.to_lowercase().contains(&needle))
             })
+            .map(|(_, row)| row)
             .collect()
     }
 
@@ -431,8 +464,19 @@ impl App {
     }
 
     pub(super) fn switch(&mut self, k: Kind) {
+        if self.tab == k {
+            return;
+        }
+        self.history.truncate(self.history_index + 1);
+        self.history.push(k);
+        self.history_index += 1;
+        self.show_tab(k);
+    }
+
+    fn show_tab(&mut self, k: Kind) {
+        self.searches[tab_index(self.tab)] = std::mem::take(&mut self.search);
         self.tab = k;
-        self.search.clear();
+        self.search = std::mem::take(&mut self.searches[tab_index(k)]);
     }
 
     fn say(&mut self, text: impl Into<String>, error: bool) {
@@ -448,6 +492,9 @@ impl App {
         self.lists = Lists::default();
         self.loaded = false;
         self.selected = [0; 4];
+        self.searches = Default::default();
+        self.history = vec![self.tab];
+        self.history_index = 0;
         self.search.clear();
         self.mode = Mode::List;
         self.busy = None;
@@ -546,6 +593,24 @@ impl App {
         self.log_generation
     }
 
+    pub fn paste(&mut self, input: &str) -> Effect {
+        if !matches!(self.mode, Mode::Search | Mode::Pull(_) | Mode::Input { .. }) {
+            return Effect::None;
+        }
+        let mut effect = Effect::None;
+        for c in input.chars().filter(|c| !c.is_control()) {
+            effect = self.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        effect
+    }
+
+    pub(super) fn open_pull(&mut self) -> Effect {
+        let form = PullForm::default();
+        let login = Effect::Login(form.place());
+        self.mode = Mode::Pull(form);
+        login
+    }
+
     pub fn on_key(&mut self, key: KeyEvent) -> Effect {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return Effect::Quit;
@@ -601,11 +666,18 @@ impl App {
                 KeyCode::Enter => {
                     self.mode = Mode::List;
                     let text = text.trim().to_string();
+                    if let Purpose::PullTag { repository } = purpose {
+                        let tag = if text.is_empty() { "latest" } else { &text };
+                        let image = format!("{repository}:{tag}");
+                        self.busy = Some(format!("Pulling {image}"));
+                        return Effect::Pull(image);
+                    }
                     if text.is_empty() {
                         return Effect::None;
                     }
                     match purpose {
                         Purpose::Rename { id } => Effect::Rename { id, to: text },
+                        Purpose::PullTag { .. } => unreachable!(),
                     }
                 }
                 code => {
@@ -686,13 +758,47 @@ impl App {
 
     fn list_key(&mut self, key: KeyEvent) -> Effect {
         match key.code {
+            KeyCode::Char('P' | 'p')
+                if key
+                    .modifiers
+                    .contains(KeyModifiers::CONTROL | KeyModifiers::SHIFT) =>
+            {
+                return self.open_pull();
+            }
             KeyCode::Char('q') => return Effect::Quit,
             KeyCode::Esc => {
                 self.search.clear();
                 self.message = None;
             }
+            KeyCode::Char('b') => {
+                self.appearance.sidebar = !self.appearance.sidebar;
+                return Effect::SaveLayout;
+            }
+            KeyCode::Char(c @ ('[' | ']')) if self.appearance.sidebar => {
+                let delta = if c == '[' { -2 } else { 2 };
+                self.appearance.sidebar_width = self
+                    .appearance
+                    .sidebar_width
+                    .saturating_add_signed(delta)
+                    .clamp(14, 36);
+                return Effect::SaveLayout;
+            }
+            KeyCode::F(n @ 6..=9) => {
+                return Effect::Page(super::dashboard::Page::ALL[usize::from(n - 6)]);
+            }
             KeyCode::Char('?') => self.mode = Mode::Help,
             KeyCode::Char('/') => self.mode = Mode::Search,
+            KeyCode::Left | KeyCode::Right if key.modifiers.contains(KeyModifiers::ALT) => {
+                let step = if key.code == KeyCode::Left { -1 } else { 1 };
+                self.history_index = self
+                    .history_index
+                    .saturating_add_signed(step)
+                    .min(self.history.len() - 1);
+                self.show_tab(self.history[self.history_index]);
+            }
+            KeyCode::Char('f' | 'k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.mode = Mode::Search
+            }
             KeyCode::Tab | KeyCode::Right => {
                 self.switch(Kind::ALL[(tab_index(self.tab) + 1) % 4]);
             }
@@ -709,6 +815,8 @@ impl App {
             KeyCode::Home | KeyCode::Char('g') => self.select(0),
             KeyCode::End | KeyCode::Char('G') => self.move_by(isize::MAX / 2),
             KeyCode::F(5) => return Effect::Refresh,
+            KeyCode::F(2) | KeyCode::Char('a') => return Effect::Dashboard,
+            KeyCode::Char('v') if self.tab == Kind::Volumes => return Effect::CreateVolume,
             KeyCode::Char('E') => return Effect::SwitchEngine,
             KeyCode::Char('D') => self.ask_docker_cli(),
             KeyCode::Char('m') => {
@@ -723,10 +831,7 @@ impl App {
             }
             KeyCode::Char('c') => return self.confirm_prune(),
             KeyCode::Char('p') if self.tab == Kind::Images => {
-                let form = PullForm::default();
-                let login = Effect::Login(form.place());
-                self.mode = Mode::Pull(form);
-                return login;
+                return self.open_pull();
             }
             _ => return self.row_key(key),
         }
@@ -767,7 +872,23 @@ impl App {
                     Kind::Volumes => "volume",
                     Kind::Networks => "network",
                 };
-                let question = if row.running {
+                let force = containers
+                    && self
+                        .lists
+                        .containers
+                        .iter()
+                        .any(|c| c.id == row.id && (c.running() || c.state == "paused"));
+                let question = if self.appearance.lang() != "en" {
+                    self.appearance
+                        .text(match kind {
+                            Kind::Containers if force => "confirm.removeRunning",
+                            Kind::Containers => "confirm.removeContainer",
+                            Kind::Images => "confirm.removeImage",
+                            Kind::Volumes => "confirm.removeVolume",
+                            Kind::Networks => "confirm.removeNetwork",
+                        })
+                        .replace("{name}", &row.name)
+                } else if force {
                     format!("Stop and remove container {}?", row.name)
                 } else if kind == Kind::Volumes {
                     format!("Remove volume {} and its data?", row.name)
@@ -776,7 +897,7 @@ impl App {
                 };
                 self.mode = Mode::Confirm {
                     question,
-                    then: act(Verb::Remove { force: row.running }),
+                    then: act(Verb::Remove { force }),
                 };
                 Effect::None
             }
@@ -854,14 +975,14 @@ impl App {
     }
 
     fn confirm_prune(&mut self) -> Effect {
-        let question = match self.tab {
-            Kind::Containers => "Remove all stopped containers?",
-            Kind::Images => "Remove all images that no container uses?",
-            Kind::Volumes => "Remove all volumes that no container uses, with their data?",
-            Kind::Networks => "Remove all networks that no container uses?",
-        };
+        let question = self.appearance.text(match self.tab {
+            Kind::Containers => "confirm.pruneContainers",
+            Kind::Images => "confirm.pruneImages",
+            Kind::Volumes => "confirm.pruneVolumes",
+            Kind::Networks => "confirm.pruneNetworks",
+        });
         self.mode = Mode::Confirm {
-            question: question.into(),
+            question,
             then: Effect::Prune(self.tab),
         };
         Effect::None
@@ -881,6 +1002,8 @@ impl App {
             Mode::Confirm { .. } => vec![("y", "yes"), ("n", "no")],
             Mode::Input { .. } => vec![("Enter", "ok"), ("Esc", "cancel")],
             Mode::Pull(_) => vec![
+                ("F2", "registries"),
+                ("F3", "login"),
                 ("Tab", "from"),
                 ("↑↓", "choose"),
                 ("Enter", "pull"),
@@ -906,6 +1029,10 @@ impl App {
                 if self.tab != Kind::Containers {
                     keys.push(("⏎", "inspect"));
                 }
+                keys.insert(0, ("a", "actions"));
+                if self.tab == Kind::Volumes {
+                    keys.push(("v", "create"));
+                }
                 keys.extend([("/", "find"), ("?", "help"), ("q", "quit")]);
                 keys
             }
@@ -913,7 +1040,7 @@ impl App {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub mod tests {
     use super::*;
     use podbag::client::DockerTarget;
@@ -932,10 +1059,12 @@ pub mod tests {
             "podbag".into(),
             "unix:///run/user/1000/podbag/docker.sock".into(),
         );
+        app.appearance.language = "en".into();
         app.now = 1_700_003_600;
         let containers: Vec<ContainerSummary> =
             serde_json::from_value(podbag::client::fake::containers_json()).unwrap();
         app.set_lists(Lists {
+            errors: Default::default(),
             containers,
             images: vec![ImageSummary {
                 id: "sha256:2222222222222222".into(),
@@ -956,6 +1085,38 @@ pub mod tests {
             .unwrap(),
         });
         app
+    }
+
+    #[test]
+    fn dashboard_and_volume_creation_work_with_empty_lists() {
+        let mut app = App::new("podbag".into(), String::new());
+        assert_eq!(app.on_key(key('a')), Effect::Dashboard);
+        app.on_key(key('3'));
+        assert_eq!(app.on_key(key('v')), Effect::CreateVolume);
+        assert_eq!(app.on_key(code(KeyCode::F(2))), Effect::Dashboard);
+    }
+    #[test]
+    fn removing_a_paused_container_requests_force_after_confirmation() {
+        let mut app = sample();
+        app.lists.containers[0].state = "paused".into();
+        assert_eq!(app.on_key(key('d')), Effect::None);
+        assert!(matches!(
+            app.on_key(key('y')),
+            Effect::Act {
+                verb: Verb::Remove { force: true },
+                ..
+            }
+        ));
+    }
+    #[test]
+    fn image_search_includes_secondary_tags() {
+        let mut app = sample();
+        app.lists.images[0].repo_tags.push("demo:stable".into());
+        app.on_key(key('2'));
+        for c in "/stable".chars() {
+            app.on_key(key(c));
+        }
+        assert_eq!(app.rows(Kind::Images).len(), 1);
     }
 
     #[test]

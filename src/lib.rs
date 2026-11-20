@@ -26,6 +26,8 @@ mod credentials;
 #[cfg(unix)]
 #[doc(hidden)]
 pub mod cri;
+#[cfg(feature = "dashboard")]
+pub mod dashboard;
 #[doc(hidden)]
 pub mod diagnose;
 #[doc(hidden)]
@@ -86,6 +88,7 @@ pub mod upgrade;
 #[doc(hidden)]
 pub mod vm;
 pub mod volume;
+pub mod volume_lesson;
 /// podbag on Windows: the CLI that runs commands in podbag's WSL2 distribution.
 #[cfg(windows)]
 #[doc(hidden)]
