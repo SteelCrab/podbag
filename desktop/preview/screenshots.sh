@@ -5,7 +5,7 @@
 set -euo pipefail
 
 out="${1:?usage: screenshots.sh <output-folder> [views] [languages] [themes]}"
-views="${2:-containers images volumes networks detail logs inspect settings empty offline vm confirm pull}"
+views="${2:-containers images volumes networks pods services detail logs inspect settings empty offline vm confirm pull}"
 langs="${3:-en ko}"
 themes="${4:-light dark}"
 here="$(cd "$(dirname "$0")/.." && pwd)"

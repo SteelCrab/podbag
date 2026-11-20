@@ -5,6 +5,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod kubernetes;
 mod settings;
 mod strings;
 
@@ -507,6 +508,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             engine,
             list,
+            kubernetes::kube_list,
             inspect,
             act,
             remove,

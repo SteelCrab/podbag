@@ -38,6 +38,15 @@
   const lists = { containers, images, volumes, networks };
   if (view === "empty") { lists.containers = []; lists.volumes = []; }
 
+  const kube = {
+    pods: [
+      { metadata: { name: "web", namespace: "default" }, spec: { containers: [{ name: "nginx" }], nodeName: "worker-1" }, status: { phase: "Running", containerStatuses: [{ name: "nginx", ready: true }] } },
+      { metadata: { name: "web", namespace: "staging" }, spec: { containers: [{ name: "nginx" }] }, status: { phase: "Pending" } },
+    ],
+    services: [
+      { metadata: { name: "frontend", namespace: "default" }, spec: { type: "NodePort", clusterIP: "10.43.0.80", ports: [{ port: 80, nodePort: 30080, protocol: "TCP" }] } },
+    ],
+  };
   const engine = {
     platform: "macos",
     endpoint: "unix:///Users/me/.podbag/run/docker.sock",
@@ -60,6 +69,10 @@
   const commands = {
     engine: () => engine,
     list: ({ kind }) => lists[kind],
+    kube_list: ({ kind, allNamespaces }) => ({
+      context: "dev", namespace: "default",
+      items: kube[kind].filter((item) => allNamespaces || item.metadata.namespace === "default"),
+    }),
     inspect: ({ kind, id }) => ({ Id: id, Name: "/web", Created: "2026-11-20T01:12:00Z", State: { Status: "running", Running: true, Pid: 4182, StartedAt: "2026-11-20T01:12:01Z" }, Config: { Image: "nginx:alpine", Cmd: ["nginx", "-g", "daemon off;"], Env: ["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "NGINX_VERSION=1.27.3"], Tty: false }, HostConfig: { PortBindings: { "80/tcp": [{ HostIp: "", HostPort: "8080" }] }, RestartPolicy: { Name: "no" } }, NetworkSettings: { IPAddress: "10.77.0.2" }, Kind: kind }),
     act: () => null,
     remove: () => null,
@@ -95,6 +108,8 @@
     const app = window.podbag;
     await app.ready;
     const scenes = {
+      pods: () => app.go("kubernetes"),
+      services: () => app.go("kubernetes", "services"),
       images: () => app.go("images"),
       volumes: () => app.go("volumes"),
       networks: () => app.go("networks"),

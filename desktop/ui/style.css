@@ -137,6 +137,13 @@ body {
 .nav-item[aria-current="page"] { background: var(--accent-soft); color: var(--accent-text); font-weight: 600; }
 .count { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .nav-item[aria-current="page"] .count { color: var(--accent-text); }
+.kube-nav-header { display: flex; align-items: center; }
+.kube-nav-header .nav-item { flex: 1; min-width: 0; }
+.kube-toggle .icon { width: 14px; height: 14px; transform: rotate(180deg); }
+.kube-toggle[aria-expanded="true"] .icon { transform: rotate(-90deg); }
+.kube-subnav { margin: 2px 0 0 18px; padding-inline-start: 10px; border-inline-start: 1px solid var(--line); }
+.kube-subnav[hidden] { display: none; }
+.kube-subnav .nav-item { padding-block: 5px; }
 .spacer { flex: 1; }
 .engine { display: flex; align-items: center; gap: 8px; padding: 10px 10px 2px; margin-top: 6px; border-top: 1px solid var(--line); color: var(--ink-2); font-size: 13px; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
@@ -265,7 +272,7 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; backg
   background: none; color: var(--ink-2); font: inherit; font-weight: 500; cursor: pointer;
 }
 .tab:hover { color: var(--ink); }
-.tab[aria-selected="true"] { color: var(--accent-text); border-bottom-color: var(--accent); }
+.tab[aria-selected="true"], .tab[aria-pressed="true"] { color: var(--accent-text); border-bottom-color: var(--accent); }
 .panel { flex: 1; min-height: 0; overflow: auto; padding: 18px 20px 24px; }
 .panel-fill { display: flex; flex-direction: column; gap: 8px; overflow: hidden; }
 .panel-title { font-size: 14px; margin: 22px 0 8px; }
@@ -280,6 +287,17 @@ pre.json, pre.logs {
 }
 .check, .radio { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; }
 input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
+
+/* Kubernetes resources */
+.kube-tabs { align-items: center; flex-wrap: wrap; }
+.kube-tabs .check { margin-inline-start: auto; padding-block: 6px; }
+.kube-scope { margin: 10px 20px 0; font-size: 12.5px; overflow-wrap: anywhere; }
+.kube-scope:empty { display: none; }
+.kube-list { min-width: 510px; }
+.kube-list th:first-child { width: 27%; }
+.kube-inspect { width: min(720px, calc(100vw - 48px)); }
+.kube-inspect pre { max-height: 60vh; }
+.kube-inspect h2, .empty .error-text { overflow-wrap: anywhere; }
 
 /* ---- settings ---- */
 .settings { display: grid; gap: 14px; align-content: start; max-width: 640px; padding-top: 20px; }

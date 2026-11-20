@@ -10,6 +10,7 @@ const API = (() => {
   return {
     engine: (start) => invoke("engine", { start: !!start }),
     list: (kind) => invoke("list", { kind }),
+    kubeList: (kind, allNamespaces) => invoke("kube_list", { kind, allNamespaces }),
     inspect: (kind, id) => invoke("inspect", { kind, id }),
     act: (id, action) => invoke("act", { id, action }),
     remove: (kind, id, force) => invoke("remove", { kind, id, force: !!force }),
