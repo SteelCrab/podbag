@@ -4,6 +4,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use podbag::dashboard::app_update::{self, Installer};
 use podbag::dashboard::cli;
 use podbag::dashboard::cluster_migration;
 mod commands;
@@ -62,6 +63,8 @@ struct AppState {
     /// The engine this window uses, and its client.
     session: Mutex<Arc<Session>>,
     podbag: PathBuf,
+    /// How this app updates itself; None when it did not come from a package.
+    installer: Option<Installer>,
     /// The engine's version (`podbag --version`), once asked.
     engine_version: Mutex<Option<String>>,
     version_asked: AtomicBool,
@@ -113,6 +116,10 @@ impl AppState {
             migration: Mutex::new(()),
             session: Mutex::new(Arc::new(Session::new(1, target))),
             podbag,
+            installer: std::env::current_exe()
+                .and_then(|e| e.canonicalize())
+                .ok()
+                .and_then(|e| Installer::detect(&e)),
             engine_version: Mutex::new(None),
             version_asked: AtomicBool::new(false),
             docker: Mutex::new(None),
@@ -158,11 +165,31 @@ impl AppState {
         lock(&self.engine_version).clone()
     }
 
-    /// A newer release, as the last check found it (a file; no network).
+    /// A newer release, as the last check found it (a file; no network). A packaged app
+    /// compares its own version: its engine comes with it.
     fn known_update(&self) -> Option<String> {
         let (_, latest) = cli::saved_check(&update_file()?)?;
-        let current = lock(&self.engine_version).clone()?;
+        let current = if self.installer.is_some() {
+            env!("CARGO_PKG_VERSION").to_string()
+        } else {
+            lock(&self.engine_version).clone()?
+        };
         cli::is_newer(&latest, &current).then_some(latest)
+    }
+
+    /// A `podbag` for the terminal that this app's package does not update.
+    fn terminal_podbag(&self) -> Option<PathBuf> {
+        self.installer.as_ref()?;
+        podbag::client::terminal_podbag(&self.podbag)
+    }
+
+    /// The `podbag` that Update upgrades with `podbag upgrade`.
+    fn cli_to_upgrade(&self) -> Option<PathBuf> {
+        cli::cli_to_upgrade(
+            &self.podbag,
+            self.installer.is_some(),
+            self.terminal_podbag().as_deref(),
+        )
     }
 
     fn language(&self) -> &'static str {
@@ -630,14 +657,15 @@ fn open_terminal(state: State<'_, AppState>, what: String) -> Result<(), String>
             .then_some(())
             .ok_or_else(String::new),
         "upgrade" if !cfg!(windows) => {
+            let podbag = state.cli_to_upgrade().ok_or("no podbag to update")?;
             let argv = [
                 "sudo".to_string(),
-                state.podbag.display().to_string(),
+                podbag.display().to_string(),
                 "upgrade".to_string(),
             ];
             commands::open_terminal(Some(&argv))
                 .then_some(())
-                .ok_or_else(|| cli::admin_command(&state.podbag))
+                .ok_or_else(|| cli::admin_command(&podbag))
         }
         _ => Err(format!("unknown terminal {what}")),
     }
@@ -733,22 +761,71 @@ fn updates(app: AppHandle, state: State<'_, AppState>, check: String) -> cli::Up
         _ => cli::Check::Never,
     };
     let file = update_file();
-    let u = cli::updates(&state.podbag, file.as_deref(), check, unix_now());
+    let mut u = cli::updates(&state.podbag, file.as_deref(), check, unix_now());
+    cli::plan(
+        &mut u,
+        state.installer.as_ref().map(Installer::name),
+        state.terminal_podbag().as_deref(),
+    );
     *lock(&state.engine_version) = u.engine.clone();
     state.version_asked.store(true, Ordering::SeqCst);
     update_tray(&app);
     u
 }
 
-/// `podbag upgrade --yes`.
+/// `podbag upgrade --yes [--version V]` on the `podbag` that Update upgrades: in a
+/// packaged app, a separate one for the terminal (the app's own comes with the app).
 #[tauri::command(async)]
-fn upgrade(app: AppHandle, state: State<'_, AppState>) -> cli::Upgraded {
-    let done = cli::upgrade(&state.podbag);
-    if done.ok {
+fn upgrade(app: AppHandle, state: State<'_, AppState>, version: Option<String>) -> cli::Upgraded {
+    let Some(podbag) = state.cli_to_upgrade() else {
+        return cli::Upgraded {
+            ok: true,
+            ..cli::Upgraded::default()
+        };
+    };
+    let done = cli::upgrade_to(&podbag, version.as_deref());
+    if done.ok && podbag == state.podbag {
         *lock(&state.engine_version) = cli::engine_version(&state.podbag);
         update_tray(&app);
     }
     done
+}
+
+/// Install the app's package of release `version` (None: the latest) and start the new
+/// app. Its own `podbag` comes with it.
+#[tauri::command(async)]
+fn update_app(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    version: Option<String>,
+) -> Result<(), String> {
+    let installer = state
+        .installer
+        .clone()
+        .ok_or("This app was not installed from a package, so it cannot update itself.")?;
+    let wanted = match version.as_deref() {
+        Some(v) => Some(
+            podbag::upgrade::Version::parse(v).ok_or_else(|| format!("{v:?} is not a version"))?,
+        ),
+        None => None,
+    };
+    let current = podbag::upgrade::Version::parse(env!("CARGO_PKG_VERSION"))
+        .ok_or("this app has no version")?;
+    let restart = app_update::install(&installer, wanted.as_ref(), &current)?;
+    state.current().stop_streams();
+    restart.spawn()?;
+    // Answer the window first; then end, so the new app (or the installer) can start.
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(500));
+        app.exit(0);
+    });
+    Ok(())
+}
+
+#[tauri::command(async)]
+fn open_releases() -> Result<(), String> {
+    let url = format!("{}/releases/latest", env!("CARGO_PKG_REPOSITORY"));
+    open::that_detached(url).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1266,6 +1343,8 @@ fn main() {
             set_engine,
             updates,
             upgrade,
+            update_app,
+            open_releases,
             search,
             registries,
             registry_login,

@@ -1673,17 +1673,36 @@ function renderUpdates() {
   check.disabled = checking || upgrading;
   const install = button("update", upgrading ? t("update.installing") : t("update.install"), runUpgrade, "primary");
   install.disabled = !u.newer || checking || upgrading;
-  section.querySelector(".setting-value").textContent = u.newer && u.latest ? t("status.available", { version: u.latest }) : u.engine || "";
+  const shown = u.installer ? u.app : u.engine;
+  section.querySelector(".setting-value").textContent = u.newer && u.latest ? t("status.available", { version: u.latest }) : shown || "";
   put(section.querySelector(".setting-body"),
     h("dl", { class: "fields" },
-      field(t("settings.engineVersion"), u.engine),
       field(t("settings.appVersion"), u.app),
+      field(t("settings.engineVersion"), u.engine),
+      u.terminal ? field(t("settings.terminalVersion"), `${u.terminalVersion || "?"} · ${u.terminal}`) : null,
       field(t("settings.latest"), u.latest),
       field(t("settings.checked"), u.checked ? ago(u.checked) : t("settings.never"))),
     status ? h("p", { class: u.error ? "error-text" : u.newer ? "update-note" : "hint", role: "status", text: status }) : null,
     h("div", { class: "buttons-row" }, check, install),
     upgradeResult(),
-    h("p", { class: "hint", text: t("update.appNote") }));
+    appNote(u));
+}
+
+// What Update does with the app: a packaged app installs its new package (with its own
+// podbag); a build of its own cannot.
+function appNote(u) {
+  if (u.installer) {
+    return h("p", { class: "hint", text: u.terminal ? t("update.appSelfTerminal") : t("update.appSelf") });
+  }
+  return h("div", {},
+    h("p", { class: "hint", text: t("update.appManual") }),
+    h("div", { class: "buttons-row" }, button("globe", t("update.openReleases"), async () => {
+      try {
+        await API.openReleases();
+      } catch (e) {
+        toast(String(e), true);
+      }
+    })));
 }
 
 function upgradeResult() {
@@ -1691,36 +1710,68 @@ function upgradeResult() {
   if (!r || r.ok) return null;
   if (r.needsAdmin) {
     const windows = S.engine && S.engine.platform === "windows";
+    const u = S.updates || {};
+    // The terminal's podbag waits for the password; the app can still update now.
+    const appNow = u.appNewer && u.installer
+      ? button("update", t("update.appNow"), installApp, "primary")
+      : null;
+    if (appNow) appNow.disabled = upgrading;
     return h("div", { class: "upgrade-result" },
       h("p", { text: windows ? t("update.needsAdminWindows") : t("update.needsAdmin") }),
       codeLine(r.command),
-      windows ? null : h("div", { class: "buttons-row" }, button("shell", t("update.openTerminal"), async () => {
-        try {
-          await API.openTerminal("upgrade");
-        } catch {
-          toast(t("terminal.none"), true);
-        }
-      })));
+      h("div", { class: "buttons-row" },
+        windows ? null : button("shell", t("update.openTerminal"), async () => {
+          try {
+            await API.openTerminal("upgrade");
+          } catch {
+            toast(t("terminal.none"), true);
+          }
+        }),
+        appNow));
   }
   return h("div", { class: "upgrade-result" },
     h("p", { class: "error-text", text: t("update.failed") }),
     r.output ? h("pre", { class: "json", text: r.output }) : null);
 }
 
+// Update: the terminal's podbag first (to the same version), then the app, which
+// starts again.
 async function runUpgrade() {
+  const u = S.updates || {};
   upgrading = true;
   S.upgrade = null;
   renderUpdates();
-  try {
-    S.upgrade = await API.upgrade();
-  } catch (e) {
-    S.upgrade = { ok: false, output: String(e) };
+  if (u.cliNewer) {
+    try {
+      S.upgrade = await API.upgrade(u.latest);
+    } catch (e) {
+      S.upgrade = { ok: false, output: String(e) };
+    }
+    if (!S.upgrade.ok) {
+      upgrading = false;
+      renderUpdates();
+      return;
+    }
+  }
+  if (u.appNewer && u.installer) {
+    await installApp();
+    return;
   }
   upgrading = false;
-  if (S.upgrade.ok) {
-    toast(t("update.done"));
-    await loadUpdates("never");
-  } else {
+  toast(t("update.done"));
+  await loadUpdates("never");
+}
+
+// Install the app's new package. On success the app ends and the new one starts.
+async function installApp() {
+  upgrading = true;
+  renderUpdates();
+  try {
+    await API.updateApp((S.updates || {}).latest);
+    toast(t("update.restarting"));
+  } catch (e) {
+    upgrading = false;
+    S.upgrade = { ok: false, output: String(e) };
     renderUpdates();
   }
 }

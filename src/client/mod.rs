@@ -17,7 +17,7 @@ mod wire;
 
 pub use choice::{Choice, Target, find_docker_cli, ui_dir};
 pub use dockercli::{DockerTarget, PODBAG_CONTEXT, previous_context, switch_back, use_podbag};
-pub use endpoint::{Closer, Endpoint, REQUEST_TIMEOUT, podbag_program};
+pub use endpoint::{Closer, Endpoint, REQUEST_TIMEOUT, podbag_program, terminal_podbag};
 pub use registries::{Location, login, login_state, logins, registry_auth};
 pub use wire::Demux;
 

@@ -1,4 +1,5 @@
 //! Operations shared by the terminal and desktop dashboards.
+pub mod app_update;
 pub mod cli;
 pub mod cluster_migration;
 pub mod kubernetes;
