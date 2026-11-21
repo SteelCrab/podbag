@@ -1,4 +1,4 @@
-//! Steps and verification for the beginner modules that use the practice container engine.
+//! Steps and verification for modules that use the practice container engine.
 use super::{Module, containers, gui};
 use crate::client::{ContainerSummary, Kind, VolumeSummary};
 use serde::{Deserialize, Serialize};
@@ -14,10 +14,23 @@ pub const ACTIVE: &str = "active-course-session";
 const STATE: &str = "run/course.json";
 const IMAGE: &str = containers::IMAGE;
 const NOTE: &str = "hello from app-a";
+const RECOVERY_NAME: &str = "lab-web";
+const MISSING_TITLE: &str = "SITE_TITLE is required";
+const RECOVERED_TITLE: &str = "Recovered Podbag site";
+
+fn recovery_command(options: &str) -> String {
+    let startup = r#"if [ -z "$SITE_TITLE" ]; then echo "SITE_TITLE is required" >&2; exit 1; fi; mkdir -p /www && printf "%s\n" "$SITE_TITLE" > /www/index.html && exec httpd -f -p 8080 -h /www"#;
+    format!("podbag run -d --name {RECOVERY_NAME} {options} {IMAGE} sh -c '{startup}'")
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Step {
     RunWeb,
+    RunFailed,
+    InspectFailed,
+    ReadRecoveryLogs,
+    RemoveFailed,
+    RunFixed,
     Ports(&'static str),
     Browser(&'static str),
     Stop(&'static str),
@@ -72,11 +85,25 @@ const SERVICE: &[Step] = &[
     Step::Finish,
 ];
 
+const RECOVERY: &[Step] = &[
+    Step::RunFailed,
+    Step::InspectFailed,
+    Step::ReadRecoveryLogs,
+    Step::RemoveFailed,
+    Step::RunFixed,
+    Step::Ports(RECOVERY_NAME),
+    Step::Browser(RECOVERY_NAME),
+    Step::Stop(RECOVERY_NAME),
+    Step::Remove(RECOVERY_NAME),
+    Step::Finish,
+];
+
 pub fn steps(module: Module) -> &'static [Step] {
     match module {
         Module::Web => WEB,
         Module::Persistence => PERSISTENCE,
         Module::Service => SERVICE,
+        Module::Recovery => RECOVERY,
         _ => &[],
     }
 }
@@ -85,6 +112,7 @@ fn default_port(module: Module) -> u16 {
     match module {
         Module::Web => 18080,
         Module::Service => 18081,
+        Module::Recovery => 18082,
         _ => 0,
     }
 }
@@ -93,6 +121,11 @@ impl Step {
     fn key(self) -> &'static str {
         match self {
             Self::RunWeb => "runWeb",
+            Self::RunFailed => "runFailed",
+            Self::InspectFailed => "inspectFailed",
+            Self::ReadRecoveryLogs => "readRecoveryLogs",
+            Self::RemoveFailed => "removeFailed",
+            Self::RunFixed => "runFixed",
             Self::Ports("site-v2") => "portsReplacement",
             Self::Ports(_) => "ports",
             Self::Browser("site-v2") => "browserReplacement",
@@ -122,6 +155,12 @@ impl Step {
             Self::RunWeb => format!(
                 "podbag run -d --name lab-web {publish} {IMAGE} sh -c 'mkdir -p /www && printf \"%s\\n\" \"Podbag Training\" > /www/index.html && exec httpd -f -p 8080 -h /www'"
             ),
+            Self::RunFailed => recovery_command("--network none"),
+            Self::ReadRecoveryLogs => format!("podbag logs {RECOVERY_NAME}"),
+            Self::RemoveFailed => format!("podbag rm {RECOVERY_NAME}"),
+            Self::RunFixed => {
+                recovery_command(&format!("{publish} -e 'SITE_TITLE={RECOVERED_TITLE}'"))
+            }
             Self::RunFirst => format!(
                 "podbag run -d --name site-v1 {publish} -v site-data:/site {IMAGE} sh -c 'printf \"%s\\n\" \"My Podbag site\" > /site/index.html && exec httpd -f -p 8080 -h /site'"
             ),
@@ -146,9 +185,18 @@ impl Step {
     pub fn verify_cli(self, root: &Path, output: &[u8]) -> io::Result<()> {
         let client = containers::client(root);
         let verified = match self {
-            Self::RunWeb | Self::RunFirst | Self::RunReplacement => {
+            Self::RunFailed => {
+                // Detach returns after launch. The normal wait endpoint supplies the actual exit code.
+                let reply = client
+                    .call("POST", &format!("/containers/{RECOVERY_NAME}/wait"), None)
+                    .map_err(io::Error::other)?;
+                reply["StatusCode"].as_i64() == Some(1)
+            }
+            Self::ReadRecoveryLogs => std::str::from_utf8(output)
+                .is_ok_and(|text| text.lines().any(|line| line.trim() == MISSING_TITLE)),
+            Self::RunWeb | Self::RunFirst | Self::RunReplacement | Self::RunFixed => {
                 let name = match self {
-                    Self::RunWeb => "lab-web",
+                    Self::RunWeb | Self::RunFixed => "lab-web",
                     Self::RunFirst => "site-v1",
                     _ => "site-v2",
                 };
@@ -173,6 +221,11 @@ impl Step {
                 }),
             Self::Read => std::str::from_utf8(output)
                 .is_ok_and(|text| text.trim_end_matches(['\r', '\n']) == NOTE),
+            Self::RemoveFailed => client
+                .containers()
+                .map_err(io::Error::other)?
+                .iter()
+                .all(|row| row.name() != RECOVERY_NAME),
             Self::Remove(name) => client
                 .containers()
                 .map_err(io::Error::other)?
@@ -331,6 +384,7 @@ pub struct Snapshot {
     detail: Option<serde_json::Value>,
     web: Option<Web>,
     stop: Option<&'static str>,
+    inspect_container: Option<&'static str>,
     remove_volume: Option<&'static str>,
 }
 
@@ -378,6 +432,11 @@ pub fn view(
     let step = attempt.step()?;
     match (action, step) {
         ("status", _) => {}
+        ("inspect-failed", Step::InspectFailed)
+            if row(RECOVERY_NAME)?.id == target && row(RECOVERY_NAME)?.state == "exited" =>
+        {
+            attempt.advance(&root)?;
+        }
         ("ports", Step::Ports(name))
             if published(row(name)?, attempt.port) && row(name)?.id == target =>
         {
@@ -388,10 +447,10 @@ pub fn view(
         {
             check_page(
                 attempt.port,
-                if name == "lab-web" {
-                    "Podbag Training"
-                } else {
-                    "My Podbag site"
+                match (attempt.module.as_str(), name) {
+                    ("web-service-recovery", _) => RECOVERED_TITLE,
+                    (_, "lab-web") => "Podbag Training",
+                    _ => "My Podbag site",
                 },
             )
             .map_err(|e| {
@@ -465,6 +524,7 @@ pub fn view(
         } else {
             None
         },
+        inspect_container: (step == Step::InspectFailed).then_some(RECOVERY_NAME),
         remove_volume: if let Step::Delete(name) = step {
             Some(name)
         } else {
@@ -476,6 +536,21 @@ pub fn view(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovery_steps_require_the_missing_title_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let logs = Step::ReadRecoveryLogs;
+        assert!(
+            logs.verify_cli(dir.path(), b"SITE_TITLE is required\n")
+                .is_ok()
+        );
+        assert!(logs.verify_cli(dir.path(), b"Listening on 8080\n").is_err());
+        let steps = instructions(Module::Recovery);
+        let keys: std::collections::HashSet<_> = steps.iter().map(|step| step.key).collect();
+        assert_eq!(keys.len(), steps.len());
+        assert!(keys.contains("removeFailed") && keys.contains("remove"));
+    }
 
     #[test]
     fn a_used_port_updates_the_command_in_this_attempt() {

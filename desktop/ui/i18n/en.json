@@ -1,4 +1,9 @@
 {
+  "training.course.runFailed": "Run the server with a missing setting",
+  "training.course.inspectFailed": "Inspect the exited container in Desktop",
+  "training.course.readRecoveryLogs": "Read the startup error in the CLI",
+  "training.course.removeFailed": "Remove the failed container in the CLI",
+  "training.course.runFixed": "Run the server with the missing setting supplied",
   "training.course.runWeb": "Run the web server",
   "training.course.ports": "Check the ports in Practice containers",
   "training.course.portsReplacement": "Check the replacement server ports",

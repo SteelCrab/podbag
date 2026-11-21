@@ -250,7 +250,7 @@ fn session(
             volume_lesson::course::Attempt::start(dir, module)?;
         }
         registration = match module {
-            Module::Web | Module::Persistence | Module::Service => {
+            Module::Web | Module::Persistence | Module::Service | Module::Recovery => {
                 Some(volume_lesson::gui::Registration::open_for(
                     library,
                     dir,

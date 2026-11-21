@@ -193,9 +193,14 @@ function renderPracticeContainers(main) {
       return;
     }
     put(resources, state.containers.length
-      ? resourceTable("containers", state.containers, row => { detailId = row.Id; render(); },
+      ? resourceTable("containers", state.containers, openContainer,
         row => h("div", { class: "actions" }, resourceAction(row)))
       : h("p", { class: "nothing", text: t("empty.containers.title") }));
+  }
+  function openContainer(row) {
+    detailId = row.Id;
+    render();
+    if (state.inspect_container === containerName(row)) change("inspect-failed", row.Id, state.session);
   }
   function renderPorts(detail) {
     const { web, session } = state;

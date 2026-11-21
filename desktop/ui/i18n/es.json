@@ -1,4 +1,9 @@
 {
+  "training.course.runFailed": "Inicia el servidor con un ajuste faltante",
+  "training.course.inspectFailed": "Inspecciona el contenedor detenido en Desktop",
+  "training.course.readRecoveryLogs": "Lee el error de inicio en la CLI",
+  "training.course.removeFailed": "Elimina el contenedor que falló en la CLI",
+  "training.course.runFixed": "Inicia el servidor con el ajuste requerido",
   "training.course.runWeb": "Ejecuta el servidor web",
   "training.course.ports": "Consulta los puertos en Contenedores de práctica",
   "training.course.portsReplacement": "Consulta los puertos del servidor de reemplazo",

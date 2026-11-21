@@ -1,4 +1,9 @@
 {
+  "training.course.runFailed": "Patakbuhin ang server na may kulang na setting",
+  "training.course.inspectFailed": "Tingnan ang humintong container sa Desktop",
+  "training.course.readRecoveryLogs": "Basahin ang error sa pagsisimula sa CLI",
+  "training.course.removeFailed": "Burahin ang pumalyang container sa CLI",
+  "training.course.runFixed": "Patakbuhin ang server gamit ang kailangang setting",
   "training.course.runWeb": "Patakbuhin ang web server",
   "training.course.ports": "Tingnan ang mga port sa Mga practice container",
   "training.course.portsReplacement": "Tingnan ang mga port ng kapalit na server",

@@ -1,4 +1,9 @@
 {
+  "training.course.runFailed": "설정이 빠진 웹 서버 실행하기",
+  "training.course.inspectFailed": "Desktop에서 종료된 컨테이너 확인하기",
+  "training.course.readRecoveryLogs": "CLI에서 시작 실패 로그 읽기",
+  "training.course.removeFailed": "CLI에서 종료된 컨테이너 삭제하기",
+  "training.course.runFixed": "환경 변수를 설정해 서버 다시 실행하기",
   "training.course.runWeb": "웹 서버 실행하기",
   "training.course.ports": "실습 컨테이너에서 포트 확인하기",
   "training.course.portsReplacement": "교체 서버의 포트 확인하기",

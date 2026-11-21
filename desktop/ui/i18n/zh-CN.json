@@ -1,4 +1,9 @@
 {
+  "training.course.runFailed": "在缺少设置时启动服务器",
+  "training.course.inspectFailed": "在 Desktop 中查看已退出的容器",
+  "training.course.readRecoveryLogs": "在 CLI 中读取启动错误日志",
+  "training.course.removeFailed": "在 CLI 中删除失败的容器",
+  "training.course.runFixed": "补上缺少的设置并启动服务器",
   "training.course.runWeb": "运行 Web 服务器",
   "training.course.ports": "在实验容器中查看端口",
   "training.course.portsReplacement": "查看替换服务器的端口",

@@ -1,4 +1,9 @@
 {
+  "training.course.runFailed": "設定が足りない状態でサーバーを起動する",
+  "training.course.inspectFailed": "Desktop で終了したコンテナを確認する",
+  "training.course.readRecoveryLogs": "CLI で起動失敗のログを読む",
+  "training.course.removeFailed": "CLI で失敗したコンテナを削除する",
+  "training.course.runFixed": "不足している設定を追加してサーバーを起動する",
   "training.course.runWeb": "ウェブサーバーを起動する",
   "training.course.ports": "実習コンテナでポートを確認する",
   "training.course.portsReplacement": "交換後のサーバーのポートを確認する",

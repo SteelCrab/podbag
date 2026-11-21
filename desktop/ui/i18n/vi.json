@@ -1,4 +1,9 @@
 {
+  "training.course.runFailed": "Chạy máy chủ khi thiếu cấu hình",
+  "training.course.inspectFailed": "Kiểm tra container đã thoát trong Desktop",
+  "training.course.readRecoveryLogs": "Đọc lỗi khởi động trong CLI",
+  "training.course.removeFailed": "Xóa container gặp lỗi trong CLI",
+  "training.course.runFixed": "Bổ sung cấu hình và chạy lại máy chủ",
   "training.course.runWeb": "Chạy máy chủ web",
   "training.course.ports": "Kiểm tra cổng trong Container thực hành",
   "training.course.portsReplacement": "Kiểm tra cổng máy chủ thay thế",

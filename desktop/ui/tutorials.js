@@ -19,6 +19,7 @@ const TRAINING_FORMATS = new Map([
   ["podbag-web-basics-v1", "web-basics"],
   ["podbag-volume-persistence-v1", "volume-persistence"],
   ["podbag-web-service-lifecycle-v1", "web-service-lifecycle"],
+  ["podbag-web-service-recovery-v1", "web-service-recovery"],
   [GUI_VOLUME_FORMAT, "volume-basics"],
   ["podbag-cli-tui-volumes-v1", "tui-volumes"],
 ]);
