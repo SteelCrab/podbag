@@ -341,7 +341,17 @@ mod tests {
                 "#!/bin/sh\necho \"$*\" >> '{}'\ncase \"$*\" in\n{body}\n*) echo \"podbag: unknown $*\" >&2; exit 2;;\nesac\n",
                 log.display()
             );
-            std::fs::write(&bin, script).unwrap();
+            // The script is put in place by `cp`, not written here: a test thread that
+            // forks while this process holds the script open for writing would make
+            // running it fail with "Text file busy" (ETXTBSY).
+            let text = dir.path().join("podbag.txt");
+            std::fs::write(&text, script).unwrap();
+            let copied = std::process::Command::new("cp")
+                .arg(&text)
+                .arg(&bin)
+                .status()
+                .unwrap();
+            assert!(copied.success());
             std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
             Fake { dir, bin }
         }
