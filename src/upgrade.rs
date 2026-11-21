@@ -146,14 +146,18 @@ pub fn asset_name(os: &str, arch: &str) -> Option<String> {
     }
 }
 
-/// This platform's release file. On a Mac, the one for its CPU: an Intel build that
-/// Rosetta runs on Apple silicon cannot start the VM, so it upgrades to the arm64 build.
-pub fn this_asset() -> Option<String> {
+/// This machine's CPU (Rust's names). On a Mac, its own: an Intel build that Rosetta runs
+/// on Apple silicon cannot start the VM, so updates bring the arm64 build.
+pub fn this_cpu() -> &'static str {
     #[cfg(target_os = "macos")]
-    let arch = crate::macos::cpu::mac();
+    return crate::macos::cpu::mac();
     #[cfg(not(target_os = "macos"))]
-    let arch = std::env::consts::ARCH;
-    asset_name(std::env::consts::OS, arch)
+    std::env::consts::ARCH
+}
+
+/// This platform's release file.
+pub fn this_asset() -> Option<String> {
+    asset_name(std::env::consts::OS, this_cpu())
 }
 
 /// The SHA-256 (lowercase hex) that a `SHA256SUMS` file gives for `name`. Lines are
