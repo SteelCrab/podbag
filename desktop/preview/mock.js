@@ -102,9 +102,12 @@
     uptimeSeconds: 7560, containers: 3, cpuPercent: 12.5, memoryUsedMiB: 1350, memoryTotalMiB: 3900,
     disk: { path: "/Users/me/.podbag/vm/disk.img", allocatedBytes: 5_800_000_000, sizeBytes: 68_719_476_736 },
   };
-  const update = view.startsWith("settings") || view === "update-admin" || view === "collapsed"
-    ? { engine: "0.1.0", app: "0.1.0", latest: "0.2.0", newer: true, checked: now - 3600, error: null }
-    : { engine: "0.1.0", app: "0.1.0", latest: "0.1.0", newer: false, checked: now - 3600, error: null };
+  // A packaged app with a separate podbag for the terminal; update-source: a build of its own.
+  const packaged = { installer: "macos-app", terminal: "/usr/local/bin/podbag", terminalVersion: "0.1.0", appNewer: true, cliNewer: true };
+  const source = { installer: null, terminal: null, terminalVersion: null, appNewer: false, cliNewer: true };
+  const update = view.startsWith("settings") || view.startsWith("update-") || view === "collapsed"
+    ? { engine: "0.1.0", app: "0.1.0", latest: "0.2.0", newer: true, checked: now - 3600, error: null, ...(view === "update-source" ? source : packaged) }
+    : { engine: "0.1.0", app: "0.1.0", latest: "0.1.0", newer: false, checked: now - 3600, error: null, ...packaged, appNewer: false, cliNewer: false };
 
   const hub = [
     { name: "nginx", description: "Official build of Nginx.", star_count: 21034, is_official: true },
@@ -208,6 +211,8 @@
     },
     updates: () => update,
     upgrade: () => ({ ok: false, code: 77, needsAdmin: true, command: "sudo /usr/local/bin/podbag upgrade", output: "podbag: cannot write to /usr/local/bin: it needs administrator rights" }),
+    update_app: () => null,
+    open_releases: () => null,
     open_terminal: () => null,
     search: ({ term }) => ({ supported: true, error: null, results: hub.filter((r) => r.name.includes(term)) }),
     registries: ({ hosts }) => {
@@ -287,6 +292,7 @@
       tutorials: () => app.go("tutorials"),
       "settings-vm": () => app.openSettingsSection("vm-settings"),
       "settings-updates": app.openUpdates,
+      "update-source": app.openUpdates,
       "update-admin": async () => { await app.openUpdates(); await app.runUpgrade(); },
       "docker-settings": () => app.openSettingsSection("engine-settings"),
       detail: () => app.openDetail("containers", containers[0].Id, "info"),

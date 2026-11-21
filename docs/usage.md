@@ -972,12 +972,25 @@ installed lessons are saved in the Podbag UI configuration directory.
   - When an environment variable (`PODBAG_VM_CPUS`, …) sets a value, the app says so.
   - Windows: the state, Start and Stop only. WSL's CPUs and memory are set for all
     distributions in `.wslconfig`. podbag does not change them.
-- Updates: podbag's version and the app's version. Check for updates. The app also
-  checks when the window opens, at most once a day. While the window is closed, it asks
-  nothing.
-  - Update podbag runs `podbag upgrade --yes`. When podbag's folder needs administrator
-    rights, the app shows the command (`sudo <path> upgrade`) with Copy and Open terminal.
-  - The desktop app has no installer yet. It cannot update itself.
+- Updates: the app's version, its podbag's version and, when there is one, the version
+  of a separate podbag for the terminal. Check for updates. The app also checks when the
+  window opens, at most once a day. While the window is closed, it asks nothing.
+  - Update podbag first updates a separate terminal podbag (for example from
+    `install.sh`) with `podbag upgrade --yes --version <latest>`. When its folder needs
+    administrator rights, the app shows the command (`sudo <path> upgrade`) with Copy,
+    Open terminal and Update the app now.
+  - Then an app from a release package installs its new package and starts again. The
+    package carries the app's own podbag, so both change together.
+    - The package must match the release's `SHA256SUMS`.
+    - macOS: the new `podbag.app` is unpacked next to the old one. Its version and
+      signature are checked, then it takes the old one's place. The app's folder must be
+      writable (`/Applications` is, for an administrator). A running VM keeps the old
+      engine until it restarts or powers off when idle.
+    - Linux: `pkexec apt-get install` (.deb) or `pkexec dnf install` (.rpm). The system
+      asks for the administrator password.
+    - Windows: the app ends, `msiexec` installs the .msi, and the new app starts.
+  - An app built from source cannot update itself. Update podbag then updates the podbag
+    it uses, and Open releases opens the release page.
 - The tray shows "Update available (x.y.z)…" when one is known. It opens Updates.
 
 #### Pull panel
@@ -1377,6 +1390,9 @@ podbag upgrade --version 0.1.0  # install this release; the only way to go back
 - `install.sh` puts podbag in `/usr/local/bin`. Writing there needs root, so run
   `sudo podbag upgrade`. podbag says so, with the exact command (exit code 77).
 - On Windows, use an administrator terminal when podbag is in a protected folder.
+- The podbag inside a Podbag Desktop package (`podbag.app`, `/usr/lib/podbag-desktop`,
+  `Podbag Desktop` in Program Files) is not upgraded on its own: update the app in
+  Settings > Updates. `--check` still works.
 
 ### After the update
 

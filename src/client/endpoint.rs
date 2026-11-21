@@ -235,6 +235,17 @@ pub fn podbag_program() -> PathBuf {
         .iter()
         .filter_map(|e| e.parent().map(Path::to_path_buf))
         .collect();
+    dirs.extend(search_dirs());
+    dirs.into_iter()
+        .map(|d| d.join(name))
+        .find(|p| p.is_file())
+        .unwrap_or_else(|| PathBuf::from(name))
+}
+
+/// Where a `podbag` for the terminal may be: `PATH`, then the usual install folders (an
+/// app started from the Dock or Finder gets a short `PATH`).
+fn search_dirs() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
     if let Some(path) = std::env::var_os("PATH") {
         dirs.extend(std::env::split_paths(&path));
     }
@@ -244,10 +255,27 @@ pub fn podbag_program() -> PathBuf {
         dirs.push(home.join(".cargo/bin"));
     }
     dirs.extend(["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin"].map(PathBuf::from));
-    dirs.into_iter()
+    dirs
+}
+
+/// The `podbag` a terminal runs, when it is another file than `app_cli` (the one that
+/// came with Podbag Desktop): a CLI installed on its own, which the app's package does
+/// not update. A link to a packaged CLI does not count.
+pub fn terminal_podbag(app_cli: &Path) -> Option<PathBuf> {
+    let name = if cfg!(windows) {
+        "podbag.exe"
+    } else {
+        "podbag"
+    };
+    let own = app_cli.canonicalize().ok();
+    search_dirs()
+        .into_iter()
         .map(|d| d.join(name))
         .find(|p| p.is_file())
-        .unwrap_or_else(|| PathBuf::from(name))
+        .filter(|p| {
+            let real = p.canonicalize().unwrap_or_else(|_| p.clone());
+            Some(&real) != own.as_ref() && crate::upgrade::package_of(&real).is_none()
+        })
 }
 
 /// Ends a connection from another thread: a read that waits on it returns.

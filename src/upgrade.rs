@@ -204,7 +204,8 @@ pub struct Release {
 }
 
 impl Release {
-    fn asset(&self, name: &str) -> Option<&str> {
+    /// The download URL of the file `name`.
+    pub fn asset(&self, name: &str) -> Option<&str> {
         self.assets
             .iter()
             .find(|(n, _)| n == name)
@@ -388,6 +389,79 @@ pub fn program_file() -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| format!("cannot find this program: {e}"))?;
     exe.canonicalize()
         .map_err(|e| format!("cannot find this program ({}): {e}", exe.display()))
+}
+
+/// Where a Podbag Desktop package put the app and the CLI that comes with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Package {
+    /// macOS: inside this `.app` bundle (`<app>/Contents/MacOS/`).
+    MacApp(PathBuf),
+    /// Linux: `/usr/lib/podbag-desktop/`, from the .deb or .rpm.
+    Linux,
+    /// Windows: `Podbag Desktop` in Program Files, from the .msi.
+    Windows,
+}
+
+/// The package that put `file` (the app or its CLI) in place, by its folder.
+pub fn package_of(file: &Path) -> Option<Package> {
+    let dir = file.parent()?;
+    if dir == Path::new("/usr/lib/podbag-desktop") {
+        return Some(Package::Linux);
+    }
+    if dir.ends_with("Contents/MacOS") {
+        let app = dir.parent()?.parent()?;
+        if app
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("app"))
+        {
+            return Some(Package::MacApp(app.to_path_buf()));
+        }
+    }
+    let windows_dir = dir
+        .file_name()
+        .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case("Podbag Desktop"));
+    (cfg!(windows) && windows_dir).then_some(Package::Windows)
+}
+
+/// Download the release's file `name` to `out` (a new file) and check it against the
+/// release's `SHA256SUMS`. On any error `out` is removed.
+pub fn download_checked(release: &Release, name: &str, out: &Path) -> Result<(), String> {
+    let v = &release.version;
+    let url = release
+        .asset(name)
+        .ok_or_else(|| format!("release v{v} has no {name}"))?;
+    let sums_url = release
+        .asset("SHA256SUMS")
+        .ok_or_else(|| format!("release v{v} has no SHA256SUMS: it cannot be checked"))?;
+    let mut sums = Vec::new();
+    download(sums_url, &mut sums, 1 << 20)?;
+    let want = checksum_for(&String::from_utf8_lossy(&sums), name)
+        .ok_or_else(|| format!("SHA256SUMS has no line for {name}"))?;
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(out)
+        .map_err(|e| format!("{}: {e}", out.display()))?;
+    let done = (|| {
+        let mut w = std::io::BufWriter::new(&file);
+        let got = download(url, &mut w, MAX_ASSET)?;
+        w.flush()
+            .map_err(|e| format!("cannot write the download: {e}"))?;
+        drop(w);
+        file.sync_all()
+            .map_err(|e| format!("cannot write the download: {e}"))?;
+        if got == want {
+            Ok(())
+        } else {
+            Err(format!(
+                "the download of {name} does not match SHA256SUMS (got {got}, want {want})"
+            ))
+        }
+    })();
+    if done.is_err() {
+        let _ = std::fs::remove_file(out);
+    }
+    done
 }
 
 /// Whether an error means "not allowed to write here".
@@ -659,6 +733,14 @@ fn upgrade(opts: &Options) -> Result<i32, Failure> {
         .ok_or_else(|| format!("release v{to} has no SHA256SUMS: it cannot be checked"))?
         .to_string();
     let exe = program_file()?;
+    if package_of(&exe).is_some() {
+        return Err(format!(
+            "this podbag ({}) comes with Podbag Desktop: update the app in Settings > \
+             Updates, and the app updates its podbag too",
+            exe.display()
+        )
+        .into());
+    }
     if !opts.yes {
         let what = if to < now { "Go back" } else { "Upgrade" };
         let question = format!("{what} from podbag {now} to {to} ({})?", exe.display());
@@ -923,6 +1005,39 @@ mod tests {
         assert!(path.exists());
         drop(staged);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn packages_are_known_by_their_folder() {
+        let p = |s: &str| package_of(Path::new(s));
+        assert_eq!(p("/usr/lib/podbag-desktop/podbag"), Some(Package::Linux));
+        assert_eq!(
+            p("/usr/lib/podbag-desktop/podbag-desktop"),
+            Some(Package::Linux)
+        );
+        assert_eq!(
+            p("/Applications/podbag.app/Contents/MacOS/podbag"),
+            Some(Package::MacApp("/Applications/podbag.app".into()))
+        );
+        assert_eq!(
+            p("/Users/me/Apps/Podbag.APP/Contents/MacOS/podbag-desktop"),
+            Some(Package::MacApp("/Users/me/Apps/Podbag.APP".into()))
+        );
+        for none in [
+            "/usr/local/bin/podbag",
+            "/usr/lib/podbag-desktop/sub/podbag",
+            "/home/me/podbag/target/release/podbag",
+            "/Applications/tools/Contents/MacOS/podbag",
+            "podbag",
+        ] {
+            assert_eq!(p(none), None, "{none}");
+        }
+        let windows = p(r"C:\Program Files\Podbag Desktop\podbag.exe");
+        if cfg!(windows) {
+            assert_eq!(windows, Some(Package::Windows));
+        } else {
+            assert_eq!(windows, None);
+        }
     }
 
     #[test]
