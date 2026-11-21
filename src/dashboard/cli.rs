@@ -166,6 +166,15 @@ pub struct Updates {
     /// When the last check was (Unix seconds).
     pub checked: Option<u64>,
     pub error: Option<String>,
+    /// How the app updates itself (`macos-app`, `deb`, `rpm`, `msi`); None: it cannot.
+    pub installer: Option<String>,
+    /// A `podbag` for the terminal that the app's package does not update.
+    pub terminal: Option<String>,
+    pub terminal_version: Option<String>,
+    /// The app (with its own `podbag`) is older than the latest release.
+    pub app_newer: bool,
+    /// The `podbag` that Update upgrades (see [`cli_to_upgrade`]) is older.
+    pub cli_newer: bool,
 }
 
 /// When to ask the network.
@@ -215,6 +224,40 @@ pub fn updates(podbag: &Path, file: Option<&Path>, check: Check, now: u64) -> Up
     u
 }
 
+/// Which `podbag` Update upgrades with `podbag upgrade`. A packaged app updates its own
+/// `podbag` with the app, so only a separate `terminal` one; otherwise the app's.
+pub fn cli_to_upgrade(
+    app_cli: &Path,
+    packaged: bool,
+    terminal: Option<&Path>,
+) -> Option<std::path::PathBuf> {
+    if packaged {
+        terminal.map(Path::to_path_buf)
+    } else {
+        Some(app_cli.to_path_buf())
+    }
+}
+
+/// Fill in what Update would do: `installer` is how the app updates itself (None: it
+/// cannot), `terminal` a separate `podbag` for the terminal.
+pub fn plan(u: &mut Updates, installer: Option<&str>, terminal: Option<&Path>) {
+    let older = |v: Option<&str>| match (&u.latest, v) {
+        (Some(l), Some(c)) => is_newer(l, c),
+        _ => false,
+    };
+    u.installer = installer.map(str::to_string);
+    u.terminal = terminal.map(|t| t.display().to_string());
+    u.terminal_version = terminal.and_then(engine_version);
+    if installer.is_some() {
+        u.app_newer = older(Some(&u.app)) || older(u.engine.as_deref());
+        u.cli_newer = older(u.terminal_version.as_deref());
+    } else {
+        u.app_newer = false;
+        u.cli_newer = older(u.engine.as_deref());
+    }
+    u.newer = u.app_newer || u.cli_newer;
+}
+
 /// What `podbag upgrade --yes` did.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -245,7 +288,17 @@ pub fn admin_command(podbag: &Path) -> String {
 
 /// `podbag upgrade --yes`.
 pub fn upgrade(podbag: &Path) -> Upgraded {
-    match run(podbag, &["upgrade", "--yes"]) {
+    upgrade_to(podbag, None)
+}
+
+/// `podbag upgrade --yes`, with `--version` when given (the app's new version, so the
+/// two match).
+pub fn upgrade_to(podbag: &Path, version: Option<&str>) -> Upgraded {
+    let mut args = vec!["upgrade", "--yes"];
+    if let Some(v) = version {
+        args.extend(["--version", v]);
+    }
+    match run(podbag, &args) {
         Ok(ran) => {
             let output = format!("{}\n{}", ran.stdout.trim(), ran.stderr.trim())
                 .trim()
@@ -464,6 +517,59 @@ mod tests {
         let other = Fake::new("'upgrade --yes') echo 'podbag: checksum mismatch' >&2; exit 1;;");
         let u = upgrade(&other.bin);
         assert!(!u.ok && !u.needs_admin && u.command.is_none());
+    }
+
+    #[test]
+    fn an_upgrade_to_a_version_says_it() {
+        let fake = Fake::new("'upgrade --yes --version 0.4.0') echo 'Upgraded';;");
+        let u = upgrade_to(&fake.bin, Some("0.4.0"));
+        assert!(u.ok, "{u:?}");
+        assert_eq!(fake.calls(), ["upgrade --yes --version 0.4.0"]);
+    }
+
+    #[test]
+    fn a_packaged_app_upgrades_only_a_separate_terminal_podbag() {
+        let app = Path::new("/Applications/podbag.app/Contents/MacOS/podbag");
+        let term = Path::new("/usr/local/bin/podbag");
+        assert_eq!(cli_to_upgrade(app, true, Some(term)), Some(term.into()));
+        assert_eq!(cli_to_upgrade(app, true, None), None);
+        assert_eq!(cli_to_upgrade(term, false, None), Some(term.into()));
+    }
+
+    #[test]
+    fn the_plan_says_what_is_older() {
+        let term = Fake::new("--version) echo 'podbag 0.3.0';;");
+        let base = Updates {
+            engine: Some("0.4.0".into()),
+            app: "0.4.0".into(),
+            latest: Some("0.4.0".into()),
+            ..Updates::default()
+        };
+        // Packaged and current, with an old terminal podbag: only the CLI.
+        let mut u = base.clone();
+        plan(&mut u, Some("macos-app"), Some(&term.bin));
+        assert_eq!(u.installer.as_deref(), Some("macos-app"));
+        assert_eq!(u.terminal_version.as_deref(), Some("0.3.0"));
+        assert!(u.newer && u.cli_newer && !u.app_newer);
+        // An old packaged app: the app.
+        let mut u = Updates {
+            app: "0.3.0".into(),
+            engine: Some("0.3.0".into()),
+            ..base.clone()
+        };
+        plan(&mut u, Some("deb"), None);
+        assert!(u.newer && u.app_newer && !u.cli_newer);
+        assert_eq!(u.terminal, None);
+        // Not packaged: the app's podbag, as before.
+        let mut u = Updates {
+            engine: Some("0.3.0".into()),
+            ..base.clone()
+        };
+        plan(&mut u, None, None);
+        assert!(u.newer && u.cli_newer && !u.app_newer);
+        let mut u = base.clone();
+        plan(&mut u, None, None);
+        assert!(!u.newer);
     }
 
     #[test]

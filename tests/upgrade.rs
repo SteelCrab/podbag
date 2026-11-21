@@ -333,3 +333,33 @@ fn plain_http_elsewhere_is_refused() {
     assert_eq!(out.status.code(), Some(1), "{}", text(&out));
     assert!(text(&out).contains("HTTPS only"), "{}", text(&out));
 }
+
+#[test]
+fn a_podbag_that_came_with_the_desktop_app_is_not_upgraded() {
+    let releases = Releases::start("v99.0.0", b"never fetched".to_vec(), None);
+    let install = Install::new();
+    let macos = install.dir.path().join("podbag.app/Contents/MacOS");
+    std::fs::create_dir_all(&macos).unwrap();
+    std::fs::rename(install.exe(), macos.join("podbag")).unwrap();
+    let run = |args: &[&str]| {
+        Command::new(macos.join("podbag"))
+            .arg("upgrade")
+            .args(args)
+            .env("PODBAG_RELEASES_URL", &releases.url)
+            .env("PODBAG_UI_DIR", install.dir.path().join("ui"))
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap()
+    };
+    let out = run(&["--yes"]);
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out));
+    assert!(
+        text(&out).contains("comes with Podbag Desktop"),
+        "{}",
+        text(&out)
+    );
+    assert!(releases.downloads().is_empty());
+    // The app still asks it for the latest version.
+    let out = run(&["--check", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out));
+}
