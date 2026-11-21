@@ -388,6 +388,7 @@ fn serve_vm(p: &Paths, lock: &std::fs::File, inherited: Option<&Inherited>) -> R
             ));
         }
     }
+    super::cpu::check_guest(&p.guest.join("Image"))?;
     make_disk(p)?;
     let env = |k: &str| std::env::var(k).ok();
     let (resources, _) =

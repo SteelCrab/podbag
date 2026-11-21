@@ -30,7 +30,7 @@ checksum() {
 
 write_manifest() {
   digest=$(checksum)
-  for asset in podbag-aarch64-linux podbag-x86_64-linux podbag-aarch64-macos; do
+  for asset in podbag-aarch64-linux podbag-x86_64-linux podbag-aarch64-macos podbag-x86_64-macos; do
     printf '%s  %s\n' "$digest" "$asset"
   done > "$fixture/SHA256SUMS"
 }
@@ -58,3 +58,35 @@ echo 'PASS  Preserve the installed binary on checksum mismatch'
 write_manifest
 expect_failure 'cannot run'
 echo 'PASS  Preserve the installed binary when the new version check fails'
+
+# On a Mac: the build for its CPU, also from a shell that Rosetta runs.
+printf '%s\n' '#!/bin/sh' 'echo podbag-test' > "$fixture/podbag"
+write_manifest
+cat > "$work/bin/uname" <<'EOF'
+#!/bin/sh
+case $1 in
+  -s) echo Darwin ;;
+  -m) echo "$fake_cpu" ;;
+esac
+EOF
+cat > "$work/bin/sysctl" <<'EOF'
+#!/bin/sh
+[ -n "$fake_translated" ] || exit 1
+echo "$fake_translated"
+EOF
+chmod +x "$work/bin/uname" "$work/bin/sysctl"
+
+expect_file() {
+  if ! fake_cpu=$1 fake_translated=$2 sh "$installer" > "$work/log" 2>&1 ||
+    ! grep -F "Downloading $3 (" "$work/log" >/dev/null; then
+    cat "$work/log" >&2
+    exit 1
+  fi
+}
+
+expect_file arm64 0 podbag-aarch64-macos
+echo 'PASS  Install the Apple silicon build on Apple silicon'
+expect_file x86_64 '' podbag-x86_64-macos
+echo 'PASS  Install the Intel build on an Intel Mac'
+expect_file x86_64 1 podbag-aarch64-macos
+echo 'PASS  Install the Apple silicon build from a shell that Rosetta runs'

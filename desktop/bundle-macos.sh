@@ -2,6 +2,7 @@
 # Build podbag.app. Use --with-cli to include the CLI and its Linux VM guest.
 #   desktop/bundle-macos.sh [debug|release] [--with-cli]
 # For --with-cli, build the guest first with dev/vm.sh run dev/macos/build-guest.sh.
+# For another CPU, set CARGO_BUILD_TARGET (x86_64-apple-darwin for Intel Macs).
 # Open it with: open target/release/podbag.app
 set -eu
 cd "$(dirname "$0")/.."
@@ -25,7 +26,7 @@ if [ "$with_cli" = --with-cli ]; then
   cargo build "$@" --bin podbag --features embed-guest
 fi
 cargo build "$@" -p podbag-desktop
-target=${CARGO_TARGET_DIR:-target}/$profile
+target=${CARGO_TARGET_DIR:-target}${CARGO_BUILD_TARGET:+/$CARGO_BUILD_TARGET}/$profile
 app=$target/podbag.app
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' desktop/Cargo.toml | head -n 1)
 stage=$(mktemp -d "$target/.podbag.XXXXXX")

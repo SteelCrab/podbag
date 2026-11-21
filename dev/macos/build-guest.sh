@@ -1,6 +1,7 @@
 #!/bin/bash
-# Build the podbag VM guest for macOS (run inside the lima VM: `dev/vm.sh run dev/macos/build-guest.sh`).
-# Writes target/vm/{Image, Image.zst, initramfs.gz, disk.zst} in the repository.
+# Build the podbag VM guest for macOS on Linux of the Mac's CPU: arm64 for Apple silicon
+# (the lima VM: `dev/vm.sh run dev/macos/build-guest.sh`), x86_64 for Intel Macs.
+# Writes target/vm/{Image, Image.zst, initramfs.gz, disk.zst, arch} in the repository.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 repo=$(pwd)
@@ -9,12 +10,23 @@ work=${PODBAG_GUEST_WORK:-$HOME/podbag-guest}
 out=$repo/target/vm
 mkdir -p "$work" "$out"
 
+# The guest's CPU is this machine's. Virtualization.framework boots an arm64 Image on Apple
+# silicon and a bzImage on an Intel Mac; both are written as `Image`.
+arch=$(uname -m)
+case $arch in
+  aarch64) kernel_arch=arm64 kernel_target=Image cpu_config=kernel-arm64.config ;;
+  x86_64) kernel_arch=x86 kernel_target=bzImage cpu_config=kernel-x86_64.config ;;
+  *) echo "no podbag VM guest for $arch" >&2; exit 1 ;;
+esac
+fragments=("$repo/dev/macos/kernel.config" "$repo/dev/macos/$cpu_config")
+
 need=()
 for tool in flex bison bc cpio zstd mkfs.ext4 gcc make; do command -v $tool >/dev/null || need+=($tool); done
 [ -e /usr/include/libelf.h ] || need+=(libelf)
 [ -e /usr/include/openssl/ssl.h ] || need+=(libssl)
+command -v musl-gcc >/dev/null || need+=(musl-gcc)
 if [ ${#need[@]} -gt 0 ]; then
-  sudo -n apt-get install -y -q build-essential flex bison bc cpio zstd e2fsprogs libelf-dev libssl-dev >/dev/null
+  sudo -n apt-get install -y -q build-essential flex bison bc cpio zstd e2fsprogs libelf-dev libssl-dev musl-tools >/dev/null
 fi
 
 # The kernel, checked against kernel.org's list of sha256 sums.
@@ -28,28 +40,31 @@ if [ ! -d "$src" ]; then
   rm linux-$version.tar.xz
 fi
 cd "$src"
-if ! cmp -s "$repo/dev/macos/kernel.config" .podbag-fragment; then
+fragment=$work/fragment-$arch.config
+cat "${fragments[@]}" > "$fragment"
+if ! cmp -s "$fragment" .podbag-fragment; then
   make -s defconfig
-  scripts/kconfig/merge_config.sh -m .config "$repo/dev/macos/kernel.config" >/dev/null
+  scripts/kconfig/merge_config.sh -m .config "${fragments[@]}" >/dev/null
   make -s olddefconfig
-  cp "$repo/dev/macos/kernel.config" .podbag-fragment
+  cp "$fragment" .podbag-fragment
 fi
-# Every option of the fragment must have survived (a missing dependency drops one quietly).
-missing=$(grep -E '^CONFIG_[A-Z0-9_]+=' "$repo/dev/macos/kernel.config" | while IFS= read -r line; do
+# Every option of the fragments must have survived (a missing dependency drops one quietly).
+missing=$(grep -hE '^CONFIG_[A-Z0-9_]+=' "${fragments[@]}" | while IFS= read -r line; do
   opt=${line%%=*}; want=${line#*=}
   have=$(grep -E "^$opt=" .config | cut -d= -f2- || true)
   if [ "$want" = n ]; then [ -z "$have" ] || echo "$opt=$have"; else [ "$have" = "$want" ] || echo "$opt (want $want, have ${have:-unset})"; fi
 done)
 [ -z "$missing" ] || { echo "kernel options not set:"; echo "$missing"; exit 1; }
-make -s -j"$(nproc)" Image
-cp arch/arm64/boot/Image "$out/Image"
+make -s -j"$(nproc)" "$kernel_target"
+cp "arch/$kernel_arch/boot/$kernel_target" "$out/Image"
 # What a release build of podbag carries (`--features embed-guest`).
 zstd -q -19 -T0 -f "$out/Image" -o "$out/Image.zst"
 
 # The static podbag for the guest.
-target=aarch64-unknown-linux-musl
-(cd "$repo" && env CC_aarch64_unknown_linux_musl=musl-gcc cargo build -q --release --target $target)
-bin=$CARGO_TARGET_DIR/$target/release/podbag
+target=$arch-unknown-linux-musl
+rustup target list --installed | grep -qx "$target" || rustup target add "$target"
+(cd "$repo" && env "CC_${target//-/_}=musl-gcc" cargo build -q --release --target "$target")
+bin=${CARGO_TARGET_DIR:-$repo/target}/$target/release/podbag
 
 # The initramfs: /init is podbag (it runs as `__vm-init` when it is PID 1).
 list=$work/initramfs.list
@@ -118,4 +133,6 @@ with open(src, 'rb') as f, open(dst, 'wb') as out:
 PY
 zstd -q -19 -f "$work/disk.raw" -o "$out/disk.zst"
 rm -f "$img" "$work/disk.raw"
+# What `cargo build --features embed-guest` checks against the Mac program's CPU.
+echo "$arch" > "$out/arch"
 ls -l "$out"

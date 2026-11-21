@@ -91,11 +91,11 @@ adb shell /data/local/tmp/podbag --version
 
 ## macOS
 
-On a Mac, podbag runs containers in a small Linux VM. A build has three steps.
-Apple silicon only.
+On a Mac, podbag runs containers in a small Linux VM. The VM has the Mac's CPU: arm64 on
+Apple silicon, x86_64 on an Intel Mac. A build has three steps.
 
-1. **Build the VM's guest** (a Linux kernel, with podbag in it) in a Linux VM.
-   [lima](https://lima-vm.io) runs that VM:
+1. **Build the VM's guest** (a Linux kernel, with podbag in it) on Linux with the Mac's
+   CPU. [lima](https://lima-vm.io) runs that Linux VM on the Mac:
 
    ```sh
    dev/vm.sh up                              # create the podbag-dev VM (once)
@@ -103,12 +103,20 @@ Apple silicon only.
    ```
 
    - The first build compiles a Linux kernel. It takes a while.
+   - `target/vm/arch` names the guest's CPU.
+   - For an Intel Mac on Apple silicon, run `dev/macos/build-guest.sh` on x86_64 Linux.
+     Or download the `podbag-vm-guest-x86_64` artifact from a
+     [CI run](https://github.com/SteelCrab/podbag/actions/workflows/ci.yml).
 
 2. **Build the program** with the guest in it:
 
    ```sh
    cargo build --release --features embed-guest
    ```
+
+   - The build stops if the guest is for another CPU.
+   - For an Intel Mac on Apple silicon, add `--target x86_64-apple-darwin`, and set
+     `PODBAG_GUEST_DIR` to the x86_64 guest's directory.
 
 3. **Sign it.** A program that starts VMs needs the virtualization entitlement:
 
