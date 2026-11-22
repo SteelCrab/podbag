@@ -1,6 +1,6 @@
 [package]
 name = "podbag"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 description = "A container engine with no daemon, in one static binary, that stores images file by file"
 license = "Apache-2.0"
