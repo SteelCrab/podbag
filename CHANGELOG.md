@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### macOS
+
+- Run podbag and Podbag Desktop on Intel Macs. The VM runs an x86_64 Linux guest, and
+  images are pulled for `linux/amd64`.
+- `install.sh` and `podbag upgrade` choose `podbag-x86_64-macos` on an Intel Mac. On
+  Apple silicon, they choose the arm64 build, also from a shell that Rosetta runs.
+
 ## v0.3.0 (2026-11-21)
 
 ### Desktop and installation

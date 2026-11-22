@@ -234,8 +234,14 @@ jobs:
           if-no-files-found: error
 
   macos:
-    name: macOS
-    runs-on: macos-15
+    name: macOS ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: aarch64, runner: macos-15 }
+          - { arch: x86_64, runner: macos-15-intel }
     steps:
       - uses: actions/checkout@v4
       - name: Test the release installer
@@ -243,13 +249,105 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test
 
+  # The Intel Mac's VM guest: an x86_64 kernel and the static podbag, built on x86_64 Linux.
+  macos-guest:
+    name: macOS VM guest x86_64
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - run: sudo apt-get update
+      - name: Build the guest
+        run: dev/macos/build-guest.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: podbag-vm-guest-x86_64
+          path: |
+            target/vm/Image
+            target/vm/Image.zst
+            target/vm/initramfs.gz
+            target/vm/disk.zst
+            target/vm/arch
+          if-no-files-found: error
+
+  # podbag on an Intel Mac: containers in a real Virtualization.framework VM, and the
+  # release files (the CLI with its guest, and the desktop app).
+  macos-intel:
+    name: macOS Intel VM
+    needs: macos-guest
+    runs-on: macos-15-intel
+    timeout-minutes: 60
+    env:
+      PODBAG_MAC_HOME: ${{ github.workspace }}/target/mac-home
+      # The runner is a 4-CPU VM itself: VMs with all its CPUs starve it.
+      PODBAG_VM_CPUS: 2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@v4
+        with:
+          name: podbag-vm-guest-x86_64
+          path: target/vm
+      - name: Build podbag with its guest
+        run: |
+          cargo build --release --features embed-guest
+          dev/macos/sign.sh target/release/podbag
+          file target/release/podbag | grep -F x86_64
+      - name: Run a container in the VM
+        run: |
+          cpu=$(target/release/podbag run --rm mirror.gcr.io/library/alpine:3.22 uname -m)
+          echo "The container runs on $cpu"
+          test "$cpu" = x86_64
+          target/release/podbag vm stop
+      # The core of the macOS VM tests, one VM at a time. (The whole suite boots about 60
+      # VMs, which is too much for this runner.)
+      - name: VM tests
+        timeout-minutes: 25
+        env:
+          PODBAG_TEST_MACOS_VM: 1
+        run: >-
+          cargo test --test macos_vm -- --test-threads=1 --exact
+          commands_run_in_the_vm
+          two_commands_share_one_vm_and_it_stops_when_idle
+          only_paths_under_users_reach_the_vm
+          a_stopped_host_keeps_what_was_written
+          a_bare_env_name_takes_the_macs_value
+          the_sockets_stay_while_the_vm_is_off
+          standby_uses_little_memory
+          vm_stop_ends_the_standby
+      - name: VM logs
+        if: failure()
+        run: |
+          for f in "$PODBAG_MAC_HOME/console.log" "$PODBAG_MAC_HOME/run/host.log"; do
+            echo "== $f"; cat "$f" || true
+          done
+      - name: Package the desktop app
+        run: |
+          desktop/bundle-macos.sh release --with-cli
+          mkdir -p target/release-files
+          cp target/release/podbag target/release-files/podbag-x86_64-macos
+          ditto -c -k --keepParent target/release/podbag.app \
+            target/release-files/podbag-desktop-x86_64-macos.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: podbag-x86_64-macos
+          path: target/release-files/podbag-x86_64-macos
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: podbag-desktop-x86_64-macos
+          path: target/release-files/podbag-desktop-x86_64-macos.zip
+          if-no-files-found: error
+
   desktop:
     name: Desktop app (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-26.04, macos-15]
+        os: [ubuntu-26.04, macos-15, macos-15-intel]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

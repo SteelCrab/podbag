@@ -1,5 +1,6 @@
 #!/bin/sh
-# Install podbag from its GitHub releases (Linux x86_64 and arm64, macOS on Apple silicon):
+# Install podbag from its GitHub releases (Linux x86_64 and arm64, macOS on Apple silicon
+# and Intel):
 #
 #   curl -fsSL https://podbag.dev/install.sh | sh
 #
@@ -30,8 +31,9 @@ esac
 case $os in
   Linux) file=podbag-$arch-linux ;;
   Darwin)
-    [ "$arch" = aarch64 ] || fail "on a Mac, podbag needs Apple silicon"
-    file=podbag-aarch64-macos
+    # A shell that Rosetta runs says x86_64 on Apple silicon; the VM needs the Mac's CPU.
+    [ "$(sysctl -n sysctl.proc_translated 2>/dev/null)" != 1 ] || arch=aarch64
+    file=podbag-$arch-macos
     ;;
   *) fail "no installer for $os; on Windows, download podbag.exe from https://github.com/$repo/releases" ;;
 esac

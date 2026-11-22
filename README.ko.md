@@ -55,10 +55,10 @@ Linux와 macOS에서 컨테이너, 이미지, 볼륨, 네트워크를 관리합�
 [최신 릴리스](https://github.com/SteelCrab/podbag/releases/latest)에서 시스템에 맞는 패키지를 받습니다.
 
 - **Linux(x86_64, arm64).** Debian과 Ubuntu에서는 `.deb`를 설치합니다. Fedora에서는 `.rpm`을 설치합니다. 패키지에 엔진이 포함됩니다.
-- **macOS(Apple silicon).** 아래 명령으로 CLI를 설치합니다. `podbag-desktop-aarch64-macos.zip`의 압축을 풀고 `podbag.app`을 엽니다.
+- **macOS(Apple silicon, Intel).** 아래 명령으로 CLI를 설치합니다. `podbag-desktop-aarch64-macos.zip`(Apple silicon) 또는 `podbag-desktop-x86_64-macos.zip`(Intel)의 압축을 풀고 `podbag.app`을 엽니다.
 - **Windows(x86_64, ARM64, 실험 단계).** CPU에 맞는 `.msi`를 실행합니다. 릴리스에 MSI가 없으면 성공한 [CI 실행](https://github.com/SteelCrab/podbag/actions/workflows/ci.yml?query=branch%3Amain)에서 받습니다. 컨테이너를 실행하려면 WSL 2를 활성화합니다.
 
-### Linux(x86_64, arm64)와 macOS(Apple silicon)용 CLI
+### Linux(x86_64, arm64)와 macOS(Apple silicon, Intel)용 CLI
 
 ```sh
 curl -fsSL https://podbag.dev/install.sh | sh

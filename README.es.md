@@ -55,10 +55,10 @@ Gestiona contenedores, imágenes, volúmenes y redes en Linux y macOS. La compat
 Descarga el paquete para tu sistema desde la [última versión](https://github.com/SteelCrab/podbag/releases/latest).
 
 - **Linux (x86_64, arm64).** Instala el `.deb` en Debian o Ubuntu, o el `.rpm` en Fedora. El paquete incluye el motor.
-- **macOS (Apple silicon).** Instala la CLI con el comando de abajo. Descomprime `podbag-desktop-aarch64-macos.zip` y abre `podbag.app`.
+- **macOS (Apple silicon, Intel).** Instala la CLI con el comando de abajo. Descomprime `podbag-desktop-aarch64-macos.zip` (Apple silicon) o `podbag-desktop-x86_64-macos.zip` (Intel) y abre `podbag.app`.
 - **Windows (x86_64, ARM64, experimental).** Ejecuta el `.msi` para tu CPU. Si la versión no incluye un MSI, descárgalo desde una [ejecución de CI correcta](https://github.com/SteelCrab/podbag/actions/workflows/ci.yml?query=branch%3Amain). Activa WSL 2 para ejecutar contenedores.
 
-### CLI en Linux (x86_64, arm64) y macOS (Apple silicon)
+### CLI en Linux (x86_64, arm64) y macOS (Apple silicon, Intel)
 
 ```sh
 curl -fsSL https://podbag.dev/install.sh | sh

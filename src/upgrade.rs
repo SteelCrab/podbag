@@ -140,15 +140,24 @@ pub fn current() -> Version {
 pub fn asset_name(os: &str, arch: &str) -> Option<String> {
     match (os, arch) {
         ("linux", "x86_64" | "aarch64") => Some(format!("podbag-{arch}-linux")),
-        ("macos", "aarch64") => Some("podbag-aarch64-macos".into()),
+        ("macos", "x86_64" | "aarch64") => Some(format!("podbag-{arch}-macos")),
         ("windows", "x86_64" | "aarch64") => Some(format!("podbag-{arch}-windows.exe")),
         _ => None,
     }
 }
 
+/// This machine's CPU (Rust's names). On a Mac, its own: an Intel build that Rosetta runs
+/// on Apple silicon cannot start the VM, so updates bring the arm64 build.
+pub fn this_cpu() -> &'static str {
+    #[cfg(target_os = "macos")]
+    return crate::macos::cpu::mac();
+    #[cfg(not(target_os = "macos"))]
+    std::env::consts::ARCH
+}
+
 /// This platform's release file.
 pub fn this_asset() -> Option<String> {
-    asset_name(std::env::consts::OS, std::env::consts::ARCH)
+    asset_name(std::env::consts::OS, this_cpu())
 }
 
 /// The SHA-256 (lowercase hex) that a `SHA256SUMS` file gives for `name`. Lines are
@@ -914,7 +923,10 @@ mod tests {
             asset_name("windows", "aarch64").unwrap(),
             "podbag-aarch64-windows.exe"
         );
-        assert_eq!(asset_name("macos", "x86_64"), None);
+        assert_eq!(
+            asset_name("macos", "x86_64").unwrap(),
+            "podbag-x86_64-macos"
+        );
         assert_eq!(asset_name("freebsd", "x86_64"), None);
         assert!(this_asset().is_some());
     }

@@ -88,7 +88,9 @@ pub fn package_asset(installer: &Installer, arch: &str, release: &Release) -> Op
             .cloned()
     };
     let name = match (installer, arch) {
-        (Installer::MacApp(_), "aarch64") => Some("podbag-desktop-aarch64-macos.zip".to_string()),
+        (Installer::MacApp(_), "x86_64" | "aarch64") => {
+            Some(format!("podbag-desktop-{arch}-macos.zip"))
+        }
         (Installer::Msi, "x86_64" | "aarch64") => {
             Some(format!("podbag-desktop-{arch}-windows.msi"))
         }
@@ -172,7 +174,7 @@ pub fn install(
     if to == current {
         return Err(format!("Podbag Desktop {current} is already installed."));
     }
-    let asset = package_asset(installer, std::env::consts::ARCH, &release)
+    let asset = package_asset(installer, upgrade::this_cpu(), &release)
         .ok_or_else(|| format!("release v{to} has no Podbag Desktop package for this system"))?;
     match installer {
         #[cfg(target_os = "macos")]
@@ -422,6 +424,7 @@ mod tests {
         "podbag-desktop-0.4.0-1.x86_64.rpm",
         "podbag-desktop-aarch64-macos.zip",
         "podbag-desktop-aarch64-windows.msi",
+        "podbag-desktop-x86_64-macos.zip",
         "podbag-desktop-x86_64-windows.msi",
         "podbag-desktop_0.4.0-1_amd64.deb",
         "podbag-desktop_0.4.0-1_arm64.deb",
@@ -436,7 +439,10 @@ mod tests {
             got(&mac, "aarch64").as_deref(),
             Some("podbag-desktop-aarch64-macos.zip")
         );
-        assert_eq!(got(&mac, "x86_64"), None);
+        assert_eq!(
+            got(&mac, "x86_64").as_deref(),
+            Some("podbag-desktop-x86_64-macos.zip")
+        );
         assert_eq!(
             got(&Installer::Deb, "x86_64").as_deref(),
             Some("podbag-desktop_0.4.0-1_amd64.deb")
@@ -469,6 +475,7 @@ mod tests {
         let r = release("v0.4.0", &["SHA256SUMS", "podbag-aarch64-macos"]);
         let mac = Installer::MacApp("/Applications/podbag.app".into());
         assert_eq!(package_asset(&mac, "aarch64", &r), None);
+        assert_eq!(package_asset(&mac, "x86_64", &r), None);
         assert_eq!(package_asset(&Installer::Msi, "x86_64", &r), None);
     }
 

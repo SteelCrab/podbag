@@ -1069,6 +1069,9 @@ open target/release/podbag.app
   desktop/bundle-macos.sh release --with-cli
   ```
 
+- For an Intel Mac, set `CARGO_BUILD_TARGET=x86_64-apple-darwin` and `PODBAG_GUEST_DIR`
+  to an x86_64 guest ([Building on macOS](build.md#macos)).
+
 - Run bare, the executable's menu says About, Hide and Quit podbag, but macOS shows
   `podbag-desktop` as the menu bar's title and in the Dock. Only a bundle changes that.
 - Windows: the .exe's product name and file description are podbag.
@@ -1226,8 +1229,10 @@ sudo k3s server --container-runtime-endpoint unix:///run/podbag/cri.sock
 
 ### The VM
 
-- On a Mac (Apple silicon), podbag runs containers in a small Linux VM of its own
+- On a Mac (Apple silicon or Intel), podbag runs containers in a small Linux VM of its own
   (Virtualization.framework, Linux 6.18).
+- The VM has the Mac's CPU. Images are pulled for it: `linux/arm64` on Apple silicon,
+  `linux/amd64` on an Intel Mac.
 - The first command starts the VM in about half a second.
 - The VM powers off 60 seconds after the last container. `podbag vm set --idle` changes
   this.

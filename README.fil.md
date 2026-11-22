@@ -55,10 +55,10 @@ Sa Linux at macOS, puwede mong pamahalaan ang mga container, image, volume at ne
 I-download ang package para sa iyong system mula sa [pinakabagong release](https://github.com/SteelCrab/podbag/releases/latest).
 
 - **Linux (x86_64, arm64).** I-install ang `.deb` sa Debian o Ubuntu, o ang `.rpm` sa Fedora. Kasama sa package ang engine.
-- **macOS (Apple silicon).** I-install ang CLI gamit ang command sa ibaba. I-extract ang `podbag-desktop-aarch64-macos.zip` at buksan ang `podbag.app`.
+- **macOS (Apple silicon, Intel).** I-install ang CLI gamit ang command sa ibaba. I-extract ang `podbag-desktop-aarch64-macos.zip` (Apple silicon) o `podbag-desktop-x86_64-macos.zip` (Intel) at buksan ang `podbag.app`.
 - **Windows (x86_64, ARM64, eksperimental).** Patakbuhin ang `.msi` para sa iyong CPU. Kung walang MSI sa release, i-download ito mula sa matagumpay na [CI run](https://github.com/SteelCrab/podbag/actions/workflows/ci.yml?query=branch%3Amain). I-enable ang WSL 2 para makapagpatakbo ng mga container.
 
-### CLI sa Linux (x86_64, arm64) at macOS (Apple silicon)
+### CLI sa Linux (x86_64, arm64) at macOS (Apple silicon, Intel)
 
 ```sh
 curl -fsSL https://podbag.dev/install.sh | sh
