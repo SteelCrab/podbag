@@ -7,6 +7,8 @@ on:
   pull_request:
     paths-ignore: ['README*.md', 'docs/**']
   workflow_dispatch:
+  # The release workflow runs CI on the tag and publishes its files.
+  workflow_call:
 
 permissions:
   contents: read
@@ -38,13 +40,15 @@ jobs:
       - name: Packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y musl-tools uidmap passt erofs-utils
+          sudo apt-get install -y musl-tools uidmap passt erofs-utils jq
           # Rootless containers need user namespaces, which Ubuntu's AppArmor restricts.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           for f in /etc/subuid /etc/subgid; do
             grep -q "^$USER:" "$f" || echo "$USER:100000:65536" | sudo tee -a "$f"
           done
       - run: cargo fmt --check
+      - name: Test the release scripts
+        run: sh tests/release.sh
       - name: Unit tests
         run: cargo test --lib --bins --test wsl
       - name: Static build
@@ -249,21 +253,27 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test
 
-  # The Intel Mac's VM guest: an x86_64 kernel and the static podbag, built on x86_64 Linux.
+  # The Macs' VM guests: a kernel and the static podbag, built on Linux of the same CPU.
   macos-guest:
-    name: macOS VM guest x86_64
-    runs-on: ubuntu-26.04
+    name: macOS VM guest ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-26.04 }
+          - { arch: aarch64, runner: ubuntu-26.04-arm }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-unknown-linux-musl
+          targets: ${{ matrix.arch }}-unknown-linux-musl
       - run: sudo apt-get update
       - name: Build the guest
         run: dev/macos/build-guest.sh
       - uses: actions/upload-artifact@v4
         with:
-          name: podbag-vm-guest-x86_64
+          name: podbag-vm-guest-${{ matrix.arch }}
           path: |
             target/vm/Image
             target/vm/Image.zst
@@ -324,12 +334,7 @@ jobs:
             echo "== $f"; cat "$f" || true
           done
       - name: Package the desktop app
-        run: |
-          desktop/bundle-macos.sh release --with-cli
-          mkdir -p target/release-files
-          cp target/release/podbag target/release-files/podbag-x86_64-macos
-          ditto -c -k --keepParent target/release/podbag.app \
-            target/release-files/podbag-desktop-x86_64-macos.zip
+        run: dev/macos/release-files.sh
       - uses: actions/upload-artifact@v4
         with:
           name: podbag-x86_64-macos
@@ -339,6 +344,37 @@ jobs:
         with:
           name: podbag-desktop-x86_64-macos
           path: target/release-files/podbag-desktop-x86_64-macos.zip
+          if-no-files-found: error
+
+  # The Apple silicon release files: the CLI with its guest, and the desktop app. GitHub's
+  # Apple silicon runners cannot start VMs, so the VM tests run on Intel only.
+  macos-arm:
+    name: macOS Apple silicon release files
+    needs: macos-guest
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/download-artifact@v4
+        with:
+          name: podbag-vm-guest-aarch64
+          path: target/vm
+      - name: Build the release files
+        run: |
+          dev/macos/release-files.sh
+          file target/release-files/podbag-aarch64-macos | grep -F arm64
+          target/release-files/podbag-aarch64-macos --version
+          codesign -d --entitlements - target/release-files/podbag-aarch64-macos |
+            grep -F com.apple.security.virtualization
+      - uses: actions/upload-artifact@v4
+        with:
+          name: podbag-aarch64-macos
+          path: target/release-files/podbag-aarch64-macos
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: podbag-desktop-aarch64-macos
+          path: target/release-files/podbag-desktop-aarch64-macos.zip
           if-no-files-found: error
 
   desktop:

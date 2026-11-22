@@ -9,7 +9,7 @@ Thank you for helping. Bug reports, fixes and new features are all welcome.
 - [Build](#build)
 - [Test](#test)
 - [Pull requests](#pull-requests)
-- [Publish to crates.io](#publish-to-cratesio)
+- [Release](#release)
 - [Translations](#translations)
 - [Website](#website)
 - [License](#license)
@@ -98,15 +98,41 @@ In the VM: `dev/vm.sh run bash -c 'cargo build && PODBAG=$CARGO_TARGET_DIR/debug
 - Commit messages are one line: `type: what changed`. Types: `feat`, `fix`, `docs`,
   `test`, `refactor`, `chore`.
 
-## Publish to crates.io
+## Release
 
-Publishing a stable GitHub release with a `vX.Y.Z` tag publishes the `podbag`
-CLI and library to crates.io. The workflow checks out the release tag and
-requires its Cargo version to match. The `crates-io` environment uses
-[Trusted Publishing](https://crates.io/docs/trusted-publishing).
+- Open a pull request that sets the new version and adds its changelog section:
+  - the version in `Cargo.toml`, `desktop/Cargo.toml`, `desktop/tauri.conf.json` and
+    `Cargo.lock`;
+  - a `## vX.Y.Z (date)` section in `CHANGELOG.md`.
+- After the merge, tag the merge commit and push the tag:
 
-To publish an existing stable release, run **Publish to crates.io** from
-`main` in GitHub Actions and enter the release tag.
+  ```sh
+  git fetch origin
+  git tag vX.Y.Z origin/main
+  git push origin vX.Y.Z
+  ```
+
+- The **Release** workflow then does the rest:
+  - It checks that the tag is on `main`, that every version matches the tag, and that
+    the changelog has a section for it.
+  - It runs CI and builds the Linux packages on the tag.
+  - It publishes the GitHub release with every file, `SHA256SUMS`, and the changelog
+    section as the notes.
+  - It starts **Publish to crates.io**.
+- If a job fails by chance (a flaky test, a lost runner), re-run the failed jobs. A draft
+  release that a failed try left is replaced.
+- For a dry run, run **Release** by hand from `main`. It makes and checks every file of
+  the current version and keeps them as the `release-files` artifact. It publishes
+  nothing.
+
+### crates.io
+
+- A stable release publishes the `podbag` CLI and library to crates.io.
+- The workflow checks out the release tag and requires its Cargo version to match.
+- The `crates-io` environment uses
+  [Trusted Publishing](https://crates.io/docs/trusted-publishing).
+- To publish an existing stable release, run **Publish to crates.io** from `main` in
+  GitHub Actions and enter the release tag.
 
 ## Translations
 

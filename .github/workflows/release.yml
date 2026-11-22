@@ -1,0 +1,107 @@
+name: Release
+
+# Push a vX.Y.Z tag on main to release that version: CI runs on the tag, then the release
+# gets every file, SHA256SUMS and the tag's changelog section, and crates.io gets the crate.
+# Run it by hand for a dry run: it makes the release files of the branch's version and
+# keeps them as an artifact. It publishes nothing.
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Check the version
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: The tag
+        id: tag
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            tag=$GITHUB_REF_NAME
+          else
+            tag=v$(cargo metadata --locked --no-deps --format-version 1 |
+              jq -er '.packages[] | select(.name == "podbag") | .version')
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - name: The versions and the changelog
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: dev/ci/release-check.sh "$TAG"
+      - name: The tag is on main
+        if: github.event_name == 'push'
+        run: git merge-base --is-ancestor HEAD origin/main
+      - name: The tag has no published release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          draft=$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft 2>/dev/null || true)
+          if [ "$draft" = false ]; then
+            echo "$GITHUB_REF_NAME already has a published release." >&2
+            exit 1
+          fi
+
+  ci:
+    name: CI
+    needs: check
+    uses: ./.github/workflows/ci.yml
+
+  packages:
+    name: Linux packages
+    needs: check
+    uses: ./.github/workflows/desktop-packages.yml
+
+  publish:
+    name: Publish the release
+    needs: [check, ci, packages]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      # To start "Publish to crates.io": a release made with this token starts no workflow.
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ needs.check.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/artifacts
+      - name: Gather the release files
+        run: |
+          dev/ci/release-files.sh "$RUNNER_TEMP/artifacts" "${TAG#v}" "$RUNNER_TEMP/release"
+          dev/ci/release-notes.sh "$TAG" > "$RUNNER_TEMP/notes.md"
+      - name: Keep the files of the dry run
+        if: github.event_name != 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-files
+          path: |
+            ${{ runner.temp }}/release
+            ${{ runner.temp }}/notes.md
+          if-no-files-found: error
+      - name: Create the release
+        if: github.event_name == 'push'
+        run: |
+          # A draft is what a failed earlier try left: start again.
+          if [ "$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null)" = true ]; then
+            gh release delete "$TAG" --yes
+          fi
+          gh release create "$TAG" "$RUNNER_TEMP"/release/* --verify-tag \
+            --title "podbag ${TAG#v}" --notes-file "$RUNNER_TEMP/notes.md"
+      - name: Publish to crates.io
+        if: github.event_name == 'push'
+        run: gh workflow run publish-crates.yml --ref main -f tag="$TAG"
