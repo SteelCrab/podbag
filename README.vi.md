@@ -55,8 +55,10 @@ Quản lý container, image, volume và mạng trên Linux và macOS. Hỗ trợ
 Tải gói cho hệ điều hành của bạn từ [bản phát hành mới nhất](https://github.com/SteelCrab/podbag/releases/latest).
 
 - **Linux (x86_64, arm64).** Cài gói `.deb` trên Debian hoặc Ubuntu, hoặc gói `.rpm` trên Fedora. Gói cài đặt có sẵn engine.
-- **macOS (Apple silicon, Intel).** Cài CLI bằng lệnh bên dưới. Giải nén `podbag-desktop-aarch64-macos.zip` (Apple silicon) hoặc `podbag-desktop-x86_64-macos.zip` (Intel) rồi mở `podbag.app`.
+- **macOS (Apple silicon, Intel).** Giải nén `podbag-desktop-aarch64-macos.zip` (Apple silicon) hoặc `podbag-desktop-x86_64-macos.zip` (Intel), chuyển `podbag.app` vào thư mục Applications rồi mở.
 - **Windows (x86_64, ARM64, thử nghiệm).** Chạy tệp `.msi` phù hợp với CPU. Nếu bản phát hành chưa có MSI, tải tệp từ một [lần chạy CI thành công](https://github.com/SteelCrab/podbag/actions/workflows/ci.yml?query=branch%3Amain). Bật WSL 2 để chạy container.
+
+Ứng dụng có sẵn CLI. Nếu terminal chưa có `podbag`, ứng dụng sẽ đề nghị cài lệnh `podbag`. Lệnh này dùng CLI của ứng dụng, nên được cập nhật cùng ứng dụng.
 
 ### CLI trên Linux (x86_64, arm64) và macOS (Apple silicon, Intel)
 

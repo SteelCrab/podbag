@@ -55,8 +55,10 @@ Linux と macOS でコンテナ、イメージ、ボリューム、ネットワ�
 [最新リリース](https://github.com/SteelCrab/podbag/releases/latest)から環境に合ったパッケージをダウンロードします。
 
 - **Linux（x86_64、arm64）。** Debian と Ubuntu では `.deb`、Fedora では `.rpm` をインストールします。エンジンも同梱されています。
-- **macOS（Apple silicon、Intel）。** 下のコマンドで CLI をインストールします。`podbag-desktop-aarch64-macos.zip`（Apple silicon）または `podbag-desktop-x86_64-macos.zip`（Intel）を展開し、`podbag.app` を開きます。
+- **macOS（Apple silicon、Intel）。** `podbag-desktop-aarch64-macos.zip`（Apple silicon）または `podbag-desktop-x86_64-macos.zip`（Intel）を展開し、`podbag.app` をアプリケーションフォルダーに移動して開きます。
 - **Windows（x86_64、ARM64、実験的サポート）。** CPU に合った `.msi` を実行します。リリースに MSI がない場合は、成功した [CI の実行結果](https://github.com/SteelCrab/podbag/actions/workflows/ci.yml?query=branch%3Amain)からダウンロードします。コンテナを実行するには WSL 2 を有効にします。
+
+アプリには CLI が含まれています。ターミナルに `podbag` がない場合、アプリが `podbag` コマンドのインストールを提案します。このコマンドはアプリの CLI を使うため、アプリと一緒にアップデートされます。
 
 ### Linux（x86_64、arm64）と macOS（Apple silicon、Intel）向け CLI
 

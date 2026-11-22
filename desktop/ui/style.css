@@ -429,6 +429,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 .setting-engine { background: #516887; }
 .setting-vm { background: #a76528; }
 .setting-updates { background: #316fb9; }
+.setting-terminalCommand { background: #3d7a55; }
 .themes { max-width: 100%; flex-wrap: wrap; }
 .themes .segment { flex: auto; }
 .themes .segment span { display: flex; justify-content: center; align-items: center; gap: 6px; padding: 4px 9px; }
@@ -501,6 +502,14 @@ dialog input[type="text"] { width: 100%; }
   font-size: 13.5px; overflow-wrap: anywhere;
 }
 .toast-error { background: var(--danger-bg); color: #fff; }
+.notice {
+  display: grid; gap: 8px; padding: 14px 16px; border-radius: 10px; background: var(--surface); color: var(--ink);
+  border: 1px solid var(--line); box-shadow: var(--shadow); font-size: 13.5px; overflow-wrap: anywhere;
+}
+.notice p { margin: 0; }
+.notice p:empty { display: none; }
+.notice-title { font-size: 14px; }
+.notice .buttons-row { justify-content: flex-end; margin-top: 4px; }
 
 @media (prefers-reduced-motion: no-preference) {
   .nav-item, .icon-button, .button, .tab { transition: background-color 0.12s, color 0.12s, border-color 0.12s; }

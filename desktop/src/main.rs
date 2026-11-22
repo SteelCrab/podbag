@@ -15,6 +15,7 @@ use podbag::dashboard::lab;
 mod migration;
 mod settings;
 mod strings;
+mod terminal_cli;
 
 use commands::EngineStatus;
 use podbag::client::{Choice, Client, Closer, Endpoint, Features, Target, podbag_program};
@@ -828,6 +829,27 @@ fn open_releases() -> Result<(), String> {
     open::that_detached(url).map_err(|e| e.to_string())
 }
 
+/// What a terminal runs for `podbag`. None: this app is a build of its own, with no podbag
+/// to offer.
+#[tauri::command(async)]
+fn terminal_command(state: State<'_, AppState>) -> Option<terminal_cli::Status> {
+    state.installer.as_ref()?;
+    Some(terminal_cli::current(&state.podbag))
+}
+
+/// Make the `podbag` command from the app's own podbag. Ok(None): the user did not give
+/// the administrator password.
+#[tauri::command(async)]
+fn install_terminal_command(
+    state: State<'_, AppState>,
+) -> Result<Option<terminal_cli::Status>, String> {
+    if state.installer.is_none() {
+        return Err("this app has no podbag of its own to install".into());
+    }
+    let prompt = strings::text(state.language(), "cli.prompt", None);
+    terminal_cli::install(&state.podbag, &prompt)
+}
+
 #[tauri::command]
 fn take_star_prompt(state: State<'_, AppState>) -> bool {
     state.star_prompt.swap(false, Ordering::SeqCst)
@@ -1354,6 +1376,8 @@ fn main() {
             import_images,
             vm_resources,
             take_star_prompt,
+            terminal_command,
+            install_terminal_command,
             open_repository,
             open_training_guide,
             get_settings,

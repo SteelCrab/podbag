@@ -55,8 +55,10 @@
 从[最新版本](https://github.com/SteelCrab/podbag/releases/latest)下载适合当前系统的安装包。
 
 - **Linux（x86_64、arm64）。** Debian 和 Ubuntu 使用 `.deb`，Fedora 使用 `.rpm`。安装包内含引擎。
-- **macOS（Apple 芯片、Intel）。** 运行下方命令安装 CLI。解压 `podbag-desktop-aarch64-macos.zip`（Apple 芯片）或 `podbag-desktop-x86_64-macos.zip`（Intel），然后打开 `podbag.app`。
+- **macOS（Apple 芯片、Intel）。** 解压 `podbag-desktop-aarch64-macos.zip`（Apple 芯片）或 `podbag-desktop-x86_64-macos.zip`（Intel），将 `podbag.app` 移到“应用程序”文件夹，然后打开。
 - **Windows（x86_64、ARM64，实验性支持）。** 运行与 CPU 架构匹配的 `.msi`。如果发行版没有提供 MSI，可从成功的 [CI 运行记录](https://github.com/SteelCrab/podbag/actions/workflows/ci.yml?query=branch%3Amain)下载。运行容器前请启用 WSL 2。
+
+应用内含 CLI。如果终端中没有 `podbag`，应用会提示安装 `podbag` 命令。该命令使用应用自带的 CLI，因此会随应用一起更新。
 
 ### Linux（x86_64、arm64）和 macOS（Apple 芯片、Intel）的 CLI
 

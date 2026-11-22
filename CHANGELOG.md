@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Desktop
+
+- Use the CLI that comes with Podbag Desktop in a terminal. When a terminal finds no
+  `podbag`, a notice offers to install the `podbag` command. Settings > Terminal command
+  can install it later.
+- The command leads to the app's own podbag, so it is updated with the app. On macOS and
+  Linux it is a link in `/usr/local/bin`. On Windows, the app's folder is added to the
+  user's `Path`.
+- When the app was updated another way and a separate terminal podbag is older, a notice
+  offers to update it to the app's version.
+
 ## v0.3.1 (2026-11-22)
 
 ### macOS

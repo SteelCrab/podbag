@@ -1,0 +1,9 @@
+#!/bin/sh
+# Before rpm removes Podbag Desktop ($1 is 0; it is 1 on an upgrade): the podbag
+# command that the app made, a link to its podbag.
+set -eu
+
+cli=/usr/local/bin/podbag
+if [ "$1" = 0 ] && [ "$(readlink "$cli" || true)" = /usr/lib/podbag-desktop/podbag ]; then
+    rm -f "$cli"
+fi

@@ -9,3 +9,9 @@ if [ "$1" = remove ] && [ "$(readlink "$link" || true)" = "$profile" ]; then
     fi
     rm -f "$link"
 fi
+
+# The podbag command that the app made: a link to its podbag.
+cli=/usr/local/bin/podbag
+if [ "$1" = remove ] && [ "$(readlink "$cli" || true)" = /usr/lib/podbag-desktop/podbag ]; then
+    rm -f "$cli"
+fi

@@ -82,11 +82,15 @@ jobs:
           runuser -u desktop-test -- dbus-run-session -- xvfb-run -a sh desktop/linux/test-installed.sh
       - name: Remove package
         run: |
+          # The podbag command that Install in the app makes.
+          ln -s /usr/lib/podbag-desktop/podbag /usr/local/bin/podbag
+          podbag --version
           if command -v apt-get >/dev/null; then
             apt-get purge -y podbag-desktop
           else
             dnf remove -y podbag-desktop
           fi
+          test ! -L /usr/local/bin/podbag
           test ! -e /usr/bin/podbag-desktop
           test ! -e /usr/lib/podbag-desktop/podbag
           test ! -e /usr/share/applications/podbag-desktop.desktop

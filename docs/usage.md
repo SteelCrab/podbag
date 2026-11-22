@@ -991,6 +991,23 @@ installed lessons are saved in the Podbag UI configuration directory.
     - Windows: the app ends, `msiexec` installs the .msi, and the new app starts.
   - An app built from source cannot update itself. Update podbag then updates the podbag
     it uses, and Open releases opens the release page.
+  - When the app was updated another way (`apt`, `dnf`, a new .msi) and a separate
+    terminal podbag is older than the app, a notice offers Update. It runs
+    `podbag upgrade --yes --version <the app's version>`. Not now hides it until the next
+    app version.
+- Terminal command (an app from a release package): what a terminal runs for `podbag`.
+  - The app's podbag: the command leads to the podbag in the app, so it changes when the
+    app is updated.
+  - A separate podbag (for example from `install.sh`): Update in Updates updates it.
+  - Not installed: Install makes the command. When the app opens and finds no `podbag`,
+    a notice offers Install too. Not now hides the notice; Install stays in Settings.
+    - macOS and Linux: a link `/usr/local/bin/podbag` to the app's podbag. When the folder
+      needs administrator rights, macOS shows its password dialog and Linux asks through
+      pkexec. Removing the Linux package removes the link.
+    - Windows: the app's folder is added at the end of the user's `Path`. New terminals
+      find `podbag.exe`.
+    - macOS: open the app from the Applications folder first. An app opened from a
+      download runs from a moving copy, and a link to it would break.
 - The tray shows "Update available (x.y.z)…" when one is known. It opens Updates.
 
 #### Pull panel
