@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.3.1 (2026-11-22)
 
 ### macOS
 
@@ -8,6 +8,20 @@
   images are pulled for `linux/amd64`.
 - `install.sh` and `podbag upgrade` choose `podbag-x86_64-macos` on an Intel Mac. On
   Apple silicon, they choose the arm64 build, also from a shell that Rosetta runs.
+- Desktop updates choose `podbag-desktop-x86_64-macos.zip` on an Intel Mac.
+
+### Updates
+
+- Update Podbag Desktop in Settings > Updates. The app installs the new release
+  package, checks it against `SHA256SUMS`, and starts again. The package carries
+  the app's podbag, so both change together.
+- macOS replaces `podbag.app` after it checks the version and signature. Linux uses
+  `pkexec apt-get` or `pkexec dnf`. Windows runs `msiexec` after the app ends.
+- The app also updates a separate terminal podbag, for example one from `install.sh`,
+  to the same version.
+- `podbag upgrade` does not replace the podbag inside a Desktop package. It points to
+  the app. `podbag upgrade --check` still works.
+- Stable releases are published to crates.io automatically.
 
 ## v0.3.0 (2026-11-21)
 
