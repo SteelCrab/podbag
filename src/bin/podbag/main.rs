@@ -1,6 +1,7 @@
 mod args;
 #[cfg(unix)]
 mod build;
+mod buildargs;
 mod check;
 #[cfg(unix)]
 mod container;
@@ -280,7 +281,7 @@ fn forwarded_logins(cli: &Cli) -> Vec<(String, String)> {
         Cmd::Run(a) | Cmd::Create(a) if a.rootfs.is_none() => {
             a.args.first().cloned().into_iter().collect()
         }
-        Cmd::Build(a) => build::pulled_images(a),
+        Cmd::Build(a) => buildargs::pulled_images(a),
         _ => Vec::new(),
     };
     let mut logins: Vec<(String, auth::AuthConfig)> = Vec::new();
