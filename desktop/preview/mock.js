@@ -200,6 +200,21 @@
     container_json: () => { throw "not supported"; },
     features: () => ({ stats: false, top: false, pause: false, rename: false }),
     pull: () => new Promise(() => {}),
+    // Like the engine: a missing image is pulled first, then the container starts.
+    run_container: async ({ spec }) => {
+      if (!images.some((i) => i.RepoTags.includes(spec.image))) {
+        for (const line of ["Pulling from library/" + spec.image, "Download complete", "Pull complete"]) {
+          emit("pull-progress", line);
+          await new Promise((resolve) => setTimeout(resolve, 60));
+        }
+        images.push({ Id: "sha256:4e3d2c1b0a9f8e7d", RepoTags: [spec.image], Created: now, Size: 9_000_000, Containers: 1 });
+      }
+      const id = "f00dfeed" + String(containers.length).padStart(8, "0");
+      const ports = spec.ports.map((p) => ({ IP: "0.0.0.0", PrivatePort: p.container, PublicPort: p.host, Type: p.protocol }));
+      lists.containers.unshift({ Id: id, Names: ["/" + (spec.name || "eager_tesla")], Image: spec.image, Command: spec.command.join(" "),
+        Created: Math.floor(Date.now() / 1000), State: "running", Status: "Up 1 second", Ports: ports });
+      return id;
+    },
     logs_start: () => { setTimeout(() => emit("logs", { generation: 1, lines: logLines }), 30); return 1; },
     logs_stop: () => null,
     watch: () => { setTimeout(() => emit("live", true), 10); return null; },
@@ -327,6 +342,29 @@
       "settings-docker": () => app.openSettingsSection("engine-settings"),
       import: async () => { app.go("images"); await app.importFromDocker(); },
       "empty-volumes": () => app.go("volumes"),
+      // The run form, filled in, with the options open.
+      "run-container": () => {
+        app.go("containers");
+        const form = app.run().querySelector("form");
+        const set = (selector, value) => { const el = form.querySelector(selector); el.value = value; };
+        set("#run-image", "nginx:alpine");
+        set("#run-name", "web");
+        set(".run-host", "8080");
+        set(".run-container", "80");
+        form.querySelector("details").open = true;
+        form.querySelector("#run-volumes ~ .run-add").click();
+        set(".run-source", "site");
+        set(".run-target", "/usr/share/nginx/html");
+        form.querySelector(".run-readonly").checked = true;
+        set("#run-restart", "unless-stopped");
+        form.querySelector("#run-image").focus();
+      },
+      // The image list: each image has Run (shown on the last one).
+      "run-image": () => {
+        app.go("images");
+        [...document.querySelectorAll(".list-images button[aria-label=Run]")].pop().focus();
+      },
+      "run-from-image": () => { app.go("images"); app.run("alpine:3.22"); },
     };
     if (view === "empty" && params.get("tab")) app.go(params.get("tab"));
     await (scenes[view] || (() => {}))();

@@ -41,6 +41,7 @@ const API = (() => {
     containerJson: (id, what) => scoped("container_json", { id, what }),
     features: (sample) => scoped("features", { sample: sample || null }),
     pull: (image, location, host) => scoped("pull", { image, location: location || null, host: host || null }),
+    runContainer: (spec) => scoped("run_container", { spec }),
     search: (term) => scoped("search", { term }),
     registries: (hosts) => invoke("registries", { hosts }),
     registryLogin: (location, host, user, password) => invoke("registry_login", { location, host, user, password }),

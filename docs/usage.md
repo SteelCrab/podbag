@@ -1022,7 +1022,19 @@ printf '%s\n' \
   Drag the open space in the toolbar to move the window.
 - Each list has a search box, and the same actions as the TUI.
 - A container's page has its details, its logs (as they come) and all its data.
-- With no containers, the window shows how to start one.
+- Select **Containers → Run container** to start a new container. Each image in
+  **Images** also has **Run**, with the image filled in.
+  - Give the image. A name and published ports (host:container, TCP or UDP) are optional.
+    With no host port, the engine chooses one.
+  - **More options** has environment variables (`KEY=VALUE`), volumes (a volume name or a
+    full host path, then the path in the container, read-only if needed), the command, the
+    restart policy and **Remove when it stops**.
+  - The form checks ports, variables and paths before it sends anything.
+  - When the engine does not have the image, the app pulls it first. It uses your
+    registry login, as **Pull image** does.
+  - Then the container's page opens with its logs. Errors from the engine show in the form.
+  - It works with every engine: it uses the Docker API.
+- With no containers, the window offers **Run container** and the terminal command.
 - The tray item shows the engine's state and how many containers run. It has Open podbag
   and Quit. On macOS, it also has Start VM or Stop VM.
 - On macOS, open **Settings → Linux VM** to start or stop the local VM and choose its

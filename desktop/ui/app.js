@@ -346,7 +346,8 @@ async function prune(kind) {
   refreshSoon();
 }
 
-// Pull progress goes here while a pull runs; images.js opens the pull panel.
+// Pull progress goes here while a pull runs (the pull panel, the run form); images.js
+// opens the pull panel.
 let pullLine = null;
 function pull() {}
 
@@ -1000,6 +1001,7 @@ function toolbar(kind) {
         h("span", { class: "dot", "aria-hidden": "true" }), h("span", { class: "live-text", text: S.live ? t("live.on") : "" })),
       kind === "images" && isPodbag() && S.docker && S.docker.installed ? button(registryIcon("dockerhub"), t("import.button"), importFromDocker) : null,
       kind === "images" ? button("pull", t("action.pull"), pull, "primary") : null,
+      kind === "containers" ? button("start", t("run.button"), () => openRunDialog(), "primary") : null,
       kind === "volumes" ? button(null, t("volume.create"), createVolume, "primary") : null,
       button("prune", t("action.prune"), () => prune(kind)),
       windowBar ? null : iconButton("refresh", t("action.refresh"), refresh)));
@@ -1074,6 +1076,7 @@ function rowActions(kind, o) {
     out.push(iconButton("logs", t("action.logs"), () => openDetail(kind, o.Id, "logs")));
     if (st === "running") out.push(iconButton("shell", t("action.shell"), () => shell(o)));
   }
+  if (kind === "images") out.push(iconButton("start", t("action.run"), () => openRunDialog(imageName(o)), "accent"));
   if (!(kind === "networks" && builtinNetwork(o))) {
     out.push(iconButton("remove", t("action.remove"), () => remove(kind, o), "danger"));
   }
@@ -1148,9 +1151,11 @@ function emptyState(kind) {
     volumes: `${cmd} volume create data`,
     networks: `${cmd} network create app`,
   };
+  const run = kind === "containers";
   return h("div", { class: "empty" },
     h("div", { class: "empty-icon" }, icon(kind)),
     h("h2", { text: t(`empty.${kind}.title`) }),
+    run ? [h("p", { text: t("empty.containers.run") }), button("start", t("run.button"), () => openRunDialog(), "primary empty-run")] : null,
     isPodbag() || S.engine?.engine === "docker" || kind === "images" ? h("p", { text: t(`empty.${kind}.text`) }) : null,
     (isPodbag() || S.engine?.engine === "docker") && commands[kind] ? codeLine(commands[kind]) : null,
     kind === "images" ? button("pull", t("action.pull"), pull, "primary") : null);
@@ -2059,7 +2064,7 @@ async function init() {
 
 // For the preview page (desktop/preview), which shows each view with a mocked API.
 window.podbag = {
-  ready, go, openDetail, remove: (kind, i) => remove(kind, S.lists[kind][i]), pull, prune, state: S,
+  ready, go, openDetail, run: (image) => openRunDialog(image), remove: (kind, i) => remove(kind, S.lists[kind][i]), pull, prune, state: S,
   toggleSidebar, openSettingsSection, openUpdates, switchEngine, applyVm: () => applyVm(document.querySelector(".vm-form")), runUpgrade,
 };
 
