@@ -175,6 +175,9 @@ pub struct Updates {
     pub app_newer: bool,
     /// The `podbag` that Update upgrades (see [`cli_to_upgrade`]) is older.
     pub cli_newer: bool,
+    /// The separate terminal `podbag` is older than the packaged app: the app was updated
+    /// some other way (a package manager, a new .msi). Known without the network.
+    pub terminal_older: bool,
 }
 
 /// When to ask the network.
@@ -251,9 +254,14 @@ pub fn plan(u: &mut Updates, installer: Option<&str>, terminal: Option<&Path>) {
     if installer.is_some() {
         u.app_newer = older(Some(&u.app)) || older(u.engine.as_deref());
         u.cli_newer = older(u.terminal_version.as_deref());
+        u.terminal_older = u
+            .terminal_version
+            .as_deref()
+            .is_some_and(|t| is_newer(&u.app, t));
     } else {
         u.app_newer = false;
         u.cli_newer = older(u.engine.as_deref());
+        u.terminal_older = false;
     }
     u.newer = u.app_newer || u.cli_newer;
 }
@@ -561,6 +569,19 @@ mod tests {
         assert_eq!(u.installer.as_deref(), Some("macos-app"));
         assert_eq!(u.terminal_version.as_deref(), Some("0.3.0"));
         assert!(u.newer && u.cli_newer && !u.app_newer);
+        assert!(u.terminal_older, "older than the app, with no check yet");
+        let mut u = Updates {
+            latest: None,
+            ..base.clone()
+        };
+        plan(&mut u, Some("macos-app"), Some(&term.bin));
+        assert!(u.terminal_older && !u.newer);
+        let mut u = Updates {
+            app: "0.3.0".into(),
+            ..base.clone()
+        };
+        plan(&mut u, Some("macos-app"), Some(&term.bin));
+        assert!(!u.terminal_older, "the same version as the app");
         // An old packaged app: the app.
         let mut u = Updates {
             app: "0.3.0".into(),
@@ -576,7 +597,7 @@ mod tests {
             ..base.clone()
         };
         plan(&mut u, None, None);
-        assert!(u.newer && u.cli_newer && !u.app_newer);
+        assert!(u.newer && u.cli_newer && !u.app_newer && !u.terminal_older);
         let mut u = base.clone();
         plan(&mut u, None, None);
         assert!(!u.newer);

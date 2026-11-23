@@ -65,6 +65,8 @@ const API = (() => {
     openReleases: () => invoke("open_releases"),
     openTerminal: (what) => invoke("open_terminal", { what }),
     takeStarPrompt: () => invoke("take_star_prompt"),
+    terminalCommand: () => invoke("terminal_command"),
+    installTerminalCommand: () => invoke("install_terminal_command"),
     openRepository: () => invoke("open_repository"),
     openTrainingGuide: (id) => invoke("open_training_guide", { id, lang: I18N.lang }),
     getSettings: () => invoke("get_settings"),

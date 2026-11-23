@@ -38,6 +38,11 @@ pub struct Settings {
     pub sidebar_width: u32,
     /// The user collapsed the sidebar to a rail of icons.
     pub sidebar_collapsed: bool,
+    /// The user answered "Not now" to installing the `podbag` command.
+    pub cli_notice_dismissed: bool,
+    /// The app version for which the user answered "Not now" to updating the terminal's
+    /// separate `podbag`.
+    pub cli_update_dismissed: Option<String>,
 }
 
 impl Default for Settings {
@@ -47,6 +52,8 @@ impl Default for Settings {
             theme: ThemePreference::System,
             sidebar_width: SIDEBAR_WIDTH,
             sidebar_collapsed: false,
+            cli_notice_dismissed: false,
+            cli_update_dismissed: None,
         }
     }
 }
@@ -124,6 +131,27 @@ mod tests {
     }
 
     #[test]
+    fn the_answers_to_the_terminal_command_notices_are_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        std::fs::write(&file, r#"{"language":"ko"}"#).unwrap();
+        let old = Settings::load(&file);
+        assert!(!old.cli_notice_dismissed);
+        assert_eq!(old.cli_update_dismissed, None);
+        let answered = Settings {
+            cli_notice_dismissed: true,
+            cli_update_dismissed: Some("0.3.1".into()),
+            ..old
+        };
+        answered.save(&file).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(json["cliNoticeDismissed"], true);
+        assert_eq!(json["cliUpdateDismissed"], "0.3.1");
+        assert_eq!(Settings::load(&file), answered);
+    }
+
+    #[test]
     fn native_theme_matches_saved_preference() {
         for (name, native) in [
             ("system", None),
@@ -155,6 +183,7 @@ mod tests {
             theme: ThemePreference::Dark,
             sidebar_width: 280,
             sidebar_collapsed: true,
+            ..Settings::default()
         };
         s.save(&file).unwrap();
         assert_eq!(Settings::load(&file), s);

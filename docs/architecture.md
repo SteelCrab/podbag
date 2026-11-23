@@ -7,9 +7,19 @@ Mac. The numbers come from [benchmarks.md](benchmarks.md) and
 ## Contents
 
 - [Processes](#processes)
+  - [Docker Engine](#docker-engine)
+  - [podbag](#podbag)
+  - [The Docker API](#the-docker-api)
 - [Image storage: layers and files](#image-storage-layers-and-files)
+  - [Layers](#layers)
+  - [Files](#files)
+  - [Keeping files right](#keeping-files-right)
+  - [Example](#example)
 - [Networks](#networks)
 - [On macOS and Windows](#on-macos-and-windows)
+  - [Other tools on a Mac](#other-tools-on-a-mac)
+  - [podbag on a Mac](#podbag-on-a-mac)
+  - [podbag on Windows](#podbag-on-windows)
 - [Where podbag is behind](#where-podbag-is-behind)
 
 <picture><source media="(prefers-color-scheme: dark)" srcset="images/architecture-dark.svg"><img alt="Docker Engine and podbag on Linux: processes and image storage" src="images/architecture-light.svg"></picture>

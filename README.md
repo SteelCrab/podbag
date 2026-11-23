@@ -55,8 +55,10 @@ Manage containers, images, volumes and networks on Linux and macOS. Windows supp
 Get the package for your system from the [latest release](https://github.com/SteelCrab/podbag/releases/latest).
 
 - **Linux (x86_64, arm64).** Install the `.deb` on Debian or Ubuntu, or the `.rpm` on Fedora. The package includes the engine.
-- **macOS (Apple silicon, Intel).** Install the CLI with the command below. Extract `podbag-desktop-aarch64-macos.zip` (Apple silicon) or `podbag-desktop-x86_64-macos.zip` (Intel) and open `podbag.app`.
+- **macOS (Apple silicon, Intel).** Extract `podbag-desktop-aarch64-macos.zip` (Apple silicon) or `podbag-desktop-x86_64-macos.zip` (Intel), move `podbag.app` to the Applications folder, and open it.
 - **Windows (x86_64, ARM64, experimental).** Run the `.msi` for your CPU. If the release has no MSI, get it from a successful [CI run](https://github.com/SteelCrab/podbag/actions/workflows/ci.yml?query=branch%3Amain). Enable WSL 2 to run containers.
+
+The app includes the CLI. When the terminal has no `podbag`, the app offers to install the `podbag` command. The command uses the app's CLI, so it is updated with the app.
 
 ### CLI on Linux (x86_64, arm64) and macOS (Apple silicon, Intel)
 

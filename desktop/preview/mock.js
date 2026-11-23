@@ -107,7 +107,14 @@
   const source = { installer: null, terminal: null, terminalVersion: null, appNewer: false, cliNewer: true };
   const update = view.startsWith("settings") || view.startsWith("update-") || view === "collapsed"
     ? { engine: "0.1.0", app: "0.1.0", latest: "0.2.0", newer: true, checked: now - 3600, error: null, ...(view === "update-source" ? source : packaged) }
-    : { engine: "0.1.0", app: "0.1.0", latest: "0.1.0", newer: false, checked: now - 3600, error: null, ...packaged, appNewer: false, cliNewer: false };
+    : view === "cli-update"
+      // The app came from a new package; the terminal's own podbag stayed behind.
+      ? { engine: "0.3.1", app: "0.3.1", latest: "0.3.1", newer: true, checked: now - 3600, error: null, ...packaged, terminalVersion: "0.3.0", appNewer: false, terminalOlder: true }
+      : { engine: "0.1.0", app: "0.1.0", latest: "0.1.0", newer: false, checked: now - 3600, error: null, ...packaged, appNewer: false, cliNewer: false };
+  // What a terminal runs for podbag: nothing in the views that show Install.
+  let terminalCommand = view === "cli-notice" || view === "settings-cli"
+    ? { state: "missing", path: null, target: "/usr/local/bin/podbag", problem: null }
+    : { state: "other", path: "/usr/local/bin/podbag", target: "/usr/local/bin/podbag", problem: null };
 
   const hub = [
     { name: "nginx", description: "Official build of Nginx.", star_count: 21034, is_official: true },
@@ -241,6 +248,12 @@
       { name: "registry.example.com/team/worker:1.4.2", size: 183_000_000, registry: "custom" },
     ],
     import_images: () => null,
+    terminal_command: () => terminalCommand,
+    install_terminal_command: async () => {
+      await new Promise((resolve) => setTimeout(resolve, 650));
+      terminalCommand = { ...terminalCommand, state: "app", path: terminalCommand.target };
+      return terminalCommand;
+    },
     take_star_prompt: () => {
       if (view !== "first-launch" || sessionStorage.getItem("preview.starPromptShown")) return false;
       sessionStorage.setItem("preview.starPromptShown", "1");
@@ -291,6 +304,7 @@
       settings: () => app.go("settings"),
       tutorials: () => app.go("tutorials"),
       "settings-vm": () => app.openSettingsSection("vm-settings"),
+      "settings-cli": () => app.openSettingsSection("terminal-command"),
       "settings-updates": app.openUpdates,
       "update-source": app.openUpdates,
       "update-admin": async () => { await app.openUpdates(); await app.runUpgrade(); },

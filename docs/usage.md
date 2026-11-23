@@ -6,21 +6,94 @@ The [README](../README.md) shows how to install podbag. This page shows what it 
 
 - [Commands](#commands)
 - [How containers run](#how-containers-run)
+  - [No daemon](#no-daemon)
+  - [The keeper](#the-keeper)
+  - [Isolation](#isolation)
+  - [Restart policies](#restart-policies)
+  - [Health checks](#health-checks)
 - [Images](#images)
+  - [Storage](#storage)
+  - [How a container sees its image](#how-a-container-sees-its-image)
+  - [File times and links](#file-times-and-links)
+  - [Damaged files](#damaged-files)
+  - [Choose the method](#choose-the-method)
 - [Registries](#registries)
+  - [Log in and out](#log-in-and-out)
+  - [Pull and push](#pull-and-push)
+  - [How a push works](#how-a-push-works)
 - [Builds](#builds)
+  - [Build an image](#build-an-image)
+  - [How the steps work](#how-the-steps-work)
+  - [Dockerfiles](#dockerfiles)
+  - [The cache](#the-cache)
+  - [commit, export and diff](#commit-export-and-diff)
+  - [Not supported in builds](#not-supported-in-builds)
 - [Checks](#checks)
+  - [podbag check](#podbag-check)
+  - [podbag check-image](#podbag-check-image)
+  - [Clear errors](#clear-errors)
 - [Volumes](#volumes)
 - [Limits and security](#limits-and-security)
+  - [Options](#options)
+  - [Memory budget](#memory-budget)
+  - [Where the cgroups are](#where-the-cgroups-are)
+  - [Security defaults](#security-defaults)
+  - [--privileged](#--privileged)
 - [Watch and change containers](#watch-and-change-containers)
+  - [stats](#stats)
+  - [top](#top)
+  - [pause and unpause](#pause-and-unpause)
+  - [rename](#rename)
+  - [update](#update)
 - [Networks](#networks)
+  - [Options](#options-1)
+  - [Names and addresses](#names-and-addresses)
+  - [How it works](#how-it-works)
 - [Docker API](#docker-api)
+  - [Start it](#start-it)
+  - [What works](#what-works)
+  - [What does not work](#what-does-not-work)
+  - [cp, save and load](#cp-save-and-load)
+  - [Differences from Docker](#differences-from-docker)
+  - [Docker Compose](#docker-compose)
+  - [Builds with the docker CLI](#builds-with-the-docker-cli)
+  - [buildx](#buildx)
 - [TUI and GUI](#tui-and-gui)
+  - [Which engine they use](#which-engine-they-use)
+  - [Migrate between engines or Kubernetes clusters](#migrate-between-engines-or-kubernetes-clusters)
+  - [Dashboard operations from the CLI](#dashboard-operations-from-the-cli)
+  - [podbag tui](#podbag-tui)
+  - [podbag-desktop](#podbag-desktop)
+  - [Build the desktop app](#build-the-desktop-app)
+  - [What is hidden](#what-is-hidden)
 - [Swarm mode](#swarm-mode)
+  - [What it is](#what-it-is)
+  - [How it runs without a daemon](#how-it-runs-without-a-daemon)
+  - [Networks and ports](#networks-and-ports)
+  - [Secrets and configs](#secrets-and-configs)
+  - [What does not work](#what-does-not-work-1)
 - [Kubernetes](#kubernetes)
+  - [Start it](#start-it-1)
+  - [How pods run](#how-pods-run)
+  - [What works](#what-works-1)
+  - [What does not work](#what-does-not-work-2)
 - [macOS](#macos)
+  - [The VM](#the-vm)
+  - [Commands and files](#commands-and-files)
+  - [Registry logins](#registry-logins)
+  - [Resources](#resources)
+  - [docker CLI, Compose and buildx](#docker-cli-compose-and-buildx)
+  - [Ports, disk and memory](#ports-disk-and-memory)
+  - [Build it yourself](#build-it-yourself)
 - [Windows (experimental)](#windows-experimental)
+  - [Setup](#setup)
+  - [How it works](#how-it-works-1)
+  - [Limits](#limits)
 - [Update podbag](#update-podbag)
+  - [How it works](#how-it-works-2)
+  - [Where podbag is installed](#where-podbag-is-installed)
+  - [After the update](#after-the-update)
+  - [Limits](#limits-1)
 - [Requirements on Linux](#requirements-on-linux)
 - [AppArmor](#apparmor)
 
@@ -65,6 +138,12 @@ podbag check-image myapp:1                   # programs that cannot run in the i
 podbag system service &                      # the Docker API, for the docker CLI
 podbag vm status                             # macOS and Windows: podbag's Linux VM
 podbag tui                                   # containers, images, volumes and networks
+podbag migrate --from docker --to podbag image myapp:1   # copy between engines
+podbag engine list container                 # dashboard operations, as JSON
+podbag kube list pod --context dev           # Kubernetes resources, with kubectl
+podbag tutorial status                       # the volume and HTTP tutorial
+podbag system docker use                     # point the docker command at podbag
+podbag upgrade                               # install the latest release
 ```
 
 ## How containers run
@@ -673,38 +752,51 @@ podbag tui --engine unix:///run/kiri/docker.sock
 
 ### Migrate between engines or Kubernetes clusters
 
-In the TUI, press `a` and choose **Migrate**. Select **Engine** or **Kubernetes**.
-In Podbag Desktop, open **Migrate**. The list shows the resources found on your local engines.
-Expand **Migrate** in the sidebar. Select **Engine** or **Kubernetes**, then choose
-a populated resource type to filter the list. For Kubernetes, choose a source cluster
-and namespace. Select a resource,
-choose its destination and start the migration. The dialog reports progress,
-verifies the destination and keeps the source. Existing destination containers and
-volumes block the copy. An identical image can be reused.
+#### Start a migration
 
-- **Images** transfer a single-platform image archive with its selected tag and layers.
-- **Containers** must be stopped. Podbag snapshots the writable filesystem, copies its
-  named and anonymous volumes, and creates a stopped container with the same name,
-  command, environment and supported runtime settings. Create any custom networks on
-  the destination first. Host bind mounts require a separate host file transfer.
-  To use the destination engine’s logging driver and process limits, select this option
-  during review or pass `--destination-defaults` to the CLI. This supports Podman
-  containers that use journald and per-container ulimits when copying to Podbag.
-  Other unsupported runtime settings stop the transfer.
-- **Volumes** copy files from local Docker-compatible volumes, including hidden files,
-  links, permissions and ownership. Stop workloads writing to the source volume first.
-  Podbag uses a BusyBox 1.36.1 helper image and temporary local disk space for the archive.
-- **Kubernetes** supports standalone Pods, Services, Deployments and filesystem PVCs.
-  Select two kubeconfig contexts and an existing destination namespace. Kubernetes assigns
-  new UIDs, service addresses and node ports. Migrate PVCs before workloads that use them.
-  The destination needs the referenced images, credentials and configuration. A bound claim
-  needs compatible storage and permission to create temporary Pods and use `pods/exec` in
-  both namespaces. Podbag transfers the files through those Pods and checks their contents
-  on the destination. Stop writers before starting. Raw block devices and CSI snapshots
-  need a storage-specific transfer. If a bound claim fails during the copy, the destination
-  claim retains its storage and carries the annotation `podbag.io/migration-state=copying`.
+- TUI: press `a` and choose **Migrate**.
+- Podbag Desktop: expand **Migrate** in the sidebar. The list shows the resources on your
+  local engines.
+- Select **Engine** or **Kubernetes**. Choose a resource type to filter the list.
+- For Kubernetes, choose a source cluster and namespace.
+- Select a resource, choose its destination and start.
+- The dialog shows the progress and verifies the destination. The source stays.
+- A destination container or volume with the same name blocks the copy. An identical
+  image is used again.
 
-The CLI supports the same engine transfers. For example, with Docker and Podbag running:
+#### What is copied
+
+- **Images**: a single-platform image archive, with the selected tag and its layers.
+- **Containers**: stop them first.
+  - Podbag saves the writable filesystem and copies the named and anonymous volumes.
+  - It creates a stopped container with the same name, command, environment and
+    supported runtime settings.
+  - Create custom networks on the destination first.
+  - Host bind mounts need a separate file transfer.
+  - To use the destination engine's logging driver and process limits, select this
+    option in the review, or pass `--destination-defaults` to the CLI. Podman containers
+    with journald and per-container ulimits can then be copied to Podbag.
+  - Other unsupported runtime settings stop the transfer.
+- **Volumes**: files from local Docker-compatible volumes, with hidden files, links,
+  permissions and ownership.
+  - Stop the workloads that write to the source volume first.
+  - Podbag uses a BusyBox 1.36.1 helper image and temporary local disk space.
+- **Kubernetes**: standalone Pods, Services, Deployments and filesystem PVCs.
+  - Select two kubeconfig contexts and an existing destination namespace.
+  - Kubernetes gives new UIDs, service addresses and node ports.
+  - Migrate PVCs before the workloads that use them.
+  - The destination needs the referenced images, credentials and configuration.
+  - A bound claim needs compatible storage and permission to create temporary Pods and
+    use `pods/exec` in both namespaces. Podbag copies the files through those Pods and
+    checks them on the destination.
+  - Stop the writers before you start.
+  - Raw block devices and CSI snapshots need a storage-specific transfer.
+  - When a bound claim fails during the copy, the destination claim keeps its storage
+    and has the annotation `podbag.io/migration-state=copying`.
+
+#### From the CLI
+
+- The CLI does the same engine transfers. Docker and Podbag must run:
 
 ```sh
 podbag migrate --from docker --to podbag image example/app:1
@@ -714,8 +806,9 @@ podbag migrate --from context:staging --to podbag container web
 
 ### Dashboard operations from the CLI
 
-These commands run without a terminal UI. List, inspect and settings commands print
-JSON. Migration progress and errors go to standard error.
+- These commands need no terminal UI.
+- List, inspect and settings commands print JSON.
+- Migration progress and errors go to standard error.
 
 | Command | Operation |
 |---|---|
@@ -733,22 +826,31 @@ JSON. Migration progress and errors go to standard error.
 | `podbag settings startup enable` | Start Podbag Desktop at login. Use `status` or `disable` to inspect or turn it off |
 | `podbag settings registry list`, `podbag settings registry host custom registry.example.com` | List registry presets and accounts or configure a preset's host |
 
-Use `podbag engine --help` for removal, rename, pull, search, stats and process commands.
-The engine commands use the same default selection as the dashboards. Use `--target`
-for an explicit engine and `--from` or `--to` to override the import endpoints.
-On Windows, a custom Unix socket refers to a socket inside Podbag's WSL distribution.
-To run `engine exec` on that socket, install the Docker CLI inside that distribution.
+#### Engine selection
 
-Use `podbag login` with the registry host. Use `podbag settings registry show` with a
-preset name to see its account and any cloud login command. Once a configurable host
-is saved, `podbag engine pull team/app:1 --registry custom` uses that host.
+- The engine commands use the same saved engine as the dashboards.
+- `--target` selects another engine for one command. `--from` and `--to` change the
+  import endpoints.
+- `podbag engine --help` lists the other commands: remove, rename, pull, search, stats
+  and processes.
+- Windows: a custom Unix socket is a socket inside Podbag's WSL distribution. For
+  `engine exec` on it, install the Docker CLI in that distribution.
 
-#### Kubernetes
+#### Registry presets
 
-Install `kubectl` on the host. Use `--context` to select a kubeconfig context. The
-context's default namespace applies unless you pass `--namespace` or list all
-namespaces with `-A`. Available resource types are `pod`, `service`, `deployment`
-and `claim` (alias `pvc`).
+- Log in with `podbag login <host>`.
+- `podbag settings registry show <preset>` shows the preset's account and any cloud
+  login command.
+- After you save a configurable host, `podbag engine pull team/app:1 --registry custom`
+  uses it.
+
+#### Kubernetes commands
+
+- Install `kubectl` on the host.
+- `--context` selects a kubeconfig context.
+- The context's default namespace applies. `--namespace` selects another one. `-A`
+  lists all namespaces.
+- Resource types: `pod`, `service`, `deployment` and `claim` (alias `pvc`).
 
 ```sh
 podbag kube contexts
@@ -758,16 +860,16 @@ podbag kube inspect pod web --context dev -n apps
 podbag kube migrate pod web --from dev --to staging --from-namespace apps --to-namespace review
 ```
 
-Migration reads the source, creates the destination resource and verifies it. Use
-`--uid` with the value from an earlier inspection to require that exact source
-object. If you omit either namespace flag, the corresponding context's default applies.
+- `migrate` reads the source, creates the destination resource and verifies it.
+- `--uid` requires that exact source object. Use the UID from an earlier inspection.
+- Without a namespace flag, that context's default namespace applies.
 
 #### Volume and HTTP tutorial
 
-Install a local `.podbag` lesson, then use `run` to complete the exercise in a
-disposable volume. Use `--input response.json` to supply your own response, or
-`--input -` to read it from standard input. CLI and TUI share the installed module
-and its completion record.
+- Install a local `.podbag` lesson. `run` does the exercise in a disposable volume.
+- `--input response.json` gives your own response. `--input -` reads it from standard
+  input.
+- The CLI and the TUI share the installed module and its completion record.
 
 ```sh
 podbag tutorial install volume-api.podbag
@@ -776,9 +878,9 @@ podbag tutorial run practice --input response.json
 podbag tutorial remove
 ```
 
-Use `podbag tutorial session` to control each step separately. It accepts one JSON
-action per line and writes one JSON response per line. The HTTP URL returned by
-`serve` is available until `end` or until the session's input closes.
+- `podbag tutorial session` runs each step separately.
+  - It reads one JSON action per line and writes one JSON response per line.
+  - The HTTP URL from `serve` works until `end`, or until the session's input closes.
 
 ```sh
 printf '%s\n' \
@@ -832,8 +934,9 @@ printf '%s\n' \
 
 #### Actions
 
-Press `a` from any resource list. Type part of a menu entry to filter it. Use the arrow
-keys and `Enter` to choose it. `Esc` returns to the resource list.
+- Press `a` from any resource list.
+- Type part of a menu entry to filter it.
+- Use the arrow keys and `Enter` to choose it. `Esc` goes back to the resource list.
 
 | Entry | What you can do |
 |---|---|
@@ -846,9 +949,11 @@ keys and `Enter` to choose it. `Esc` returns to the resource list.
 | Settings | Connect to an engine, inspect it, check for updates, install an update, open a host shell or the project page. Set the terminal language and theme. Manage sign-in startup when Podbag Desktop is installed |
 | Settings → Virtual machine | With Podbag selected on macOS or Windows, inspect, start, stop or restart the VM. On macOS, change CPU, memory and idle timeout. Choose whether to restart immediately or apply the changes at the next start |
 
-Kubernetes uses `kubectl` on the TUI host. In a detail or command dialog, press `y` to
-copy the text if your terminal allows clipboard writes (OSC 52). Terminal appearance and
-installed lessons are saved in the Podbag UI configuration directory.
+- Kubernetes uses `kubectl` on the TUI host.
+- In a detail or command dialog, `y` copies the text when the terminal allows clipboard
+  writes (OSC 52).
+- The terminal appearance and installed lessons are saved in the Podbag UI
+  configuration folder.
 
 #### The engine
 
@@ -881,8 +986,8 @@ installed lessons are saved in the Podbag UI configuration directory.
 - ECR, GAR, ACR and custom registries need a host. Type it, then press `Enter`.
 - ECR, GAR and ACR also show the command to log in.
 - A short name gets the registry's host: `me/app:1` from GitHub is `ghcr.io/me/app:1`.
-- From Docker Hub, typing searches Docker Hub, when the engine can search. `↑` `↓` choose
-  a result. Press `Enter` and enter a tag, or accept `latest`. podbag cannot search yet, so there is no search with podbag.
+- From Docker Hub, typing searches Docker Hub when the engine can search. podbag can.
+  `↑` `↓` choose a result. Press `Enter`, then enter a tag or accept `latest`.
 - The pull sends your login for that registry to the engine.
 
 #### The mouse
@@ -900,14 +1005,16 @@ installed lessons are saved in the Podbag UI configuration directory.
 
 ### podbag-desktop
 
-- A window with Containers, Images, Volumes, Networks, Kubernetes and Settings.
+- A window with Containers, Images, Volumes, Networks, Training, Kubernetes, Migrate and
+  Settings.
 - Open **Volumes → Create volume** to add a named volume on the selected engine.
 - Open **Kubernetes** and choose a **Cluster context** from the host's kubeconfig.
   **Current context** follows the active kubectl context. The selector applies only to
   Podbag and works while the selected container engine is offline.
 - Install `kubectl` on the desktop host. Browse Pods, Services, Deployments and
   persistent volume claims in the context's namespace or select **All namespaces**.
-  Select a name to inspect its JSON. These Kubernetes views are read-only.
+  Select a name to inspect its JSON. These views change nothing. To copy a resource to
+  another cluster, use [Migrate](#migrate-between-engines-or-kubernetes-clusters).
 
 ![Available migrations in a Kubernetes namespace and resource counts in the sidebar](images/migration-overview-en.png)
 
@@ -991,6 +1098,23 @@ installed lessons are saved in the Podbag UI configuration directory.
     - Windows: the app ends, `msiexec` installs the .msi, and the new app starts.
   - An app built from source cannot update itself. Update podbag then updates the podbag
     it uses, and Open releases opens the release page.
+  - When the app was updated another way (`apt`, `dnf`, a new .msi) and a separate
+    terminal podbag is older than the app, a notice offers Update. It runs
+    `podbag upgrade --yes --version <the app's version>`. Not now hides it until the next
+    app version.
+- Terminal command (an app from a release package): what a terminal runs for `podbag`.
+  - The app's podbag: the command leads to the podbag in the app, so it changes when the
+    app is updated.
+  - A separate podbag (for example from `install.sh`): Update in Updates updates it.
+  - Not installed: Install makes the command. When the app opens and finds no `podbag`,
+    a notice offers Install too. Not now hides the notice; Install stays in Settings.
+    - macOS and Linux: a link `/usr/local/bin/podbag` to the app's podbag. When the folder
+      needs administrator rights, macOS shows its password dialog and Linux asks through
+      pkexec. Removing the Linux package removes the link.
+    - Windows: the app's folder is added at the end of the user's `Path`. New terminals
+      find `podbag.exe`.
+    - macOS: open the app from the Applications folder first. An app opened from a
+      download runs from a moving copy, and a link to it would break.
 - The tray shows "Update available (x.y.z)…" when one is known. It opens Updates.
 
 #### Pull panel
@@ -1000,7 +1124,7 @@ installed lessons are saved in the Podbag UI configuration directory.
 - One field: type to search Docker Hub, or paste a full reference. `↑` `↓` move, `Enter`
   pulls, `Esc` closes.
 - A search result asks for the tag (`latest` first), then pulls.
-- When the engine cannot search (podbag today), the panel says so. Type the full name.
+- When the engine cannot search, the panel says so. Type the full name.
 - Open the registry picker and search by service name or server. Choose **My registry**
   to use any other Docker/OCI image registry supported by your engine. Enter the full
   server name and optional port, then the repository and tag or digest.
@@ -1044,9 +1168,13 @@ cargo build --release -p podbag-desktop
 ./target/release/podbag-desktop
 ```
 
-- It finds the `podbag` program next to itself, in `PATH`, or in `/usr/local/bin`,
-  `/opt/homebrew/bin` and `~/.local/bin`. `PODBAG_BIN` sets another one.
-- There are no installers yet (.dmg, .msi, AppImage).
+- It finds the `podbag` program in this order:
+  1. `PODBAG_BIN`.
+  2. Next to itself.
+  3. `PATH`, then `~/.local/bin`, `~/.cargo/bin`, `/usr/local/bin`, `/opt/homebrew/bin`
+     and `/usr/bin`.
+- Each release has packages: a `.zip` with `podbag.app` for macOS, an `.msi` for
+  Windows, and a `.deb` and an `.rpm` for Linux. See [Install](../README.md#install).
 
 #### Its name: podbag
 
@@ -1323,7 +1451,8 @@ docker buildx build --load -t app .
 ### Build it yourself
 
 - Release files carry the VM already. To build one: [build.md](build.md#macos).
-- Images must be for arm64. There is no Rosetta in the VM yet.
+- Images must be for the VM's CPU: `linux/arm64` on Apple silicon, `linux/amd64` on an
+  Intel Mac. The VM has no Rosetta.
 
 ## Windows (experimental)
 
@@ -1398,6 +1527,9 @@ podbag upgrade --version 0.1.0  # install this release; the only way to go back
 - The podbag inside a Podbag Desktop package (`podbag.app`, `/usr/lib/podbag-desktop`,
   `Podbag Desktop` in Program Files) is not upgraded on its own: update the app in
   Settings > Updates. `--check` still works.
+- The `podbag` command that Podbag Desktop installs runs the app's podbag: a link on
+  macOS and Linux, the app's folder in `Path` on Windows. So `podbag upgrade` there also
+  points to the app.
 
 ### After the update
 

@@ -1435,9 +1435,11 @@ async function renderSettings(main) {
           dockerSettings()),
         settingDetails("vm-settings", "vm", "vm"),
         settingDetails("updates", "updates", "update"),
+        settingDetails("terminal-command", "terminalCommand", "shell"),
         settingDetails("about-settings", "about", "inspect", null, h("p", { text: t("settings.aboutText") })))));
   renderVmSettings(true);
   renderUpdates();
+  renderTerminalCommand();
   for (const id of openSections) document.getElementById(id).open = true;
 }
 
@@ -1642,6 +1644,134 @@ async function showFirstLaunchStarPrompt() {
   }
 }
 
+// ---- notices ----
+
+// A notice in the corner, next to the toasts. It stays until one of its buttons is used.
+function notice(id, title, text, buttons) {
+  document.getElementById(id)?.remove();
+  const status = h("p", { class: "error-text" });
+  const el = h("section", { class: "notice", id, "aria-label": title },
+    h("strong", { class: "notice-title", text: title }),
+    h("p", { text }),
+    status,
+    h("div", { class: "buttons-row" }, buttons));
+  document.getElementById("toasts").append(el);
+  return { status, close: () => el.remove() };
+}
+
+// ---- the podbag command for terminals ----
+
+// Where Install puts the command: a link (macOS, Linux) or the app's folder in Path.
+function terminalCommandWhere(c) {
+  return t(navigator.userAgent.includes("Windows") ? "cli.wherePath" : "cli.whereLink", { path: c.target });
+}
+
+// A packaged app that finds no podbag for terminals offers its own, until "Not now".
+async function showTerminalCommandNotice() {
+  try {
+    S.cli = await API.terminalCommand();
+  } catch {
+    S.cli = null;
+  }
+  renderTerminalCommand();
+  const c = S.cli;
+  if (!c || c.state !== "missing" || c.problem || S.settings.cliNoticeDismissed) return;
+  const later = button(null, t("cli.later"), () => {
+    n.close();
+    S.settings.cliNoticeDismissed = true;
+    saveSettings();
+    toast(t("cli.laterNote"));
+  });
+  const install = button("shell", t("cli.install"), async () => {
+    if (await installTerminalCommand(install, n.status)) n.close();
+  }, "primary");
+  const n = notice("cli-notice", t("cli.title"), `${t("cli.text")} ${terminalCommandWhere(c)}`, [later, install]);
+}
+
+// Make the command; `btn` shows the work and `status` an error. True when it was made
+// (false also when the password was not given).
+async function installTerminalCommand(btn, status) {
+  const label = btn.querySelector("span");
+  btn.disabled = true;
+  label.textContent = t("cli.installing");
+  status.textContent = "";
+  try {
+    const done = await API.installTerminalCommand();
+    if (!done) return false;
+    S.cli = done;
+    document.getElementById("cli-notice")?.remove();
+    renderTerminalCommand();
+    toast(t("cli.done"));
+    return true;
+  } catch (e) {
+    status.textContent = t("cli.failed", { error: String(e) });
+    return false;
+  } finally {
+    btn.disabled = false;
+    label.textContent = t("cli.install");
+  }
+}
+
+// A separate podbag for the terminal that is older than the app (the app was updated
+// another way): offer to bring it to the app's version. Update in Settings does the same.
+function showTerminalUpdateNotice() {
+  const u = S.updates || {};
+  const old = document.getElementById("cli-update-notice");
+  if (!u.installer || !u.terminalOlder || S.settings.cliUpdateDismissed === u.app) {
+    old?.remove();
+    return;
+  }
+  if (old || upgrading) return;
+  const later = button(null, t("cli.later"), () => {
+    n.close();
+    S.settings.cliUpdateDismissed = u.app;
+    saveSettings();
+  });
+  const update = button("update", t("cliUpdate.update"), async () => {
+    update.disabled = true;
+    update.querySelector("span").textContent = t("update.installing");
+    let r;
+    try {
+      r = await API.upgrade(u.app);
+    } catch (e) {
+      r = { ok: false, output: String(e) };
+    }
+    n.close();
+    if (r.ok) {
+      toast(t("cliUpdate.done", { version: u.app }));
+    } else {
+      // The password or an error: Updates shows the command and what it printed.
+      S.upgrade = r;
+      await openUpdates();
+    }
+    await loadUpdates("never");
+  }, "primary");
+  const n = notice("cli-update-notice", t("cliUpdate.title"),
+    t("cliUpdate.text", { terminal: u.terminalVersion, app: u.app, path: u.terminal }), [later, update]);
+}
+
+// Settings: what terminals run, and Install when they find no podbag.
+function renderTerminalCommand() {
+  const section = document.getElementById("terminal-command");
+  if (!section) return;
+  const c = S.cli;
+  section.hidden = !c;
+  if (!c) return;
+  section.querySelector(".setting-value").textContent = t(`cli.state.${c.state}`);
+  const status = h("p", { class: "error-text", role: "status" });
+  let action = null;
+  if (c.state === "missing" && c.problem) {
+    action = h("p", { class: "error-text", text: t(`cli.problem.${c.problem}`) });
+  } else if (c.state === "missing") {
+    const install = button("shell", t("cli.install"), () => installTerminalCommand(install, status), "primary");
+    action = [h("p", { class: "hint", text: terminalCommandWhere(c) }), h("div", { class: "buttons-row" }, install), status];
+  }
+  put(section.querySelector(".setting-body"),
+    h("p", { class: "hint", text: t(`cli.about.${c.state}`) }),
+    c.path ? h("dl", { class: "fields" }, field(t("cli.path"), c.path, "mono")) : null,
+    action);
+}
+
 // ---- settings: updates ----
 
 let checking = false;
@@ -1659,6 +1789,7 @@ async function loadUpdates(check) {
   checking = false;
   renderUpdates();
   renderStatusbar();
+  showTerminalUpdateNotice();
 }
 
 function renderUpdates() {
@@ -1919,7 +2050,7 @@ async function init() {
   setInterval(() => {
     if (!S.live && !document.hidden && S.engine && S.engine.reachable) refresh();
   }, 3000);
-  showFirstLaunchStarPrompt();
+  showFirstLaunchStarPrompt().then(showTerminalCommandNotice);
   pollVm(true);
   loadUpdates("due");
   await connect(false);

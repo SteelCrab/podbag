@@ -53,3 +53,5 @@ overrides:
       - libxdo.so.3()(64bit)
       - shadow-utils
       - passt
+    scripts:
+      preremove: desktop/linux/rpm-preremove

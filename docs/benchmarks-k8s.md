@@ -11,8 +11,17 @@ containerd and CRI-O. All three run under the same k3s, in the same VM.
 
 - [Summary](#summary)
 - [Setup](#setup)
+  - [Machine](#machine)
+  - [Kubernetes](#kubernetes)
+  - [The runtimes](#the-runtimes)
+  - [What was measured](#what-was-measured)
 - [Results](#results)
 - [Reading the numbers](#reading-the-numbers)
+  - [Pod start](#pod-start)
+  - [`kubectl exec`](#kubectl-exec)
+  - [Processes](#processes)
+  - [Memory](#memory)
+  - [Disk](#disk)
 - [Caveats](#caveats)
 - [Run it yourself](#run-it-yourself)
 

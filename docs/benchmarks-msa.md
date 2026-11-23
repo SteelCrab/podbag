@@ -7,9 +7,17 @@ How each tool stores images when a node runs many Java services in two releases:
 
 - [Summary](#summary)
 - [Setup](#setup)
+  - [Machine](#machine)
+  - [Images](#images)
 - [What each tool did](#what-each-tool-did)
 - [Results](#results)
 - [Reading the numbers](#reading-the-numbers)
+  - [Disk](#disk)
+  - [Memory: the page cache](#memory-the-page-cache)
+  - [Pull and the first start](#pull-and-the-first-start)
+  - [The JVMs](#the-jvms)
+  - [100 containers](#100-containers)
+  - [Clean-up](#clean-up)
 - [Limits](#limits)
 - [Run it yourself](#run-it-yourself)
 
