@@ -691,6 +691,18 @@ pub struct RunArgs {
     /// Publish a port ([IP:][HOST_PORT:]CONTAINER_PORT[/tcp|udp])
     #[arg(short = 'p', long = "publish")]
     pub publish: Vec<String>,
+    /// Add a line to /etc/hosts (NAME:IP or NAME=IP; IP may be host-gateway)
+    #[arg(long = "add-host", value_name = "NAME:IP")]
+    pub add_host: Vec<String>,
+    /// Use this DNS server (replaces the default ones)
+    #[arg(long, value_name = "IP")]
+    pub dns: Vec<String>,
+    /// Use this DNS search domain ("." for none)
+    #[arg(long = "dns-search", value_name = "DOMAIN")]
+    pub dns_search: Vec<String>,
+    /// Set a DNS resolver option (like ndots:2)
+    #[arg(long = "dns-option", alias = "dns-opt", value_name = "OPTION")]
+    pub dns_option: Vec<String>,
     /// Set an environment variable (NAME=VALUE, or NAME to copy it from this shell)
     #[arg(short = 'e', long = "env")]
     pub env: Vec<String>,

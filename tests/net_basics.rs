@@ -329,6 +329,66 @@ fn bridge_resolv_conf_by_mode() {
     }
 }
 
+// `--add-host` lines come before the container's own; `--dns` settings replace their part
+// of resolv.conf.
+#[test]
+fn extra_hosts_and_dns_settings_reach_the_files() {
+    let sb = Sandbox::new();
+    let flags = [
+        "--hostname",
+        "me",
+        "--add-host",
+        "db:10.1.2.3",
+        "--add-host",
+        "v6=[fd00::1]",
+        "--dns",
+        "9.9.9.9",
+        "--dns-search",
+        "corp.example",
+        "--dns-option",
+        "ndots:2",
+    ];
+    let script = "cat /etc/hosts; grep -E '^(nameserver|search|options)' /etc/resolv.conf";
+    let out = ok(&sb.run_with(&flags, &["sh", "-c", script]));
+    let lines: Vec<&str> = out.lines().collect();
+    let place = |line: &str| lines.iter().position(|l| *l == line);
+    let (db, v6) = (place("10.1.2.3\tdb"), place("fd00::1\tv6"));
+    assert!(db.is_some() && v6 == db.map(|i| i + 1), "{out}");
+    // The own line after them.
+    let own = lines.iter().position(|l| l.contains("\tme ")).unwrap();
+    assert!(own > db.unwrap() + 1, "{out}");
+    assert_eq!(
+        lines[lines.len() - 3..],
+        [
+            "nameserver 9.9.9.9",
+            "search corp.example",
+            "options ndots:2"
+        ],
+        "{out}"
+    );
+    assert_eq!(out.matches("nameserver").count(), 1, "{out}");
+}
+
+// `host-gateway` is the bridge's gateway as root; rootless bridges cannot reach the host.
+#[test]
+fn host_gateway_by_mode() {
+    let sb = Sandbox::new();
+    let flags = ["--add-host", "gw:host-gateway"];
+    let out = sb.run_with(&flags, &["grep", "gw", "/etc/hosts"]);
+    if root_mode() {
+        let gateway = network_record(&sb, "bridge")["network"]["gateway"].clone();
+        assert_eq!(ok(&out), format!("{}\tgw", gateway.as_str().unwrap()));
+    } else {
+        assert_ne!(out.status.code(), Some(0));
+        assert!(stderr(&out).contains("host-gateway"), "{}", stderr(&out));
+    }
+    let out = ok(&sb.run_with(
+        &["--network", "host", "--add-host", "gw:host-gateway"],
+        &["grep", "gw", "/etc/hosts"],
+    ));
+    assert_eq!(out, "127.0.0.1\tgw");
+}
+
 // A session whose runtime directory is gone (its record lost) does not linger.
 #[test]
 fn orphaned_session_ends_by_itself() {
