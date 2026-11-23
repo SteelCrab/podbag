@@ -4,9 +4,14 @@
 
 - [What you need](#what-you-need)
 - [Linux](#linux)
+  - [Quick build](#quick-build)
+  - [Static build](#static-build)
+  - [Linux desktop packages](#linux-desktop-packages)
 - [Android](#android)
 - [macOS](#macos)
+  - [macOS desktop app and release files](#macos-desktop-app-and-release-files)
 - [Windows](#windows)
+  - [Windows desktop installer](#windows-desktop-installer)
 - [Check your build](#check-your-build)
 
 ## What you need
@@ -34,7 +39,7 @@ sudo install -m 0755 target/release/podbag /usr/local/bin/podbag
 
 ### Static build
 
-This is how the release files are built.
+- The release files are built this way.
 
 ```sh
 sudo apt-get install musl-tools                  # Debian and Ubuntu
@@ -47,32 +52,38 @@ CC_x86_64_unknown_linux_musl=musl-gcc cargo build --release --target x86_64-unkn
 
 ### Linux desktop packages
 
-Download the `podbag-desktop-amd64` or `podbag-desktop-arm64` artifact from
-[Linux desktop packages](https://github.com/SteelCrab/podbag/actions/workflows/desktop-packages.yml).
-Extract the ZIP, then install the package for your distribution from that directory:
+#### Install a package
+
+- Each release has a `.deb` and an `.rpm` for amd64 and arm64:
+  [latest release](https://github.com/SteelCrab/podbag/releases/latest).
+- A build of `main` is the `podbag-desktop-amd64` or `podbag-desktop-arm64` artifact of
+  [Linux desktop packages](https://github.com/SteelCrab/podbag/actions/workflows/desktop-packages.yml).
+  Extract the ZIP first.
 
 ```sh
 sudo apt install ./podbag-desktop_*.deb     # Debian 12 or compatible Ubuntu
 sudo dnf install ./podbag-desktop-*.rpm     # Fedora 44
 ```
 
-Open **Podbag Desktop** from the applications menu. The package includes the
-engine used by the GUI. To remove it, run `sudo apt purge podbag-desktop` or
-`sudo dnf remove podbag-desktop`.
+- Open **Podbag Desktop** from the applications menu.
+- The package includes the engine that the GUI uses.
+- Remove it with `sudo apt purge podbag-desktop` or `sudo dnf remove podbag-desktop`.
+  This also removes the `/usr/local/bin/podbag` link that the app made.
 
-To build both packages on Debian 12, install Rust, nFPM, jq, a C compiler,
-pkg-config, libwebkit2gtk-4.1-dev, libayatana-appindicator3-dev, librsvg2-dev
-and libxdo-dev. Run `desktop/linux/package.sh` on the target architecture.
-The packages are written to `packages/` in Cargo's target directory.
+#### Build the packages
+
+- On Debian 12, install Rust, nFPM, jq, a C compiler, pkg-config,
+  libwebkit2gtk-4.1-dev, libayatana-appindicator3-dev, librsvg2-dev and libxdo-dev.
+- Run `desktop/linux/package.sh` on the target architecture.
+- The packages are in `packages/` in Cargo's target directory.
 
 ## Android
 
-Build the CLI for 64-bit ARM devices with Android 7.0 (API 24) or later.
-The Android build includes image commands. Running containers locally requires
-the Linux build.
-
-Install the [Android NDK](https://developer.android.com/ndk/downloads) and set
-`ANDROID_NDK_HOME` to its directory. From the repository root, run:
+- The CLI for 64-bit ARM devices with Android 7.0 (API 24) or later.
+- It has the image commands. To run containers, use the Linux build.
+- Install the [Android NDK](https://developer.android.com/ndk/downloads). Set
+  `ANDROID_NDK_HOME` to its folder.
+- Run from the repository root:
 
 ```sh
 rustup target add aarch64-linux-android
@@ -81,7 +92,7 @@ export PATH="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
 cargo build --locked --release --target aarch64-linux-android --bin podbag
 ```
 
-To check the binary on a connected device:
+- Check the program on a connected device:
 
 ```sh
 adb push target/aarch64-linux-android/release/podbag /data/local/tmp/podbag
@@ -91,8 +102,9 @@ adb shell /data/local/tmp/podbag --version
 
 ## macOS
 
-On a Mac, podbag runs containers in a small Linux VM. The VM has the Mac's CPU: arm64 on
-Apple silicon, x86_64 on an Intel Mac. A build has three steps.
+- On a Mac, podbag runs containers in a small Linux VM.
+- The VM has the Mac's CPU: arm64 on Apple silicon, x86_64 on an Intel Mac.
+- A build has three steps.
 
 1. **Build the VM's guest** (a Linux kernel, with podbag in it) on Linux with the Mac's
    CPU. [lima](https://lima-vm.io) runs that Linux VM on the Mac:
@@ -124,9 +136,18 @@ Apple silicon, x86_64 on an Intel Mac. A build has three steps.
    dev/macos/sign.sh target/release/podbag
    ```
 
+### macOS desktop app and release files
+
+- Build the guest first (step 1).
+- `desktop/bundle-macos.sh release --with-cli` builds `podbag.app` with the CLI in it.
+- `dev/macos/release-files.sh` builds both release files for this Mac's CPU in
+  `target/release-files`: `podbag-<arch>-macos` and `podbag-desktop-<arch>-macos.zip`.
+  CI uses the same script.
+- More: [Build the desktop app](usage.md#build-the-desktop-app).
+
 ## Windows
 
-podbag.exe runs a static Linux podbag in WSL 2. A build needs both.
+- podbag.exe runs a static Linux podbag in WSL 2. A build needs both.
 
 1. **Get the static Linux program** for the same CPU:
    - build it on Linux (see [Static build](#static-build)), or
@@ -145,16 +166,21 @@ podbag.exe runs a static Linux podbag in WSL 2. A build needs both.
 
 ### Windows desktop installer
 
-Find the MSI for your CPU in the v0.3.0 or later
-[GitHub release](https://github.com/SteelCrab/podbag/releases), or download an
-installer artifact from [CI](https://github.com/SteelCrab/podbag/actions/workflows/ci.yml).
-Install the MSI and open **Podbag Desktop** from the Start menu. Enable WSL 2
-to run containers.
+#### Install the MSI
 
-On Windows x86_64 or ARM64, build the CLI with the Linux engine for the same CPU.
-Use a native Rust toolchain for that CPU.
-Install the Visual Studio C++ build tools for your CPU, WebView2, and Node.js.
-From the repository root, run:
+- Each release from v0.3.0 has an MSI for x86_64 and ARM64:
+  [GitHub release](https://github.com/SteelCrab/podbag/releases).
+- A build of `main` is an installer artifact of
+  [CI](https://github.com/SteelCrab/podbag/actions/workflows/ci.yml).
+- Install the MSI and open **Podbag Desktop** from the Start menu.
+- Enable WSL 2 to run containers.
+
+#### Build the MSI
+
+- On Windows x86_64 or ARM64, build the CLI with the Linux engine for the same CPU.
+- Use a native Rust toolchain for that CPU.
+- Install the Visual Studio C++ build tools for your CPU, WebView2 and Node.js.
+- Run from the repository root:
 
 ```powershell
 New-Item -ItemType Directory -Force target/windows-engine | Out-Null
@@ -163,10 +189,9 @@ Set-Location desktop
 npx --yes --package @tauri-apps/cli@2.12.6 tauri build --config windows/msi.json -- --locked
 ```
 
-Open the MSI in `target/release/bundle/msi`, then start **Podbag Desktop** from
-the Start menu. The installer includes the GUI and its matching CLI. Enable WSL 2
-to run containers. CI publishes the tested MSI as `podbag-desktop-x86_64-windows` or
-`podbag-desktop-aarch64-windows`. The latter runs natively on Windows on Arm.
+- The MSI is in `target/release/bundle/msi`. It includes the GUI and its matching CLI.
+- CI publishes the tested MSI as `podbag-desktop-x86_64-windows` or
+  `podbag-desktop-aarch64-windows`. The ARM64 one runs natively on Windows on Arm.
 
 ## Check your build
 

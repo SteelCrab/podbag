@@ -14,6 +14,17 @@
 - [macOS, each tool with its own VM](#macos-each-tool-with-its-own-vm)
 - [300 containers on one network](#300-containers-on-one-network)
 - [Reading the numbers](#reading-the-numbers)
+  - [Memory per container (Linux)](#memory-per-container-linux)
+  - [The keeper against a shim per container](#the-keeper-against-a-shim-per-container)
+  - [Where podbag is behind Kiri](#where-podbag-is-behind-kiri)
+  - [Networks](#networks)
+  - [Start time](#start-time)
+  - [composefs and hard links](#composefs-and-hard-links)
+  - [Disk](#disk)
+  - [Many containers](#many-containers)
+  - [The state of the system](#the-state-of-the-system)
+  - [macOS](#macos)
+  - [Caveats](#caveats)
 
 ## Linux host, no VM
 
