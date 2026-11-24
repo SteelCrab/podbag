@@ -5,7 +5,7 @@
 #   curl -fsSL https://podbag.dev/install.sh | sh
 #
 # Settings:
-#   PODBAG_VERSION=v0.3.1      install this release (default: the latest)
+#   PODBAG_VERSION=v0.3.2      install this release (default: the latest)
 #   PODBAG_INSTALL_DIR=DIR     install into DIR (default: /usr/local/bin; sudo when needed)
 #   PODBAG_SKIP_APPARMOR=1     do not add the AppArmor profile (Ubuntu 24.04 and later)
 set -eu
