@@ -6,8 +6,20 @@ const KUBE_COLUMNS = {
   services: ["kube.type", "kube.address", "col.ports"],
   deployments: ["kube.ready", "col.image"],
   claims: ["kube.phase", "kube.capacity", "kube.storageClass"],
+  routes: ["kube.host", "kube.path", "kube.service", "kube.tls"],
 };
-const KUBE_KINDS = Object.keys(KUBE_COLUMNS);
+// Every cluster has these kinds, and migration copies them. Routes exist only on OpenShift.
+const KUBE_KINDS = ["pods", "services", "deployments", "claims"];
+const KUBE_VIEW_KINDS = Object.keys(KUBE_COLUMNS);
+
+function kubeKinds() {
+  return S.kubeOpenShift ? KUBE_VIEW_KINDS : KUBE_KINDS;
+}
+
+// The same address desktop/src/kubernetes.rs opens: https when the Route has TLS settings.
+function routeUrl(spec) {
+  return `${spec.tls ? "https" : "http"}://${spec.host}${spec.path || ""}`;
+}
 
 function kubeColumns(kind) {
   return ["col.name", "kube.namespace", ...KUBE_COLUMNS[kind]];
@@ -31,6 +43,9 @@ function kubeCells(kind, item) {
   if (kind === "claims") {
     return [...identity, status.phase, status.capacity?.storage, spec.storageClassName];
   }
+  if (kind === "routes") {
+    return [...identity, spec.host, spec.path, spec.to?.name, spec.tls?.termination];
+  }
   const ports = (spec.ports || []).map((p) =>
     `${p.port}${p.nodePort ? ":" + p.nodePort : ""}/${p.protocol || "TCP"}`);
   const address = spec.externalName || (spec.clusterIPs || []).join(", ") || spec.clusterIP;
@@ -50,6 +65,15 @@ function inspectKubeObject(item, context) {
   dialog.showModal();
 }
 
+// The app opens the address it reads from the cluster; the page only names the Route.
+function routeLink(item, context) {
+  const url = routeUrl(item.spec);
+  return h("a", { class: "link route-link", href: url, title: url, text: item.spec.host, onclick: (event) => {
+    event.preventDefault();
+    API.kubeOpenRoute(context, item.metadata.namespace, item.metadata.name).catch((error) => toast(String(error), true));
+  } });
+}
+
 function renderKubernetes(main) {
   let items = [];
   let context = "";
@@ -59,11 +83,15 @@ function renderKubernetes(main) {
   const search = h("input", { type: "search", class: "search", placeholder: t("search.placeholder"),
     "aria-label": t("search.placeholder"), oninput: renderRows });
   const all = h("input", { type: "checkbox", checked: S.kubeAllNamespaces, onchange: () => { S.kubeAllNamespaces = all.checked; refreshKubeCounts(); load(); } });
-  const cluster = h("select", { id: "kube-context", onchange: () => {
+  const cluster = h("select", { id: "kube-context", onchange: async () => {
     S.kubeContext = cluster.value;
     sessionStorage.setItem("kube-context", cluster.value);
     refreshKubeCounts();
-    load();
+    const openshift = refreshKubeOpenShift();
+    if (S.kubeKind !== "routes") return load();
+    // A plain cluster has no Routes: the answer switches to Pods, which loads them.
+    await openshift;
+    if (S.kubeKind === "routes") load();
   } });
   function contexts(names) {
     const options = [...new Set([...names, S.kubeContext].filter(Boolean))];
@@ -74,12 +102,13 @@ function renderKubernetes(main) {
   contexts([]);
   function reload() {
     refreshKubeCounts();
+    refreshKubeOpenShift();
     API.kubeContexts().then(contexts).catch(() => {});
     return load();
   }
-  const tabs = KUBE_KINDS.map((kind) => h("button", {
+  const tabs = KUBE_VIEW_KINDS.map((kind) => h("button", {
     type: "button", class: "tab", id: `kube-${kind}`, "aria-pressed": String(kind === S.kubeKind),
-    onclick: () => go("kubernetes", kind), text: t(`kube.${kind}`),
+    hidden: !kubeKinds().includes(kind), onclick: () => go("kubernetes", kind), text: t(`kube.${kind}`),
   }));
   main.replaceChildren(
     h("header", { class: "toolbar" }, h("h1", { text: t("nav.kubernetes") }),
@@ -98,8 +127,10 @@ function renderKubernetes(main) {
       if (q && !values.some((v) => String(v || "").toLowerCase().includes(q))) continue;
       const open = () => inspectKubeObject(item, context);
       const name = h("button", { type: "button", class: "link primary-text", text: values[0], title: values[0], onclick: open });
-      rows.push(h("tr", { onclick: (e) => { if (!e.target.closest("button")) name.click(); } },
-        h("td", {}, name), values.slice(1).map((v) => h("td", {}, h("span", { text: v || "—", title: v })))));
+      const cells = values.slice(1).map((v) => h("span", { text: v || "—", title: v }));
+      if (kind === "routes" && item.spec?.host) cells[1] = routeLink(item, context);
+      rows.push(h("tr", { onclick: (e) => { if (!e.target.closest("button, a")) name.click(); } },
+        h("td", {}, name), cells.map((cell) => h("td", {}, cell))));
     }
     if (!rows.length) {
       const text = items.length ? t("empty.search", { q: search.value.trim() }) : t(`kube.empty.${kind}`);
@@ -137,8 +168,11 @@ function renderKubernetes(main) {
   reload();
   return {
     reload,
+    showKinds() {
+      tabs.forEach((tab, i) => { tab.hidden = !kubeKinds().includes(KUBE_VIEW_KINDS[i]); });
+    },
     switchResource() {
-      tabs.forEach((tab, i) => tab.setAttribute("aria-pressed", String(KUBE_KINDS[i] === S.kubeKind)));
+      tabs.forEach((tab, i) => tab.setAttribute("aria-pressed", String(KUBE_VIEW_KINDS[i] === S.kubeKind)));
       search.value = "";
       load();
     },

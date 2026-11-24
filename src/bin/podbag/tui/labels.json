@@ -91,6 +91,7 @@
   "kube.pods": ["Pods", "파드", "Pod", "Pod", "Mga Pod", "Pods", "Pod"],
   "kube.ready": ["Ready", "준비됨", "準備完了", "就绪", "Handa", "Listos", "Sẵn sàng"],
   "kube.resources": ["Kubernetes resources", "쿠버네티스 리소스", "Kubernetes リソース", "Kubernetes 资源", "Mga resource ng Kubernetes", "Recursos de Kubernetes", "Tài nguyên Kubernetes"],
+  "kube.routes": ["Routes", "라우트", "Route", "Route", "Mga Route", "Routes", "Route"],
   "kube.services": ["Services", "서비스", "Service", "Service", "Mga Service", "Servicios", "Service"],
   "kube.storageClass": ["Storage class", "스토리지 클래스", "ストレージクラス", "存储类", "Storage class", "Clase de almacenamiento", "Lớp lưu trữ"],
   "kube.type": ["Type", "유형", "種類", "类型", "Uri", "Tipo", "Loại"],
