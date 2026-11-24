@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Training
+
+- New module `web-service-recovery`: a web server exits because a setting is missing.
+  Read the cause with `podbag logs`, then start it again with `-e` and open its page.
+- Opening the exited container in Desktop's Practice containers completes the inspect
+  step.
+- The guide and the module file are at https://podbag.dev/blog/web-service-recovery/.
+
 ## v0.3.2 (2026-11-23)
 
 ### Desktop
