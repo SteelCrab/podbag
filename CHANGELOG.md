@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Networking
+
+- `podbag run` and `podbag create` take `--add-host NAME:IP`, `--dns`, `--dns-search` and
+  `--dns-option`, as Docker does. `host-gateway` stands for the host.
+- The Docker API applies `ExtraHosts`, `Dns`, `DnsSearch` and `DnsOptions`, and inspect
+  shows them. Compose `extra_hosts` and `dns` now take effect.
+- Where `host-gateway` has no address (rootless bridge, `--network none`, WSL), the CLI
+  refuses it. The Docker API leaves the entry out with a warning.
+
 ## v0.3.2 (2026-11-23)
 
 ### Desktop
