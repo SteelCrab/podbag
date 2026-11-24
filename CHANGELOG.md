@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### macOS
+
+- Published UDP ports, such as `-p 5353:53/udp`, answer on the Mac's localhost, like TCP
+  ports.
+- A UDP client's flow ends after 90 seconds without traffic, as with Docker.
+- A port that another Mac program holds no longer stops the other published ports. It is
+  reported in `~/.podbag/run/host.log`.
+
 ## v0.3.2 (2026-11-23)
 
 ### Desktop
