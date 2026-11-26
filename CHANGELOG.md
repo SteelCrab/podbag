@@ -4,15 +4,19 @@
 
 ### Training
 
+- Training modules come from the catalog on podbag.dev. Podbag Desktop refreshes it at
+  start, when Training opens, and with **Refresh**. `podbag lab list` refreshes it too.
+  New modules appear without a new podbag.
+- Course modules are data files (`podbag-course-v1`): steps, commands, checks and step
+  names. podbag only reads the practice engine to check a step; it never runs a command
+  from a module file.
+- Each file is checked against the catalog's SHA-256. Offline, the installed modules stay.
+  A finished module stays finished after an update.
 - New module `web-service-recovery`: a web server exits because a setting is missing.
   Read the cause with `podbag logs`, then start it again with `-e` and open its page.
-- Opening the exited container in Desktop's Practice containers completes the inspect
-  step.
-- The guide and the module file are at https://podbag.dev/blog/web-service-recovery/.
 - New module `container-network`: create a network, run a server without a port, and
-  reach it by name from other containers on the same network. A published web server
-  shows the page it got from that server.
-- The guide and the module file are at https://podbag.dev/blog/container-network/.
+  reach it by name from other containers on the same network.
+- All modules and their guides: https://podbag.dev/training/.
 
 ## v0.3.2 (2026-11-23)
 
