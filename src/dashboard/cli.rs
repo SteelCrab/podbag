@@ -125,6 +125,20 @@ pub fn vm_action(podbag: &Path, action: &str) -> Result<(), String> {
     run_ok(podbag, args).map(drop)
 }
 
+/// `podbag system compression [idle|off] --json`: `{"mode", "after"}`. With no mode it
+/// only reads. On macOS the command runs in the VM, and starts a stopped VM.
+pub fn compression(podbag: &Path, mode: Option<&str>) -> Result<Value, String> {
+    let mut args = vec!["system", "compression"];
+    match mode {
+        None => {}
+        Some(mode @ ("idle" | "off")) => args.push(mode),
+        Some(other) => return Err(format!("unknown compression mode {other}")),
+    }
+    args.push("--json");
+    let out = run_ok(podbag, &args)?;
+    serde_json::from_str(out.trim()).map_err(|e| format!("podbag system compression --json: {e}"))
+}
+
 /// `podbag --version`: `0.1.0` from `podbag 0.1.0`.
 pub fn engine_version(podbag: &Path) -> Option<String> {
     let out = run_ok(podbag, &["--version"]).ok()?;
@@ -440,6 +454,34 @@ mod tests {
         vm_action(&fake.bin, "stop").unwrap();
         assert!(vm_action(&fake.bin, "rm").is_err());
         assert_eq!(fake.calls(), ["vm start", "vm restart --yes", "vm stop"]);
+    }
+
+    #[test]
+    fn compression_reads_and_sets_with_json() {
+        let fake = Fake::new(
+            "'system compression --json') echo '{\"mode\":\"off\",\"after\":604800}';;\n\
+             'system compression idle --json') echo '{\"mode\":\"idle\",\"after\":604800}';;\n\
+             'system compression off --json') echo 'podbag: the VM did not start in time' >&2; exit 1;;",
+        );
+        assert_eq!(compression(&fake.bin, None).unwrap()["mode"], "off");
+        let on = compression(&fake.bin, Some("idle")).unwrap();
+        assert_eq!(
+            (on["mode"].as_str(), on["after"].as_u64()),
+            (Some("idle"), Some(604800))
+        );
+        assert_eq!(
+            compression(&fake.bin, Some("off")).unwrap_err(),
+            "the VM did not start in time"
+        );
+        assert!(compression(&fake.bin, Some("max")).is_err());
+        assert_eq!(
+            fake.calls(),
+            [
+                "system compression --json",
+                "system compression idle --json",
+                "system compression off --json"
+            ]
+        );
     }
 
     #[test]

@@ -3,6 +3,7 @@
 //! and loaded ones.
 
 use super::{HashingReader, Source, Store, io_error, now, remove_tree, tree};
+use crate::config::ImageCompression;
 use crate::image::ImageConfig;
 use crate::image::manifest::{self, Compression};
 use crate::{Error, ErrorKind, Result};
@@ -34,6 +35,12 @@ impl Store {
     /// Where the object `key` (a tree entry's file) is.
     pub fn object_path(&self, key: &str) -> std::path::PathBuf {
         self.objects.path(key)
+    }
+
+    /// True when only the compressed form of the object `key` is stored: a build has the
+    /// store helper thaw it ([`crate::store::ops::StoreOp::ThawLayers`]) before it reads it.
+    pub fn is_cold(&self, key: &str) -> bool {
+        self.objects.is_cold(key)
     }
 
     /// The shared store lock, held by its owner: images cannot be removed meanwhile.
@@ -123,6 +130,10 @@ impl Store {
         let json = manifest::config_json(&config, &diff_ids, created);
         let digest = format!("sha256:{}", crate::image::registry::sha256_hex(&json));
         if self.has_image(&digest) {
+            // The build cache made it again: a use, so an image built often stays plain.
+            if self.compression.0 != ImageCompression::Off {
+                self.note_use(&digest)?;
+            }
             if artifact {
                 self.ensure_artifact(&digest)?;
             }
@@ -279,6 +290,47 @@ mod tests {
             .create_image(config, vec![format!("sha256:{}", "0".repeat(64))], 1, false)
             .unwrap_err();
         assert_eq!(missing.kind, ErrorKind::NotFound);
+    }
+
+    /// The build cache makes an image again through `commit_layer` and `create_image`:
+    /// with compression on, that counts as a use, so the image does not look idle.
+    #[test]
+    fn an_image_the_build_cache_makes_again_is_used() {
+        let layer = tar_with("f", b"x");
+        let commit = |store: &Store| {
+            store
+                .commit_layer(
+                    &[],
+                    &mut |w| copy_all(&mut &layer[..], w, "the layer"),
+                    ImageConfig::default(),
+                    1,
+                )
+                .unwrap()
+        };
+        let last_used = |store: &Store, digest: &str| store.image_dir(digest).join("last_used");
+
+        let (_off_tmp, off) = store();
+        let made = commit(&off);
+        commit(&off);
+        off.create_image(ImageConfig::default(), vec![made.diff_id.clone()], 1, false)
+            .unwrap();
+        assert!(!last_used(&off, &made.image).exists(), "compression off");
+
+        let (_on_tmp, mut on) = store();
+        on.use_compression(ImageCompression::Idle, 3600);
+        let made = commit(&on);
+        assert!(
+            !last_used(&on, &made.image).exists(),
+            "a new image is no reuse"
+        );
+        assert_eq!(commit(&on).image, made.image);
+        assert!(last_used(&on, &made.image).exists(), "commit_layer");
+        std::fs::remove_file(last_used(&on, &made.image)).unwrap();
+        let again = on
+            .create_image(ImageConfig::default(), vec![made.diff_id.clone()], 1, false)
+            .unwrap();
+        assert_eq!(again, made.image);
+        assert!(last_used(&on, &made.image).exists(), "create_image");
     }
 
     #[test]

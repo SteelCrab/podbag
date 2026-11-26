@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Image compression question and switch test</title>
+<iframe id="on" src="preview.html?view=compression-prompt&amp;after=129600&amp;lang=en" width="900" height="560" title="Turn on"></iframe>
+<iframe id="later" src="preview.html?view=compression-prompt&amp;lang=en" width="900" height="560" title="Not now"></iframe>
+<iframe id="failed" src="preview.html?view=compression-prompt&amp;lang=en" width="900" height="560" title="Turn on fails"></iframe>
+<iframe id="idle" src="preview.html?view=compression-prompt&amp;compression=idle&amp;lang=en" width="900" height="560" title="VM running, already on"></iframe>
+<iframe id="stopped" src="preview.html?view=vm&amp;ask&amp;after=86400&amp;lang=en" width="900" height="560" title="VM stopped"></iframe>
+<iframe id="vm-error" src="preview.html?view=compression-prompt&amp;vm-error&amp;lang=en" width="900" height="560" title="VM state unknown"></iframe>
+<iframe id="broken" src="preview.html?view=compression-prompt&amp;compression=broken&amp;lang=en" width="900" height="560" title="Reply without a mode"></iframe>
+<iframe id="override" src="preview.html?view=compression-prompt&amp;override&amp;lang=en" width="900" height="560" title="Environment keeps it off"></iframe>
+<iframe id="busy" src="preview.html?view=compression-prompt&amp;busy&amp;lang=en" width="900" height="560" title="Another dialog"></iframe>
+<iframe id="docker" src="preview.html?view=docker-settings&amp;ask&amp;lang=en" width="900" height="560" title="Docker"></iframe>
+<pre id="result">Running</pre>
+<script>
+"use strict";
+const check = (condition, message) => { if (!condition) throw Error(message); };
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function until(get, what) {
+  const deadline = performance.now() + 5000;
+  for (;;) {
+    const value = get();
+    if (value) return value;
+    if (performance.now() >= deadline) throw Error(`Timed out: ${what}`);
+    await pause(20);
+  }
+}
+
+// In view: Chrome holds back a hidden frame's rendering, and with it the dialog's close event.
+function frame(id) {
+  const el = document.getElementById(id);
+  el.scrollIntoView();
+  return new Promise((resolve) => {
+    const ready = () => el.contentDocument?.documentElement.dataset.ready === "1";
+    const wait = async () => resolve(await until(ready, `${id} ready`).then(() => el.contentWindow));
+    if (el.contentDocument?.readyState === "complete") wait();
+    else el.addEventListener("load", wait, { once: true });
+  });
+}
+
+// Record what the page sends; `answer` can change what a command does.
+function spy(win, answer) {
+  const invoke = win.__TAURI__.core.invoke;
+  const calls = { compression: [], saved: [] };
+  win.__TAURI__.core.invoke = (cmd, args) => {
+    if (cmd === "compression") calls.compression.push(args.mode);
+    if (cmd === "set_settings") calls.saved.push(args.settings);
+    return answer && answer(cmd, args) || invoke(cmd, args);
+  };
+  return calls;
+}
+
+async function question(win) {
+  const dialog = await until(() => win.document.querySelector("dialog.choose[open]"), "the question");
+  check(dialog.querySelector("h2").textContent === "Save disk space", "Name the question");
+  check(dialog.querySelector('.choose-icon use[href="#i-compress"]'), "Show the compression icon next to the title");
+  check(win.document.getElementById("i-compress"), "Define the compression icon");
+  check(dialog.querySelector("p").textContent.includes("A compressed image starts a little slower"), "Say what it costs");
+  const [later, on] = dialog.querySelectorAll("button");
+  check(later.textContent === "Not now" && on.textContent === "Turn on", "Offer Not now and Turn on");
+  check(on.classList.contains("primary"), "Make Turn on the primary button");
+  return { dialog, later, on };
+}
+
+// Turn on: compression is set to idle, the dialog closes and the answer is kept.
+async function turnsOn() {
+  const win = await frame("on");
+  const { dialog, on } = await question(win);
+  const calls = spy(win);
+  on.click();
+  await until(() => calls.compression.includes("idle"), "compression set to idle");
+  await until(() => !dialog.isConnected, "the dialog to close");
+  await until(() => win.document.getElementById("toasts").textContent.includes("Image compression is on."), "the toast");
+  check(calls.saved.some((s) => s.compressionPromptSeen === true), "Do not ask again");
+
+  await win.podbag.openSettingsSection("engine-settings");
+  const toggle = await until(() => win.document.querySelector("#compression-switch:not(:disabled)"), "the switch");
+  check(toggle.getAttribute("role") === "switch" && toggle.checked, "Show compression as on in Settings");
+  check(win.document.querySelector("#engine-settings").textContent.includes("Compress idle images"), "Name the switch");
+  check(win.document.getElementById("compression-hint").textContent ===
+    "Compress images that no container used for 36 hours. They are uncompressed when a container needs them.", "Show the engine's age in hours");
+  toggle.click();
+  await until(() => calls.compression.includes("off"), "compression set to off");
+  await until(() => !toggle.disabled, "the switch to come back");
+  check(!toggle.checked, "Show compression as off");
+}
+
+// Not now: no change, the answer is kept, and a toast says where to find it.
+async function notNow() {
+  const win = await frame("later");
+  const { dialog, later } = await question(win);
+  let fail = false;
+  const calls = spy(win, (cmd, args) => fail && cmd === "compression" && args.mode
+    ? Promise.reject("the VM is not running") : null);
+  later.click();
+  await until(() => !dialog.isConnected, "the dialog to close");
+  check(!calls.compression.length, "Do not change compression");
+  await until(() => calls.saved.some((s) => s.compressionPromptSeen === true), "the answer saved");
+  check(win.document.getElementById("toasts").textContent.includes("You can turn it on in Settings at any time."), "Say where to turn it on");
+
+  await win.podbag.openSettingsSection("engine-settings");
+  const toggle = await until(() => win.document.querySelector("#compression-switch:not(:disabled)"), "the switch");
+  check(!toggle.checked, "Show compression as off in Settings");
+  fail = true;
+  toggle.click();
+  check(toggle.disabled, "Disable the switch while it works");
+  await until(() => !toggle.disabled, "the switch to come back");
+  check(!toggle.checked, "Put the switch back when it fails");
+  check(win.document.getElementById("toasts").textContent.includes("the VM is not running"), "Show the error");
+}
+
+// Turn on fails: an error, and the question comes again at the next launch.
+async function failed() {
+  const win = await frame("failed");
+  const { dialog, on } = await question(win);
+  const calls = spy(win, (cmd, args) => cmd === "compression" && args.mode ? Promise.reject("disk is full") : null);
+  on.click();
+  await until(() => !dialog.isConnected, "the dialog to close");
+  await until(() => win.document.getElementById("toasts").textContent.includes("Could not turn on image compression: disk is full"), "the error");
+  check(!calls.saved.some((s) => s.compressionPromptSeen), "Ask again at the next launch");
+}
+
+// The VM runs and compression is already on: no question.
+async function alreadyOn() {
+  const win = await frame("idle");
+  await pause(400);
+  check(!win.document.querySelector("dialog.choose"), "Do not ask when compression is on");
+}
+
+// A stopped VM is not started to read the setting: the question comes anyway (the mode
+// is unknown), Turn on sets it, and the switch waits for the VM.
+async function vmStopped() {
+  const win = await frame("stopped");
+  const { dialog, on } = await question(win);
+  const calls = spy(win);
+  on.click();
+  await until(() => calls.compression.includes("idle"), "compression set to idle");
+  await until(() => !dialog.isConnected, "the dialog to close");
+  check(!win.previewCompressionReads, "Do not read while the VM is off");
+  await win.podbag.openSettingsSection("engine-settings");
+  const toggle = await until(() => win.document.getElementById("compression-switch"), "the switch");
+  await until(() => toggle.parentElement.textContent.includes("The VM is off"), "the VM note");
+  check(toggle.disabled, "Wait for the VM");
+  check(win.document.getElementById("compression-hint").textContent.includes("for 7 days"), "Show the default age while the state is unknown");
+  await win.__TAURI__.core.invoke("vm", { action: "start" });
+  await until(() => !toggle.disabled, "the switch after the VM starts");
+  check(toggle.checked && !toggle.parentElement.textContent.includes("The VM is off"), "Read the setting once the VM runs");
+  check(win.document.getElementById("compression-hint").textContent.includes("for 1 day."), "Show the engine's age in days");
+}
+
+// The VM's state cannot be read: it is not woken to read the mode, and the question comes.
+async function vmUnknown() {
+  const win = await frame("vm-error");
+  const { dialog, later } = await question(win);
+  check(!win.previewCompressionReads, "Do not read when the VM's state is unknown");
+  later.click();
+  await until(() => !dialog.isConnected, "the dialog to close");
+  await until(() => win.previewSavedSettings?.compressionPromptSeen === true, "the answer saved");
+}
+
+// A reply without a mode: no question, and nothing saved (it is read again next launch).
+async function brokenReply() {
+  const win = await frame("broken");
+  await until(() => win.previewCompressionReads, "the read");
+  await pause(300);
+  check(!win.document.querySelector("dialog.choose"), "Do not ask without a mode");
+  check(!win.previewSavedSettings?.compressionPromptSeen, "Do not save the answer");
+}
+
+// An environment setting keeps compression off: Turn on says so and keeps the question.
+async function overridden() {
+  const win = await frame("override");
+  const { dialog, on } = await question(win);
+  const calls = spy(win);
+  on.click();
+  await until(() => calls.compression.includes("idle"), "compression set to idle");
+  await until(() => !dialog.isConnected, "the dialog to close");
+  await until(() => win.document.getElementById("toasts").textContent.includes(
+    "Could not turn on image compression: An environment setting keeps image compression off."), "the reason");
+  check(!win.document.getElementById("toasts").textContent.includes("Image compression is on."), "Do not say it is on");
+  check(!calls.saved.some((s) => s.compressionPromptSeen), "Ask again at the next launch");
+}
+
+// Another dialog is open: no question this launch, and nothing saved.
+async function busy() {
+  const win = await frame("busy");
+  await until(() => win.previewCompressionReads, "the read");
+  await pause(300);
+  check(win.document.getElementById("busy-dialog").open, "Keep the other dialog");
+  check(!win.document.querySelector("dialog.choose"), "Do not ask over another dialog");
+  check(!win.previewSavedSettings?.compressionPromptSeen, "Ask again at the next launch");
+}
+
+// Another engine: no switch.
+async function otherEngine() {
+  const win = await frame("docker");
+  check(win.document.getElementById("engine-settings").open, "Show the engine settings");
+  await pause(200);
+  check(!win.document.getElementById("compression-switch"), "Show no switch for Docker");
+  check(!win.document.querySelector("dialog.choose"), "Do not ask for Docker");
+}
+
+let step = "";
+(async () => {
+  const result = document.getElementById("result");
+  try {
+    for (const test of [turnsOn, notNow, failed, alreadyOn, vmStopped, vmUnknown, brokenReply, overridden, busy, otherEngine]) {
+      step = test.name;
+      await test();
+    }
+    result.textContent = "PASS";
+  } catch (error) {
+    result.textContent = `FAIL (${step}): ${error.message}`;
+  }
+})();
+</script>
+</html>

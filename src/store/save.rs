@@ -6,7 +6,7 @@
 //! image's creation time). Its digest differs from the original layer's; the config
 //! written with it names the new digests. The same store writes the same archive.
 
-use super::{Store, io_error};
+use super::Store;
 use crate::image::manifest;
 use crate::store::layer::{EntryKind, LayerIndex};
 use crate::{Error, ErrorKind, Result};
@@ -113,9 +113,7 @@ impl Store {
                 EntryKind::File { object, size } => {
                     h.set_entry_type(tar::EntryType::Regular);
                     h.set_size(*size);
-                    let file_path = self.objects.path(object);
-                    let file =
-                        std::fs::File::open(&file_path).map_err(|e| io_error(&file_path, e))?;
+                    let file = self.objects.open(object)?;
                     b.append_data(&mut h, path, Exact::new(file, *size))
                 }
                 EntryKind::Dir => {

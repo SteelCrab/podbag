@@ -243,7 +243,7 @@ fn build(
 /// An entry's metadata as an object's: since merge() gave hard links their target's,
 /// it is the metadata of the entry's object.
 #[cfg(unix)]
-fn meta_of(e: &Entry) -> super::object::Meta {
+pub(crate) fn meta_of(e: &Entry) -> super::object::Meta {
     super::object::Meta {
         uid: e.uid,
         gid: e.gid,

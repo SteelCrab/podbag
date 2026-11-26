@@ -22,7 +22,14 @@ pub struct Config {
     pub keeper: bool,
     /// How long the keeper stays after its last container, in milliseconds.
     pub keeper_linger_ms: u64,
+    /// Whether unused images are compressed in the store.
+    pub image_compression: ImageCompression,
+    /// How long an image must stay unused before it is compressed, in seconds.
+    pub compress_idle_after: u64,
 }
+
+/// How long an image must stay unused before `image_compression = "idle"` freezes it: 7 days.
+pub const DEFAULT_COMPRESS_IDLE_AFTER: u64 = 7 * 24 * 3600;
 
 /// Whether the keeper is used when nothing says otherwise.
 pub const KEEPER_DEFAULT: bool = true;
@@ -48,6 +55,34 @@ impl ImageMount {
     }
 }
 
+/// `image_compression`: `off` never compresses; `idle` compresses images nobody has
+/// used for `compress_idle_after`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageCompression {
+    Off,
+    Idle,
+}
+
+impl ImageCompression {
+    fn parse(value: &str) -> std::result::Result<ImageCompression, String> {
+        match value {
+            "off" => Ok(ImageCompression::Off),
+            "idle" => Ok(ImageCompression::Idle),
+            other => Err(format!(
+                "image_compression is \"{other}\"; it must be \"off\" or \"idle\""
+            )),
+        }
+    }
+
+    /// The setting's value: `off` or `idle`.
+    pub fn name(self) -> &'static str {
+        match self {
+            ImageCompression::Off => "off",
+            ImageCompression::Idle => "idle",
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
@@ -57,6 +92,8 @@ impl Default for Config {
             image_mount: ImageMount::Auto,
             keeper: KEEPER_DEFAULT,
             keeper_linger_ms: 10_000,
+            image_compression: ImageCompression::Off,
+            compress_idle_after: DEFAULT_COMPRESS_IDLE_AFTER,
         }
     }
 }
@@ -69,9 +106,32 @@ fn parse_switch(value: &str) -> std::result::Result<bool, String> {
     }
 }
 
+/// "7d", "36h", "90m", "45s" or "0": a whole number with a unit, as seconds.
+fn parse_age(text: &str) -> std::result::Result<u64, String> {
+    let bad = || format!("compress_idle_after is \"{text}\"; give a number with d, h, m or s (7d)");
+    if text == "0" {
+        return Ok(0);
+    }
+    let unit = text.chars().last().ok_or_else(bad)?;
+    let seconds: u64 = match unit {
+        'd' => 24 * 3600,
+        'h' => 3600,
+        'm' => 60,
+        's' => 1,
+        _ => return Err(bad()),
+    };
+    let digits = &text[..text.len() - 1];
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(bad());
+    }
+    let count: u64 = digits.parse().map_err(|_| bad())?;
+    count.checked_mul(seconds).ok_or_else(bad)
+}
+
 /// Read `<config>/config.toml` (missing file = defaults). `PODBAG_STORE_LIMIT`,
-/// `PODBAG_MEMORY_BUDGET`, `PODBAG_DEFAULT_SUBNET`, `PODBAG_IMAGE_MOUNT`, `PODBAG_KEEPER`
-/// and `PODBAG_KEEPER_LINGER_MS` override it.
+/// `PODBAG_MEMORY_BUDGET`, `PODBAG_DEFAULT_SUBNET`, `PODBAG_IMAGE_MOUNT`, `PODBAG_KEEPER`,
+/// `PODBAG_KEEPER_LINGER_MS`, `PODBAG_IMAGE_COMPRESSION` and `PODBAG_COMPRESS_IDLE_AFTER`
+/// override it.
 pub fn load(dirs: &Dirs) -> Result<Config> {
     let path = dirs.config.join("config.toml");
     let mut config = match std::fs::read_to_string(&path) {
@@ -90,6 +150,99 @@ pub fn load(dirs: &Dirs) -> Result<Config> {
     };
     apply_overrides(&mut config, |k| std::env::var(k).ok())?;
     Ok(config)
+}
+
+/// Set `key = "value"` in `<config>/config.toml`, which is made when missing. The line that
+/// sets `key` is replaced (each one, when there are several), or the line is added at the
+/// end; every other line stays as it is. A value [`parse`] refuses changes nothing. The
+/// file is replaced at once: a reader sees the old text or the new one.
+pub fn set_value(dirs: &Dirs, key: &str, value: &str) -> Result<()> {
+    let path = dirs.config.join("config.toml");
+    let old = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            return Err(Error::io(
+                format!("cannot read {}", path.display()),
+                &e,
+                "check the file permissions",
+            ));
+        }
+    };
+    let setting = format!("{key} = \"{value}\"");
+    let sets_key = |line: &str| {
+        strip_comment(line)
+            .split_once('=')
+            .is_some_and(|(k, _)| k.trim() == key)
+    };
+    let mut found = false;
+    let mut text = String::new();
+    for line in old.lines() {
+        if sets_key(line) {
+            found = true;
+            text.push_str(&setting);
+        } else {
+            text.push_str(line);
+        }
+        text.push('\n');
+    }
+    if !found {
+        text.push_str(&setting);
+        text.push('\n');
+    }
+    // The value alone first, so its error does not point at a line of the file.
+    parse(&setting).map_err(|e| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            format!("invalid {key}"),
+            e.why.trim_start_matches("line 1: "),
+            "use a valid value",
+        )
+    })?;
+    parse(&text).map_err(|mut e| {
+        e.what = format!("invalid settings in {}", path.display());
+        e
+    })?;
+    let write = || -> std::io::Result<()> {
+        std::fs::create_dir_all(&dirs.config)?;
+        // A new file gets the mode any new file gets (the umask applies), not 0600.
+        #[cfg(unix)]
+        let mut tmp = tempfile::Builder::new()
+            .permissions(std::os::unix::fs::PermissionsExt::from_mode(0o666))
+            .tempfile_in(&dirs.config)?;
+        #[cfg(not(unix))]
+        let mut tmp = tempfile::NamedTempFile::new_in(&dirs.config)?;
+        std::io::Write::write_all(&mut tmp, text.as_bytes())?;
+        // The file keeps the mode it had: this replaces the user's whole file.
+        match std::fs::metadata(&path) {
+            Ok(old) => tmp.as_file().set_permissions(old.permissions())?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        // On disk before it takes the old file's place: after a crash an empty file would
+        // read as all defaults, and every other setting would be lost without an error.
+        tmp.as_file().sync_all()?;
+        tmp.persist(&path)?;
+        Ok(())
+    };
+    write().map_err(|e| {
+        Error::io(
+            format!("cannot write {}", path.display()),
+            &e,
+            "check the folder's permissions",
+        )
+    })
+}
+
+/// Seconds as `compress_idle_after` writes them: the largest unit that divides them (7d).
+pub fn format_age(seconds: u64) -> String {
+    match seconds {
+        0 => "0".to_string(),
+        s if s % (24 * 3600) == 0 => format!("{}d", s / (24 * 3600)),
+        s if s % 3600 == 0 => format!("{}h", s / 3600),
+        s if s % 60 == 0 => format!("{}m", s / 60),
+        s => format!("{s}s"),
+    }
 }
 
 /// The environment variables that override the file.
@@ -111,6 +264,26 @@ fn apply_overrides(config: &mut Config, var: impl Fn(&str) -> Option<String>) ->
                 "invalid PODBAG_IMAGE_MOUNT",
                 why,
                 "set it to auto or hardlink, or unset it",
+            )
+        })?;
+    }
+    if let Some(v) = var("PODBAG_IMAGE_COMPRESSION") {
+        config.image_compression = ImageCompression::parse(&v).map_err(|why| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                "invalid PODBAG_IMAGE_COMPRESSION",
+                why,
+                "set it to off or idle, or unset it",
+            )
+        })?;
+    }
+    if let Some(v) = var("PODBAG_COMPRESS_IDLE_AFTER") {
+        config.compress_idle_after = parse_age(&v).map_err(|why| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                "invalid PODBAG_COMPRESS_IDLE_AFTER",
+                why,
+                "set it like 7d, 36h, 90m, 45s or 0, or unset it",
             )
         })?;
     }
@@ -166,6 +339,10 @@ pub fn parse(text: &str) -> Result<Config> {
                 config.default_subnet = value.to_string();
             }
             "image_mount" => config.image_mount = ImageMount::parse(value).map_err(bad)?,
+            "image_compression" => {
+                config.image_compression = ImageCompression::parse(value).map_err(bad)?
+            }
+            "compress_idle_after" => config.compress_idle_after = parse_age(value).map_err(bad)?,
             "keeper" => config.keeper = parse_switch(value).map_err(bad)?,
             "keeper_linger" => {
                 config.keeper_linger_ms = value
@@ -316,6 +493,152 @@ mod tests {
         assert!(
             apply_overrides(&mut c, |k| (k == "PODBAG_IMAGE_MOUNT").then(|| "x".into())).is_err()
         );
+    }
+
+    #[test]
+    fn compression_is_off_by_default() {
+        let c = parse("").unwrap();
+        assert_eq!(
+            (c.image_compression, c.compress_idle_after),
+            (ImageCompression::Off, 604_800)
+        );
+    }
+
+    #[test]
+    fn reads_compression_settings() {
+        let c = parse("image_compression = \"idle\"\ncompress_idle_after = \"36h\"\n").unwrap();
+        assert_eq!(
+            (c.image_compression, c.compress_idle_after),
+            (ImageCompression::Idle, 129_600)
+        );
+    }
+
+    #[test]
+    fn rejects_bad_compression_settings() {
+        assert!(parse("image_compression = \"zstd\"").is_err());
+        assert!(parse("compress_idle_after = \"7 days\"").is_err());
+    }
+
+    #[test]
+    fn parses_ages() {
+        assert_eq!(parse_age("7d").unwrap(), 604_800);
+        assert_eq!(parse_age("36h").unwrap(), 129_600);
+        assert_eq!(parse_age("90m").unwrap(), 5_400);
+        assert_eq!(parse_age("45s").unwrap(), 45);
+        assert_eq!(parse_age("0").unwrap(), 0);
+        for bad in [
+            "",
+            "d",
+            "7",
+            "7 d",
+            "7w",
+            "-1d",
+            "1.5h",
+            "99999999999999999999d",
+        ] {
+            assert!(parse_age(bad).is_err(), "{bad:?}");
+        }
+        assert_eq!(
+            parse_age("7 days").unwrap_err(),
+            "compress_idle_after is \"7 days\"; give a number with d, h, m or s (7d)"
+        );
+    }
+
+    #[test]
+    fn compression_environment_overrides() {
+        let mut c = Config::default();
+        let env = |k: &str| match k {
+            "PODBAG_IMAGE_COMPRESSION" => Some("idle".to_string()),
+            "PODBAG_COMPRESS_IDLE_AFTER" => Some("0".to_string()),
+            _ => None,
+        };
+        apply_overrides(&mut c, env).unwrap();
+        assert_eq!(
+            (c.image_compression, c.compress_idle_after),
+            (ImageCompression::Idle, 0)
+        );
+        let bad = |k: &str| (k == "PODBAG_IMAGE_COMPRESSION").then(|| "zstd".to_string());
+        assert!(apply_overrides(&mut c, bad).is_err());
+        let bad = |k: &str| (k == "PODBAG_COMPRESS_IDLE_AFTER").then(|| "soon".to_string());
+        assert!(apply_overrides(&mut c, bad).is_err());
+    }
+
+    #[test]
+    fn formats_ages_as_they_are_written() {
+        for (seconds, text) in [
+            (604_800, "7d"),
+            (129_600, "36h"),
+            (5_400, "90m"),
+            (45, "45s"),
+            (0, "0"),
+        ] {
+            assert_eq!(format_age(seconds), text);
+            assert_eq!(parse_age(text).unwrap(), seconds);
+        }
+    }
+
+    fn dirs_with_config(config: std::path::PathBuf) -> Dirs {
+        Dirs {
+            data: config.join("data"),
+            runtime: config.join("run"),
+            config,
+        }
+    }
+
+    #[test]
+    fn set_value_replaces_the_line_and_keeps_the_rest() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = dirs_with_config(root.path().to_path_buf());
+        let file = root.path().join("config.toml");
+        std::fs::write(
+            &file,
+            "# my settings\nstore_limit = \"2GB\"\nimage_compression = \"off\"\n",
+        )
+        .unwrap();
+        set_value(&dirs, "image_compression", "idle").unwrap();
+        let text = std::fs::read_to_string(&file).unwrap();
+        assert!(text.contains("# my settings\n"), "{text}");
+        assert!(text.contains("store_limit = \"2GB\"\n"), "{text}");
+        let lines = text.lines().filter(|l| l.contains("image_compression"));
+        assert_eq!(lines.collect::<Vec<_>>(), ["image_compression = \"idle\""]);
+        let c = load(&dirs).unwrap();
+        assert_eq!(c.image_compression, ImageCompression::Idle);
+        assert_eq!(c.store_limit, 2_000_000_000);
+    }
+
+    #[test]
+    fn set_value_appends_a_missing_key_and_creates_the_file() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = dirs_with_config(root.path().join("no").join("such"));
+        set_value(&dirs, "compress_idle_after", "36h").unwrap();
+        assert_eq!(load(&dirs).unwrap().compress_idle_after, 129_600);
+    }
+
+    /// The writer replaces the user's whole file: it keeps the mode the file had.
+    #[cfg(unix)]
+    #[test]
+    fn set_value_keeps_the_mode_of_the_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let dirs = dirs_with_config(root.path().to_path_buf());
+        let file = root.path().join("config.toml");
+        std::fs::write(&file, "store_limit = \"2GB\"\n").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640)).unwrap();
+        set_value(&dirs, "image_compression", "idle").unwrap();
+        let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+        assert_eq!(mode & 0o7777, 0o640);
+    }
+
+    #[test]
+    fn set_value_refuses_an_invalid_value() {
+        let root = tempfile::tempdir().unwrap();
+        let dirs = dirs_with_config(root.path().to_path_buf());
+        let file = root.path().join("config.toml");
+        let before = "image_compression = \"off\"\n";
+        std::fs::write(&file, before).unwrap();
+        let e = set_value(&dirs, "image_compression", "zstd").unwrap_err();
+        assert_eq!(e.kind, ErrorKind::InvalidInput);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
     }
 
     #[test]

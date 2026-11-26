@@ -642,6 +642,20 @@ fn vm_resources(
     serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())
 }
 
+/// `podbag system compression [idle|off] --json`: `{"mode", "after"}`. With no mode it
+/// only reads. On macOS the command runs in the VM (it starts the VM when none runs).
+#[tauri::command(async)]
+fn compression(
+    state: State<'_, AppState>,
+    token: u64,
+    mode: Option<String>,
+) -> Result<Value, String> {
+    if state.session(token)?.target.choice != Choice::Podbag {
+        return Err("Image compression requires the podbag engine".into());
+    }
+    cli::compression(&state.podbag, mode.as_deref())
+}
+
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct VmResources {
@@ -1375,6 +1389,7 @@ fn main() {
             docker_images,
             import_images,
             vm_resources,
+            compression,
             take_star_prompt,
             terminal_command,
             install_terminal_command,
