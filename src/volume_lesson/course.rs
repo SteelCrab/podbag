@@ -17,6 +17,10 @@ const NOTE: &str = "hello from app-a";
 const RECOVERY_NAME: &str = "lab-web";
 const MISSING_TITLE: &str = "SITE_TITLE is required";
 const RECOVERED_TITLE: &str = "Recovered Podbag site";
+const NETWORK_NAME: &str = "lab-net";
+const API_NAME: &str = "api";
+const FRONT_NAME: &str = "web";
+const API_PAGE: &str = "Hello from api";
 
 fn recovery_command(options: &str) -> String {
     let startup = r#"if [ -z "$SITE_TITLE" ]; then echo "SITE_TITLE is required" >&2; exit 1; fi; mkdir -p /www && printf "%s\n" "$SITE_TITLE" > /www/index.html && exec httpd -f -p 8080 -h /www"#;
@@ -31,6 +35,12 @@ pub enum Step {
     ReadRecoveryLogs,
     RemoveFailed,
     RunFixed,
+    CreateNetwork,
+    RunApi,
+    CallByName,
+    RunFront,
+    RemoveApi,
+    DeleteNetwork,
     Ports(&'static str),
     Browser(&'static str),
     Stop(&'static str),
@@ -98,12 +108,27 @@ const RECOVERY: &[Step] = &[
     Step::Finish,
 ];
 
+const NETWORK: &[Step] = &[
+    Step::CreateNetwork,
+    Step::RunApi,
+    Step::CallByName,
+    Step::RunFront,
+    Step::Ports(FRONT_NAME),
+    Step::Browser(FRONT_NAME),
+    Step::Stop(FRONT_NAME),
+    Step::Remove(FRONT_NAME),
+    Step::RemoveApi,
+    Step::DeleteNetwork,
+    Step::Finish,
+];
+
 pub fn steps(module: Module) -> &'static [Step] {
     match module {
         Module::Web => WEB,
         Module::Persistence => PERSISTENCE,
         Module::Service => SERVICE,
         Module::Recovery => RECOVERY,
+        Module::Network => NETWORK,
         _ => &[],
     }
 }
@@ -113,6 +138,7 @@ fn default_port(module: Module) -> u16 {
         Module::Web => 18080,
         Module::Service => 18081,
         Module::Recovery => 18082,
+        Module::Network => 18083,
         _ => 0,
     }
 }
@@ -126,6 +152,12 @@ impl Step {
             Self::ReadRecoveryLogs => "readRecoveryLogs",
             Self::RemoveFailed => "removeFailed",
             Self::RunFixed => "runFixed",
+            Self::CreateNetwork => "createNetwork",
+            Self::RunApi => "runApi",
+            Self::CallByName => "callByName",
+            Self::RunFront => "runFront",
+            Self::RemoveApi => "removeApi",
+            Self::DeleteNetwork => "deleteNetwork",
             Self::Ports("site-v2") => "portsReplacement",
             Self::Ports(_) => "ports",
             Self::Browser("site-v2") => "browserReplacement",
@@ -161,6 +193,18 @@ impl Step {
             Self::RunFixed => {
                 recovery_command(&format!("{publish} -e 'SITE_TITLE={RECOVERED_TITLE}'"))
             }
+            Self::CreateNetwork => format!("podbag network create {NETWORK_NAME}"),
+            Self::RunApi => format!(
+                "podbag run -d --name {API_NAME} --network {NETWORK_NAME} {IMAGE} sh -c 'mkdir -p /www && printf \"%s\\n\" \"{API_PAGE}\" > /www/index.html && exec httpd -f -p 8080 -h /www'"
+            ),
+            Self::CallByName => format!(
+                "podbag run --rm --network {NETWORK_NAME} {IMAGE} wget -qO- http://{API_NAME}:8080/"
+            ),
+            Self::RunFront => format!(
+                "podbag run -d --name {FRONT_NAME} --network {NETWORK_NAME} {publish} {IMAGE} sh -c 'mkdir -p /www && wget -qO /www/index.html http://{API_NAME}:8080/ && exec httpd -f -p 8080 -h /www'"
+            ),
+            Self::RemoveApi => format!("podbag rm -f {API_NAME}"),
+            Self::DeleteNetwork => format!("podbag network rm {NETWORK_NAME}"),
             Self::RunFirst => format!(
                 "podbag run -d --name site-v1 {publish} -v site-data:/site {IMAGE} sh -c 'printf \"%s\\n\" \"My Podbag site\" > /site/index.html && exec httpd -f -p 8080 -h /site'"
             ),
@@ -182,6 +226,19 @@ impl Step {
         })
     }
 
+    /// Steps that publish the attempt's port: a used port changes the command first.
+    pub fn publishes_port(self) -> bool {
+        matches!(
+            self,
+            Self::RunWeb | Self::RunFirst | Self::RunFixed | Self::RunFront
+        )
+    }
+
+    /// Steps checked against what the command prints on stdout.
+    pub fn checks_stdout(self) -> bool {
+        matches!(self, Self::Read | Self::CallByName)
+    }
+
     pub fn verify_cli(self, root: &Path, output: &[u8]) -> io::Result<()> {
         let client = containers::client(root);
         let verified = match self {
@@ -194,9 +251,14 @@ impl Step {
             }
             Self::ReadRecoveryLogs => std::str::from_utf8(output)
                 .is_ok_and(|text| text.lines().any(|line| line.trim() == MISSING_TITLE)),
-            Self::RunWeb | Self::RunFirst | Self::RunReplacement | Self::RunFixed => {
+            Self::RunWeb
+            | Self::RunFirst
+            | Self::RunReplacement
+            | Self::RunFixed
+            | Self::RunFront => {
                 let name = match self {
                     Self::RunWeb | Self::RunFixed => "lab-web",
+                    Self::RunFront => FRONT_NAME,
                     Self::RunFirst => "site-v1",
                     _ => "site-v2",
                 };
@@ -204,6 +266,9 @@ impl Step {
                 let port = Attempt::read(root)?.port;
                 rows.iter()
                     .any(|row| row.name() == name && published(row, port))
+                    // web serves api's page only if it reached api by name; it exits otherwise.
+                    && (self != Self::RunFront
+                        || wait_for_page(port, API_PAGE, Duration::from_secs(5)).is_ok())
             }
             Self::Create(name) => client
                 .volumes()
@@ -221,6 +286,28 @@ impl Step {
                 }),
             Self::Read => std::str::from_utf8(output)
                 .is_ok_and(|text| text.trim_end_matches(['\r', '\n']) == NOTE),
+            Self::CallByName => std::str::from_utf8(output)
+                .is_ok_and(|text| text.trim_end_matches(['\r', '\n']) == API_PAGE),
+            Self::CreateNetwork => client
+                .networks()
+                .map_err(io::Error::other)?
+                .iter()
+                .any(|net| net.name == NETWORK_NAME),
+            Self::DeleteNetwork => client
+                .networks()
+                .map_err(io::Error::other)?
+                .iter()
+                .all(|net| net.name != NETWORK_NAME),
+            Self::RunApi => client
+                .containers()
+                .map_err(io::Error::other)?
+                .iter()
+                .any(|row| row.name() == API_NAME && row.state == "running"),
+            Self::RemoveApi => client
+                .containers()
+                .map_err(io::Error::other)?
+                .iter()
+                .all(|row| row.name() != API_NAME),
             Self::RemoveFailed => client
                 .containers()
                 .map_err(io::Error::other)?
@@ -348,6 +435,19 @@ fn published(row: &ContainerSummary, port: u16) -> bool {
         })
 }
 
+/// check_page until it passes or WITHIN has gone: a new container's server starts a
+/// moment after its published port does.
+fn wait_for_page(port: u16, expected: &str, within: Duration) -> io::Result<()> {
+    let deadline = std::time::Instant::now() + within;
+    loop {
+        match check_page(port, expected) {
+            Err(e) if std::time::Instant::now() >= deadline => return Err(e),
+            Err(_) => std::thread::sleep(Duration::from_millis(200)),
+            ok => return ok,
+        }
+    }
+}
+
 fn check_page(port: u16, expected: &str) -> io::Result<()> {
     let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     let timeout = Duration::from_secs(2);
@@ -449,6 +549,7 @@ pub fn view(
                 attempt.port,
                 match (attempt.module.as_str(), name) {
                     ("web-service-recovery", _) => RECOVERED_TITLE,
+                    ("container-network", _) => API_PAGE,
                     (_, "lab-web") => "Podbag Training",
                     _ => "My Podbag site",
                 },
@@ -553,6 +654,98 @@ mod tests {
     }
 
     #[test]
+    fn network_steps_have_unique_keys_and_the_shown_commands() {
+        let steps = instructions(Module::Network);
+        let keys: Vec<_> = steps.iter().map(|step| step.key).collect();
+        assert_eq!(
+            keys,
+            [
+                "createNetwork",
+                "runApi",
+                "callByName",
+                "runFront",
+                "ports",
+                "browser",
+                "stop",
+                "remove",
+                "removeApi",
+                "deleteNetwork",
+                "finish",
+            ]
+        );
+        let command = |key| {
+            steps
+                .iter()
+                .find(|step| step.key == key)
+                .and_then(|step| step.command.clone())
+                .unwrap()
+        };
+        assert_eq!(command("createNetwork"), "podbag network create lab-net");
+        assert!(command("runApi").starts_with("podbag run -d --name api --network lab-net "));
+        assert!(!command("runApi").contains("127.0.0.1:"));
+        assert_eq!(
+            command("callByName"),
+            "podbag run --rm --network lab-net docker.io/library/busybox:1.37.0 wget -qO- http://api:8080/"
+        );
+        assert!(
+            command("runFront").contains("--name web --network lab-net -p 127.0.0.1:18083:8080 ")
+        );
+        assert!(command("runFront").contains("wget -qO /www/index.html http://api:8080/"));
+        assert_eq!(command("remove"), "podbag rm web");
+        assert_eq!(command("removeApi"), "podbag rm -f api");
+        assert_eq!(command("deleteNetwork"), "podbag network rm lab-net");
+    }
+
+    #[test]
+    fn calling_by_name_needs_the_api_page() {
+        let dir = tempfile::tempdir().unwrap();
+        let call = Step::CallByName;
+        assert!(call.verify_cli(dir.path(), b"Hello from api\n").is_ok());
+        assert!(call.verify_cli(dir.path(), b"Hello from api\r\n").is_ok());
+        assert!(
+            call.verify_cli(dir.path(), b"wget: bad address 'api:8080'\n")
+                .is_err()
+        );
+        assert!(call.verify_cli(dir.path(), b"").is_err());
+    }
+
+    #[test]
+    fn a_used_port_updates_the_front_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir(root.join("run")).unwrap();
+        Attempt::start(root, Module::Network).unwrap();
+        let mut attempt = Attempt::read(root).unwrap();
+        attempt.index = 3;
+        let reserved = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        attempt.port = reserved.local_addr().unwrap().port();
+        attempt.save(root).unwrap();
+        assert!(attempt.step().unwrap() == Step::RunFront);
+        // course_command refreshes the port before it compares the learner's command.
+        assert!(Step::RunFront.publishes_port());
+        assert!(
+            [Step::RunWeb, Step::RunFirst, Step::RunFixed]
+                .iter()
+                .all(|step| step.publishes_port())
+        );
+        assert!(!Step::RunApi.publishes_port() && !Step::CallByName.publishes_port());
+        // and keeps the command's output for the check.
+        assert!(Step::CallByName.checks_stdout() && Step::Read.checks_stdout());
+        assert!(!Step::RunFront.checks_stdout());
+        assert!(attempt.refresh_port(root).unwrap());
+        let stored = Attempt::read(root).unwrap();
+        assert_ne!(stored.port, reserved.local_addr().unwrap().port());
+        assert!(
+            stored
+                .step()
+                .unwrap()
+                .command(stored.port)
+                .unwrap()
+                .contains(&format!("127.0.0.1:{}:8080", stored.port))
+        );
+    }
+
+    #[test]
     fn a_used_port_updates_the_command_in_this_attempt() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -574,6 +767,38 @@ mod tests {
                 .unwrap()
                 .contains(&format!("127.0.0.1:{}:8080", attempt.port))
         );
+    }
+
+    /// A server that drops the first FAILS connections, then serves the api page.
+    fn late_server(fails: usize) -> (u16, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            for (n, stream) in listener.incoming().enumerate() {
+                let mut stream = stream.unwrap();
+                if n < fails {
+                    continue;
+                }
+                let mut request = [0; 128];
+                let _ = stream.read(&mut request).unwrap();
+                write!(stream, "HTTP/1.0 200 OK\r\n\r\nHello from api\n").unwrap();
+                return;
+            }
+        });
+        (port, server)
+    }
+
+    #[test]
+    fn the_front_check_waits_for_the_copied_page() {
+        // The published port answers before httpd in the container does.
+        let (port, server) = late_server(2);
+        assert!(wait_for_page(port, API_PAGE, Duration::from_secs(5)).is_ok());
+        server.join().unwrap();
+        // web never got the page from api: the step fails.
+        let (port, _server) = late_server(usize::MAX);
+        let started = std::time::Instant::now();
+        assert!(wait_for_page(port, API_PAGE, Duration::from_millis(600)).is_err());
+        assert!(started.elapsed() < Duration::from_secs(3));
     }
 
     #[test]

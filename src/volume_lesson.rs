@@ -22,17 +22,19 @@ pub enum Module {
     Persistence,
     Service,
     Recovery,
+    Network,
     Volumes,
     Tui,
 }
 
 impl Module {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Containers,
         Self::Web,
         Self::Persistence,
         Self::Service,
         Self::Recovery,
+        Self::Network,
         Self::Volumes,
         Self::Tui,
     ];
@@ -44,6 +46,7 @@ impl Module {
             Self::Persistence => "podbag-volume-persistence-v1",
             Self::Service => "podbag-web-service-lifecycle-v1",
             Self::Recovery => "podbag-web-service-recovery-v1",
+            Self::Network => "podbag-container-network-v1",
             Self::Volumes => gui::FORMAT,
             Self::Tui => FORMAT,
         }
@@ -56,6 +59,7 @@ impl Module {
             Self::Persistence => "volume-persistence",
             Self::Service => "web-service-lifecycle",
             Self::Recovery => "web-service-recovery",
+            Self::Network => "container-network",
             Self::Volumes => "volume-basics",
             Self::Tui => "tui-volumes",
         }
@@ -78,9 +82,12 @@ impl Module {
     pub fn guide_url(self, lang: &str) -> Option<String> {
         let lang = lang.split(['-', '_', '.']).next().unwrap_or("en");
         let (post, locale) = match self {
-            Self::Containers | Self::Web | Self::Persistence | Self::Service | Self::Recovery => {
-                (self.id(), if lang == "ko" { "ko/" } else { "" })
-            }
+            Self::Containers
+            | Self::Web
+            | Self::Persistence
+            | Self::Service
+            | Self::Recovery
+            | Self::Network => (self.id(), if lang == "ko" { "ko/" } else { "" }),
             Self::Volumes => (
                 "cli-tui-volumes",
                 match lang {

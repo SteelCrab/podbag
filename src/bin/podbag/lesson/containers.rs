@@ -185,9 +185,7 @@ pub fn course_command(root: &Path) -> io::Result<i32> {
             "Use the command shown for the current Training step, or type exit.",
         ));
     }
-    if matches!(step, Step::RunWeb | Step::RunFirst | Step::RunFixed)
-        && attempt.refresh_port(root)?
-    {
+    if step.publishes_port() && attempt.refresh_port(root)? {
         return Err(io::Error::other(format!(
             "That port is in use. Copy the updated Training command for port {}.",
             attempt.port
@@ -201,7 +199,7 @@ pub fn course_command(root: &Path) -> io::Result<i32> {
         io::stderr().write_all(&result.stderr)?;
         result.stdout.extend(result.stderr);
         (result.status, result.stdout)
-    } else if step == Step::Read {
+    } else if step.checks_stdout() {
         let result = engine.stderr(Stdio::inherit()).output()?;
         io::stdout().write_all(&result.stdout)?;
         (result.status, result.stdout)
