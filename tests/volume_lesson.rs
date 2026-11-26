@@ -135,107 +135,200 @@ fn desktop_observes_cli_creation_and_requires_inspection_before_deletion() {
     assert!(snapshot("remove", id).is_err());
 }
 
+/// A course attempt on a real practice engine, driven the way a learner drives it: the
+/// command of each step in the practice terminal, and Desktop's actions through `view`.
+#[cfg(target_os = "linux")]
+struct Course {
+    library: tempfile::TempDir,
+    root: PathBuf,
+    engine: std::process::Child,
+    registration: Option<podbag::volume_lesson::gui::Registration>,
+}
+
+#[cfg(target_os = "linux")]
+impl Course {
+    fn start(module: podbag::volume_lesson::Module) -> Self {
+        use podbag::volume_lesson::{course, gui::Registration};
+        let library = tempfile::tempdir().unwrap();
+        let mut engine = Command::new(env!("CARGO_BIN_EXE_podbag"))
+            .args(["lab", "workspace", "--containers"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(engine.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let root = PathBuf::from(line.trim_end());
+        course::Attempt::start(&root, module).unwrap();
+        let registration = Registration::open_for(library.path(), &root, course::ACTIVE).unwrap();
+        Self {
+            library,
+            root,
+            engine,
+            registration: Some(registration),
+        }
+    }
+
+    fn try_view(
+        &self,
+        action: &str,
+        session: Option<&str>,
+        target: &str,
+    ) -> std::io::Result<serde_json::Value> {
+        let snapshot =
+            podbag::volume_lesson::course::view(self.library.path(), action, session, target)?;
+        Ok(serde_json::to_value(snapshot.unwrap()).unwrap())
+    }
+
+    fn view(&self, action: &str, session: Option<&str>, target: &str) -> serde_json::Value {
+        self.try_view(action, session, target).unwrap()
+    }
+
+    /// The current step, which must be STAGE.
+    fn step(&self, stage: &str) -> serde_json::Value {
+        let snapshot = self.view("status", None, "");
+        assert_eq!(snapshot["stage"], stage);
+        snapshot
+    }
+
+    /// The command a learner copies from the current step, run in the practice terminal.
+    fn cli(&self, snapshot: &serde_json::Value) -> std::process::Output {
+        let line = snapshot["command"].as_str().unwrap();
+        let words = shlex::split(line).unwrap();
+        assert_eq!(words[0], "podbag");
+        Command::new(env!("CARGO_BIN_EXE_podbag"))
+            .args(&words[1..])
+            .env(podbag::volume_lesson::SCOPE, &self.root)
+            .env("PODBAG_DATA_DIR", self.root.join("data"))
+            .env("PODBAG_RUNTIME_DIR", self.root.join("run"))
+            .env("PODBAG_CONFIG_DIR", self.root.join("config"))
+            .env("PODBAG_UI_DIR", self.root.join("ui"))
+            .output()
+            .unwrap()
+    }
+
+    /// Opens the page: httpd starts a moment after its container, so the learner can
+    /// press Open again.
+    fn open_page(&self, session: Option<&str>, container: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while self.try_view("open-web", session, container).is_err() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the page never matched"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    }
+
+    /// Ends the session: the engine stops and its directory goes.
+    fn finish(mut self) {
+        drop(self.engine.stdin.take());
+        assert!(self.engine.wait().unwrap().success());
+        drop(self.registration.take());
+        assert!(!self.root.exists());
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn id_of(snapshot: &serde_json::Value, name: &str) -> String {
+    snapshot["containers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["Names"][0].as_str().unwrap().trim_start_matches('/') == name)
+        .map(|row| row["Id"].as_str().unwrap().to_string())
+        .unwrap()
+}
+
 /// The recovery Training from start to finish against a real practice engine: a server
 /// that exits for a missing setting, its log, and the fixed server's page. Pulls busybox
 /// from Docker Hub: runs only with PODBAG_TEST_NETWORK=1.
 #[cfg(target_os = "linux")]
 #[test]
 fn the_recovery_training_goes_from_a_failed_start_to_a_working_page() {
-    use podbag::volume_lesson::{Module, course, gui::Registration};
     if std::env::var("PODBAG_TEST_NETWORK").as_deref() != Ok("1") {
         eprintln!("PODBAG_TEST_NETWORK is not 1: skipped");
         return;
     }
-    let library = tempfile::tempdir().unwrap();
-    let library = library.path();
-    let mut engine = Command::new(env!("CARGO_BIN_EXE_podbag"))
-        .args(["lab", "workspace", "--containers"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut line = String::new();
-    BufReader::new(engine.stdout.take().unwrap())
-        .read_line(&mut line)
-        .unwrap();
-    let root = PathBuf::from(line.trim_end());
-    course::Attempt::start(&root, Module::Recovery).unwrap();
-    let registration = Registration::open_for(library, &root, course::ACTIVE).unwrap();
-    let view = |action: &str, session: Option<&str>, target: &str| {
-        let snapshot = course::view(library, action, session, target).unwrap();
-        serde_json::to_value(snapshot.unwrap()).unwrap()
-    };
-    let id_of = |snapshot: &serde_json::Value, name: &str| {
-        snapshot["containers"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|row| row["Names"][0].as_str().unwrap().trim_start_matches('/') == name)
-            .map(|row| row["Id"].as_str().unwrap().to_string())
-            .unwrap()
-    };
-    // The command a learner copies from the current step, run in the practice terminal.
-    let cli = |snapshot: &serde_json::Value| {
-        let line = snapshot["command"].as_str().unwrap();
-        let words = shlex::split(line).unwrap();
-        assert_eq!(words[0], "podbag");
-        Command::new(env!("CARGO_BIN_EXE_podbag"))
-            .args(&words[1..])
-            .env(podbag::volume_lesson::SCOPE, &root)
-            .env("PODBAG_DATA_DIR", root.join("data"))
-            .env("PODBAG_RUNTIME_DIR", root.join("run"))
-            .env("PODBAG_CONFIG_DIR", root.join("config"))
-            .env("PODBAG_UI_DIR", root.join("ui"))
-            .output()
-            .unwrap()
-    };
-    let step = |stage: &str| {
-        let snapshot = view("status", None, "");
-        assert_eq!(snapshot["stage"], stage);
-        snapshot
-    };
+    let course = Course::start(podbag::volume_lesson::Module::Recovery);
 
-    let failed = step("runFailed");
+    let failed = course.step("runFailed");
     assert!(
-        cli(&failed).status.success(),
+        course.cli(&failed).status.success(),
         "the failing server still starts"
     );
-    let inspect = step("inspectFailed");
+    let inspect = course.step("inspectFailed");
     assert_eq!(inspect["inspect_container"], "lab-web");
     let session = inspect["session"].as_str().unwrap().to_string();
     let session = Some(session.as_str());
     let exited = id_of(&inspect, "lab-web");
-    assert!(course::view(library, "ports", session, &exited).is_err());
-    view("inspect-failed", session, &exited);
-    let logs = cli(&step("readRecoveryLogs"));
+    assert!(course.try_view("ports", session, &exited).is_err());
+    course.view("inspect-failed", session, &exited);
+    let logs = course.cli(&course.step("readRecoveryLogs"));
     assert!(
         String::from_utf8_lossy(&logs.stderr).contains("SITE_TITLE is required"),
         "{logs:?}"
     );
-    assert!(cli(&step("removeFailed")).status.success());
-    let fixed = cli(&step("runFixed"));
+    assert!(course.cli(&course.step("removeFailed")).status.success());
+    let fixed = course.cli(&course.step("runFixed"));
     assert!(fixed.status.success(), "{fixed:?}");
-    let ports = step("ports");
+    let ports = course.step("ports");
     let running = id_of(&ports, "lab-web");
     assert_ne!(running, exited);
-    view("ports", session, &running);
-    step("browser");
-    // httpd starts a moment after the container: the learner can press Open again.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while course::view(library, "open-web", session, &running).is_err() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the page never matched"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(200));
-    }
-    step("stop");
-    view("stop", session, &running);
-    assert!(cli(&step("remove")).status.success());
-    step("finish");
+    course.view("ports", session, &running);
+    course.step("browser");
+    course.open_page(session, &running);
+    course.step("stop");
+    course.view("stop", session, &running);
+    assert!(course.cli(&course.step("remove")).status.success());
+    course.step("finish");
+    course.finish();
+}
 
-    drop(engine.stdin.take());
-    assert!(engine.wait().unwrap().success());
-    drop(registration);
-    assert!(!root.exists());
+/// The network Training from start to finish against a real practice engine: a server
+/// without a port, reached by name from a one-off container and from a published web
+/// server on the same network. Pulls busybox: runs only with PODBAG_TEST_NETWORK=1.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_network_training_reaches_api_by_name() {
+    if std::env::var("PODBAG_TEST_NETWORK").as_deref() != Ok("1") {
+        eprintln!("PODBAG_TEST_NETWORK is not 1: skipped");
+        return;
+    }
+    let course = Course::start(podbag::volume_lesson::Module::Network);
+    let run = |stage: &str| {
+        let output = course.cli(&course.step(stage));
+        assert!(output.status.success(), "{stage}: {output:?}");
+        output
+    };
+
+    run("createNetwork");
+    run("runApi");
+    let call = run("callByName");
+    assert_eq!(
+        String::from_utf8_lossy(&call.stdout).trim_end(),
+        "Hello from api"
+    );
+    run("runFront");
+    let ports = course.step("ports");
+    let session = ports["session"].as_str().unwrap().to_string();
+    let session = Some(session.as_str());
+    let web = id_of(&ports, "web");
+    assert!(
+        course
+            .try_view("ports", session, &id_of(&ports, "api"))
+            .is_err()
+    );
+    course.view("ports", session, &web);
+    course.step("browser");
+    course.open_page(session, &web);
+    course.step("stop");
+    course.view("stop", session, &web);
+    run("remove");
+    run("removeApi");
+    run("deleteNetwork");
+    course.step("finish");
+    course.finish();
 }
