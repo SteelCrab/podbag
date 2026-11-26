@@ -9,6 +9,10 @@
 - Opening the exited container in Desktop's Practice containers completes the inspect
   step.
 - The guide and the module file are at https://podbag.dev/blog/web-service-recovery/.
+- New module `container-network`: create a network, run a server without a port, and
+  reach it by name from other containers on the same network. A published web server
+  shows the page it got from that server.
+- The guide and the module file are at https://podbag.dev/blog/container-network/.
 
 ## v0.3.2 (2026-11-23)
 
