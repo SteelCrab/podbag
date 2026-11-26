@@ -169,7 +169,7 @@ pub fn scoped(root: &Path, cmd: Cmd) -> io::Result<i32> {
 }
 
 pub fn course_command(root: &Path) -> io::Result<i32> {
-    use volume_lesson::course::{Attempt, Step};
+    use volume_lesson::course::{Attempt, Output};
     let _lock = Attempt::lock(root)?;
     let mut attempt = Attempt::read(root)?;
     let step = attempt.step()?;
@@ -193,25 +193,27 @@ pub fn course_command(root: &Path) -> io::Result<i32> {
     }
     let mut engine = engine_command(root)?;
     engine.args(args);
-    let (status, output) = if step == Step::ReadRecoveryLogs {
-        let mut result = engine.output()?;
-        io::stdout().write_all(&result.stdout)?;
-        io::stderr().write_all(&result.stderr)?;
-        result.stdout.extend(result.stderr);
-        (result.status, result.stdout)
-    } else if step.checks_stdout() {
-        let result = engine.stderr(Stdio::inherit()).output()?;
-        io::stdout().write_all(&result.stdout)?;
-        (result.status, result.stdout)
-    } else {
-        (engine.status()?, Vec::new())
+    let (status, output) = match step.output() {
+        Output::All => {
+            let mut result = engine.output()?;
+            io::stdout().write_all(&result.stdout)?;
+            io::stderr().write_all(&result.stderr)?;
+            result.stdout.extend(result.stderr);
+            (result.status, result.stdout)
+        }
+        Output::Stdout => {
+            let result = engine.stderr(Stdio::inherit()).output()?;
+            io::stdout().write_all(&result.stdout)?;
+            (result.status, result.stdout)
+        }
+        Output::None => (engine.status()?, Vec::new()),
     };
     if !status.success() {
         return Ok(status.code().unwrap_or(1));
     }
-    step.verify_cli(root, &output)?;
+    step.verify_cli(root, attempt.port, &output)?;
     attempt.advance(root)?;
-    if attempt.step()? == Step::Finish {
+    if attempt.step()?.is_finish() {
         eprintln!("Verified. Type exit to finish the lab.");
     }
     Ok(0)

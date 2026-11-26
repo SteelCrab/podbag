@@ -862,10 +862,14 @@ fn open_repository() -> Result<(), String> {
 
 #[tauri::command(async)]
 fn open_training_guide(id: &str, lang: &str) -> Result<(), String> {
-    let module = podbag::volume_lesson::Module::parse(id).map_err(|e| e.to_string())?;
-    let url = module
-        .guide_url(lang)
-        .ok_or("The module has no web guide.")?;
+    use podbag::volume_lesson as lesson;
+    let module = lesson::Module::parse(id).map_err(|e| e.to_string())?;
+    let dir = lesson::directory().map_err(|e| e.to_string())?;
+    let url = match lesson::read(&dir, &module).map_err(|e| e.to_string())? {
+        Some(record) => record.guide_url(lang),
+        None => module.guide_url(lang),
+    }
+    .ok_or("The module has no web guide.")?;
     open::that_detached(url).map_err(|e| e.to_string())
 }
 
@@ -1262,7 +1266,7 @@ fn practice_volumes(
     request(&action)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn volume_tools_lab(
     action: &str,
     package: Option<String>,
@@ -1277,14 +1281,19 @@ fn volume_tools_lab(
             lesson::install(&dir, package.as_deref().ok_or("Choose a module file.")?)
                 .map_err(|e| e.to_string())?;
         }
-        "remove" => lesson::remove(&dir, module()?).map_err(|e| e.to_string())?,
+        "remove" => lesson::remove(&dir, &module()?).map_err(|e| e.to_string())?,
+        // The Training catalog on podbag.dev: new and changed modules, no app update.
+        "sync" => {
+            lesson::catalog::sync(&dir)?;
+        }
         _ => return Err("Unknown lesson action.".into()),
     }
     let mut records = Vec::new();
     for mut record in lesson::list(&dir).map_err(|e| e.to_string())? {
-        let key = lesson::Module::for_format(&record.package.format)
+        let key = lesson::Module::of(&record.package)
             .map_err(|e| e.to_string())?
-            .id();
+            .id()
+            .to_owned();
         if id
             .as_deref()
             .is_some_and(|id| action == "summary" && id != key)
@@ -1292,8 +1301,12 @@ fn volume_tools_lab(
             continue;
         }
         record.package.animation = None;
-        let steps =
-            lesson::course::instructions(lesson::Module::parse(key).map_err(|e| e.to_string())?);
+        // An old course format has no steps until a sync replaces it.
+        let steps = record
+            .package
+            .course()
+            .map(|course| lesson::course::instructions(&course))
+            .unwrap_or_default();
         records.push(LessonRecord {
             id: key,
             record,
@@ -1305,7 +1318,7 @@ fn volume_tools_lab(
 
 #[derive(serde::Serialize)]
 struct LessonRecord {
-    id: &'static str,
+    id: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     steps: Vec<podbag::volume_lesson::course::Instruction>,
     #[serde(flatten)]

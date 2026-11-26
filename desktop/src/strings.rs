@@ -111,20 +111,6 @@ mod tests {
     }
 
     #[test]
-    fn every_training_step_has_a_name() {
-        use podbag::volume_lesson::{Module, course};
-        let t = tables();
-        let en = &t["en"];
-        for module in Module::ALL {
-            let steps = serde_json::to_value(course::instructions(module)).unwrap();
-            for step in steps.as_array().unwrap() {
-                let key = format!("training.course.{}", step["key"].as_str().unwrap());
-                assert!(en.contains_key(&key), "{} lacks {key}", module.id());
-            }
-        }
-    }
-
-    #[test]
     fn locales_match_the_tables() {
         assert_eq!(match_locale("ko-KR"), Some("ko"));
         assert_eq!(match_locale("ja"), Some("ja"));

@@ -147,8 +147,16 @@ struct Course {
 
 #[cfg(target_os = "linux")]
 impl Course {
-    fn start(module: podbag::volume_lesson::Module) -> Self {
-        use podbag::volume_lesson::{course, gui::Registration};
+    /// A session of the course in tests/fixtures/training/ID.podbag.
+    fn start(id: &str) -> Self {
+        use podbag::volume_lesson::{course, gui::Registration, parse_package};
+        let file = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/training")
+            .join(format!("{id}.podbag"));
+        let course = parse_package(&std::fs::read_to_string(file).unwrap())
+            .unwrap()
+            .course()
+            .unwrap();
         let library = tempfile::tempdir().unwrap();
         let mut engine = Command::new(env!("CARGO_BIN_EXE_podbag"))
             .args(["lab", "workspace", "--containers"])
@@ -161,7 +169,7 @@ impl Course {
             .read_line(&mut line)
             .unwrap();
         let root = PathBuf::from(line.trim_end());
-        course::Attempt::start(&root, module).unwrap();
+        course::Attempt::start(&root, &course).unwrap();
         let registration = Registration::open_for(library.path(), &root, course::ACTIVE).unwrap();
         Self {
             library,
@@ -252,7 +260,7 @@ fn the_recovery_training_goes_from_a_failed_start_to_a_working_page() {
         eprintln!("PODBAG_TEST_NETWORK is not 1: skipped");
         return;
     }
-    let course = Course::start(podbag::volume_lesson::Module::Recovery);
+    let course = Course::start("web-service-recovery");
 
     let failed = course.step("runFailed");
     assert!(
@@ -297,7 +305,7 @@ fn the_network_training_reaches_api_by_name() {
         eprintln!("PODBAG_TEST_NETWORK is not 1: skipped");
         return;
     }
-    let course = Course::start(podbag::volume_lesson::Module::Network);
+    let course = Course::start("container-network");
     let run = |stage: &str| {
         let output = course.cli(&course.step(stage));
         assert!(output.status.success(), "{stage}: {output:?}");
