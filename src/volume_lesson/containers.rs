@@ -29,12 +29,18 @@ pub struct Snapshot {
     pub containers: Vec<ContainerSummary>,
 }
 
+/// The Docker API socket of the practice engine in ROOT.
+pub fn socket(root: &Path) -> std::path::PathBuf {
+    if cfg!(target_os = "macos") {
+        root.join("run/docker.sock")
+    } else {
+        root.join("api.sock")
+    }
+}
+
 pub fn client(root: &Path) -> Client {
     Client::new(Endpoint::Socket {
-        #[cfg(target_os = "macos")]
-        path: root.join("run/docker.sock"),
-        #[cfg(not(target_os = "macos"))]
-        path: root.join("api.sock"),
+        path: socket(root),
         own: false,
     })
 }

@@ -163,7 +163,10 @@ fn practice_command(program: &Path, dir: &Path) -> io::Result<std::process::Comm
         .env("PODBAG_UI_DIR", dir.join("ui"))
         .env(
             "DOCKER_HOST",
-            format!("unix://{}", dir.join("api.sock").display()),
+            format!(
+                "unix://{}",
+                volume_lesson::containers::socket(dir).display()
+            ),
         )
         .env("DOCKER_CONFIG", dir.join("docker"))
         .env(
@@ -357,6 +360,22 @@ fn terminal_without_shell(dir: &Path, prompt: &str) -> io::Result<()> {
             None => {}
         }
     }
+}
+
+/// `podbag lab docker-step ARGS` from a course's `bin/docker`.
+#[cfg(unix)]
+pub fn docker_step(root: &Path, args: Vec<std::ffi::OsString>) -> i32 {
+    let result = if root.is_absolute() && volume_lesson::course::Attempt::active(root) {
+        containers::docker_step(root, args)
+    } else {
+        Err(io::Error::other(
+            "This practice session has no Training course.",
+        ))
+    };
+    result.unwrap_or_else(|e| {
+        eprintln!("podbag: {e}");
+        1
+    })
 }
 
 #[cfg(unix)]

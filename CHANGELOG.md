@@ -16,6 +16,9 @@
   Read the cause with `podbag logs`, then start it again with `-e` and open its page.
 - New module `container-network`: create a network, run a server without a port, and
   reach it by name from other containers on the same network.
+- Module format `podbag-course-v2`: checks for images, container states, health, restarts
+  and networks; text files for the practice directory; steps with the Docker CLI and
+  Compose. Training modules for every podbag feature use it.
 - All modules and their guides: https://podbag.dev/training/.
 
 ## v0.3.2 (2026-11-23)

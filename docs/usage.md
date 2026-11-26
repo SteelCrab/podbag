@@ -941,6 +941,39 @@ podbag lab remove container-network
 | `desktop-stop` | `name` | Desktop stopped the container |
 | `desktop-inspect-volume`, `desktop-delete-volume` | `name` | Desktop opened / deleted the volume |
 
+##### Version 2 (`podbag-course-v2`)
+
+- Everything in v1, and:
+  - more checks (below),
+  - `files`: up to 8 text files, 16 KiB in all, written into the practice directory when
+    the session starts (a `Dockerfile`, a `compose.yaml`).
+    - Paths are relative: names of `A-Z a-z 0-9 . _ -`, joined by `/`, without `..`.
+    - They cannot start with a name the session uses: `bin`, `run`, `data`, `config`,
+      `ui`, `docker`, `api.sock`, `disk.img`, `console.log`, `verified` (any case).
+    - A file is never written over something that is there, or through a link.
+    - `{port}` in a file is the attempt's port.
+  - steps with `docker …` commands. The practice shell's `docker` runs the Docker CLI
+    against the session's engine, and podbag checks the step. It needs the Docker CLI (and
+    the Compose plugin for `docker compose`).
+    - A docker command has no global options before its command (`-H`, `--context`,
+      `--config`) and no `docker context`: it always talks to the practice engine.
+    - Windows practice sessions have no Docker CLI, so podbag on Windows leaves these
+      modules out.
+- `{port}` also works in check values. Only a step that publishes `127.0.0.1:{port}:…`
+  gets a new port when the old one is in use.
+- A podbag without v2 leaves v2 modules out of the Training list.
+
+| Kind | Fields | Passes when |
+|---|---|---|
+| `image-exists`, `image-absent` | `name` | an image has (no image has) the tag; `busybox` means `docker.io/library/busybox:latest` |
+| `container-created`, `container-stopped`, `container-paused` | `name` | the container is in that state |
+| `container-healthy` | `name` | its health check says healthy, within 30 s |
+| `container-restarted` | `name`, `count` | it restarted at least `count` times, within 20 s |
+| `container-in-network`, `container-not-in-network` | `name`, `network` | it is (not) attached |
+| `volume-absent` | `name` | the volume is not listed |
+| `output-contains` | `text` | the output or the errors contain `text` |
+| `file-exists` | `path` | the file is in the practice directory |
+
 ### podbag tui
 
 - Four lists: containers, images, volumes and networks. The selected one's details show

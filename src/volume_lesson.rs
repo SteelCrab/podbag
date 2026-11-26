@@ -103,7 +103,7 @@ impl Module {
     /// The module a package belongs to.
     pub fn of(package: &Package) -> io::Result<Self> {
         let format = package.format.as_str();
-        if format == course::FORMAT {
+        if course::is_course(format) {
             return Ok(Self::Course(package.id.clone().unwrap_or_default()));
         }
         if let Some((_, id)) = OLD_COURSES.iter().find(|(old, _)| *old == format) {
@@ -119,7 +119,14 @@ impl Module {
 
     /// Whether podbag can install a module of FORMAT.
     pub fn known_format(format: &str) -> bool {
-        [course::FORMAT, containers::FORMAT, gui::FORMAT, FORMAT].contains(&format)
+        [
+            course::FORMAT,
+            course::FORMAT_V2,
+            containers::FORMAT,
+            gui::FORMAT,
+            FORMAT,
+        ]
+        .contains(&format)
             || OLD_COURSES.iter().any(|(old, _)| *old == format)
     }
 
@@ -181,22 +188,26 @@ pub struct Package {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub animation: Option<Animation>,
     pub translations: BTreeMap<String, Words>,
-    /// Course modules (`course::FORMAT`) only: their id, port and steps.
+    /// Course modules (`course::FORMAT`, `course::FORMAT_V2`) only: their id, port, files
+    /// and steps.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<course::StepDef>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub files: BTreeMap<String, String>,
 }
 
 impl Package {
     /// The steps of a course module.
     pub fn course(&self) -> Option<course::Course> {
-        (self.format == course::FORMAT).then(|| course::Course {
+        course::is_course(&self.format).then(|| course::Course {
             id: self.id.clone().unwrap_or_default(),
             port: self.port,
             steps: self.steps.clone(),
+            files: self.files.clone(),
         })
     }
 }
@@ -344,11 +355,15 @@ pub fn parse_package(text: &str) -> io::Result<Package> {
         return Err(io::Error::other("The module is too large."));
     }
     let package: Package = serde_json::from_str(text)?;
-    if package.format == course::FORMAT {
+    if course::is_course(&package.format) {
         course::validate(&package)?;
     } else {
         Module::of(&package)?;
-        if package.id.is_some() || package.port.is_some() || !package.steps.is_empty() {
+        if package.id.is_some()
+            || package.port.is_some()
+            || !package.steps.is_empty()
+            || !package.files.is_empty()
+        {
             return Err(io::Error::other("Only course modules have steps."));
         }
     }
@@ -388,10 +403,10 @@ fn install_with(dir: &Path, package: Package, sha256: Option<String>) -> io::Res
     let _lock = locked(dir)?;
     let current = read(dir, &module).ok().flatten();
     // An old course file (from an old guide) does not replace the course's steps.
-    if package.format != course::FORMAT
+    if !course::is_course(&package.format)
         && current
             .as_ref()
-            .is_some_and(|r| r.package.format == course::FORMAT)
+            .is_some_and(|r| course::is_course(&r.package.format))
     {
         return Ok(module);
     }
@@ -460,7 +475,7 @@ impl Installed {
     /// The web guide in LANG, or in English.
     pub fn guide_url(&self, lang: &str) -> Option<String> {
         let module = Module::of(&self.package).ok()?;
-        if self.package.format != course::FORMAT {
+        if !course::is_course(&self.package.format) {
             return module.guide_url(lang);
         }
         let url = self
@@ -784,5 +799,210 @@ mod tests {
             "the catalog lists the built-in labs too"
         );
         assert!(!needs_sync(dir, "Not An Id"));
+    }
+
+    /// The network fixture as a v2 module with an image step, a docker step and a file.
+    fn v2(edit: impl FnOnce(&mut serde_json::Value)) -> String {
+        edited(|v| {
+            v["format"] = course::FORMAT_V2.into();
+            v["files"] = serde_json::json!({"Dockerfile": "FROM busybox:1.37.0\n"});
+            let steps = v["steps"].as_array_mut().unwrap();
+            steps.insert(
+                0,
+                serde_json::json!({
+                "key": "pull", "names": {"en": "Pull the image"},
+                "command": "podbag pull docker.io/library/busybox:1.37.0",
+                "check": {"kind": "image-exists", "name": "docker.io/library/busybox:1.37.0"}}),
+            );
+            steps.insert(
+                1,
+                serde_json::json!({
+                "key": "list", "names": {"en": "List with the Docker CLI"},
+                "command": "docker ps -a",
+                "check": {"kind": "output-contains", "text": "CONTAINER ID"}}),
+            );
+            steps.insert(
+                2,
+                serde_json::json!({
+                "key": "restarted", "names": {"en": "Watch it restart"},
+                "command": "podbag ps",
+                "check": {"kind": "container-restarted", "name": "api", "count": 1}}),
+            );
+            edit(v);
+        })
+    }
+
+    #[test]
+    fn v2_adds_kinds_files_and_docker_steps() {
+        let package = parse_package(&v2(|_| {})).unwrap();
+        assert_eq!(
+            Module::of(&package).unwrap(),
+            Module::Course("container-network".into())
+        );
+        assert!(Module::known_format(course::FORMAT_V2));
+        let course = package.course().unwrap();
+        assert_eq!(course.files["Dockerfile"], "FROM busybox:1.37.0\n");
+        assert_eq!(course.steps.len(), 14);
+        for kind in [
+            r#"{"kind":"image-absent","name":"x:1"}"#,
+            r#"{"kind":"container-created","name":"a"}"#,
+            r#"{"kind":"container-stopped","name":"a"}"#,
+            r#"{"kind":"container-paused","name":"a"}"#,
+            r#"{"kind":"container-healthy","name":"a"}"#,
+            r#"{"kind":"container-in-network","name":"a","network":"n"}"#,
+            r#"{"kind":"container-not-in-network","name":"a","network":"n"}"#,
+            r#"{"kind":"volume-absent","name":"v"}"#,
+            r#"{"kind":"file-exists","path":"out/app.tar"}"#,
+        ] {
+            let text = v2(|v| v["steps"][0]["check"] = serde_json::from_str(kind).unwrap());
+            assert!(parse_package(&text).is_ok(), "{kind}");
+        }
+    }
+
+    #[test]
+    fn v2_refuses_unsafe_files_and_v1_refuses_v2_parts() {
+        let big = "x".repeat(16 * 1024 + 1);
+        let cases: Vec<(&str, String)> = vec![
+            (
+                "parent path",
+                v2(|v| v["files"] = serde_json::json!({"../x": "a"})),
+            ),
+            (
+                "absolute path",
+                v2(|v| v["files"] = serde_json::json!({"/etc/x": "a"})),
+            ),
+            (
+                "odd path",
+                v2(|v| v["files"] = serde_json::json!({"a b": "a"})),
+            ),
+            (
+                "too much text",
+                v2(|v| v["files"] = serde_json::json!({"big": big})),
+            ),
+            (
+                "too many files",
+                v2(|v| {
+                    v["files"] = (0..9)
+                        .map(|n| (format!("f{n}"), serde_json::json!("a")))
+                        .collect();
+                }),
+            ),
+            (
+                "file-exists outside",
+                v2(|v| {
+                    v["steps"][0]["check"] =
+                        serde_json::json!({"kind": "file-exists", "path": "../x"});
+                }),
+            ),
+            (
+                "docker with a pipe",
+                v2(|v| v["steps"][1]["command"] = "docker ps | sh".into()),
+            ),
+            (
+                "file over the podbag link",
+                v2(|v| v["files"] = serde_json::json!({"bin/podbag": "#!/bin/sh"})),
+            ),
+            (
+                "file over the link, other case",
+                v2(|v| v["files"] = serde_json::json!({"BIN/podbag": "x"})),
+            ),
+            (
+                "file in the engine's run folder",
+                v2(|v| v["files"] = serde_json::json!({"run/closing": "x"})),
+            ),
+            (
+                "file in the image store",
+                v2(|v| v["files"] = serde_json::json!({"data/x": "x"})),
+            ),
+            (
+                "docker config",
+                v2(|v| v["files"] = serde_json::json!({"docker/config.json": "{}"})),
+            ),
+            (
+                "the VM disk",
+                v2(|v| v["files"] = serde_json::json!({"disk.img": "x"})),
+            ),
+            (
+                "the socket",
+                v2(|v| v["files"] = serde_json::json!({"api.sock": "x"})),
+            ),
+            (
+                "docker -H",
+                v2(|v| {
+                    v["steps"][1]["command"] = "docker -H unix:///var/run/docker.sock ps".into()
+                }),
+            ),
+            (
+                "docker --context",
+                v2(|v| v["steps"][1]["command"] = "docker --context real ps".into()),
+            ),
+            (
+                "docker --config",
+                v2(|v| v["steps"][1]["command"] = "docker --config other ps".into()),
+            ),
+            (
+                "docker context",
+                v2(|v| v["steps"][1]["command"] = "docker context use real".into()),
+            ),
+            (
+                "other program",
+                v2(|v| v["steps"][1]["command"] = "kubectl get pods".into()),
+            ),
+            (
+                "port in a check without a port",
+                v2(|v| {
+                    v.as_object_mut().unwrap().remove("port");
+                    v["steps"][0]["check"] =
+                        serde_json::json!({"kind": "image-exists", "name": "127.0.0.1:{port}/x:1"});
+                    for step in v["steps"].as_array_mut().unwrap() {
+                        if let Some(c) = step["command"].as_str() {
+                            step["command"] = c.replace("{port}", "18083").into();
+                        }
+                    }
+                }),
+            ),
+            (
+                "port in a file without a port",
+                v2(|v| {
+                    v.as_object_mut().unwrap().remove("port");
+                    v["files"] = serde_json::json!({"compose.yaml": "127.0.0.1:{port}:8080"});
+                    for step in v["steps"].as_array_mut().unwrap() {
+                        if let Some(c) = step["command"].as_str() {
+                            step["command"] = c.replace("{port}", "18083").into();
+                        }
+                    }
+                }),
+            ),
+            (
+                "v1 docker",
+                edited(|v| v["steps"][0]["command"] = "docker ps".into()),
+            ),
+            (
+                "v1 files",
+                edited(|v| v["files"] = serde_json::json!({"a": "b"})),
+            ),
+            (
+                "v1 new kind",
+                edited(|v| {
+                    v["steps"][0]["check"] =
+                        serde_json::json!({"kind": "image-exists", "name": "x:1"});
+                }),
+            ),
+        ];
+        for (why, text) in cases {
+            assert!(parse_package(&text).is_err(), "accepted: {why}");
+        }
+    }
+
+    #[test]
+    fn docker_modules_stay_off_windows() {
+        let docker = parse_package(&v2(|_| {})).unwrap();
+        let plain = parse_package(FIXTURES[0]).unwrap();
+        assert!(catalog::usable_here(&docker, false));
+        assert!(
+            !catalog::usable_here(&docker, true),
+            "no Docker CLI in the Windows lab"
+        );
+        assert!(catalog::usable_here(&plain, true));
     }
 }
