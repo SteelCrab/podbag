@@ -58,7 +58,7 @@ function setInstalledPractice(records) {
 function renderPracticeProgress(panel, announcement, practice, stage, liveCommand) {
   const complete = stage === "complete";
   const current = practice.steps.findIndex(([key]) => key === (stage === "restart" ? "stop" : stage));
-  const label = (key) => t(practice.namespace + key);
+  const label = (key) => practiceLabel(practice, key);
   const rows = practice.steps.map(([key, command], index) => {
     const done = complete || index < current;
     const active = index === current;
@@ -92,9 +92,10 @@ function renderTutorials(main) {
   const tools = h("div", { class: "training-library" });
   const input = h("input", { type: "file", accept: ".podbag", hidden: true });
   const install = button("import", t("tutorial.install"), () => input.click(), "primary");
+  const refresh = button("refresh", t("action.refresh"), () => syncLibrary(true));
   const title = trainingEntries().find(entry => entry.id === id)?.title;
   put(main, h("header", { class: "toolbar training-toolbar" }, h("h1", { title, text: title || t("nav.tutorials") }),
-    h("div", { class: "tools" }, install, input)),
+    h("div", { class: "tools" }, refresh, install, input)),
     h("div", { class: "content tutorial" }, status, tools));
   let installed = savedJsonLesson();
 
@@ -126,7 +127,8 @@ function renderTutorials(main) {
       renderLibrary();
       return true;
     } catch (error) {
-      if (main.contains(install)) status.textContent = String(error);
+      if (!main.contains(install)) return false;
+      status.textContent = action === "sync" ? t("training.syncFailed", { error: String(error) }) : String(error);
       return false;
     }
   }
@@ -175,7 +177,7 @@ function renderTutorials(main) {
         const current = stage === "restart" ? "stop" : stage;
         progress.textContent = stage === "complete" ? t("tutorial.complete")
           : stage === "start" ? t("tutorial.installed")
-          : t("practice.current") + " · " + t(practice.namespace + current);
+          : t("practice.current") + " · " + practiceLabel(practice, current);
       }});
     }
   }
@@ -274,7 +276,19 @@ function renderTutorials(main) {
           button("rename", t("lab.edit"), () => renderLab(state, true))));
     }
   }
+  // New and changed modules from podbag.dev: on Refresh, and at most once a minute here.
+  async function syncLibrary(asked = false) {
+    if (!asked && Date.now() - (S.trainingSyncedAt || 0) < 60_000) return;
+    S.trainingSyncedAt = Date.now();
+    refresh.disabled = true;
+    status.textContent = "";
+    try {
+      await toolsAction("sync");
+    } finally {
+      refresh.disabled = false;
+    }
+  }
   renderLibrary();
   if (id === JSON_LESSON && installed) openLab();
-  else return toolsAction("status");
+  else return toolsAction("status").then(() => syncLibrary());
 }

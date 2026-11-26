@@ -37,11 +37,21 @@ function practiceFor(record) {
     id: record.id,
     namespace: "training.course.",
     steps: [["start"], ...record.steps.map(step => [step.key, step.command])],
+    // The module file names its steps; the app names only the start.
+    label(key) {
+      if (key === "start") return t("training.course.start");
+      const names = record.steps.find(step => step.key === key)?.names || {};
+      return names[I18N.lang] || names.en || key;
+    },
     async request() {
       const state = await courseRequest();
       return state?.module === record.id ? state : null;
     },
   };
+}
+
+function practiceLabel(practice, key) {
+  return practice.label ? practice.label(key) : t(practice.namespace + key);
 }
 
 function practiceResources(legacy) {
