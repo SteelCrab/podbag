@@ -1706,9 +1706,11 @@ function compressionAge(secs) {
   return fmt(Math.max(1, Math.round(secs / 60)), "minute");
 }
 
-// The switch's hint: the engine's own age when its state is known, else the default 7 days.
+// The switch's hint: the engine's own age when its state is known (0: at once), else the
+// default 7 days.
 function compressionHint(state) {
   const after = state?.after;
+  if (after === 0) return t("compression.hintNow");
   return Number.isInteger(after) && after > 0
     ? t("compression.hintAfter", { time: compressionAge(after) })
     : t("compression.hint");
@@ -1763,6 +1765,10 @@ async function showCompressionPrompt() {
   readCompressionSwitch();
 }
 
+// The switch's write while it runs (it never fails): a Settings view opened meanwhile
+// reads the mode after it.
+let compressionWrite = null;
+
 // The switch in the engine's settings (podbag only).
 function compressionSetting() {
   if (!S.connection || !S.connection.local) return null;
@@ -1774,18 +1780,34 @@ function compressionSetting() {
   toggle.addEventListener("change", async () => {
     const on = toggle.checked;
     toggle.disabled = true;
+    const write = API.compression(on ? "idle" : "off");
+    const done = write.then(() => {}, () => {});
+    compressionWrite = done;
+    let state;
+    let failed = false;
     try {
-      const state = await API.compression(on ? "idle" : "off");
-      toggle.checked = state?.mode === "idle";
-      hint.textContent = compressionHint(state);
+      state = await write;
+      // A reply without a mode does not say what happened: it fails like an error.
+      if (state?.mode !== "idle" && state?.mode !== "off") throw t("error.title");
       compressionAnswered();
-      if (on && !toggle.checked) toast(t("compression.failed", { error: t("compression.overridden") }), true);
+      // An environment setting (PODBAG_IMAGE_COMPRESSION) wins over the saved mode.
+      if (state.mode !== (on ? "idle" : "off")) {
+        toast(on ? t("compression.failed", { error: t("compression.overridden") }) : t("compression.offOverridden"), true);
+      }
     } catch (e) {
-      toggle.checked = !on;
+      failed = true;
       toast(String(e), true);
     }
-    showImagesNote(toggle);
-    toggle.disabled = false;
+    if (compressionWrite === done) compressionWrite = null;
+    // Settings may have been left or opened again meanwhile: the switch on screen now
+    // shows the result, and none is changed when Settings is not shown.
+    const shown = document.getElementById("compression-switch");
+    if (!shown) return;
+    shown.checked = failed ? !on : state?.mode === "idle";
+    if (!failed) document.getElementById("compression-hint").textContent = compressionHint(state);
+    showImagesNote(shown);
+    // A new switch comes back when its own read (readCompressionSwitch) is done.
+    if (shown === toggle) shown.disabled = false;
   });
   return h("div", { class: "compression-setting" },
     h("div", { class: "compression-text" },
@@ -1806,6 +1828,8 @@ function showImagesNote(toggle) {
 // Show the engine's state on the switch. While the VM is off it waits (marked
 // data-waiting), and refreshVm reads it again when the VM runs.
 async function readCompressionSwitch() {
+  // A write the switch started finishes first: the read shows its result.
+  await compressionWrite;
   const toggle = document.getElementById("compression-switch");
   if (!toggle) return;
   const hint = document.getElementById("compression-hint");

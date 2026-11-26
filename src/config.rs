@@ -601,7 +601,8 @@ mod tests {
         assert!(text.contains("store_limit = \"2GB\"\n"), "{text}");
         let lines = text.lines().filter(|l| l.contains("image_compression"));
         assert_eq!(lines.collect::<Vec<_>>(), ["image_compression = \"idle\""]);
-        let c = load(&dirs).unwrap();
+        // Parsed directly: `load` would apply the environment overrides.
+        let c = parse(&text).unwrap();
         assert_eq!(c.image_compression, ImageCompression::Idle);
         assert_eq!(c.store_limit, 2_000_000_000);
     }
@@ -611,7 +612,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let dirs = dirs_with_config(root.path().join("no").join("such"));
         set_value(&dirs, "compress_idle_after", "36h").unwrap();
-        assert_eq!(load(&dirs).unwrap().compress_idle_after, 129_600);
+        let text = std::fs::read_to_string(dirs.config.join("config.toml")).unwrap();
+        assert_eq!(parse(&text).unwrap().compress_idle_after, 129_600);
     }
 
     /// The writer replaces the user's whole file: it keeps the mode the file had.

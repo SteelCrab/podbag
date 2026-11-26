@@ -317,7 +317,9 @@ fn compressed_images_report_their_sizes() {
     let (body, _) = curl(&service.socket, &[&format!("/images/{cold}/json")]);
     let inspected: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(inspected["PodbagCompression"], *c, "{inspected}");
-    let (body, _) = curl(&service.socket, &[&format!("/images/{warm}/json")]);
+    // An error reply has no PodbagCompression either: only a found image counts.
+    let (body, head) = curl(&service.socket, &[&format!("/images/{warm}/json")]);
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}{body}");
     let inspected: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert!(inspected.get("PodbagCompression").is_none(), "{inspected}");
 }

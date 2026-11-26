@@ -170,10 +170,10 @@
   }
   let launchAtLogin = false;
   // podbag system compression --json. URL: compression=idle (already on), compression=broken
-  // (a reply without a mode), override (an environment setting keeps it off), after
-  // (seconds an image stays unused), vm-error (vm status fails), busy (another dialog is
-  // open when the window first asks for the VM's state).
-  const compression = { mode: params.get("compression") === "idle" ? "idle" : "off", after: Number(params.get("after")) || 604800 };
+  // (a reply without a mode), override (an environment setting keeps the mode as it is),
+  // after (seconds an image stays unused; 0: at once), vm-error (vm status fails), busy
+  // (another dialog is open when the window first asks for the VM's state).
+  const compression = { mode: params.get("compression") === "idle" ? "idle" : "off", after: Number(params.get("after") ?? 604800) };
   const practiceModules = new Map();
   const commands = {
     "plugin:autostart|is_enabled": () => launchAtLogin,

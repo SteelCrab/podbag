@@ -580,19 +580,23 @@ impl Store {
     /// files, and EROFS metadata names them.
     #[cfg(unix)]
     fn thaw_tree(&self, tree: &tree::Tree) -> Result<()> {
-        let mut thawed = false;
+        // Dropped on every return: objects thawed before a failure changed state too.
+        let mut thawed = NewGenerationOnDrop(&self.objects, false);
         for e in tree.entries.values() {
             if let EntryKind::File { object, .. } = &e.kind
                 && self.objects.is_cold(object)
             {
-                self.objects.thaw(object, &tree::meta_of(e))?;
-                thawed = true;
+                if let Err(err) = self.objects.thaw(object, &tree::meta_of(e)) {
+                    // The plain file may be there already (the compressed one stayed).
+                    thawed.1 |= self.objects.path(object).exists();
+                    return Err(err);
+                }
+                thawed.1 = true;
             }
         }
         // The plain files reach the disk before the artifact that names them.
-        if thawed {
+        if thawed.1 {
             self.objects.sync()?;
-            self.objects.new_cold_generation();
         }
         Ok(())
     }
@@ -1368,9 +1372,22 @@ impl Store {
         // the lock.
         let _lock = self.lock(fix)?;
         damaged.retain(|name| self.objects.is_damaged(name).unwrap_or(true));
-        // A damaged compressed file belongs to its object.
+        // A damaged compressed file beside a sound plain file is a stale copy (an insert
+        // made the object plain again and stopped before it deleted the copy): images
+        // read the plain file, so the copy breaks none of them.
+        let stale: Vec<&str> = damaged
+            .iter()
+            .map(String::as_str)
+            .filter(|name| {
+                name.strip_suffix(".zst").is_some_and(|key| {
+                    self.objects.path(key).exists() && !self.objects.is_damaged(key).unwrap_or(true)
+                })
+            })
+            .collect();
+        // Any other damaged compressed file belongs to its object.
         let bad: HashSet<&str> = damaged
             .iter()
+            .filter(|name| !stale.contains(&name.as_str()))
             .map(|name| name.strip_suffix(".zst").unwrap_or(name))
             .collect();
         let uses_bad = |e: &layer::Entry| match &e.kind {
@@ -1412,6 +1429,15 @@ impl Store {
             ..VerifyReport::default()
         };
         if fix {
+            for name in &stale {
+                let path = self.objects.path(name);
+                match std::fs::remove_file(&path) {
+                    Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                        return Err(io_error(&path, e));
+                    }
+                    _ => {}
+                }
+            }
             let used = in_use();
             for digest in &affected {
                 if used.contains_key(digest) {
@@ -1631,11 +1657,14 @@ impl Store {
             return Ok((None, Vec::new()));
         }
         // The objects of warm images stay plain: images with an artifact, and, to be safe,
-        // those a container uses and `keep`, which is about to run.
-        let mut warm = HashSet::new();
+        // those a container uses and `keep`, which is about to run. Each object counts the
+        // warm images that use it.
+        let mut warm: HashMap<String, usize> = HashMap::new();
         for digest in &images {
             if self.has_any_artifact(digest) || in_use.contains_key(digest) || digest == keep {
-                warm.extend(self.image_keys(digest, run)?);
+                for key in self.image_keys(digest, run)? {
+                    *warm.entry(key).or_default() += 1;
+                }
             }
         }
         let (mut steps, mut batch_bytes) = (0, 0);
@@ -1648,6 +1677,13 @@ impl Store {
                 break;
             }
             if *artifact {
+                // Under a size limit, an image whose objects all stay plain keeps its
+                // artifact: removing it saves nothing, and its next use builds it again.
+                if run.budget.largest < u64::MAX
+                    && !self.has_freezable_object(digest, &warm, run)?
+                {
+                    continue;
+                }
                 doomed = self.remove_artifacts(digest)?;
                 run.report.images += 1;
                 // A tree links the objects until it is deleted, after the lock is let go:
@@ -1665,7 +1701,17 @@ impl Store {
                     whole = false;
                     continue;
                 }
-                if warm.contains(&key) || run.tried.contains(&key) {
+                if warm.contains_key(&key) {
+                    continue;
+                }
+                if run.tried.contains(&key) {
+                    // An earlier batch compressed it or left it plain, but a build may
+                    // have made it plain since: the image is whole only while the object
+                    // has no plain file a freeze would compress.
+                    let path = self.objects.path(&key);
+                    if std::fs::metadata(&path).is_ok_and(|m| m.len() >= object::MIN_COLD_SIZE) {
+                        whole = false;
+                    }
                     continue;
                 }
                 steps += 1;
@@ -1679,7 +1725,15 @@ impl Store {
                     continue;
                 }
                 if size.is_ok() {
-                    let (plain, packed) = self.objects.freeze(&key)?;
+                    let (plain, packed) = match self.objects.freeze(&key) {
+                        Ok(sizes) => sizes,
+                        Err(e) => {
+                            // The plain name may be gone already (a time copy that could
+                            // not be deleted): then the object changed state.
+                            changed.1 |= self.objects.is_cold(&key);
+                            return Err(e);
+                        }
+                    };
                     if plain > 0 {
                         changed.1 = true;
                         run.report.objects += 1;
@@ -1706,6 +1760,25 @@ impl Store {
             File::create(&path).map_err(|e| io_error(&path, e))?;
         }
         Ok((cut, doomed))
+    }
+
+    /// True when the image (which has an artifact) has an object a later batch could
+    /// compress within the budget's `largest`: one no other warm image uses, that has a
+    /// plain file no larger than that and not smaller than a block (`freeze` leaves
+    /// smaller ones plain).
+    fn has_freezable_object(
+        &self,
+        digest: &str,
+        warm: &HashMap<String, usize>,
+        run: &mut FreezeRun,
+    ) -> Result<bool> {
+        let largest = run.budget.largest;
+        Ok(self.image_keys(digest, run)?.iter().any(|key| {
+            // The image counts itself among the warm ones: its artifact makes it warm.
+            warm.get(key).is_none_or(|n| *n <= 1)
+                && std::fs::metadata(self.objects.path(key))
+                    .is_ok_and(|m| (object::MIN_COLD_SIZE..=largest).contains(&m.len()))
+        }))
     }
 
     /// The images `select` names that may be frozen, in the order to freeze them.
@@ -2621,6 +2694,45 @@ mod tests {
         assert!(!s.objects.cold_path(&keys[0]).exists(), "garbage collected");
     }
 
+    /// Overwrite the end of the object's compressed file with zeros.
+    fn damage_cold(s: &Store, key: &str) {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut cold = std::fs::OpenOptions::new()
+            .write(true)
+            .open(s.objects.cold_path(key))
+            .unwrap();
+        cold.seek(SeekFrom::End(-16)).unwrap();
+        cold.write_all(&[0u8; 16]).unwrap();
+    }
+
+    /// A damaged compressed file beside a sound plain file is a stale copy: `--fix`
+    /// deletes the copy and keeps the image, which reads the plain file.
+    #[cfg(unix)]
+    #[test]
+    fn verify_fix_removes_only_a_stale_compressed_copy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = open(&tmp);
+        let rec = s
+            .import_for_test("a", vec![file_layer(&[("f", &[7u8; 8192])])], 1)
+            .unwrap();
+        remove_tree(&s.rootfs_path(&rec.digest)).unwrap();
+        let key = object_keys(&s, &rec).remove(0);
+        let contents = std::fs::read(s.objects.path(&key)).unwrap();
+        assert_eq!(s.objects.freeze(&key).unwrap().0, 8192);
+        damage_cold(&s, &key);
+        // An insert made the object plain again and stopped before it deleted the copy.
+        std::fs::write(s.objects.path(&key), &contents).unwrap();
+        let report = s.verify(true, &HashMap::new).unwrap();
+        assert_eq!(report.damaged, [format!("{key}.zst")]);
+        assert!(report.images.is_empty(), "{:?}", report.images);
+        assert!(report.removed.is_empty(), "{:?}", report.removed);
+        assert_eq!(s.list().unwrap().len(), 1);
+        assert!(!s.objects.cold_path(&key).exists());
+        s.ensure_artifact(&rec.digest).unwrap();
+        let f = s.rootfs_path(&rec.digest).join("f");
+        assert_eq!(std::fs::read(f).unwrap(), contents);
+    }
+
     /// Two pulls that share a new layer both write its index: neither may fail.
     #[test]
     fn writers_of_one_file_do_not_disturb_each_other() {
@@ -2885,6 +2997,47 @@ mod tests {
         assert_eq!(warm, frozen);
     }
 
+    /// `save` checks a compressed object against its key while it reads it: a damaged
+    /// copy that still unpacks to the right size stops the save.
+    #[test]
+    fn save_refuses_a_compressed_object_that_does_not_match_its_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = open(&tmp);
+        let data = noise(3);
+        let rec = s
+            .import_for_test("a", vec![file_layer(&[("f", &data)])], 1)
+            .unwrap();
+        let names = ["a".to_string()];
+        let mut warm = Vec::new();
+        s.save(&names, &mut warm).unwrap();
+        s.freeze_images(
+            &FreezeSelect::Images(vec![rec.digest.clone()]),
+            &HashMap::new,
+            "",
+            FreezeBudget::UNLIMITED,
+        )
+        .unwrap();
+        assert!(all_cold(&s, &rec));
+        let mut frozen = Vec::new();
+        s.save(&names, &mut frozen).unwrap();
+        assert!(warm == frozen, "the archives differ");
+        // Noise does not compress: its frame holds the bytes as they are. Change one.
+        let key = object_keys(&s, &rec).remove(0);
+        let cold = s.objects.cold_path(&key);
+        let mut bytes = std::fs::read(&cold).unwrap();
+        let at = bytes.len() - 100;
+        bytes[at] ^= 0xff;
+        std::fs::write(&cold, &bytes).unwrap();
+        let mut out = Vec::new();
+        s.objects.open(&key).unwrap().read_to_end(&mut out).unwrap();
+        assert_eq!(out.len(), data.len(), "it still unpacks to the same size");
+        assert!(out != data);
+        let mut archive = Vec::new();
+        let e = s.save(&names, &mut archive).unwrap_err();
+        assert!(e.why.contains(&key), "{}", e.why);
+        assert!(e.next.contains("podbag system verify --fix"), "{}", e.next);
+    }
+
     /// `disk_usage` reports the compressed objects: how many, their size on disk, and the
     /// size their plain files had.
     #[test]
@@ -2954,6 +3107,10 @@ mod tests {
         s.use_compression(ImageCompression::Idle, 3600);
         build(&s);
         assert!(last_used.exists());
+        // A time that cannot be written does not fail the build.
+        std::fs::remove_file(&last_used).unwrap();
+        std::fs::create_dir(&last_used).unwrap();
+        assert_eq!(build(&s), digest);
     }
 
     #[test]
@@ -3356,6 +3513,33 @@ mod tests {
         assert!(!s.has_artifact(&rec.digest));
     }
 
+    /// A thaw that fails at its second object changes the cold generation all the same:
+    /// the first object is plain now.
+    #[cfg(unix)]
+    #[test]
+    fn a_thaw_that_fails_half_way_changes_the_generation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = open(&tmp);
+        let rec = s
+            .import_for_test(
+                "a",
+                vec![file_layer(&[("a", &[3u8; 20_000]), ("b", &[4u8; 20_000])])],
+                1,
+            )
+            .unwrap();
+        remove_tree(&s.rootfs_path(&rec.digest)).unwrap();
+        let keys = object_keys(&s, &rec);
+        for key in &keys {
+            s.objects.freeze(key).unwrap();
+        }
+        damage_cold(&s, &keys[1]);
+        let before = s.objects.cold_generation();
+        assert!(s.thaw_layers(&rec.diff_ids).is_err());
+        assert!(!s.objects.is_cold(&keys[0]), "the first object was thawed");
+        assert!(s.objects.is_cold(&keys[1]));
+        assert_ne!(s.objects.cold_generation(), before);
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_new_image_with_frozen_layers_thaws_them() {
@@ -3721,6 +3905,84 @@ mod tests {
             .unwrap();
         assert_eq!(report.objects, 1);
         assert!(all_cold(&s, &rec));
+        assert!(s.image_dir(&rec.digest).join(FROZEN).exists());
+    }
+
+    /// Under a size limit, an image whose objects are all too large (or too small to
+    /// compress) keeps its artifact: removing it would save nothing. `system compress`
+    /// (no limit) compresses it.
+    #[test]
+    fn an_automatic_freeze_keeps_the_artifact_of_an_image_it_cannot_compress() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = open(&tmp);
+        let rec = s
+            .import_for_test(
+                "a",
+                vec![file_layer(&[
+                    ("big", &[5u8; 40_000]),
+                    ("small", &[1u8; 100]),
+                ])],
+                1,
+            )
+            .unwrap();
+        let select = FreezeSelect::Images(vec![rec.digest.clone()]);
+        let budget = FreezeBudget {
+            largest: 20_000,
+            ..FreezeBudget::AUTO
+        };
+        let report = s.freeze_images(&select, &HashMap::new, "", budget).unwrap();
+        assert_eq!((report.images, report.objects), (0, 0));
+        assert!(report.finished);
+        assert!(s.has_artifact(&rec.digest));
+        assert!(!s.image_dir(&rec.digest).join(FROZEN).exists());
+        let report = s
+            .freeze_images(&select, &HashMap::new, "", FreezeBudget::UNLIMITED)
+            .unwrap();
+        assert_eq!((report.images, report.objects), (1, 1));
+        assert!(!s.has_artifact(&rec.digest));
+        // The big object is compressed; the small one stays plain.
+        let cold = object_keys(&s, &rec)
+            .iter()
+            .filter(|k| s.objects.is_cold(k))
+            .count();
+        assert_eq!(cold, 1);
+        assert!(s.image_dir(&rec.digest).join(FROZEN).exists());
+    }
+
+    fn new_run(budget: FreezeBudget) -> FreezeRun {
+        FreezeRun {
+            start: std::time::Instant::now(),
+            budget,
+            report: FreezeReport::default(),
+            tried: HashSet::new(),
+            linked: HashSet::new(),
+            layer_keys: HashMap::new(),
+            image_keys: HashMap::new(),
+        }
+    }
+
+    /// An object an earlier batch of the same call handled counts for the `frozen` mark
+    /// only while it is still compressed: a build may have made it plain in between.
+    #[test]
+    fn an_object_made_plain_since_an_earlier_batch_keeps_the_image_unmarked() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = open(&tmp);
+        let rec = s
+            .import_for_test("a", vec![file_layer(&[("f", &[5u8; 20_000])])], 1)
+            .unwrap();
+        remove_tree(&s.rootfs_path(&rec.digest)).unwrap();
+        let key = object_keys(&s, &rec).remove(0);
+        let select = FreezeSelect::Images(vec![rec.digest.clone()]);
+        let mut run = new_run(FreezeBudget::UNLIMITED);
+        run.tried.insert(key.clone());
+        s.freeze_batch(&select, &HashMap::new, "", &mut run)
+            .unwrap();
+        assert!(!s.image_dir(&rec.digest).join(FROZEN).exists());
+        assert!(!s.objects.is_cold(&key));
+        // Compressed, as the earlier batch left it: the image is whole.
+        s.objects.freeze(&key).unwrap();
+        s.freeze_batch(&select, &HashMap::new, "", &mut run)
+            .unwrap();
         assert!(s.image_dir(&rec.digest).join(FROZEN).exists());
     }
 

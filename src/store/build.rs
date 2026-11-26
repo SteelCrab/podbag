@@ -131,8 +131,9 @@ impl Store {
         let digest = format!("sha256:{}", crate::image::registry::sha256_hex(&json));
         if self.has_image(&digest) {
             // The build cache made it again: a use, so an image built often stays plain.
+            // Best effort: a time that cannot be written must not fail the build.
             if self.compression.0 != ImageCompression::Off {
-                self.note_use(&digest)?;
+                let _ = self.note_use(&digest);
             }
             if artifact {
                 self.ensure_artifact(&digest)?;

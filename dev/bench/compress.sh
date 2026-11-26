@@ -10,6 +10,7 @@
 #
 # usage: dev/bench/compress.sh [work-dir]
 #   work-dir  where the store goes, default /var/tmp/podbag-compress-bench (deleted first)
+#             a work dir given as a symlink is resolved: its target is what gets deleted
 #   PODBAG_BIN       the program to measure, default target/linux/release/podbag in the
 #                    repository, else the one in PATH
 #   BENCH_RUNTIME    runtime directory, default /run/podbag-compress-bench
@@ -31,11 +32,42 @@ else
 fi
 pb="$(cd "$(dirname "$pb")" && pwd)/$(basename "$pb")"
 [ "$(id -u)" -eq 0 ] || { echo "run as root" >&2; exit 2; }
-# These paths are unmounted and deleted: refuse the ones that would do harm.
-work="${work%/}"
-runtime="${runtime%/}"
-case "$work" in "" | / | /run | /var | /var/tmp | /tmp | /home | /root) echo "bad work dir: '$work'" >&2; exit 2 ;; esac
-case "$runtime" in "" | / | /run | /var | /tmp) echo "bad BENCH_RUNTIME: '$runtime'" >&2; exit 2 ;; esac
+# These paths are unmounted and deleted: refuse the ones that would do harm. They are
+# checked and used as absolute physical paths, so `/var//tmp` or `/var/tmp/.` is `/var/tmp`.
+# The directory itself need not exist yet.
+resolve() {
+  if realpath -m / > /dev/null 2>&1; then
+    realpath -m -- "$1"
+  elif [ -d "$1" ]; then
+    (cd "$1" && pwd -P)
+  else
+    local parent
+    parent="$(cd "$(dirname "$1")" && pwd -P)" || return 1
+    echo "${parent%/}/$(basename "$1")"
+  fi
+}
+# protected PATH DIR...: true when PATH is one of the directories, as written or resolved
+# (/var/tmp may be a link).
+protected() {
+  local path="$1" dir
+  shift
+  for dir in "$@"; do
+    if [ "$path" = "$dir" ] || [ "$path" = "$(resolve "$dir")" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+work="$(resolve "$work")" || { echo "bad work dir: '$work'" >&2; exit 2; }
+runtime="$(resolve "$runtime")" || { echo "bad BENCH_RUNTIME: '$runtime'" >&2; exit 2; }
+if protected "$work" / /run /var /var/tmp /tmp /home /root; then
+  echo "bad work dir: '$work'" >&2
+  exit 2
+fi
+if protected "$runtime" / /run /var /tmp; then
+  echo "bad BENCH_RUNTIME: '$runtime'" >&2
+  exit 2
+fi
 
 py=python:3.12.8-slim-bookworm
 java=eclipse-temurin:21.0.6_7-jre-noble

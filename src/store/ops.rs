@@ -459,7 +459,8 @@ mod linux_ops {
     /// after a removal.
     fn open_for_change(dirs: &Dirs, rootless: bool) -> Result<Store> {
         let mut store = Store::open(dirs, !rootless)?;
-        let config = config::load(dirs)?;
+        // Settings that do not parse must not stop a removal: compression stays off.
+        let config = config::load(dirs).unwrap_or_default();
         store.use_compression(config.image_compression, config.compress_idle_after);
         Ok(store)
     }

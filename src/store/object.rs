@@ -493,22 +493,30 @@ impl ObjectStore {
     }
 
     /// The contents of an object: the plain file, or else the compressed file, unpacked
-    /// while it is read. The compressed contents are not checked against the name.
-    pub fn open(&self, key: &str) -> Result<Box<dyn Read + Send>> {
+    /// while it is read. The compressed contents are not checked against the name;
+    /// [`Opened::is_cold`] tells the caller which file it reads.
+    pub fn open(&self, key: &str) -> Result<Opened> {
+        let plain = |file: File| Opened {
+            reader: Box::new(file),
+            cold: false,
+        };
         let object = self.path(key);
         match File::open(&object) {
-            Ok(file) => Ok(Box::new(file)),
+            Ok(file) => Ok(plain(file)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 race_point("open");
                 let cold = self.cold_path(key);
                 match File::open(&cold) {
-                    Ok(file) => Ok(Box::new(super::zstd::ZstdFrames::new(
-                        std::io::BufReader::new(file),
-                    ))),
+                    Ok(file) => Ok(Opened {
+                        reader: Box::new(super::zstd::ZstdFrames::new(std::io::BufReader::new(
+                            file,
+                        ))),
+                        cold: true,
+                    }),
                     // A thaw made the plain file and deleted the compressed one in between.
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => match File::open(&object)
                     {
-                        Ok(file) => Ok(Box::new(file)),
+                        Ok(file) => Ok(plain(file)),
                         Err(_) => Err(io_error(&cold, e)),
                     },
                     Err(e) => Err(io_error(&cold, e)),
@@ -754,8 +762,27 @@ fn apply_owner(_file: &File, _meta: &Meta) -> std::io::Result<()> {
     Ok(())
 }
 
+/// The contents of an object, from [`ObjectStore::open`].
+pub struct Opened {
+    reader: Box<dyn Read + Send>,
+    cold: bool,
+}
+
+impl Opened {
+    /// True when the contents come from the compressed file.
+    pub fn is_cold(&self) -> bool {
+        self.cold
+    }
+}
+
+impl Read for Opened {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.reader.read(buf)
+    }
+}
+
 /// Objects smaller than this are not frozen: a file system block is the least a file takes.
-const MIN_COLD_SIZE: u64 = 4096;
+pub(super) const MIN_COLD_SIZE: u64 = 4096;
 
 /// How many names a file has. Non-unix systems have no trees that link objects.
 fn link_count(meta: &std::fs::Metadata) -> u64 {

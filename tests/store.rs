@@ -495,3 +495,33 @@ fn builds_read_files_of_a_compressed_image() {
         assert!(seen.contains(&hex_sha256(&big)), "{mode}: {seen}");
     }
 }
+
+/// A config.toml that does not parse does not stop `rmi` or `system prune`: they go on
+/// with compression off.
+#[test]
+fn a_malformed_config_does_not_stop_image_removal() {
+    use std::os::unix::fs::PermissionsExt;
+    let reg = FakeRegistry::start(false);
+    let a = push(&reg, "a", &[&[timed("x", b"a\n", 1)]]);
+    let b = push(&reg, "b", &[&[timed("y", b"b\n", 1)]]);
+    let mut sb = Sandbox::new();
+    // Readable by all: rootless, the store helper reads it as another user.
+    let config = sb.tmp.path().join("config");
+    std::fs::create_dir_all(&config).unwrap();
+    for dir in [sb.tmp.path(), config.as_path()] {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    sb.env.push((
+        "PODBAG_CONFIG_DIR".to_string(),
+        config.display().to_string(),
+    ));
+    ok(&podbag(&sb, &["pull", &a]));
+    ok(&podbag(&sb, &["pull", &b]));
+    let file = config.join("config.toml");
+    std::fs::write(&file, "image_compression = \"zstd\"\n").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    ok(&podbag(&sb, &["rmi", &a]));
+    ok(&podbag(&sb, &["system", "prune", "-f"]));
+    let images = ok(&podbag(&sb, &["images"]));
+    assert!(!images.contains(&a) && !images.contains(&b), "{images}");
+}
