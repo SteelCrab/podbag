@@ -613,7 +613,9 @@ impl Mock {
         };
         Mock {
             state: Arc::new(Mutex::new(state)),
-            training: Mutex::default(),
+            training: Mutex::new(crate::mock_training::Training::new(
+                scenario == Scenario::Offline,
+            )),
             login: AtomicBool::new(false),
             events,
             now,

@@ -72,6 +72,7 @@ pub fn next_due(d: &Desktop) -> Option<std::time::Instant> {
 }
 
 /// The pages' preview commands: `training [<id>]`, `training install <id>`,
+/// `training refresh` (a sync),
 /// `lab start|advance <id>` (the mock's terminal), `labs <action>` (the JSON lab),
 /// `migrate engine|kube [kind]`, `migration <n>` (its dialog), `check updates`,
 /// `upgrade`, `login <location>`, `import`, `notice cli|update`, `star`.
@@ -84,6 +85,7 @@ pub fn command(d: &mut Desktop, line: &str) {
                 training::install(d, Some(id.to_string()), text);
             }
         }
+        ["training", "refresh"] => training::sync(d, true),
         ["training", "lesson"] => {
             let pack = serde_json::json!({
                 "format": "podbag-volume-api-lab-v1",

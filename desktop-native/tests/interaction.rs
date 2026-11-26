@@ -70,6 +70,8 @@ fn every_view_is_reached_from_the_sidebar_and_history_goes_back() {
     let mut h = window();
     assert!(app(&h).loaded, "the mock's lists load at start");
     assert_eq!(app(&h).page, Page::Containers);
+    // Training lists the synced modules; the whole sidebar fits a taller window.
+    h.resize(1200., 1100.);
     for page in [
         Page::Images,
         Page::Volumes,

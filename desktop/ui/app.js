@@ -2002,6 +2002,12 @@ async function init() {
   await I18N.load(S.settings.language);
   try { setInstalledPractice(await API.volumeToolsLab("summary")); }
   catch { /* The Training page can retry the library. */ }
+  // New Training modules from podbag.dev appear without an app update.
+  S.trainingSyncedAt = Date.now();
+  API.volumeToolsLab("sync").then(records => {
+    setInstalledPractice(records);
+    renderNav();
+  }).catch(() => { /* Offline: the installed modules stay. */ });
   setupWindowBar();
   setupKubeNav();
   setupTrainingNav();

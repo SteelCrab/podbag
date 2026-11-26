@@ -2,7 +2,7 @@
 //! on the mock backend through the headless harness.
 
 use podbag_desktop_core::Backend;
-use podbag_desktop_core::mock::{Options as MockOptions, sample_module};
+use podbag_desktop_core::mock::{Options as MockOptions, Scenario, sample_module};
 use podbag_desktop_native::views::{
     import, login, migrate, notices, practice, pull, settings, training, updates,
 };
@@ -131,7 +131,6 @@ fn a_migration_runs_from_the_selection_to_done() {
 fn a_tutorial_runs_step_by_step_to_done_and_its_lab_resets() {
     let mut h = window();
     h.click_id(shell::nav_id(Page::Training));
-    assert!(app(&h).training.records.is_empty());
     let path = module_file("lesson", &lesson_pack());
     install(&mut h, &path);
     assert_eq!(
@@ -174,7 +173,7 @@ fn a_tutorial_runs_step_by_step_to_done_and_its_lab_resets() {
     wake(&mut h);
     assert!(!app(&h).training.lab.as_ref().unwrap().active);
     assert!(h.hitbox(training::LAB_START).is_some());
-    // Removing it empties Training.
+    // Removing it leaves the modules.
     h.click_id(training::remove_id(training::JSON_LESSON));
     h.click_id(dialogs::YES);
     assert!(app(&h).training.lesson.is_none());
@@ -225,6 +224,96 @@ fn a_practice_session_is_followed_from_its_start_to_its_end() {
     wake(&mut h);
     assert_eq!(stage(&h), "complete");
     assert!(app(&h).training.records[0].completed);
+}
+
+#[test]
+fn training_syncs_at_start_and_on_refresh() {
+    let mut h = window();
+    let ids: Vec<String> = app(&h)
+        .training
+        .records
+        .iter()
+        .map(|r| r.id.clone())
+        .collect();
+    assert!(ids.contains(&"web-service-recovery".to_string()), "{ids:?}");
+    let synced = app(&h).training.synced_at.unwrap();
+    // The page syncs at most once a minute; Refresh always does.
+    h.click_id(shell::nav_id(Page::Training));
+    wake(&mut h);
+    assert_eq!(app(&h).training.synced_at, Some(synced));
+    h.click_id(training::REFRESH);
+    wake(&mut h);
+    assert!(app(&h).training.synced_at.unwrap() > synced);
+    assert!(!app(&h).training.syncing);
+    assert!(app(&h).training.status.is_empty());
+}
+
+#[test]
+fn offline_a_refresh_says_why_and_the_modules_stay() {
+    let mut h = window_with(MockOptions {
+        scenario: Scenario::Offline,
+        ..MockOptions::default()
+    });
+    assert!(app(&h).training.records.is_empty());
+    h.click_id(shell::nav_id(Page::Training));
+    let path = module_file("offline", &sample_module("container-basics").unwrap());
+    install(&mut h, &path);
+    h.click_id(training::REFRESH);
+    wake(&mut h);
+    let status = app(&h).training.status.clone();
+    assert!(
+        status.starts_with("Could not refresh the Training list: cannot reach"),
+        "{status}"
+    );
+    let ids: Vec<&str> = app(&h)
+        .training
+        .records
+        .iter()
+        .map(|r| r.id.as_str())
+        .collect();
+    assert_eq!(ids, ["container-basics"]);
+}
+
+#[test]
+fn course_steps_are_named_by_the_module_file() {
+    let mut h = window();
+    h.view_mut().app.command("lang ko");
+    let d = app(&h);
+    let web = d
+        .training
+        .records
+        .iter()
+        .find(|r| r.id == "web-basics")
+        .unwrap();
+    let p = training::practice_for(web).unwrap();
+    assert_eq!(p.label(d, "runWeb"), "웹 서버 실행하기");
+    assert_eq!(p.label(d, "start"), d.t("training.course.start"));
+    assert_eq!(p.label(d, "missing"), "missing");
+    // Without the language, English.
+    let mut p = p.clone();
+    p.steps[1].names.remove("ko");
+    assert_eq!(p.label(d, "runWeb"), "Run the web server");
+}
+
+#[test]
+fn opening_the_failed_container_is_the_inspect_step() {
+    let mut h = window();
+    let api = app(&h).api.clone();
+    api.practice("start", None, Some("web-service-recovery"), false, false)
+        .unwrap();
+    api.practice("advance", None, None, false, true).unwrap();
+    h.click_id(shell::nav_id(Page::LabContainers));
+    wake(&mut h);
+    let state = app(&h).practice.state.clone().unwrap();
+    assert_eq!(state["stage"], "inspectFailed");
+    h.click_id(practice::row_id(0));
+    wake(&mut h);
+    let state = app(&h).practice.state.clone().unwrap();
+    assert_eq!(state["stage"], "readRecoveryLogs");
+    assert!(
+        app(&h).practice.container.is_some(),
+        "the container is shown"
+    );
 }
 
 #[test]

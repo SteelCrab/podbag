@@ -45,6 +45,15 @@ const VIEW_SHOTS: &[(&str, &[&str], f32)] = &[
         1200.,
     ),
     (
+        "training-offline",
+        &[
+            "training install container-basics",
+            "training",
+            "training refresh",
+        ],
+        1200.,
+    ),
+    (
         "training-module",
         &[
             "training install container-basics",
@@ -326,9 +335,16 @@ fn views(out: &Path, filter: &str, scale: f32) {
             if !name.contains(filter) {
                 continue;
             }
+            // A `-offline` picture: the engine and podbag.dev do not answer.
+            let scenario = if shot.ends_with("-offline") {
+                Scenario::Offline
+            } else {
+                Scenario::Default
+            };
             let opts = MockOptions {
                 instant: true,
                 all_features: true,
+                scenario,
                 ..MockOptions::default()
             };
             let (backend, events) = Backend::mock(opts, || {});

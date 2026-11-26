@@ -1,79 +1,116 @@
-//! Training on sample data: the installed modules, a practice session, the tutorial lab
-//! and the JSON lesson, all in memory.
+//! Training on sample data: the installed modules, the Training catalog, a practice
+//! session, the tutorial lab and the JSON lesson, all in memory.
 //!
-//! A real practice session starts in a terminal (`podbag lab start <id>`) and moves on
-//! there; the window only watches it. Here two extra actions stand in for the terminal:
-//! `practice("start", None, Some(id), ..)` starts a session of the module `id`, and
-//! `practice("advance", ..)` does the current step's terminal part.
+//! Module files go through podbag's own parser, and a course session moves on by the
+//! checks in its module file. A real practice session starts in a terminal
+//! (`podbag lab start <id>`) and moves on there; the window only watches it. Here two
+//! extra actions stand in for the terminal: `practice("start", None, Some(id), ..)`
+//! starts a session of the module `id`, and `practice("advance", ..)` does the current
+//! step's terminal part.
 
 use crate::training::LessonRecord;
 use podbag::client::{ContainerSummary, Port, VolumeSummary};
 use podbag::dashboard::lab::{Reply, Snapshot};
-use podbag::volume_lesson::{Installed, Module, course};
+use podbag::volume_lesson::course::{self, Check};
+use podbag::volume_lesson::{Installed, Module, Package, catalog, parse_package};
 use serde_json::{Value, json};
 
-/// The module file of `id`, as `podbag lab` installs it (English and Korean words).
+const VOLUME_BASICS: &str = r#"{
+  "format": "podbag-cli-gui-volumes-v1",
+  "translations": {
+    "en": { "title": "Podbag Training · Volumes in the CLI and the GUI",
+      "guide": "Follow the steps in your terminal and in Podbag Desktop." },
+    "ko": { "title": "Podbag Training · CLI와 GUI의 볼륨",
+      "guide": "터미널과 Podbag Desktop에서 단계를 따라 하세요." }
+  }
+}"#;
+
+const TUI_VOLUMES: &str = r#"{
+  "format": "podbag-cli-tui-volumes-v1",
+  "translations": {
+    "en": { "title": "Podbag Training · Volumes in the TUI",
+      "guide": "Follow the steps in your terminal." },
+    "ko": { "title": "Podbag Training · TUI의 볼륨",
+      "guide": "터미널에서 단계를 따라 하세요." }
+  }
+}"#;
+
+/// The Training catalog of the mock, in its order: the module files a sync installs.
+const CATALOG: [(&str, &str); 5] = [
+    (
+        "container-basics",
+        include_str!("../../labs/container-basics/container-basics.podbag"),
+    ),
+    (
+        "web-basics",
+        include_str!("../../tests/fixtures/training/web-basics.podbag"),
+    ),
+    (
+        "volume-persistence",
+        include_str!("../../tests/fixtures/training/volume-persistence.podbag"),
+    ),
+    (
+        "web-service-recovery",
+        include_str!("../../tests/fixtures/training/web-service-recovery.podbag"),
+    ),
+    ("volume-basics", VOLUME_BASICS),
+];
+
+/// The module file of `id`, as the Training catalog has it.
 pub fn sample_module(id: &str) -> Option<String> {
-    let module = Module::parse(id).ok()?;
-    if module == Module::Containers {
-        return Some(include_str!("../../labs/container-basics/container-basics.podbag").into());
+    if id == "tui-volumes" {
+        return Some(TUI_VOLUMES.into());
     }
-    let (en, ko) = match module {
-        Module::Web => ("Publish a web page", "웹 페이지 게시하기"),
-        Module::Persistence => ("Keep data in a volume", "볼륨에 데이터 보관하기"),
-        Module::Service => ("Replace a web service", "웹 서비스 교체하기"),
-        Module::Volumes => ("Volumes in the CLI and the GUI", "CLI와 GUI의 볼륨"),
-        _ => ("Volumes in the TUI", "TUI의 볼륨"),
-    };
-    let words = |title: &str, guide: &str| json!({ "title": format!("Podbag Training · {title}"), "guide": guide });
-    Some(
-        json!({
-            "format": module.format(),
-            "translations": {
-                "en": words(en, "Follow the steps in your terminal and in Podbag Desktop."),
-                "ko": words(ko, "터미널과 Podbag Desktop에서 단계를 따라 하세요."),
-            },
-        })
-        .to_string(),
-    )
+    CATALOG
+        .iter()
+        .find(|(m, _)| *m == id)
+        .map(|(_, text)| text.to_string())
 }
 
-/// Where a step is done: in the terminal, or in the window with this action.
-fn desktop_action(key: &str) -> Option<&'static str> {
-    Some(match key {
-        "ports" | "portsReplacement" => "ports",
-        "browser" | "browserReplacement" => "open-web",
-        "stop" | "stopReplacement" => "stop",
-        "inspect" => "inspect",
-        "delete" => "remove",
-        _ => return None,
-    })
-}
-
+/// Which practice view a session uses.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Flavor {
     /// `volume-basics`: the GUI volumes lesson.
     Volumes,
     /// `container-basics`.
     Containers,
-    /// A course module (`web-basics`, …).
+    /// A course module, with the steps of its module file.
     Course,
 }
 
+/// A step of a session; only a course step has a check.
+struct Step {
+    key: String,
+    command: Option<String>,
+    check: Option<Check>,
+}
+
+impl Step {
+    fn lab(key: &str) -> Step {
+        Step {
+            key: key.into(),
+            command: None,
+            check: None,
+        }
+    }
+}
+
 struct Session {
-    module: Module,
+    module: String,
     flavor: Flavor,
     id: String,
-    /// The steps after "start": (key, command).
-    steps: Vec<(String, Option<String>)>,
+    /// The steps after "start".
+    steps: Vec<Step>,
     at: usize,
+    port: u16,
     containers: Vec<ContainerSummary>,
     volumes: Vec<VolumeSummary>,
 }
 
+/// The port of a course without its own.
 const PORT: u16 = 18080;
 
-fn container(name: &str, running: bool, port: Option<u16>) -> ContainerSummary {
+fn container(name: &str, state: &str, port: Option<u16>) -> ContainerSummary {
     ContainerSummary {
         id: format!(
             "{:0>16x}",
@@ -83,13 +120,13 @@ fn container(name: &str, running: bool, port: Option<u16>) -> ContainerSummary {
         image: podbag::volume_lesson::containers::IMAGE.into(),
         command: "httpd -f -p 8080".into(),
         created: 0,
-        state: if running { "running" } else { "exited" }.into(),
-        status: if running {
-            "Up 5 seconds"
-        } else {
-            "Exited (0) 1 second ago"
+        status: match state {
+            "running" => "Up 5 seconds",
+            "created" => "Created",
+            _ => "Exited (0) 1 second ago",
         }
         .into(),
+        state: state.into(),
         ports: port
             .map(|public| Port {
                 ip: "127.0.0.1".into(),
@@ -112,16 +149,33 @@ fn volume(name: &str) -> VolumeSummary {
 }
 
 impl Session {
-    fn key(&self) -> &str {
-        self.steps.get(self.at).map_or("finish", |s| s.0.as_str())
+    fn step(&self) -> Option<&Step> {
+        self.steps.get(self.at)
     }
 
-    /// The container the current step is about: the last web server.
-    fn web_container(&self) -> Option<&ContainerSummary> {
-        self.containers
-            .iter()
-            .rev()
-            .find(|c| !matches!(c.name(), "app-a" | "app-b"))
+    fn key(&self) -> &str {
+        self.step().map_or("finish", |s| s.key.as_str())
+    }
+
+    fn check(&self) -> Option<&Check> {
+        self.step().and_then(|s| s.check.as_ref())
+    }
+
+    fn row(&self, name: &str) -> Option<&ContainerSummary> {
+        self.containers.iter().find(|c| c.name() == name)
+    }
+
+    /// The container `name` gets this state.
+    fn set_state(&mut self, name: &str, state: &str, status: String) {
+        if let Some(c) = self.containers.iter_mut().find(|c| c.name() == name) {
+            c.state = state.into();
+            c.status = status;
+        }
+    }
+
+    fn run(&mut self, name: &str, state: &str, port: Option<u16>) {
+        self.containers.retain(|c| c.name() != name);
+        self.containers.push(container(name, state, port));
     }
 
     fn snapshot(&self, detail: Option<Value>) -> Value {
@@ -133,82 +187,135 @@ impl Session {
             Flavor::Containers => json!({
                 "session": self.id, "stage": key, "containers": self.containers,
             }),
+            // As `course::view` reports it.
             Flavor::Course => {
-                let web = self.web_container().map(|c| c.name().to_string());
-                let web = match key {
-                    "ports" | "portsReplacement" | "browser" | "browserReplacement" => {
-                        web.map(|name| {
-                            json!({
-                                "container": name, "port": PORT,
-                                "ready": key.starts_with("browser"),
-                                "url": format!("http://127.0.0.1:{PORT}/"),
-                            })
-                        })
+                let check = self.check();
+                let web = match check {
+                    Some(Check::DesktopPorts { name } | Check::DesktopBrowser { name, .. }) => {
+                        Some(json!({
+                            "container": name, "port": self.port,
+                            "ready": matches!(check, Some(Check::DesktopBrowser { .. })),
+                            "url": format!("http://127.0.0.1:{}/", self.port),
+                        }))
                     }
                     _ => None,
                 };
-                let stop = key
-                    .starts_with("stop")
-                    .then(|| self.web_container().map(|c| c.name().to_string()))
-                    .flatten();
-                let remove = (key == "delete")
-                    .then(|| self.volumes.first().map(|v| v.name.clone()))
-                    .flatten();
+                let named = |wanted: fn(&Check) -> Option<&String>| check.and_then(wanted);
                 json!({
-                    "module": self.module.id(), "session": self.id, "stage": key,
-                    "command": self.steps.get(self.at).and_then(|s| s.1.clone()),
+                    "module": self.module, "session": self.id, "stage": key,
+                    "command": self.step().and_then(|s| s.command.clone()),
                     "containers": self.containers, "volumes": self.volumes, "detail": detail,
-                    "web": web, "stop": stop, "remove_volume": remove,
+                    "web": web,
+                    "stop": named(|c| match c {
+                        Check::DesktopStop { name } => Some(name),
+                        _ => None,
+                    }),
+                    "inspect_container": named(|c| match c {
+                        Check::DesktopInspectExited { name } => Some(name),
+                        _ => None,
+                    }),
+                    "remove_volume": named(|c| match c {
+                        Check::DesktopDeleteVolume { name } => Some(name),
+                        _ => None,
+                    }),
                 })
             }
         }
     }
 
-    /// What the step `key` changes when it is done.
-    fn effect(&mut self, key: &str) {
-        let web_name = match self.module {
-            Module::Service if self.containers.iter().any(|c| c.name() == "site-v1") => "site-v2",
-            Module::Service => "site-v1",
-            _ => "lab-web",
+    /// What the current step changes when it is done.
+    fn effect(&mut self) {
+        let Some(check) = self.check().cloned() else {
+            // The built-in labs.
+            match (self.flavor, self.key()) {
+                (Flavor::Containers, "run") => self.run("hello-web", "running", None),
+                (Flavor::Containers, "stop") => {
+                    self.set_state("hello-web", "exited", "Exited (137) 1 second ago".into())
+                }
+                (Flavor::Volumes, "create") => self.volumes.push(volume("my-api")),
+                (Flavor::Volumes, "remove") => self.volumes.clear(),
+                _ => {}
+            }
+            return;
         };
-        match key {
-            "run" => self.containers.push(container("hello-web", true, None)),
-            "runWeb" | "runFirst" | "runReplacement" => {
-                self.containers.push(container(web_name, true, Some(PORT)));
+        match check {
+            Check::ContainerPublished { name, .. } => self.run(&name, "running", Some(self.port)),
+            Check::ContainerRunning { name } => self.run(&name, "running", None),
+            Check::ContainerCreated { name } => self.run(&name, "created", None),
+            Check::ContainerExited { name, code } => {
+                self.run(&name, "exited", None);
+                self.set_state(&name, "exited", format!("Exited ({code}) 1 second ago"));
             }
-            "write" => self.containers.push(container("app-a", false, None)),
-            "read" => self.containers.push(container("app-b", false, None)),
-            "create" if self.flavor == Flavor::Volumes => self.volumes.push(volume("my-api")),
-            "create" => {
-                let name = if self.module == Module::Service {
-                    "site-data"
-                } else {
-                    "training-data"
-                };
-                self.volumes.push(volume(name));
+            Check::ContainerStopped { name } | Check::DesktopStop { name } => {
+                self.set_state(&name, "exited", "Exited (137) 1 second ago".into());
             }
-            "stop" | "stopReplacement" => {
-                if let Some(c) = self
-                    .containers
-                    .iter_mut()
-                    .rev()
-                    .find(|c| c.state == "running")
-                {
-                    c.state = "exited".into();
-                    c.status = "Exited (137) 1 second ago".into();
-                }
+            Check::ContainerAbsent { name } => self.containers.retain(|c| c.name() != name),
+            Check::ContainersEmpty => self.containers.clear(),
+            Check::VolumeExists { name } => {
+                self.volumes.retain(|v| v.name != name);
+                self.volumes.push(volume(&name));
             }
-            "removeWriter" => self.containers.retain(|c| c.name() != "app-a"),
-            "removeReader" => self.containers.retain(|c| c.name() != "app-b"),
-            "remove" | "removeReplacement" if self.flavor == Flavor::Course => {
-                if let Some(i) = self.containers.iter().rposition(|c| c.state == "exited") {
-                    self.containers.remove(i);
-                }
+            Check::VolumeAbsent { name } | Check::DesktopDeleteVolume { name } => {
+                self.volumes.retain(|v| v.name != name);
             }
-            "remove" | "delete" => self.volumes.clear(),
+            Check::VolumesEmpty => self.volumes.clear(),
             _ => {}
         }
     }
+
+    /// Do the current step and move on.
+    fn advance(&mut self) {
+        self.effect();
+        self.at += 1;
+    }
+
+    /// The window's action on a course step, as `course::view` allows it.
+    fn course_action(&mut self, action: &str, target: &str) -> Result<Option<Value>, String> {
+        let check = self.check().cloned();
+        let id_of = |s: &Session, name: &str| {
+            s.row(name)
+                .map(|c| (c.id.clone(), c.state.clone()))
+                .ok_or("The practice container was not found.")
+        };
+        match (action, &check) {
+            ("inspect-failed", Some(Check::DesktopInspectExited { name }))
+                if id_of(self, name)? == (target.to_string(), "exited".to_string()) =>
+            {
+                self.advance();
+            }
+            ("ports", Some(Check::DesktopPorts { name }))
+            | ("open-web", Some(Check::DesktopBrowser { name, .. }))
+            | ("stop", Some(Check::DesktopStop { name }))
+                if id_of(self, name)?.0 == target =>
+            {
+                self.advance();
+            }
+            ("show-web", Some(Check::DesktopBrowser { name, .. }))
+                if id_of(self, name)?.0 == target => {}
+            ("inspect", _) if self.volumes.iter().any(|v| v.name == target) => {
+                if matches!(&check, Some(Check::DesktopInspectVolume { name }) if name == target) {
+                    self.advance();
+                }
+                return Ok(Some(inspect(self, target)));
+            }
+            ("remove", Some(Check::DesktopDeleteVolume { name })) if name == target => {
+                self.advance();
+            }
+            _ => return Err("This action is unavailable for the current practice step.".into()),
+        }
+        Ok(None)
+    }
+}
+
+/// The inspect JSON of the session's volume `name`.
+fn inspect(s: &Session, name: &str) -> Value {
+    let v = s.volumes.iter().find(|v| v.name == name);
+    v.map_or(Value::Null, |v| {
+        json!({
+            "Name": v.name, "Driver": v.driver, "Mountpoint": v.mountpoint,
+            "CreatedAt": v.created_at, "Scope": "local",
+        })
+    })
 }
 
 #[derive(Default)]
@@ -222,46 +329,95 @@ struct TutorialLab {
 
 #[derive(Default)]
 pub(crate) struct Training {
-    modules: Vec<(Module, Value, bool)>,
+    /// The Training catalog cannot be read (the `offline` scenario).
+    offline: bool,
+    /// The installed modules: the module file and whether it is complete.
+    modules: Vec<(Module, Package, bool)>,
     session: Option<Session>,
     sessions: u32,
     lab: TutorialLab,
     lesson: Option<Value>,
 }
 
-fn record(module: Module, package: &Value, completed: bool) -> Result<LessonRecord, String> {
-    let installed: Installed = serde_json::from_value(json!({
+fn record(module: &Module, package: &Package, completed: bool) -> Result<LessonRecord, String> {
+    let mut package = package.clone();
+    package.animation = None;
+    // An old course format has no steps until a sync replaces it.
+    let steps = package
+        .course()
+        .map(|c| course::instructions(&c))
+        .unwrap_or_default();
+    let record: Installed = serde_json::from_value(json!({
         "package": package, "completed": completed, "generation": "mock",
     }))
     .map_err(|e| e.to_string())?;
     Ok(LessonRecord {
-        id: module.id(),
-        steps: course::instructions(module),
-        record: installed,
+        id: module.id().to_owned(),
+        steps,
+        record,
     })
 }
 
-fn steps_of(module: Module) -> Vec<(String, Option<String>)> {
-    let keys = |k: &[&str]| k.iter().map(|k| (k.to_string(), None)).collect();
-    match module {
-        Module::Containers => keys(&["run", "stop", "check", "finish"]),
-        Module::Volumes => keys(&["create", "inspect", "remove", "verify", "finish"]),
-        _ => serde_json::to_value(course::instructions(module))
-            .ok()
-            .and_then(|v| v.as_array().cloned())
-            .unwrap_or_default()
-            .iter()
-            .map(|s| {
-                (
-                    s["key"].as_str().unwrap_or_default().to_string(),
-                    s["command"].as_str().map(str::to_string),
-                )
-            })
-            .collect(),
-    }
+/// The place of a module in the catalog's order.
+fn rank(module: &Module) -> (usize, String) {
+    let id = module.id();
+    let at = CATALOG.iter().position(|(m, _)| *m == id);
+    (at.unwrap_or(usize::MAX), id.to_owned())
 }
 
 impl Training {
+    pub(crate) fn new(offline: bool) -> Training {
+        Training {
+            offline,
+            ..Training::default()
+        }
+    }
+
+    /// `volume_lesson::install`: an update keeps the completion, and an old course file
+    /// does not replace the course's steps.
+    fn install(&mut self, text: &str) -> Result<(), String> {
+        let package = parse_package(text).map_err(|e| e.to_string())?;
+        let module = Module::of(&package).map_err(|e| e.to_string())?;
+        let current = self.modules.iter().position(|(m, _, _)| *m == module);
+        let completed = current.is_some_and(|i| self.modules[i].2);
+        if let Some(i) = current {
+            if !course::is_course(&package.format) && course::is_course(&self.modules[i].1.format) {
+                return Ok(());
+            }
+            self.modules.remove(i);
+        }
+        self.modules.push((module, package, completed));
+        self.modules.sort_by_key(|(m, _, _)| rank(m));
+        Ok(())
+    }
+
+    /// `catalog::sync`: the catalog's modules; offline, nothing changes.
+    fn sync(&mut self) -> Result<(), String> {
+        if self.offline {
+            return Err(format!(
+                "cannot reach {}: the network is unreachable",
+                catalog::URL
+            ));
+        }
+        CATALOG.iter().try_for_each(|(_, text)| self.install(text))
+    }
+
+    /// The course of an installed module; `podbag lab start` syncs first when it is
+    /// missing or has an old format.
+    fn course_of(&mut self, module: &Module) -> Result<course::Course, String> {
+        let find = |t: &Training| {
+            t.modules
+                .iter()
+                .find(|(m, _, _)| m == module)
+                .and_then(|(_, p, _)| p.course())
+        };
+        if let Some(c) = find(self) {
+            return Ok(c);
+        }
+        self.sync()?;
+        find(self).ok_or_else(|| "Unknown practice module. Run podbag lab list.".into())
+    }
+
     pub(crate) fn modules(
         &mut self,
         action: &str,
@@ -270,35 +426,18 @@ impl Training {
     ) -> Result<Vec<LessonRecord>, String> {
         match action {
             "status" | "summary" => {}
-            "install" => {
-                let text = package.ok_or("Choose a module file.")?;
-                if text.len() > podbag::volume_lesson::LIMIT {
-                    return Err("The module file is too large.".into());
-                }
-                let mut pack: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
-                let module = Module::for_format(pack["format"].as_str().unwrap_or_default())
-                    .map_err(|e| e.to_string())?;
-                // Words without a guide are kept with an empty one.
-                if let Some(words) = pack["translations"].as_object_mut() {
-                    for w in words.values_mut() {
-                        if w.get("guide").is_none() {
-                            w["guide"] = json!("");
-                        }
-                    }
-                }
-                self.modules.retain(|(m, _, _)| *m != module);
-                self.modules.push((module, pack, false));
-            }
+            "install" => self.install(package.ok_or("Choose a module file.")?)?,
             "remove" => {
                 let module = Module::parse(id.unwrap_or_default()).map_err(|e| e.to_string())?;
                 self.modules.retain(|(m, _, _)| *m != module);
             }
+            "sync" => self.sync()?,
             _ => return Err("Unknown lesson action.".into()),
         }
         self.modules
             .iter()
             .filter(|(m, _, _)| action != "summary" || id.is_none_or(|id| id == m.id()))
-            .map(|(m, pack, done)| record(*m, pack, *done))
+            .map(|(m, pack, done)| record(m, pack, *done))
             .collect()
     }
 
@@ -311,24 +450,7 @@ impl Training {
         course: bool,
     ) -> Result<Value, String> {
         if action == "start" {
-            let module = Module::parse(name.unwrap_or_default()).map_err(|e| e.to_string())?;
-            let flavor = match module {
-                Module::Containers => Flavor::Containers,
-                Module::Volumes => Flavor::Volumes,
-                Module::Tui => return Err("This module has no practice session.".into()),
-                _ => Flavor::Course,
-            };
-            self.sessions += 1;
-            self.session = Some(Session {
-                module,
-                flavor,
-                id: format!("podbag-practice-{}", self.sessions),
-                steps: steps_of(module),
-                at: 0,
-                containers: Vec::new(),
-                volumes: Vec::new(),
-            });
-            return Ok(Value::Null);
+            return self.start(name.unwrap_or_default()).map(|()| Value::Null);
         }
         let wanted = if course {
             Flavor::Course
@@ -348,58 +470,51 @@ impl Training {
             return Ok(s.snapshot(None));
         }
         if action == "advance" {
-            let key = s.key().to_string();
-            if desktop_action(&key).is_some() && s.flavor == Flavor::Course
-                || matches!((s.flavor, key.as_str()), (Flavor::Containers, "stop"))
-                || matches!(
-                    (s.flavor, key.as_str()),
-                    (Flavor::Volumes, "inspect" | "remove")
-                )
-            {
+            let in_desktop = match s.check() {
+                Some(check) => check.in_desktop(),
+                None => matches!(
+                    (s.flavor, s.key()),
+                    (Flavor::Containers, "stop") | (Flavor::Volumes, "inspect" | "remove")
+                ),
+            };
+            if in_desktop {
                 return Err("This step is done in Podbag Desktop.".into());
             }
-            if key == "finish" {
+            if s.check()
+                .map_or(s.key() == "finish", |c| *c == Check::Finish)
+            {
                 // The session ends and the module is complete.
-                let module = s.module;
+                let module = s.module.clone();
                 self.session = None;
-                if let Some(m) = self.modules.iter_mut().find(|(m, _, _)| *m == module) {
+                if let Some(m) = self.modules.iter_mut().find(|(m, _, _)| m.id() == module) {
                     m.2 = true;
                 }
                 return Ok(Value::Null);
             }
-            s.effect(&key);
-            s.at += 1;
+            s.advance();
             return Ok(s.snapshot(None));
         }
         if session != Some(s.id.as_str()) {
             return Err("The practice session has changed.".into());
         }
         let target = name.unwrap_or_default();
+        if s.flavor == Flavor::Course {
+            let detail = s.course_action(action, target)?;
+            return Ok(s.snapshot(detail));
+        }
         let key = s.key().to_string();
         let mut detail = None;
         match (s.flavor, action) {
             (_, "inspect") => {
-                let v = s
-                    .volumes
-                    .iter()
-                    .find(|v| v.name == target)
-                    .ok_or("The practice volume was not found.")?;
-                detail = Some(json!({
-                    "Name": v.name, "Driver": v.driver, "Mountpoint": v.mountpoint,
-                    "CreatedAt": v.created_at, "Scope": "local",
-                }));
+                if !s.volumes.iter().any(|v| v.name == target) {
+                    return Err("The practice volume was not found.".into());
+                }
+                detail = Some(inspect(s, target));
                 if key == "inspect" {
-                    s.at += 1;
+                    s.advance();
                 }
             }
-            (Flavor::Volumes, "remove") if key == "remove" && target == "my-api" => {
-                s.effect("remove");
-                s.at += 1;
-            }
-            (Flavor::Course, "remove") if key == "delete" => {
-                s.effect("delete");
-                s.at += 1;
-            }
+            (Flavor::Volumes, "remove") if key == "remove" && target == "my-api" => s.advance(),
             (Flavor::Containers, "stop") if key == "stop" => {
                 let c = s
                     .containers
@@ -409,28 +524,55 @@ impl Training {
                 if c.state != "running" {
                     return Err("The practice container cannot perform that action.".into());
                 }
-                s.effect("stop");
-                s.at += 1;
-            }
-            (Flavor::Course, "ports" | "open-web" | "show-web" | "stop")
-                if desktop_action(&key)
-                    == Some(if action == "show-web" {
-                        "open-web"
-                    } else {
-                        action
-                    }) =>
-            {
-                if s.web_container().is_none_or(|c| c.id != target) {
-                    return Err("The practice container was not found.".into());
-                }
-                if action != "show-web" {
-                    s.effect(&key);
-                    s.at += 1;
-                }
+                s.advance();
             }
             _ => return Err("This action is unavailable for the current practice step.".into()),
         }
         Ok(s.snapshot(detail))
+    }
+
+    /// The terminal's `podbag lab start <id>`.
+    fn start(&mut self, id: &str) -> Result<(), String> {
+        let module = Module::parse(id).map_err(|e| e.to_string())?;
+        let (flavor, steps, port) = match &module {
+            Module::Containers => (
+                Flavor::Containers,
+                Vec::from(["run", "stop", "check", "finish"].map(Step::lab)),
+                PORT,
+            ),
+            Module::Volumes => (
+                Flavor::Volumes,
+                Vec::from(["create", "inspect", "remove", "verify", "finish"].map(Step::lab)),
+                PORT,
+            ),
+            Module::Tui => return Err("This module has no practice session.".into()),
+            Module::Course(_) => {
+                let c = self.course_of(&module)?;
+                let port = c.port.unwrap_or(PORT);
+                let steps = c
+                    .steps
+                    .iter()
+                    .map(|s| Step {
+                        key: s.key.clone(),
+                        command: s.command(port),
+                        check: Some(s.check.with_port(port)),
+                    })
+                    .collect();
+                (Flavor::Course, steps, port)
+            }
+        };
+        self.sessions += 1;
+        self.session = Some(Session {
+            module: module.id().to_owned(),
+            flavor,
+            id: format!("podbag-practice-{}", self.sessions),
+            steps,
+            at: 0,
+            port,
+            containers: Vec::new(),
+            volumes: Vec::new(),
+        });
+        Ok(())
     }
 
     pub(crate) fn tutorial_lab(
@@ -507,6 +649,10 @@ mod tests {
         v["stage"].as_str().unwrap_or_default()
     }
 
+    fn ids(records: &[LessonRecord]) -> Vec<&str> {
+        records.iter().map(|r| r.id.as_str()).collect()
+    }
+
     #[test]
     fn a_container_session_moves_on_in_the_terminal_and_in_the_window() {
         let mut t = Training::default();
@@ -553,12 +699,14 @@ mod tests {
     #[test]
     fn a_course_session_names_what_the_window_does() {
         let mut t = Training::default();
+        // The module is missing: the start syncs the catalog first.
         t.practice("start", None, Some("web-basics"), false, false)
             .unwrap();
         let s = t.practice("advance", None, None, false, true).unwrap();
         assert_eq!(stage(&s), "ports");
         assert_eq!(s["module"], "web-basics");
         assert_eq!(s["web"]["ready"], false);
+        assert_eq!(s["web"]["port"], 18080);
         let (session, id) = (
             s["session"].as_str().unwrap().to_string(),
             s["containers"][0]["Id"].as_str().unwrap().to_string(),
@@ -574,6 +722,142 @@ mod tests {
             .practice("open-web", Some(&session), Some(&id), false, true)
             .unwrap();
         assert_eq!((stage(&s), s["stop"].clone()), ("stop", json!("lab-web")));
+        assert!(t.practice("advance", None, None, false, true).is_err());
+        let s = t
+            .practice("stop", Some(&session), Some(&id), false, true)
+            .unwrap();
+        assert_eq!(stage(&s), "remove");
+        assert_eq!(s["command"], "podbag rm lab-web");
+        let s = t.practice("advance", None, None, false, true).unwrap();
+        assert_eq!((stage(&s), s["containers"].clone()), ("finish", json!([])));
+        t.practice("advance", None, None, false, true).unwrap();
+        let done = t.modules("summary", None, Some("web-basics")).unwrap();
+        assert!(done[0].record.completed);
+    }
+
+    #[test]
+    fn a_failed_container_is_inspected_in_the_window() {
+        let mut t = Training::default();
+        t.practice("start", None, Some("web-service-recovery"), false, false)
+            .unwrap();
+        let s = t.practice("advance", None, None, false, true).unwrap();
+        assert_eq!(stage(&s), "inspectFailed");
+        assert_eq!(s["inspect_container"], "lab-web");
+        assert_eq!(s["containers"][0]["State"], "exited");
+        assert_eq!(s["containers"][0]["Status"], "Exited (1) 1 second ago");
+        let session = s["session"].as_str().unwrap().to_string();
+        let id = s["containers"][0]["Id"].as_str().unwrap().to_string();
+        assert!(
+            t.practice("inspect-failed", Some(&session), Some("other"), false, true)
+                .is_err()
+        );
+        let s = t
+            .practice("inspect-failed", Some(&session), Some(&id), false, true)
+            .unwrap();
+        assert_eq!(stage(&s), "readRecoveryLogs");
+        assert!(s["inspect_container"].is_null());
+    }
+
+    #[test]
+    fn a_course_volume_is_inspected_and_deleted_in_the_window() {
+        let mut t = Training::default();
+        t.practice("start", None, Some("volume-persistence"), false, false)
+            .unwrap();
+        for _ in 0..5 {
+            t.practice("advance", None, None, false, true).unwrap();
+        }
+        let s = t.practice("status", None, None, false, true).unwrap();
+        assert_eq!(stage(&s), "inspect");
+        let session = s["session"].as_str().unwrap().to_string();
+        assert!(
+            t.practice("remove", Some(&session), Some("training-data"), false, true)
+                .is_err()
+        );
+        let s = t
+            .practice(
+                "inspect",
+                Some(&session),
+                Some("training-data"),
+                false,
+                true,
+            )
+            .unwrap();
+        assert_eq!(s["detail"]["Name"], "training-data");
+        assert_eq!(
+            (stage(&s), s["remove_volume"].clone()),
+            ("delete", json!("training-data"))
+        );
+        let s = t
+            .practice("remove", Some(&session), Some("training-data"), false, true)
+            .unwrap();
+        assert_eq!(
+            (stage(&s), s["volumes"].clone()),
+            ("checkVolumes", json!([]))
+        );
+    }
+
+    #[test]
+    fn a_sync_installs_the_catalog_with_the_names_of_its_steps() {
+        let mut t = Training::default();
+        let tui = sample_module("tui-volumes").unwrap();
+        t.modules("install", Some(&tui), None).unwrap();
+        let records = t.modules("sync", None, None).unwrap();
+        assert_eq!(
+            ids(&records),
+            [
+                "container-basics",
+                "web-basics",
+                "volume-persistence",
+                "web-service-recovery",
+                "volume-basics",
+                "tui-volumes",
+            ]
+        );
+        let web = &records[1];
+        assert_eq!(web.steps[0].key, "runWeb");
+        assert_eq!(web.steps[0].names["ko"], "웹 서버 실행하기");
+        assert!(
+            web.steps[0]
+                .command
+                .as_deref()
+                .unwrap()
+                .contains("127.0.0.1:18080:8080")
+        );
+        assert!(records[0].steps.is_empty(), "a built-in lab has no course");
+    }
+
+    #[test]
+    fn offline_the_installed_modules_stay() {
+        let mut t = Training::new(true);
+        let pack = sample_module("container-basics").unwrap();
+        t.modules("install", Some(&pack), None).unwrap();
+        let error = t.modules("sync", None, None).err().unwrap();
+        assert!(error.contains(catalog::URL), "{error}");
+        let records = t.modules("status", None, None).unwrap();
+        assert_eq!(ids(&records), ["container-basics"]);
+        assert!(
+            t.practice("start", None, Some("web-basics"), false, false)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn an_old_course_file_has_no_steps_until_a_sync() {
+        let mut t = Training::default();
+        let old = json!({
+            "format": "podbag-web-basics-v1",
+            "translations": { "en": { "title": "Podbag Training · Web", "guide": "Old guide." } },
+        })
+        .to_string();
+        let records = t.modules("install", Some(&old), None).unwrap();
+        assert_eq!(ids(&records), ["web-basics"]);
+        assert!(records[0].steps.is_empty());
+        t.modules("sync", None, None).unwrap();
+        // The old file again does not replace the course.
+        let records = t.modules("install", Some(&old), None).unwrap();
+        let web = records.iter().find(|r| r.id == "web-basics").unwrap();
+        assert_eq!(web.steps.len(), 6);
+        assert!(t.modules("install", Some("{}"), None).is_err());
     }
 
     #[test]

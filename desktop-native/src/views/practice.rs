@@ -297,9 +297,7 @@ fn start_options(d: &mut Desktop, ui: &mut Ui, x: f32, y0: f32, w: f32, flavor: 
         .records
         .iter()
         .filter(|r| match flavor {
-            Flavor::Volumes => {
-                r.id == "volume-basics" || r.steps.iter().any(|(k, _)| k == "inspect")
-            }
+            Flavor::Volumes => r.id == "volume-basics" || r.uses_volumes(),
             _ => r.id == "container-basics" || !r.steps.is_empty(),
         })
         .cloned()
@@ -648,7 +646,12 @@ fn containers(d: &mut Desktop, ui: &mut Ui, x: f32, y0: f32, w: f32, s: &Value) 
         if acted {
             act(d, "stop", id, session.clone());
         } else if open {
-            d.practice.container = Some(id);
+            // practice-volumes.js `openContainer`: opening the failed container is the
+            // step that asks for it.
+            d.practice.container = Some(id.clone());
+            if s["inspect_container"] == container_name(c).as_str() {
+                act(d, "inspect-failed", id, session.clone());
+            }
         }
     }
     y - y0

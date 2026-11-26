@@ -444,7 +444,7 @@ fn practice_volumes(
     )
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn volume_tools_lab(
     action: &str,
     package: Option<String>,

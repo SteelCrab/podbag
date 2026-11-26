@@ -34,16 +34,20 @@ const JSON_FORMAT: &str = "podbag-volume-api-lab-v1";
 /// A module file is at most this large.
 pub const LIMIT: u64 = 64 * 1024;
 /// The formats of the modules that `podbag lab` runs, by module id.
-const FORMATS: [(&str, &str); 6] = [
+const FORMATS: [(&str, &str); 8] = [
     ("podbag-container-basics-v1", "container-basics"),
     ("podbag-web-basics-v1", "web-basics"),
     ("podbag-volume-persistence-v1", "volume-persistence"),
     ("podbag-web-service-lifecycle-v1", "web-service-lifecycle"),
+    ("podbag-web-service-recovery-v1", "web-service-recovery"),
+    ("podbag-container-network-v1", "container-network"),
     ("podbag-cli-gui-volumes-v1", "volume-basics"),
     ("podbag-cli-tui-volumes-v1", "tui-volumes"),
 ];
 /// How often a shown practice is read again.
 const POLL: Duration = Duration::from_millis(800);
+/// The Training page syncs the catalog at most this often (Refresh always does).
+const SYNC_EVERY: Duration = Duration::from_secs(60);
 
 pub const INSTALL: Id = Id(0x7472_6169_6e01);
 pub const TOGGLE: Id = Id(0x7472_6169_6e03);
@@ -56,6 +60,7 @@ pub const LAB_SAVE: Id = Id(0x7472_6169_6e09);
 pub const LAB_SERVE: Id = Id(0x7472_6169_6e0a);
 pub const LAB_EDIT: Id = Id(0x7472_6169_6e0b);
 pub const LAB_SEND: Id = Id(0x7472_6169_6e0c);
+pub const REFRESH: Id = Id(0x7472_6169_6e0d);
 
 /// The sidebar item of a module.
 pub fn module_nav_id(id: &str) -> Id {
@@ -84,22 +89,38 @@ pub struct Record {
     pub completed: bool,
     /// Language → (title, guide).
     pub words: BTreeMap<String, (String, String)>,
-    /// The course steps: (key, command).
-    pub steps: Vec<(String, Option<String>)>,
+    /// The course steps, as the module file names them.
+    pub steps: Vec<Step>,
+}
+
+/// A step of a practice: its key, its names by language (a course's module file names
+/// its steps; the app names the built-in labs' steps), and its command.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Step {
+    pub key: String,
+    pub names: BTreeMap<String, String>,
+    pub command: Option<String>,
+}
+
+impl Step {
+    fn lab(key: &str, command: Option<&str>) -> Step {
+        Step {
+            key: key.into(),
+            names: BTreeMap::new(),
+            command: command.map(str::to_string),
+        }
+    }
 }
 
 impl Record {
     fn from(r: &LessonRecord) -> Record {
-        let steps = serde_json::to_value(&r.steps)
-            .ok()
-            .and_then(|v| v.as_array().cloned())
-            .unwrap_or_default()
+        let steps = r
+            .steps
             .iter()
-            .map(|s| {
-                (
-                    s["key"].as_str().unwrap_or_default().to_string(),
-                    s["command"].as_str().map(str::to_string),
-                )
+            .map(|s| Step {
+                key: s.key.clone(),
+                names: s.names.clone(),
+                command: s.command.clone(),
             })
             .collect();
         Record {
@@ -125,8 +146,8 @@ impl Record {
     }
 
     /// The step list of a course uses the volumes view.
-    fn uses_volumes(&self) -> bool {
-        self.steps.iter().any(|(k, _)| k == "inspect")
+    pub fn uses_volumes(&self) -> bool {
+        self.steps.iter().any(|s| s.key == "inspect")
     }
 }
 
@@ -233,16 +254,27 @@ pub enum Flavor {
 pub struct Practice {
     pub id: String,
     pub namespace: &'static str,
-    pub steps: Vec<(String, Option<String>)>,
+    pub steps: Vec<Step>,
     pub flavor: Flavor,
 }
 
+impl Practice {
+    /// practice-volumes.js `practiceLabel`: a course step's name in `lang`, else in
+    /// English, else its key. Only the start of a course has an app string.
+    pub fn label(&self, d: &Desktop, key: &str) -> String {
+        if self.flavor != Flavor::Course || key == "start" {
+            return d.t(&format!("{}{key}", self.namespace));
+        }
+        let names = self.steps.iter().find(|s| s.key == key).map(|s| &s.names);
+        names
+            .and_then(|n| n.get(d.lang()).or_else(|| n.get("en")))
+            .cloned()
+            .unwrap_or_else(|| key.to_string())
+    }
+}
+
 pub fn practice_for(r: &Record) -> Option<Practice> {
-    let steps = |s: &[(&str, Option<&str>)]| {
-        s.iter()
-            .map(|(k, c)| (k.to_string(), c.map(str::to_string)))
-            .collect()
-    };
+    let steps = |s: &[(&str, Option<&str>)]| s.iter().map(|(k, c)| Step::lab(k, *c)).collect();
     match r.id.as_str() {
         "volume-basics" => Some(Practice {
             id: r.id.clone(),
@@ -278,7 +310,7 @@ pub fn practice_for(r: &Record) -> Option<Practice> {
         _ => Some(Practice {
             id: r.id.clone(),
             namespace: "training.course.",
-            steps: std::iter::once(("start".to_string(), None))
+            steps: std::iter::once(Step::lab("start", None))
                 .chain(r.steps.iter().cloned())
                 .collect(),
             flavor: Flavor::Course,
@@ -356,6 +388,9 @@ pub struct TrainingState {
     pub installing: bool,
     /// The module an install in flight opens when it is done.
     pub pending_install: Option<String>,
+    /// When the Training catalog was last synced, and whether a sync runs.
+    pub synced_at: Option<Instant>,
+    pub syncing: bool,
     pub scroll: ScrollState,
 }
 
@@ -378,6 +413,8 @@ impl TrainingState {
             lab_source: input(LAB_SOURCE, ""),
             installing: false,
             pending_install: None,
+            synced_at: None,
+            syncing: false,
             scroll: ScrollState::default(),
         }
     }
@@ -426,7 +463,8 @@ pub fn entries(d: &Desktop) -> Vec<(String, String, String)> {
 
 // ---- loading ----
 
-/// At start: the installed modules and the JSON lesson.
+/// At start: the installed modules and the JSON lesson, then a sync, so new modules
+/// from podbag.dev appear without an app update.
 pub fn start(d: &mut Desktop) {
     d.training.lesson = d.api.saved_lesson().as_ref().and_then(Lesson::from_saved);
     spawn(
@@ -436,8 +474,35 @@ pub fn start(d: &mut Desktop) {
             if let Ok(records) = r {
                 set_records(d, &records);
             }
+            d.training.synced_at = Some(Instant::now());
+            // Offline: the installed modules stay.
+            spawn(
+                d,
+                |api| api.training_modules("sync", None, None),
+                |d, r| {
+                    if let Ok(records) = r {
+                        set_records(d, &records);
+                    }
+                },
+            );
         },
     );
+}
+
+/// tutorials.js `syncLibrary`: new and changed modules from podbag.dev, on Refresh
+/// (`asked`), and on the Training page at most once a minute.
+pub fn sync(d: &mut Desktop, asked: bool) {
+    let recent = d
+        .training
+        .synced_at
+        .is_some_and(|at| at.elapsed() < SYNC_EVERY);
+    if d.training.syncing || (!asked && recent) {
+        return;
+    }
+    d.training.synced_at = Some(Instant::now());
+    d.training.syncing = true;
+    d.training.status.clear();
+    tools(d, "sync", None, None);
 }
 
 fn set_records(d: &mut Desktop, records: &[LessonRecord]) {
@@ -460,6 +525,9 @@ fn tools(d: &mut Desktop, action: &'static str, package: Option<String>, id: Opt
         move |api| api.training_modules(action, package.as_deref(), id.as_deref()),
         move |d, r| {
             d.training.installing = false;
+            if action == "sync" {
+                d.training.syncing = false;
+            }
             match r {
                 Ok(records) => {
                     set_records(d, &records);
@@ -481,9 +549,17 @@ fn tools(d: &mut Desktop, action: &'static str, package: Option<String>, id: Opt
                 Err(e) => {
                     d.training.pending_install = None;
                     if d.page == Page::Training {
-                        d.training.status = e;
+                        d.training.status = if action == "sync" {
+                            d.tv("training.syncFailed", &[("error", &e)])
+                        } else {
+                            e
+                        };
                     }
                 }
+            }
+            // The page's first read is followed by a sync when the last one is old.
+            if action == "status" {
+                sync(d, false);
             }
         },
     );
@@ -823,10 +899,24 @@ pub fn paint(d: &mut Desktop, ui: &mut Ui, r: Rect) {
     let label = d.t("tutorial.install");
     let bw = podbag_ui::widgets::button::width(ui, &label, Some(Icon::Import.id()), false);
     let install = Rect::new(bar.right() - 20. - bw, bar.y + 15., bw, 32.);
+    let refresh_label = d.t("action.refresh");
+    let rw = podbag_ui::widgets::button::width(ui, &refresh_label, Some(Icon::Refresh.id()), false);
+    let refresh = Rect::new(install.x - 8. - rw, install.y, rw, 32.);
     ui.clip(
-        Rect::new(bar.x, bar.y, install.x - bar.x - 12., bar.h),
+        Rect::new(bar.x, bar.y, refresh.x - bar.x - 12., bar.h),
         |ui| title_bar(ui, bar, &title),
     );
+    if podbag_ui::widgets::button::button(
+        ui,
+        REFRESH,
+        refresh,
+        &refresh_label,
+        Some(Icon::Refresh.id()),
+        ButtonKind::Normal,
+        !d.training.syncing,
+    ) {
+        sync(d, true);
+    }
     if podbag_ui::widgets::button::button(
         ui,
         INSTALL,
@@ -915,11 +1005,7 @@ fn library(d: &mut Desktop, ui: &mut Ui, x: f32, y0: f32, w: f32) -> f32 {
                         let line = match current_stage.as_str() {
                             "complete" => d.t("tutorial.complete"),
                             "start" => d.t("tutorial.installed"),
-                            _ => format!(
-                                "{} · {}",
-                                d.t("practice.current"),
-                                d.t(&format!("{}{current}", p.namespace))
-                            ),
+                            _ => format!("{} · {}", d.t("practice.current"), p.label(d, &current)),
                         };
                         y += small(ui, x, y, w, &line, t.ink2) + 10.;
                     }
@@ -1029,12 +1115,12 @@ fn progress(
     let t = ui.theme;
     let complete = stage == "complete";
     let wanted = if stage == "restart" { "stop" } else { stage };
-    let current = p.steps.iter().position(|(k, _)| k == wanted);
+    let current = p.steps.iter().position(|s| s.key == wanted);
     let mut y = y0;
     if complete {
         y += text(ui, x, y, w, &d.t("tutorial.complete"), t.ink2) + 10.;
     }
-    for (i, (key, command)) in p.steps.iter().enumerate() {
+    for (i, Step { key, command, .. }) in p.steps.iter().enumerate() {
         let done = complete || current.is_some_and(|c| i < c);
         let active = current == Some(i);
         ui.p.fill(Rect::new(x, y, w, 1.), t.line);
@@ -1074,7 +1160,7 @@ fn progress(
             row_y + (20. - sl.height) / 2.,
             status_color,
         );
-        let name = d.t(&format!("{}{key}", p.namespace));
+        let name = p.label(d, key);
         let name_style = ui.style().weight(if active { 600 } else { 400 });
         let name_color = if active { t.accent_text } else { t.ink };
         let nh = ui.paragraph(
