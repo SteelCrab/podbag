@@ -269,7 +269,8 @@
           "podbag-cli-gui-volumes-v1": "volume-basics", "podbag-cli-tui-volumes-v1": "tui-volumes",
           "podbag-web-basics-v1": "web-basics", "podbag-volume-persistence-v1": "volume-persistence",
           "podbag-web-service-lifecycle-v1": "web-service-lifecycle",
-          "podbag-web-service-recovery-v1": "web-service-recovery" }[pack.format];
+          "podbag-web-service-recovery-v1": "web-service-recovery",
+          "podbag-container-network-v1": "container-network" }[pack.format];
         practiceModules.set(key, { id: key, package: pack, completed: false });
       }
       if (action === "remove") practiceModules.delete(id);
