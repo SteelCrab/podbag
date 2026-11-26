@@ -34,8 +34,10 @@ impl ImageData {
         let rgba = match info.color_type {
             ColorType::Rgba => buf,
             ColorType::GrayscaleAlpha => buf
-                .chunks_exact(2)
-                .flat_map(|ga| [ga[0], ga[0], ga[0], ga[1]])
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .flat_map(|&[g, a]| [g, g, g, a])
                 .collect(),
             other => return Err(format!("unexpected PNG color type {other:?}")),
         };
@@ -59,7 +61,7 @@ impl ImageData {
         let (sw, sh) = (self.width, self.height);
         if w >= sw && h >= sh {
             let mut out = self.rgba.clone();
-            for px in out.chunks_exact_mut(4) {
+            for px in out.as_chunks_mut::<4>().0 {
                 premultiply(px);
             }
             return (sw, sh, out);
