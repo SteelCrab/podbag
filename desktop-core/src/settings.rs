@@ -19,16 +19,6 @@ pub enum ThemePreference {
     System,
 }
 
-impl ThemePreference {
-    pub fn native(self) -> Option<tauri::Theme> {
-        match self {
-            Self::Light => Some(tauri::Theme::Light),
-            Self::Dark => Some(tauri::Theme::Dark),
-            Self::System => None,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
@@ -152,15 +142,15 @@ mod tests {
     }
 
     #[test]
-    fn native_theme_matches_saved_preference() {
-        for (name, native) in [
-            ("system", None),
-            ("light", Some(tauri::Theme::Light)),
-            ("dark", Some(tauri::Theme::Dark)),
+    fn the_theme_is_read_and_written_by_name() {
+        for (name, theme) in [
+            ("system", ThemePreference::System),
+            ("light", ThemePreference::Light),
+            ("dark", ThemePreference::Dark),
         ] {
             let json = serde_json::json!({ "theme": name });
             let settings: Settings = serde_json::from_value(json).unwrap();
-            assert_eq!(settings.theme.native(), native);
+            assert_eq!(settings.theme, theme);
             assert_eq!(serde_json::to_value(settings).unwrap()["theme"], name);
         }
         for json in [
@@ -169,7 +159,7 @@ mod tests {
         ] {
             let settings: Settings = serde_json::from_str(json).unwrap();
             assert_eq!(settings.language, "ko");
-            assert_eq!(settings.theme.native(), None);
+            assert_eq!(settings.theme, ThemePreference::System);
         }
     }
 

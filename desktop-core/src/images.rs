@@ -1,6 +1,6 @@
 //! The pull panel and the import from Docker: where images come from and who is logged
 //! in there, Docker Hub search, pulls with a login, and copies from one engine to
-//! another. No Tauri here, so it is tested against fake engines.
+//! another. Tested against fake engines.
 
 use podbag::client::registries::{config_dir, registry_host};
 use podbag::client::{Client, ImageSummary, Location, Target, logins};
@@ -131,11 +131,12 @@ pub fn pull(
 }
 
 /// A tagged image as shown in the Docker import list.
-#[derive(Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ImportImage {
-    name: String,
-    size: i64,
-    registry: &'static str,
+    pub name: String,
+    pub size: i64,
+    /// The location id, for the icon.
+    pub registry: &'static str,
 }
 
 impl ImportImage {
@@ -196,13 +197,6 @@ mod tests {
             ids.len(),
             ids.iter().collect::<std::collections::HashSet<_>>().len()
         );
-        let sprite = include_str!("../ui/registry-icons.svg");
-        for id in ids {
-            assert!(
-                sprite.contains(&format!("<symbol id=\"{id}\"")),
-                "missing icon for {id}"
-            );
-        }
         assert_eq!(all[0].account, None);
         assert_eq!(all[1].account.as_deref(), Some("octo"));
         // ECR with no host yet: any ECR login.

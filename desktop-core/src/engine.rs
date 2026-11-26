@@ -1,7 +1,9 @@
-//! What the window asks for, on a [`Client`]: no Tauri here, so it is tested against a
-//! fake engine. `main.rs` wraps these in Tauri commands.
+//! What the window asks the engine, on a [`Client`]. Tested against a fake engine.
 
-use podbag::client::{Choice, Client, Endpoint, Kind, LogLines, Pruned, Target};
+use podbag::client::{
+    Choice, Client, ContainerSummary, Endpoint, ImageSummary, Kind, LogLines, NetworkSummary,
+    Pruned, Target, VolumeSummary,
+};
 use serde::Serialize;
 use serde_json::Value;
 use std::path::Path;
@@ -133,34 +135,60 @@ pub fn choose(name: &str, file: &Path, podbag: &Path) -> Result<Target, String> 
     Ok(target)
 }
 
-fn kind(name: &str) -> Result<Kind, String> {
+/// The kind named `name` (`containers`, `images`, `volumes`, `networks`).
+pub fn parse_kind(name: &str) -> Result<Kind, String> {
     Kind::ALL
         .into_iter()
         .find(|k| k.segment() == name)
         .ok_or_else(|| format!("unknown kind {name}"))
 }
 
-/// A list, as the engine gives it (Docker's field names).
-pub fn list(client: &Client, what: &str) -> Result<Value, String> {
-    let json = |v: Result<Value, serde_json::Error>| v.map_err(|e| e.to_string());
-    match kind(what)? {
-        Kind::Containers => json(serde_json::to_value(
-            client.containers().map_err(|e| e.message)?,
-        )),
-        Kind::Images => json(serde_json::to_value(
-            client.images().map_err(|e| e.message)?,
-        )),
-        Kind::Volumes => json(serde_json::to_value(
-            client.volumes().map_err(|e| e.message)?,
-        )),
-        Kind::Networks => json(serde_json::to_value(
-            client.networks().map_err(|e| e.message)?,
-        )),
+/// A list, as the engine gives it. Serialized, it is the bare array with Docker's field
+/// names.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum List {
+    Containers(Vec<ContainerSummary>),
+    Images(Vec<ImageSummary>),
+    Volumes(Vec<VolumeSummary>),
+    Networks(Vec<NetworkSummary>),
+}
+
+impl List {
+    /// How many containers run (0 for other lists).
+    pub fn running(&self) -> usize {
+        match self {
+            List::Containers(list) => list.iter().filter(|c| c.state == "running").count(),
+            _ => 0,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            List::Containers(l) => l.len(),
+            List::Images(l) => l.len(),
+            List::Volumes(l) => l.len(),
+            List::Networks(l) => l.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
-pub fn inspect(client: &Client, what: &str, id: &str) -> Result<Value, String> {
-    client.inspect(kind(what)?, id).map_err(|e| e.message)
+pub fn list(client: &Client, kind: Kind) -> Result<List, String> {
+    let list = match kind {
+        Kind::Containers => List::Containers(client.containers().map_err(|e| e.message)?),
+        Kind::Images => List::Images(client.images().map_err(|e| e.message)?),
+        Kind::Volumes => List::Volumes(client.volumes().map_err(|e| e.message)?),
+        Kind::Networks => List::Networks(client.networks().map_err(|e| e.message)?),
+    };
+    Ok(list)
+}
+
+pub fn inspect(client: &Client, kind: Kind, id: &str) -> Result<Value, String> {
+    client.inspect(kind, id).map_err(|e| e.message)
 }
 
 /// `start`, `stop`, `restart`, `pause` or `unpause`: nothing else is sent.
@@ -171,12 +199,12 @@ pub fn act(client: &Client, id: &str, action: &str) -> Result<(), String> {
     client.container_action(id, action).map_err(|e| e.message)
 }
 
-pub fn remove(client: &Client, what: &str, id: &str, force: bool) -> Result<(), String> {
-    client.remove(kind(what)?, id, force).map_err(|e| e.message)
+pub fn remove(client: &Client, kind: Kind, id: &str, force: bool) -> Result<(), String> {
+    client.remove(kind, id, force).map_err(|e| e.message)
 }
 
-pub fn prune(client: &Client, what: &str) -> Result<Pruned, String> {
-    client.prune(kind(what)?).map_err(|e| e.message)
+pub fn prune(client: &Client, kind: Kind) -> Result<Pruned, String> {
+    client.prune(kind).map_err(|e| e.message)
 }
 
 pub fn rename(client: &Client, id: &str, name: &str) -> Result<(), String> {
@@ -224,172 +252,6 @@ pub fn follow_logs(lines: LogLines, mut emit: impl FnMut(Vec<String>) -> bool + 
             return;
         }
     }
-}
-
-/// How many containers run.
-pub fn running(list: &Value) -> usize {
-    list.as_array().map_or(0, |a| {
-        a.iter()
-            .filter(|c| c["State"].as_str() == Some("running"))
-            .count()
-    })
-}
-
-/// A container id or name that is safe in a command line.
-fn safe_id(id: &str) -> Result<&str, String> {
-    if !id.starts_with('-')
-        && !id.is_empty()
-        && id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "_.-".contains(c))
-    {
-        Ok(id)
-    } else {
-        Err(format!("invalid container id {id:?}"))
-    }
-}
-
-/// A shell in a container: the command, and what to type by hand.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Shell {
-    pub argv: Vec<String>,
-    pub by_hand: String,
-}
-
-/// `podbag exec -it <id> sh` for podbag; `docker exec -it <id> sh` for another engine,
-/// with `DOCKER_HOST` set to its socket.
-pub fn shell_command(
-    target: &Target,
-    podbag: &Path,
-    docker: &Path,
-    id: &str,
-) -> Result<Shell, String> {
-    let id = safe_id(id)?;
-    let tail = ["exec", "-it", id, "sh"].map(String::from);
-    if target.choice == Choice::Podbag {
-        let mut argv = vec![podbag.display().to_string()];
-        argv.extend(tail);
-        return Ok(Shell {
-            argv,
-            by_hand: format!("podbag exec -it {id} sh"),
-        });
-    }
-    let mut argv: Vec<String> = target
-        .cli(podbag, Some(docker))
-        .ok_or("No CLI for this engine")?
-        .iter()
-        .map(|arg| arg.to_string_lossy().into_owned())
-        .collect();
-    argv.extend(tail);
-    let quoted: Vec<_> = argv
-        .iter()
-        .map(|arg| {
-            if cfg!(windows) {
-                format!("'{}'", arg.replace('\'', "''"))
-            } else {
-                format!("'{}'", arg.replace('\'', "'\\''"))
-            }
-        })
-        .collect();
-    let line = quoted.join(" ");
-    Ok(Shell {
-        argv,
-        by_hand: if cfg!(windows) {
-            format!("& {line}")
-        } else {
-            line
-        },
-    })
-}
-
-/// Open a terminal window with a shell in the container. When none can be opened, the
-/// error is the command to run by hand.
-pub fn open_shell(shell: &Shell) -> Result<(), String> {
-    if open_terminal(Some(&shell.argv)) {
-        Ok(())
-    } else {
-        Err(shell.by_hand.clone())
-    }
-}
-
-/// Open a terminal window that runs `argv` (None: a plain shell). False when no
-/// terminal app was found.
-pub fn open_terminal(argv: Option<&[String]>) -> bool {
-    let Some(argv) = argv else {
-        return if cfg!(target_os = "macos") {
-            std::process::Command::new("open")
-                .args(["-a", "Terminal"])
-                .spawn()
-                .is_ok()
-        } else if cfg!(windows) {
-            std::process::Command::new("cmd")
-                .args(["/C", "start", "cmd"])
-                .spawn()
-                .is_ok()
-        } else {
-            linux_terminal(&[])
-        };
-    };
-    let quoted: Vec<String> = argv
-        .iter()
-        .map(|a| format!("'{}'", a.replace('\'', "'\\''")))
-        .collect();
-    let line = quoted.join(" ");
-    if cfg!(target_os = "macos") {
-        let script = format!(
-            "tell application \"Terminal\"\nactivate\ndo script \"{}\"\nend tell",
-            line.replace('\\', "\\\\").replace('"', "\\\"")
-        );
-        std::process::Command::new("osascript")
-            .args(["-e", &script])
-            .spawn()
-            .is_ok()
-    } else if cfg!(windows) {
-        {
-            #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                std::process::Command::new(&argv[0])
-                    .args(&argv[1..])
-                    .creation_flags(0x10)
-                    .spawn()
-                    .is_ok()
-            }
-            #[cfg(not(windows))]
-            {
-                false
-            }
-        }
-    } else {
-        linux_terminal(argv)
-    }
-}
-
-/// The first terminal found: $TERMINAL, then the common ones.
-fn linux_terminal(argv: &[String]) -> bool {
-    let mut candidates: Vec<(String, &str)> = Vec::new();
-    if let Ok(t) = std::env::var("TERMINAL") {
-        candidates.push((t, "-e"));
-    }
-    for (t, flag) in [
-        ("x-terminal-emulator", "-e"),
-        ("gnome-terminal", "--"),
-        ("konsole", "-e"),
-        ("xfce4-terminal", "-x"),
-        ("kitty", "--"),
-        ("alacritty", "-e"),
-        ("foot", "--"),
-        ("xterm", "-e"),
-    ] {
-        candidates.push((t.to_string(), flag));
-    }
-    candidates.into_iter().any(|(t, flag)| {
-        let mut cmd = std::process::Command::new(&t);
-        if !argv.is_empty() {
-            cmd.arg(flag).args(argv);
-        }
-        cmd.spawn().is_ok()
-    })
 }
 
 #[cfg(all(test, unix))]
@@ -445,23 +307,20 @@ mod tests {
     #[test]
     fn lists_keep_docker_field_names() {
         let engine = FakeEngine::start(small_engine);
-        let c = list(&engine.client, "containers").unwrap();
+        let json = |kind: &str| {
+            serde_json::to_value(list(&engine.client, parse_kind(kind).unwrap()).unwrap()).unwrap()
+        };
+        let c = json("containers");
         assert_eq!(c[0]["Names"][0], "/web");
         assert_eq!(c[0]["Ports"][0]["PublicPort"], 8080);
-        assert_eq!(running(&c), 1);
+        assert_eq!(list(&engine.client, Kind::Containers).unwrap().running(), 1);
+        assert_eq!(json("images")[0]["RepoTags"][0], "nginx:alpine");
+        assert_eq!(json("volumes")[0]["Name"], "pgdata");
         assert_eq!(
-            list(&engine.client, "images").unwrap()[0]["RepoTags"][0],
-            "nginx:alpine"
-        );
-        assert_eq!(
-            list(&engine.client, "volumes").unwrap()[0]["Name"],
-            "pgdata"
-        );
-        assert_eq!(
-            list(&engine.client, "networks").unwrap()[1]["IPAM"]["Config"][0]["Subnet"],
+            json("networks")[1]["IPAM"]["Config"][0]["Subnet"],
             "10.77.1.0/24"
         );
-        assert!(list(&engine.client, "pods").is_err());
+        assert_eq!(parse_kind("pods").unwrap_err(), "unknown kind pods");
     }
 
     #[test]
@@ -472,8 +331,8 @@ mod tests {
         assert!(act(c, "web", "kill?signal=9").is_err());
         let e = act(c, "web", "pause").unwrap_err();
         assert!(e.contains("not supported"), "{e}");
-        remove(c, "volumes", "pgdata", false).unwrap();
-        assert_eq!(prune(c, "containers").unwrap().count, 1);
+        remove(c, Kind::Volumes, "pgdata", false).unwrap();
+        assert_eq!(prune(c, Kind::Containers).unwrap().count, 1);
         assert!(container_json(c, "web", "logs").is_err());
         assert!(
             container_json(c, "web", "stats")
@@ -581,64 +440,5 @@ mod tests {
             podbag::client::choice::saved_in(&file),
             Some(Choice::Podbag)
         );
-    }
-
-    #[test]
-    fn docker_shells_use_the_docker_cli_and_its_socket() {
-        let target = docker_at("/x/docker.sock");
-        let shell = shell_command(
-            &target,
-            Path::new("/opt/podbag"),
-            Path::new("/usr/bin/docker"),
-            "web",
-        )
-        .unwrap();
-        assert_eq!(
-            shell.argv,
-            [
-                "/usr/bin/docker",
-                "--host=unix:///x/docker.sock",
-                "exec",
-                "-it",
-                "web",
-                "sh"
-            ]
-        );
-        assert!(shell.by_hand.contains("--host=unix:///x/docker.sock"));
-        let podbag = Target {
-            choice: Choice::Podbag,
-            endpoint: Endpoint::Socket {
-                path: "/p.sock".into(),
-                own: true,
-            },
-        };
-        let shell = shell_command(
-            &podbag,
-            Path::new("/opt/podbag"),
-            Path::new("docker"),
-            "web",
-        )
-        .unwrap();
-        assert_eq!(shell.argv, ["/opt/podbag", "exec", "-it", "web", "sh"]);
-        assert_eq!(shell.by_hand, "podbag exec -it web sh");
-    }
-
-    #[test]
-    fn shell_commands_take_only_plain_ids() {
-        let t = Target {
-            choice: Choice::Podbag,
-            endpoint: Endpoint::Socket {
-                path: "/p.sock".into(),
-                own: true,
-            },
-        };
-        let docker = Path::new("docker");
-        let shell = shell_command(&t, Path::new("/usr/local/bin/podbag"), docker, "web-1").unwrap();
-        assert_eq!(
-            shell.argv,
-            ["/usr/local/bin/podbag", "exec", "-it", "web-1", "sh"]
-        );
-        assert!(shell_command(&t, Path::new("podbag"), docker, "web; rm -rf /").is_err());
-        assert!(shell_command(&t, Path::new("podbag"), docker, "").is_err());
     }
 }

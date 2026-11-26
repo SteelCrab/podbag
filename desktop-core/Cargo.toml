@@ -1,0 +1,27 @@
+[package]
+name = "podbag-desktop-core"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/SteelCrab/podbag"
+publish = false
+description = "Engine and system calls of Podbag Desktop, without a UI toolkit"
+
+[features]
+# A backend with sample data and no engine (previews and UI tests).
+mock = []
+
+[dependencies]
+podbag = { path = "..", default-features = false, features = ["dashboard"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sys-locale = "0.3"
+open = "5"
+
+# Launch at login: the Run key in the registry.
+[target.'cfg(windows)'.dependencies]
+windows-registry = "0.6"
+windows-result = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
