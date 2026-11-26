@@ -1072,6 +1072,7 @@ pub mod tests {
                 size: 8_000_000,
                 created: 1_700_000_000,
                 containers: 1,
+                podbag_compression: None,
             }],
             volumes: vec![VolumeSummary {
                 name: "pgdata".into(),

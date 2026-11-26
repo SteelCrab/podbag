@@ -70,10 +70,12 @@ function Activate-Button([string]$Name) {
     }
 }
 
-# The first-launch prompt may appear after navigation becomes visible.
+# The first-launch prompts (star, then image compression) may appear after navigation
+# becomes visible.
 $deadline = [DateTime]::UtcNow.AddSeconds(90)
 do {
     Activate-Button 'Skip'
+    Activate-Button 'Not now'
     Activate-Button 'Training'
     Start-Sleep -Milliseconds 500
     $heading = Find-Text 'No modules installed.'

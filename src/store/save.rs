@@ -6,7 +6,7 @@
 //! image's creation time). Its digest differs from the original layer's; the config
 //! written with it names the new digests. The same store writes the same archive.
 
-use super::{Store, io_error};
+use super::Store;
 use crate::image::manifest;
 use crate::store::layer::{EntryKind, LayerIndex};
 use crate::{Error, ErrorKind, Result};
@@ -113,9 +113,13 @@ impl Store {
                 EntryKind::File { object, size } => {
                     h.set_entry_type(tar::EntryType::Regular);
                     h.set_size(*size);
-                    let file_path = self.objects.path(object);
-                    let file =
-                        std::fs::File::open(&file_path).map_err(|e| io_error(&file_path, e))?;
+                    let file = self.objects.open(object)?;
+                    if file.is_cold() {
+                        let checked = Checked::new(file, object, *size);
+                        b.append_data(&mut h, path, Exact::new(checked, *size))
+                            .map_err(|e| cold_error(object, e))?;
+                        continue;
+                    }
                     b.append_data(&mut h, path, Exact::new(file, *size))
                 }
                 EntryKind::Dir => {
@@ -303,6 +307,94 @@ impl<R: Read> Read for Exact<R> {
         }
         self.left -= n as u64;
         Ok(n)
+    }
+}
+
+/// The unpacked contents of a compressed object, checked against its key while they are
+/// read: once `size` bytes are read there must be no more, and their SHA-256 must be the
+/// start of the key. Anything else, and a file that does not unpack, is a [`Damaged`]
+/// read error: the archive is never written from a damaged copy.
+struct Checked<'a, R> {
+    inner: R,
+    key: &'a str,
+    size: u64,
+    read: u64,
+    hasher: Sha256,
+    done: bool,
+}
+
+impl<'a, R: Read> Checked<'a, R> {
+    fn new(inner: R, key: &'a str, size: u64) -> Checked<'a, R> {
+        Checked {
+            inner,
+            key,
+            size,
+            read: 0,
+            hasher: Sha256::new(),
+            done: false,
+        }
+    }
+
+    fn read_checked(&mut self, buf: &mut [u8]) -> std::result::Result<usize, String> {
+        let n = self.inner.read(buf).map_err(|e| e.to_string())?;
+        self.hasher.update(&buf[..n]);
+        self.read += n as u64;
+        if n == 0 || self.read >= self.size {
+            // The end of the contents: the size and the hash must match.
+            self.done = true;
+            let more = self.inner.read(&mut [0u8; 1]).map_err(|e| e.to_string())?;
+            if self.read != self.size || more != 0 {
+                return Err("its size does not match".to_string());
+            }
+            let sha: String = std::mem::take(&mut self.hasher)
+                .finalize()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            if self.key.get(..64) != Some(sha.as_str()) {
+                return Err("its contents do not match its name".to_string());
+            }
+        }
+        Ok(n)
+    }
+}
+
+impl<R: Read> Read for Checked<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.done || buf.is_empty() {
+            return Ok(0);
+        }
+        self.read_checked(buf)
+            .map_err(|why| std::io::Error::new(std::io::ErrorKind::InvalidData, Damaged(why)))
+    }
+}
+
+/// Why a compressed object could not be read whole, or did not match its key.
+#[derive(Debug)]
+struct Damaged(String);
+
+impl std::fmt::Display for Damaged {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Damaged {}
+
+/// The error of an archive entry read from the compressed object `key`: a [`Damaged`]
+/// object, or else a write that failed.
+fn cold_error(key: &str, e: std::io::Error) -> Error {
+    match e
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<Damaged>())
+    {
+        Some(why) => Error::new(
+            ErrorKind::Runtime,
+            "cannot read a file of the image",
+            format!("the compressed object {key} is damaged: {why}"),
+            "run `podbag system verify --fix`, then pull or load the image again",
+        ),
+        None => write_error(e),
     }
 }
 
