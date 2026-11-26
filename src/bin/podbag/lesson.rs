@@ -60,8 +60,10 @@ pub fn command(cmd: LabCmd) -> i32 {
                 println!("Installed. Run podbag lab start {}.", module.id());
             }
             LabCmd::List => {
-                for record in volume_lesson::list(&volume_lesson::directory()?)? {
-                    let module = Module::for_format(&record.package.format)?;
+                let dir = volume_lesson::directory()?;
+                refresh(&dir);
+                for record in volume_lesson::list(&dir)? {
+                    let module = Module::of(&record.package)?;
                     println!(
                         "{}	{}	{}",
                         module.id(),
@@ -76,7 +78,7 @@ pub fn command(cmd: LabCmd) -> i32 {
             }
             LabCmd::Remove { module } => {
                 let dir = volume_lesson::directory()?;
-                volume_lesson::remove(&dir, volume_lesson::selected(&dir, module.as_deref())?)?;
+                volume_lesson::remove(&dir, &volume_lesson::selected(&dir, module.as_deref())?)?;
                 println!("Module removed.");
             }
             LabCmd::Start {
@@ -88,6 +90,12 @@ pub fn command(cmd: LabCmd) -> i32 {
                     Some(dir) => dir,
                     None => volume_lesson::directory()?,
                 };
+                if module
+                    .as_deref()
+                    .is_some_and(|id| volume_lesson::needs_sync(&dir, id))
+                {
+                    refresh(&dir);
+                }
                 let module = volume_lesson::selected(&dir, module.as_deref())?;
                 let lang = lang
                     .or_else(|| std::env::var("LANG").ok())
@@ -114,10 +122,16 @@ pub fn command(cmd: LabCmd) -> i32 {
                 }
                 #[cfg(unix)]
                 {
-                    let installed = volume_lesson::read(&dir, module)?.ok_or_else(|| {
+                    let installed = volume_lesson::read(&dir, &module)?.ok_or_else(|| {
                         io::Error::other("Install the module with podbag lab install FILE first.")
                     })?;
-                    if session(installed.words(&lang), &dir, module, &lang)? {
+                    let course = match module {
+                        Module::Course(_) => Some(installed.course()?),
+                        _ => None,
+                    };
+                    let words = installed.words(&lang);
+                    let guide = installed.guide_url(&lang);
+                    if session(words, guide, &dir, &module, course)? {
                         installed.finish(&dir)?;
                     }
                 }
@@ -207,12 +221,25 @@ fn workspace() -> io::Result<()> {
     serving
 }
 
+/// Syncs the Training catalog; offline, the installed modules stay as they are.
+fn refresh(dir: &std::path::Path) {
+    match volume_lesson::catalog::sync(dir) {
+        Ok(synced) => {
+            for (id, why) in synced.failed {
+                eprintln!("podbag: Training module {id} was not updated: {why}");
+            }
+        }
+        Err(e) => eprintln!("podbag: could not refresh the Training list: {e}"),
+    }
+}
+
 #[cfg(unix)]
 fn session(
     words: &volume_lesson::Words,
+    guide: Option<String>,
     library: &Path,
-    module: Module,
-    lang: &str,
+    module: &Module,
+    course: Option<volume_lesson::course::Course>,
 ) -> io::Result<bool> {
     use std::io::{BufRead, BufReader, IsTerminal};
     use std::os::unix::process::CommandExt;
@@ -220,9 +247,8 @@ fn session(
     if !io::stdin().is_terminal() {
         return Err(io::Error::other("Open the lab in an interactive terminal."));
     }
-    let course = !volume_lesson::course::steps(module).is_empty();
-    let container_lab = module == Module::Containers || course;
-    let prompt = if course {
+    let container_lab = *module == Module::Containers || course.is_some();
+    let prompt = if course.is_some() {
         "training $ "
     } else if container_lab {
         "container-lab $ "
@@ -246,17 +272,15 @@ fn session(
             return Err(io::Error::other("The practice engine did not start."));
         }
         let dir = Path::new(line.trim_end());
-        if course {
-            volume_lesson::course::Attempt::start(dir, module)?;
+        if let Some(course) = &course {
+            volume_lesson::course::Attempt::start(dir, course)?;
         }
         registration = match module {
-            Module::Web | Module::Persistence | Module::Service => {
-                Some(volume_lesson::gui::Registration::open_for(
-                    library,
-                    dir,
-                    volume_lesson::course::ACTIVE,
-                )?)
-            }
+            Module::Course(_) => Some(volume_lesson::gui::Registration::open_for(
+                library,
+                dir,
+                volume_lesson::course::ACTIVE,
+            )?),
             Module::Containers => Some(volume_lesson::gui::Registration::open_for(
                 library,
                 dir,
@@ -265,7 +289,7 @@ fn session(
             Module::Volumes => Some(volume_lesson::gui::Registration::open(library, dir)?),
             Module::Tui => None,
         };
-        if let Some(url) = module.guide_url(lang) {
+        if let Some(url) = &guide {
             println!("\n{}\n{url}\n", words.title);
         } else {
             println!("\n{}\n", words.guide);
@@ -280,9 +304,10 @@ fn session(
         } else {
             terminal_without_shell(dir, prompt)?;
         }
-        if course {
-            return Ok(volume_lesson::course::Attempt::read(dir)?.step()?
-                == volume_lesson::course::Step::Finish);
+        if course.is_some() {
+            return Ok(volume_lesson::course::Attempt::read(dir)?
+                .step()?
+                .is_finish());
         }
         Ok(dir.join("verified").is_file())
     })();

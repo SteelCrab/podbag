@@ -893,6 +893,54 @@ printf '%s\n' \
   podbag tutorial session
 ```
 
+#### Training modules
+
+- Training modules come from the catalog on podbag.dev:
+  `https://podbag.dev/training/catalog.json`. A new module needs no new podbag.
+- `podbag lab list` refreshes the list first. Podbag Desktop refreshes it at start, when
+  Training opens, and with **Refresh**.
+- Offline, the installed modules stay. The message says why the refresh failed.
+- A refresh installs new and changed modules. It checks each file against the catalog's
+  SHA-256. A finished module stays finished.
+- A module in a format this podbag does not know is left out. A newer podbag shows it.
+
+```sh
+podbag lab list                        # refresh, then list the modules
+podbag lab start container-network     # open the practice shell
+podbag lab install my-module.podbag    # a local module file
+podbag lab remove container-network
+```
+
+- `PODBAG_TRAINING_CATALOG` reads another catalog, for example a local copy of the site
+  at `http://127.0.0.1:8000/training/catalog.json`. Other addresses must use HTTPS.
+
+##### Course module files
+
+- A course module (`podbag-course-v1`) is data: steps, the command of each CLI step, a
+  check for each step, and step names in its languages.
+- The learner runs the commands. podbag only reads the practice engine to check them.
+- Commands are `podbag …` or `exit`. `{port}` is the attempt's port.
+- `translations.en` needs `title`, `guide` and `url`. Guide URLs are on
+  `https://podbag.dev/`.
+- Checks:
+
+| Kind | Fields | Passes when |
+|---|---|---|
+| `network-exists`, `network-absent` | `name` | the network is (not) listed |
+| `volume-exists` | `name` | the volume is listed |
+| `volumes-empty`, `containers-empty` | – | there are none |
+| `container-running` | `name` | the container runs |
+| `container-published` | `name`, `page` (optional) | it runs with `127.0.0.1:{port}->8080/tcp`; the page shows `page` within 5 s |
+| `container-exited` | `name`, `code` | it exited with `code` |
+| `container-absent` | `name` | it is not listed |
+| `stdout-equals` | `text` | the command's output is `text` |
+| `output-has-line` | `text` | a line of the output or the errors is `text` |
+| `finish` | – | the last step: `exit` |
+| `desktop-inspect-exited` | `name` | Desktop opened the exited container |
+| `desktop-ports`, `desktop-browser` | `name` (`page` for the browser) | Desktop showed the ports / opened the page |
+| `desktop-stop` | `name` | Desktop stopped the container |
+| `desktop-inspect-volume`, `desktop-delete-volume` | `name` | Desktop opened / deleted the volume |
+
 ### podbag tui
 
 - Four lists: containers, images, volumes and networks. The selected one's details show

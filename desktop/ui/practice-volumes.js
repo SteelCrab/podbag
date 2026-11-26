@@ -37,11 +37,21 @@ function practiceFor(record) {
     id: record.id,
     namespace: "training.course.",
     steps: [["start"], ...record.steps.map(step => [step.key, step.command])],
+    // The module file names its steps; the app names only the start.
+    label(key) {
+      if (key === "start") return t("training.course.start");
+      const names = record.steps.find(step => step.key === key)?.names || {};
+      return names[I18N.lang] || names.en || key;
+    },
     async request() {
       const state = await courseRequest();
       return state?.module === record.id ? state : null;
     },
   };
+}
+
+function practiceLabel(practice, key) {
+  return practice.label ? practice.label(key) : t(practice.namespace + key);
 }
 
 function practiceResources(legacy) {
@@ -193,9 +203,14 @@ function renderPracticeContainers(main) {
       return;
     }
     put(resources, state.containers.length
-      ? resourceTable("containers", state.containers, row => { detailId = row.Id; render(); },
+      ? resourceTable("containers", state.containers, openContainer,
         row => h("div", { class: "actions" }, resourceAction(row)))
       : h("p", { class: "nothing", text: t("empty.containers.title") }));
+  }
+  function openContainer(row) {
+    detailId = row.Id;
+    render();
+    if (state.inspect_container === containerName(row)) change("inspect-failed", row.Id, state.session);
   }
   function renderPorts(detail) {
     const { web, session } = state;
