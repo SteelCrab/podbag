@@ -149,7 +149,7 @@ struct Course {
 impl Course {
     /// A session of the course in tests/fixtures/training/ID.podbag.
     fn start(id: &str) -> Self {
-        use podbag::volume_lesson::{course, gui::Registration, parse_package};
+        use podbag::volume_lesson::parse_package;
         let file = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/training")
             .join(format!("{id}.podbag"));
@@ -157,6 +157,11 @@ impl Course {
             .unwrap()
             .course()
             .unwrap();
+        Self::start_course(&course)
+    }
+
+    fn start_course(course: &podbag::volume_lesson::course::Course) -> Self {
+        use podbag::volume_lesson::{course, gui::Registration};
         let library = tempfile::tempdir().unwrap();
         let mut engine = Command::new(env!("CARGO_BIN_EXE_podbag"))
             .args(["lab", "workspace", "--containers"])
@@ -169,7 +174,7 @@ impl Course {
             .read_line(&mut line)
             .unwrap();
         let root = PathBuf::from(line.trim_end());
-        course::Attempt::start(&root, &course).unwrap();
+        course::Attempt::start(&root, course).unwrap();
         let registration = Registration::open_for(library.path(), &root, course::ACTIVE).unwrap();
         Self {
             library,
@@ -202,17 +207,54 @@ impl Course {
     }
 
     /// The command a learner copies from the current step, run in the practice terminal.
+    /// When its port is in use, podbag changes the command, and the learner copies it again.
     fn cli(&self, snapshot: &serde_json::Value) -> std::process::Output {
+        let output = self.cli_once(snapshot);
+        if String::from_utf8_lossy(&output.stderr).contains("That port is in use") {
+            return self.cli_once(&self.view("status", None, ""));
+        }
+        output
+    }
+
+    fn cli_once(&self, snapshot: &serde_json::Value) -> std::process::Output {
         let line = snapshot["command"].as_str().unwrap();
         let words = shlex::split(line).unwrap();
         assert_eq!(words[0], "podbag");
         Command::new(env!("CARGO_BIN_EXE_podbag"))
             .args(&words[1..])
+            .current_dir(&self.root)
             .env(podbag::volume_lesson::SCOPE, &self.root)
             .env("PODBAG_DATA_DIR", self.root.join("data"))
             .env("PODBAG_RUNTIME_DIR", self.root.join("run"))
             .env("PODBAG_CONFIG_DIR", self.root.join("config"))
             .env("PODBAG_UI_DIR", self.root.join("ui"))
+            .output()
+            .unwrap()
+    }
+
+    /// The step's docker command, run through the practice directory's `bin/docker`.
+    fn docker(&self, snapshot: &serde_json::Value) -> std::process::Output {
+        let output = self.docker_once(snapshot);
+        if String::from_utf8_lossy(&output.stderr).contains("That port is in use") {
+            return self.docker_once(&self.view("status", None, ""));
+        }
+        output
+    }
+
+    fn docker_once(&self, snapshot: &serde_json::Value) -> std::process::Output {
+        let line = snapshot["command"].as_str().unwrap();
+        let words = shlex::split(line).unwrap();
+        assert_eq!(words[0], "docker");
+        Command::new(self.root.join("bin/docker"))
+            .args(&words[1..])
+            .current_dir(&self.root)
+            .env("PODBAG_BIN", env!("CARGO_BIN_EXE_podbag"))
+            .env(podbag::volume_lesson::SCOPE, &self.root)
+            .env("PODBAG_DATA_DIR", self.root.join("data"))
+            .env("PODBAG_RUNTIME_DIR", self.root.join("run"))
+            .env("PODBAG_CONFIG_DIR", self.root.join("config"))
+            .env("PODBAG_UI_DIR", self.root.join("ui"))
+            .env("DOCKER_CONFIG", self.root.join("docker"))
             .output()
             .unwrap()
     }
@@ -339,4 +381,98 @@ fn the_network_training_reaches_api_by_name() {
     run("deleteNetwork");
     course.step("finish");
     course.finish();
+}
+
+/// Every module file in PODBAG_TRAINING_MODULES (default: tests/fixtures/training) from its
+/// first step to `exit`, the way a learner does it: each CLI step's command in the practice
+/// shell, each Desktop step through the action Desktop sends. PODBAG_TRAINING_ONLY limits it
+/// to some ids (comma-separated). Pulls images: runs only with PODBAG_TEST_NETWORK=1.
+#[cfg(target_os = "linux")]
+#[test]
+fn every_training_module_runs_start_to_finish() {
+    use podbag::volume_lesson::{course::Check, parse_package};
+    if std::env::var("PODBAG_TEST_NETWORK").as_deref() != Ok("1") {
+        eprintln!("PODBAG_TEST_NETWORK is not 1: skipped");
+        return;
+    }
+    let folder = std::env::var_os("PODBAG_TRAINING_MODULES")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/training"));
+    let only = std::env::var("PODBAG_TRAINING_ONLY").ok();
+    let mut files: Vec<_> = std::fs::read_dir(&folder)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|x| x == "podbag"))
+        .collect();
+    files.sort();
+    let mut failures = Vec::new();
+    let mut ran = 0;
+    for file in files {
+        let Some(course) = parse_package(&std::fs::read_to_string(&file).unwrap())
+            .unwrap()
+            .course()
+        else {
+            continue;
+        };
+        if only
+            .as_deref()
+            .is_some_and(|only| !only.split(',').any(|id| id == course.id))
+        {
+            continue;
+        }
+        ran += 1;
+        let session = Course::start_course(&course);
+        let result = (|| -> Result<(), String> {
+            for _ in 0..=course.steps.len() {
+                let snapshot = session.view("status", None, "");
+                let stage = snapshot["stage"].as_str().unwrap().to_owned();
+                let step = course.steps.iter().find(|s| s.key == stage).unwrap();
+                let id = snapshot["session"].as_str().unwrap().to_owned();
+                let id = Some(id.as_str());
+                let container = |name: &str| id_of(&snapshot, name);
+                match &step.check {
+                    Check::Finish => return Ok(()),
+                    Check::DesktopPorts { name } => {
+                        session.view("ports", id, &container(name));
+                    }
+                    Check::DesktopBrowser { name, .. } => session.open_page(id, &container(name)),
+                    Check::DesktopStop { name } => {
+                        session.view("stop", id, &container(name));
+                    }
+                    Check::DesktopInspectExited { name } => {
+                        session.view("inspect-failed", id, &container(name));
+                    }
+                    Check::DesktopInspectVolume { name } => {
+                        session.view("inspect", id, name);
+                    }
+                    Check::DesktopDeleteVolume { name } => {
+                        session.view("remove", id, name);
+                    }
+                    _ => {
+                        let output = if step.is_docker() {
+                            session.docker(&snapshot)
+                        } else {
+                            session.cli(&snapshot)
+                        };
+                        let after = session.view("status", None, "");
+                        if !output.status.success() || after["stage"] == stage.as_str() {
+                            return Err(format!(
+                                "step {stage}: {}\n--- stdout\n{}--- stderr\n{}",
+                                output.status,
+                                String::from_utf8_lossy(&output.stdout),
+                                String::from_utf8_lossy(&output.stderr)
+                            ));
+                        }
+                    }
+                }
+            }
+            Err("the steps never reached finish".into())
+        })();
+        if let Err(why) = result {
+            failures.push(format!("{}: {why}", course.id));
+        }
+        session.finish();
+    }
+    assert!(ran > 0, "no course modules in {}", folder.display());
+    assert!(failures.is_empty(), "\n{}", failures.join("\n\n"));
 }

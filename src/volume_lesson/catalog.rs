@@ -140,6 +140,9 @@ pub fn sync_from(dir: &Path, url: &str) -> Result<Synced, String> {
                 return Ok(false);
             }
             let package = parse_package(&text).map_err(|e| e.to_string())?;
+            if !usable_here(&package, cfg!(windows)) {
+                return Ok(false);
+            }
             if Module::of(&package).map_err(|e| e.to_string())? != module {
                 return Err("the file is another module".into());
             }
@@ -157,6 +160,12 @@ pub fn sync_from(dir: &Path, url: &str) -> Result<Synced, String> {
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     fs::write(dir.join(SAVED), saved).map_err(|e| e.to_string())?;
     Ok(synced)
+}
+
+/// Whether this computer can do every step of PACKAGE: the Windows practice session runs
+/// podbag alone in WSL, without a Docker CLI.
+pub fn usable_here(package: &super::Package, windows: bool) -> bool {
+    !(windows && package.steps.iter().any(super::course::StepDef::is_docker))
 }
 
 /// The module ids of the last synced catalog, in its order; empty before the first sync.

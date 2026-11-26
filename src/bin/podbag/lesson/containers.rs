@@ -169,6 +169,40 @@ pub fn scoped(root: &Path, cmd: Cmd) -> io::Result<i32> {
 }
 
 pub fn course_command(root: &Path) -> io::Result<i32> {
+    course_step(root, "podbag", std::env::args_os().skip(1).collect())
+}
+
+/// `docker …` in a course's practice shell, sent here by `bin/docker`: the same check as a
+/// podbag step, run with the Docker CLI against the session's engine.
+pub fn docker_step(root: &Path, args: Vec<std::ffi::OsString>) -> io::Result<i32> {
+    course_step(root, "docker", args)
+}
+
+/// The Docker CLI on this computer: the first `docker` in PATH after the practice `bin/`.
+fn docker_command(root: &Path) -> io::Result<Command> {
+    let bin = root.join("bin");
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let docker = std::env::split_paths(&path)
+        .filter(|dir| *dir != bin)
+        .map(|dir| dir.join("docker"))
+        .find(|file| file.is_file())
+        .ok_or_else(|| io::Error::other("Install the Docker CLI to do this step."))?;
+    let mut cmd = Command::new(docker);
+    cmd.current_dir(root)
+        .env(
+            "DOCKER_HOST",
+            format!("unix://{}", lab::socket(root).display()),
+        )
+        .env("DOCKER_CONFIG", root.join("docker"))
+        .env_remove("DOCKER_CONTEXT")
+        .env_remove("DOCKER_TLS_VERIFY")
+        .env_remove("DOCKER_CERT_PATH")
+        .env_remove(volume_lesson::SCOPE);
+    Ok(cmd)
+}
+
+/// Runs the current step's command when ARGS are exactly it, then checks the step.
+fn course_step(root: &Path, program: &str, args: Vec<std::ffi::OsString>) -> io::Result<i32> {
     use volume_lesson::course::{Attempt, Output};
     let _lock = Attempt::lock(root)?;
     let mut attempt = Attempt::read(root)?;
@@ -176,10 +210,11 @@ pub fn course_command(root: &Path) -> io::Result<i32> {
     let line = step
         .command(attempt.port)
         .and_then(|line| shlex::split(&line));
-    let args: Vec<_> = std::env::args_os().skip(1).collect();
     if !line.as_ref().is_some_and(|line| {
-        args.iter()
-            .eq(line.iter().skip(1).map(std::ffi::OsStr::new))
+        line.first().is_some_and(|first| first == program)
+            && args
+                .iter()
+                .eq(line.iter().skip(1).map(std::ffi::OsStr::new))
     }) {
         return Err(io::Error::other(
             "Use the command shown for the current Training step, or type exit.",
@@ -191,7 +226,11 @@ pub fn course_command(root: &Path) -> io::Result<i32> {
             attempt.port
         )));
     }
-    let mut engine = engine_command(root)?;
+    let mut engine = if program == "docker" {
+        docker_command(root)?
+    } else {
+        engine_command(root)?
+    };
     engine.args(args);
     let (status, output) = match step.output() {
         Output::All => {

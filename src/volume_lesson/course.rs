@@ -16,6 +16,15 @@ use std::{
 };
 
 pub const FORMAT: &str = "podbag-course-v1";
+/// v1 with more check kinds, files for the practice directory, and `docker …` steps.
+pub const FORMAT_V2: &str = "podbag-course-v2";
+const MAX_FILES: usize = 8;
+const FILES_LIMIT: usize = 16 * 1024;
+
+/// Both course formats.
+pub fn is_course(format: &str) -> bool {
+    format == FORMAT || format == FORMAT_V2
+}
 pub const ACTIVE: &str = "active-course-session";
 const MAX_STEPS: usize = 40;
 
@@ -57,6 +66,46 @@ pub enum Check {
         text: String,
     },
     Finish,
+    // podbag-course-v2
+    ImageExists {
+        name: String,
+    },
+    ImageAbsent {
+        name: String,
+    },
+    ContainerCreated {
+        name: String,
+    },
+    ContainerStopped {
+        name: String,
+    },
+    ContainerPaused {
+        name: String,
+    },
+    ContainerHealthy {
+        name: String,
+    },
+    ContainerRestarted {
+        name: String,
+        count: u32,
+    },
+    ContainerInNetwork {
+        name: String,
+        network: String,
+    },
+    ContainerNotInNetwork {
+        name: String,
+        network: String,
+    },
+    VolumeAbsent {
+        name: String,
+    },
+    OutputContains {
+        text: String,
+    },
+    FileExists {
+        path: String,
+    },
     DesktopInspectExited {
         name: String,
     },
@@ -91,9 +140,46 @@ impl Check {
         )
     }
 
+    /// The check with `{port}` in its names and texts set to PORT.
+    pub fn with_port(&self, port: u16) -> Check {
+        let text = serde_json::to_string(self).expect("a check is JSON");
+        serde_json::from_str(&text.replace("{port}", &port.to_string())).expect("still a check")
+    }
+
+    /// Kinds that need `FORMAT_V2`.
+    fn is_v2(&self) -> bool {
+        matches!(
+            self,
+            Self::ImageExists { .. }
+                | Self::ImageAbsent { .. }
+                | Self::ContainerCreated { .. }
+                | Self::ContainerStopped { .. }
+                | Self::ContainerPaused { .. }
+                | Self::ContainerHealthy { .. }
+                | Self::ContainerRestarted { .. }
+                | Self::ContainerInNetwork { .. }
+                | Self::ContainerNotInNetwork { .. }
+                | Self::VolumeAbsent { .. }
+                | Self::OutputContains { .. }
+                | Self::FileExists { .. }
+        )
+    }
+
     /// The names and texts the check compares with.
     fn values(&self) -> Vec<&str> {
         match self {
+            Self::ContainerInNetwork { name, network }
+            | Self::ContainerNotInNetwork { name, network } => vec![name, network],
+            Self::OutputContains { text } => vec![text],
+            Self::FileExists { path } => vec![path],
+            Self::ImageExists { name }
+            | Self::ImageAbsent { name }
+            | Self::ContainerCreated { name }
+            | Self::ContainerStopped { name }
+            | Self::ContainerPaused { name }
+            | Self::ContainerHealthy { name }
+            | Self::ContainerRestarted { name, .. }
+            | Self::VolumeAbsent { name } => vec![name],
             Self::VolumesEmpty | Self::ContainersEmpty | Self::Finish => vec![],
             Self::ContainerPublished { name, page } => std::iter::once(name.as_str())
                 .chain(page.as_deref())
@@ -131,6 +217,9 @@ pub struct Course {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
     pub steps: Vec<StepDef>,
+    /// Written into the practice directory when the session starts.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub files: BTreeMap<String, String>,
 }
 
 fn plain(text: &str) -> bool {
@@ -157,6 +246,49 @@ fn shell_safe(command: &str) -> bool {
         }
     }
     quote.is_none()
+}
+
+/// What the practice session keeps in its directory: a module file cannot use these names.
+const SESSION_NAMES: [&str; 10] = [
+    "bin",
+    "run",
+    "data",
+    "config",
+    "ui",
+    "docker",
+    "api.sock",
+    "disk.img",
+    "console.log",
+    "verified",
+];
+
+/// A path for a module file: in the practice directory, not over the session's own files.
+fn file_path(path: &str) -> bool {
+    let first = path.split('/').next().unwrap_or("").to_ascii_lowercase();
+    practice_path(path) && !SESSION_NAMES.contains(&first.as_str())
+}
+
+/// A docker command that talks to the practice engine: no global options before the
+/// command (`-H`, `--context`, `--config` would reach another engine) and no `context`.
+fn practice_docker(command: &str) -> bool {
+    let mut words = command.split_whitespace().skip(1);
+    words
+        .next()
+        .is_some_and(|word| !word.starts_with('-') && word != "context")
+}
+
+/// A relative path in the practice directory: plain names, no `..`.
+fn practice_path(path: &str) -> bool {
+    !path.is_empty()
+        && path.len() <= 200
+        && path.split('/').all(|part| {
+            !part.is_empty()
+                && part != "."
+                && part != ".."
+                && part
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'))
+        })
 }
 
 fn invalid(why: &str) -> io::Error {
@@ -195,6 +327,25 @@ pub fn validate(package: &Package) -> io::Result<()> {
     }) {
         return Err(invalid("guide links must be on https://podbag.dev/"));
     }
+    let v2 = package.format == FORMAT_V2;
+    if !v2 && !package.files.is_empty() {
+        return Err(invalid("files need podbag-course-v2"));
+    }
+    if package.files.len() > MAX_FILES
+        || package.files.values().map(String::len).sum::<usize>() > FILES_LIMIT
+        || !package.files.keys().all(|path| file_path(path))
+        || package.files.values().any(|text| {
+            text.chars()
+                .any(|c| c.is_control() && c != '\n' && c != '\t')
+        })
+    {
+        return Err(invalid(
+            "files are at most 8 plain text files, 16 KiB in all, under the practice directory",
+        ));
+    }
+    if package.port.is_none() && package.files.values().any(|text| text.contains("{port}")) {
+        return Err(invalid("files use {port} without a port"));
+    }
     if package.steps.is_empty() || package.steps.len() > MAX_STEPS {
         return Err(invalid("a course has 1-40 steps"));
     }
@@ -209,6 +360,21 @@ pub fn validate(package: &Package) -> io::Result<()> {
         if !step.names.contains_key("en") || !step.names.values().all(|name| plain(name)) {
             return Err(invalid(&format!("step {} needs an English name", step.key)));
         }
+        if step.check.is_v2() && !v2 {
+            return Err(invalid(&format!(
+                "step {} needs podbag-course-v2 for its check",
+                step.key
+            )));
+        }
+        if matches!(&step.check, Check::FileExists { path } if !practice_path(path)) {
+            return Err(invalid(&format!("step {} checks a path outside", step.key)));
+        }
+        if package.port.is_none() && step.check.values().iter().any(|v| v.contains("{port}")) {
+            return Err(invalid(&format!(
+                "step {} uses {{port}} without a port",
+                step.key
+            )));
+        }
         if !step.check.values().into_iter().all(plain) {
             return Err(invalid(&format!(
                 "step {} has an empty check value",
@@ -222,7 +388,8 @@ pub fn validate(package: &Package) -> io::Result<()> {
             Some(command) => {
                 !step.check.in_desktop()
                     && !finish
-                    && command.starts_with("podbag ")
+                    && (command.starts_with("podbag ")
+                        || (v2 && command.starts_with("docker ") && practice_docker(command)))
                     && plain(command)
                     && shell_safe(command)
                     && command.len() <= 1000
@@ -261,19 +428,27 @@ impl StepDef {
             .map(|command| command.replace("{port}", &port.to_string()))
     }
 
-    /// Steps that publish the attempt's port: a used port changes the command first.
+    /// Steps that publish the attempt's port (`127.0.0.1:{port}:…`): a used port changes
+    /// the command first. Other uses of `{port}` reach what such a step published.
     pub fn publishes_port(&self) -> bool {
         self.command
             .as_deref()
-            .is_some_and(|command| command.contains("{port}"))
+            .is_some_and(|command| command.contains("127.0.0.1:{port}:"))
     }
 
     pub fn output(&self) -> Output {
         match self.check {
             Check::StdoutEquals { .. } => Output::Stdout,
-            Check::OutputHasLine { .. } => Output::All,
+            Check::OutputHasLine { .. } | Check::OutputContains { .. } => Output::All,
             _ => Output::None,
         }
+    }
+
+    /// A step the learner runs with the Docker CLI (`bin/docker` in the practice directory).
+    pub fn is_docker(&self) -> bool {
+        self.command
+            .as_deref()
+            .is_some_and(|command| command.starts_with("docker "))
     }
 
     pub fn is_finish(&self) -> bool {
@@ -285,14 +460,15 @@ impl StepDef {
         let client = containers::client(root);
         let containers = || client.containers().map_err(io::Error::other);
         let text = || std::str::from_utf8(output).unwrap_or("");
-        let verified = match &self.check {
+        let check = self.check.with_port(port);
+        let verified = match &check {
             Check::NetworkExists { name } | Check::NetworkAbsent { name } => {
                 let listed = client
                     .networks()
                     .map_err(io::Error::other)?
                     .iter()
                     .any(|net| &net.name == name);
-                listed == matches!(self.check, Check::NetworkExists { .. })
+                listed == matches!(check, Check::NetworkExists { .. })
             }
             Check::VolumeExists { name } => client
                 .volumes()
@@ -328,6 +504,57 @@ impl StepDef {
             Check::OutputHasLine { text: expected } => {
                 text().lines().any(|line| line.trim() == expected)
             }
+            Check::ImageExists { name } | Check::ImageAbsent { name } => {
+                let found = client
+                    .images()
+                    .map_err(io::Error::other)?
+                    .iter()
+                    .any(|image| image.repo_tags.iter().any(|tag| same_image(tag, name)));
+                found == matches!(check, Check::ImageExists { .. })
+            }
+            Check::ContainerCreated { name }
+            | Check::ContainerStopped { name }
+            | Check::ContainerPaused { name } => {
+                let state = match check {
+                    Check::ContainerCreated { .. } => "created",
+                    Check::ContainerStopped { .. } => "exited",
+                    _ => "paused",
+                };
+                // `kill` and `pause` return before the state changes.
+                poll(Duration::from_secs(10), || {
+                    containers()
+                        .ok()?
+                        .iter()
+                        .any(|row| row.name() == name && row.state == state)
+                        .then_some(())
+                })
+            }
+            Check::ContainerHealthy { name } => poll(Duration::from_secs(30), || {
+                let detail = client.inspect(Kind::Containers, name).ok()?;
+                (detail["State"]["Health"]["Status"] == "healthy").then_some(())
+            }),
+            Check::ContainerRestarted { name, count } => poll(Duration::from_secs(20), || {
+                let detail = client.inspect(Kind::Containers, name).ok()?;
+                (detail["RestartCount"].as_u64()? >= u64::from(*count)).then_some(())
+            }),
+            Check::ContainerInNetwork { name, network }
+            | Check::ContainerNotInNetwork { name, network } => {
+                let detail = client
+                    .inspect(Kind::Containers, name)
+                    .map_err(io::Error::other)?;
+                let attached = detail["NetworkSettings"]["Networks"]
+                    .as_object()
+                    .is_some_and(|networks| networks.contains_key(network));
+                attached == matches!(check, Check::ContainerInNetwork { .. })
+            }
+            Check::VolumeAbsent { name } => client
+                .volumes()
+                .map_err(io::Error::other)?
+                .iter()
+                .all(|vol| &vol.name != name),
+            Check::OutputContains { text: expected } => text().contains(expected.as_str()),
+            // validate() keeps the path inside the practice directory.
+            Check::FileExists { path } => root.join(path).is_file(),
             Check::Finish
             | Check::DesktopInspectExited { .. }
             | Check::DesktopPorts { .. }
@@ -383,6 +610,7 @@ impl Attempt {
             Some(preferred) => available_port(preferred)?,
             None => 0,
         };
+        prepare(root, course, port)?;
         Self {
             module: course.id.clone(),
             index: 0,
@@ -439,6 +667,76 @@ impl Attempt {
         self.save(root)?;
         Ok(true)
     }
+}
+
+/// Asks READY every half second until it answers or WITHIN has gone.
+fn poll(within: Duration, mut ready: impl FnMut() -> Option<()>) -> bool {
+    let deadline = std::time::Instant::now() + within;
+    loop {
+        if ready().is_some() {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+/// An image name as the engine lists it: `busybox` is `docker.io/library/busybox:latest`.
+fn normal_image(name: &str) -> String {
+    let name = name
+        .strip_prefix("docker.io/")
+        .or_else(|| name.strip_prefix("index.docker.io/"))
+        .map(|rest| rest.strip_prefix("library/").unwrap_or(rest))
+        .unwrap_or(name);
+    let last = name.rsplit('/').next().unwrap_or(name);
+    if last.contains(':') || last.contains('@') {
+        name.to_owned()
+    } else {
+        format!("{name}:latest")
+    }
+}
+
+fn same_image(a: &str, b: &str) -> bool {
+    normal_image(a) == normal_image(b)
+}
+
+/// The script that sends `docker …` in the practice shell to `podbag lab docker-step`.
+const DOCKER_WRAPPER: &str = "#!/bin/sh\nexec \"$PODBAG_BIN\" lab docker-step \"$@\"\n";
+
+/// Writes the course's files, and the docker wrapper when a step uses the Docker CLI.
+fn prepare(root: &Path, course: &Course, port: u16) -> io::Result<()> {
+    for (path, text) in &course.files {
+        // Folder by folder, never through a link, and never over a file that is there.
+        let mut folder = root.to_path_buf();
+        let parts: Vec<_> = path.split('/').collect();
+        for part in &parts[..parts.len() - 1] {
+            folder.push(part);
+            match fs::symlink_metadata(&folder) {
+                Ok(meta) if meta.is_dir() => {}
+                Ok(_) => return Err(io::Error::other(format!("{path}: not a folder"))),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => fs::create_dir(&folder)?,
+                Err(e) => return Err(e),
+            }
+        }
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(folder.join(parts[parts.len() - 1]))?;
+        file.write_all(text.replace("{port}", &port.to_string()).as_bytes())?;
+    }
+    if course.steps.iter().any(StepDef::is_docker) {
+        fs::create_dir_all(root.join("bin"))?;
+        let wrapper = root.join("bin/docker");
+        fs::write(&wrapper, DOCKER_WRAPPER)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755))?;
+        }
+    }
+    Ok(())
 }
 
 fn available_port(preferred: u16) -> io::Result<u16> {
@@ -553,7 +851,8 @@ pub fn view(
             .ok_or_else(|| io::Error::other("The practice container was not found."))
     };
     let step = attempt.step()?;
-    match (action, &step.check) {
+    let check = step.check.with_port(attempt.port);
+    match (action, &check) {
         ("status", _) => {}
         ("inspect-failed", Check::DesktopInspectExited { name })
             if row(name)?.id == target && row(name)?.state == "exited" =>
@@ -614,16 +913,17 @@ pub fn view(
         }
     }
     let step = attempt.step()?;
-    let web = match &step.check {
+    let check = step.check.with_port(attempt.port);
+    let web = match &check {
         Check::DesktopPorts { name } | Check::DesktopBrowser { name, .. } => Some(Web {
             container: name.clone(),
             port: attempt.port,
-            ready: matches!(step.check, Check::DesktopBrowser { .. }),
+            ready: matches!(check, Check::DesktopBrowser { .. }),
             url: format!("http://127.0.0.1:{}/", attempt.port),
         }),
         _ => None,
     };
-    let named = |wanted: fn(&Check) -> Option<&String>| wanted(&step.check).cloned();
+    let named = |wanted: fn(&Check) -> Option<&String>| wanted(&check).cloned();
     Ok(Some(Snapshot {
         stop: named(|c| match c {
             Check::DesktopStop { name } => Some(name),
@@ -828,6 +1128,181 @@ mod tests {
         let stored = Attempt::read(session.path()).unwrap();
         assert_eq!(stored.step().unwrap().key, "runWeb");
         assert!(!stored.step().unwrap().is_finish());
+    }
+
+    fn cli_step(command: &str, check: Check) -> StepDef {
+        StepDef {
+            key: "step".into(),
+            names: BTreeMap::from([("en".into(), "A step".into())]),
+            command: Some(command.into()),
+            check,
+        }
+    }
+
+    #[test]
+    fn output_contains_reads_stdout_and_stderr() {
+        let dir = tempfile::tempdir().unwrap();
+        let step = cli_step(
+            "docker ps -a",
+            Check::OutputContains {
+                text: "CONTAINER ID".into(),
+            },
+        );
+        assert_eq!(step.output(), Output::All);
+        assert!(
+            step.verify_cli(dir.path(), 0, b"CONTAINER ID   IMAGE\n")
+                .is_ok()
+        );
+        assert!(step.verify_cli(dir.path(), 0, b"Cannot connect\n").is_err());
+        assert!(step.is_docker());
+        assert!(!cli_step("podbag ps", Check::ContainersEmpty).is_docker());
+    }
+
+    #[test]
+    fn file_exists_looks_in_the_practice_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let step = cli_step(
+            "podbag export app -o out/app.tar",
+            Check::FileExists {
+                path: "out/app.tar".into(),
+            },
+        );
+        assert!(step.verify_cli(dir.path(), 0, b"").is_err());
+        fs::create_dir(dir.path().join("out")).unwrap();
+        fs::write(dir.path().join("out/app.tar"), b"tar").unwrap();
+        assert!(step.verify_cli(dir.path(), 0, b"").is_ok());
+    }
+
+    #[test]
+    fn a_session_writes_its_files_and_the_docker_wrapper() {
+        let mut course = fixture("web-basics");
+        course.files = BTreeMap::from([
+            ("Dockerfile".into(), "FROM busybox:1.37.0\n".into()),
+            ("site/index.html".into(), "Hello\n".into()),
+        ]);
+        let (dir, _) = attempt_at(&course, 0);
+        let root = dir.path();
+        assert_eq!(
+            fs::read_to_string(root.join("Dockerfile")).unwrap(),
+            "FROM busybox:1.37.0\n"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("site/index.html")).unwrap(),
+            "Hello\n"
+        );
+        assert!(
+            !root.join("bin/docker").exists(),
+            "no docker steps, no wrapper"
+        );
+
+        course.steps[0].command = Some("docker ps".into());
+        let (dir, _) = attempt_at(&course, 0);
+        let wrapper = fs::read_to_string(dir.path().join("bin/docker")).unwrap();
+        assert!(wrapper.contains("lab docker-step"), "{wrapper}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(dir.path().join("bin/docker"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o111, 0o111);
+        }
+    }
+
+    #[test]
+    fn image_names_match_with_or_without_the_registry() {
+        assert!(same_image(
+            "busybox:1.37.0",
+            "docker.io/library/busybox:1.37.0"
+        ));
+        assert!(same_image(
+            "docker.io/library/busybox:1.37.0",
+            "busybox:1.37.0"
+        ));
+        assert!(same_image(
+            "127.0.0.1:5000/my/app:1",
+            "127.0.0.1:5000/my/app:1"
+        ));
+        assert!(!same_image("busybox:1.36.0", "busybox:1.37.0"));
+        assert!(!same_image("my/busybox:1.37.0", "busybox:1.37.0"));
+    }
+
+    #[test]
+    fn only_publishing_steps_refresh_the_port() {
+        let check = || Check::ContainersEmpty;
+        assert!(
+            cli_step("podbag run -d -p 127.0.0.1:{port}:5000 registry", check()).publishes_port()
+        );
+        assert!(
+            !cli_step("podbag push 127.0.0.1:{port}/training/busybox:1", check()).publishes_port()
+        );
+        assert!(
+            !cli_step(
+                "podbag tag busybox 127.0.0.1:{port}/training/busybox:1",
+                check()
+            )
+            .publishes_port()
+        );
+    }
+
+    #[test]
+    fn the_port_reaches_check_values_and_files() {
+        let image = Check::ImageExists {
+            name: "127.0.0.1:{port}/training/busybox:1".into(),
+        };
+        assert_eq!(
+            image.with_port(18105),
+            Check::ImageExists {
+                name: "127.0.0.1:18105/training/busybox:1".into()
+            }
+        );
+        let mut course = fixture("web-basics");
+        course.files = BTreeMap::from([(
+            "compose.yaml".into(),
+            "ports: [\"127.0.0.1:{port}:8080\"]\n".into(),
+        )]);
+        let (dir, attempt) = attempt_at(&course, 0);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("compose.yaml")).unwrap(),
+            format!("ports: [\"127.0.0.1:{}:8080\"]\n", attempt.port)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn files_never_replace_what_is_there() {
+        let mut course = fixture("web-basics");
+        course.files = BTreeMap::from([("notes.txt".into(), "from the module\n".into())]);
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir(root.join("run")).unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        fs::write(outside.path(), "keep me").unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.join("notes.txt")).unwrap();
+        assert!(Attempt::start(root, &course).is_err());
+        assert_eq!(fs::read_to_string(outside.path()).unwrap(), "keep me");
+
+        // Nor through a linked folder.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir(root.join("run")).unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(elsewhere.path(), root.join("site")).unwrap();
+        course.files = BTreeMap::from([("site/index.html".into(), "x".into())]);
+        assert!(Attempt::start(root, &course).is_err());
+        assert!(!elsewhere.path().join("index.html").exists());
+    }
+
+    #[test]
+    fn the_practice_socket_matches_the_engine() {
+        let root = Path::new("/p");
+        let socket = containers::socket(root);
+        if cfg!(target_os = "macos") {
+            assert_eq!(socket, root.join("run/docker.sock"));
+        } else {
+            assert_eq!(socket, root.join("api.sock"));
+        }
     }
 
     /// A server that drops the first FAILS connections, then serves the api page.
