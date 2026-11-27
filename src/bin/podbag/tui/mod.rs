@@ -803,6 +803,10 @@ impl Runtime {
         let step = match self.step_report(&effect) {
             Ok(step) => step,
             Err(refused) => {
+                // The pull form said "Pulling …" before this effect; no worker clears it.
+                if matches!(effect, Effect::Pull(_)) {
+                    self.app.busy = None;
+                }
                 self.app.on_msg(Msg::Step(Err(refused)));
                 return;
             }
@@ -1487,6 +1491,40 @@ mod tests {
         assert_eq!(
             rt.app.message.as_ref().unwrap().0,
             "Step done: Remove the container in the CLI"
+        );
+    }
+
+    #[test]
+    fn a_refused_pull_clears_its_busy_text() {
+        // The pull form says "Pulling …" before the effect; a refused pull starts no worker.
+        let engine = FakeEngine::start(small_engine);
+        let mut module: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/training/web-basics.podbag"
+        ))
+        .unwrap();
+        module["format"] = "podbag-course-v2".into();
+        module["steps"].as_array_mut().unwrap().insert(
+            0,
+            serde_json::json!({
+                "key": "pull", "names": {"en": "Pull the image"},
+                "command": "podbag pull busybox:1.37.0",
+                "ui": {"action": "pull", "name": "busybox:1.37.0"},
+                "check": {"kind": "image-exists", "name": "busybox:1.37.0"},
+            }),
+        );
+        let (_dir, mut rt) = training_of(&engine, &module.to_string(), "pull");
+        rt.app.busy = Some("Pulling alpine:latest".into());
+        rt.apply(Effect::Pull("alpine:latest".into()));
+        assert_eq!(
+            rt.app.message,
+            Some(("This step is pull busybox:1.37.0.".into(), true))
+        );
+        assert!(rt.app.busy.is_none(), "{:?}", rt.app.busy);
+        assert!(
+            !engine
+                .requests()
+                .iter()
+                .any(|r| r.starts_with("POST /images/create"))
         );
     }
 
