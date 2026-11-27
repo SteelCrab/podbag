@@ -111,6 +111,7 @@ impl NfsOptions {
             .filter(|s| !s.is_empty())
     }
 
+    #[cfg(unix)]
     pub(crate) fn read_only(&self) -> bool {
         self.parameters()
             .filter(|option| matches!(*option, "ro" | "rw"))
