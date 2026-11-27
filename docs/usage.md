@@ -344,6 +344,26 @@ podbag logout ghcr.io
 - When the registry gives a token for the login (an identity token), podbag keeps the
   token, not the password.
 
+### Registry proxies
+
+Open **Settings → Registry proxies** in Podbag Desktop on Linux or macOS with the local
+Podbag engine selected. The saved choice applies to new engine registry requests,
+including pulls, pushes, search, and registry authentication. The engine reads it from
+`registry-proxy.json` in its configuration directory.
+
+- **Use engine environment** is the default. It uses the engine's proxy environment
+  variables, including `ALL_PROXY`, `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY`.
+- **Connect directly** opens registry connections without a proxy.
+- **Manual proxy** uses an HTTP or HTTPS proxy URL, such as
+  `http://proxy.example.com:3128`. The URL must omit credentials. Enter bypass rules
+  separated by commas. Use exact hosts or IP addresses, `.example.com` or
+  `*.example.com` for subdomains, and `*` for every host.
+
+On macOS this configures the Linux VM's engine. Opening the form can start a stopped VM.
+The proxy address must be reachable from that VM. Inherited mode uses the engine
+environment inside the VM. Docker contexts, container applications, and BuildKit use
+their own proxy settings.
+
 ### Pull and push
 
 ```sh
