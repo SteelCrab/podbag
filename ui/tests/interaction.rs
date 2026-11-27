@@ -21,6 +21,8 @@ use podbag_ui::{
 #[derive(Default)]
 struct Form {
     clicks: Vec<&'static str>,
+    /// Enter on the checkbox (a form would send itself).
+    entered: usize,
     check: bool,
     choice: usize,
     tab: usize,
@@ -67,6 +69,9 @@ impl UiApp for Form {
             true,
         ) {
             self.clicks.push("b");
+        }
+        if ui.entered(CHECK) {
+            self.entered += 1;
         }
         let mut c = self.check;
         checkbox(
@@ -215,6 +220,19 @@ fn enter_and_space_activate_the_focused_widget() {
     h.shift_tab();
     h.press_key(held);
     assert_eq!(h.view().app.clicks, ["a", "b"]);
+}
+
+#[test]
+fn entered_takes_only_enter_on_the_focused_widget() {
+    let mut h = harness(Form::default());
+    h.click_id(CHECK);
+    assert!(h.view().app.check, "a click toggles");
+    assert_eq!(h.view().app.entered, 0);
+    h.press_key(key(NamedKey::Space));
+    assert!(!h.view().app.check, "Space toggles");
+    h.press_key(key(NamedKey::Enter));
+    assert_eq!(h.view().app.entered, 1, "Enter is taken");
+    assert!(!h.view().app.check, "and does not toggle");
 }
 
 #[test]

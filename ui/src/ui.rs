@@ -225,6 +225,8 @@ pub struct Ui<'a, 'b> {
     input: &'a mut Input,
     pub mem: &'a mut Memory,
     clicked: Option<Id>,
+    /// `clicked` came from Enter on the focused widget.
+    entered: bool,
     pressed: Option<Id>,
     consumed: bool,
 }
@@ -246,6 +248,17 @@ impl Ui<'_, '_> {
     /// Pressed and released on `id` (a click), or activated with the keyboard, this frame.
     pub fn clicked(&mut self, id: Id) -> bool {
         if self.clicked == Some(id) {
+            self.clicked = None;
+            self.consumed = true;
+            return true;
+        }
+        false
+    }
+
+    /// Enter (not a click or Space) activated `id` this frame. Like `clicked`, it uses the
+    /// activation up: a form can submit on Enter from a checkbox or a select.
+    pub fn entered(&mut self, id: Id) -> bool {
+        if self.entered && self.clicked == Some(id) {
             self.clicked = None;
             self.consumed = true;
             return true;
@@ -670,8 +683,8 @@ impl<A: UiApp> UiView<A> {
     }
 
     /// Tab, Escape for popups, Enter and Space on the focused widget. Returns the
-    /// widget a key clicked.
-    fn framework_keys(&mut self, p: &mut Paint) -> Option<Id> {
+    /// widget a key clicked, and whether the key was Enter.
+    fn framework_keys(&mut self, p: &mut Paint) -> Option<(Id, bool)> {
         let mem = &mut self.mem;
         let mut clicked = None;
         for (key, used) in self.input.keys.iter_mut().filter(|(_, used)| !*used) {
@@ -694,7 +707,7 @@ impl<A: UiApp> UiView<A> {
                     .get(f)
                     .is_some_and(|x| x.kind == FocusKind::Activate);
                 if activates && mem.focus_prev.in_scope(f) && mem.popup != Some(f) {
-                    clicked = Some(f);
+                    clicked = Some((f, key.is(NamedKey::Enter)));
                     *used = true;
                 }
             }
@@ -785,8 +798,10 @@ impl<A: UiApp> View for UiView<A> {
             _ => None,
         };
         self.mem.focus_moved = false;
-        if let Some(id) = self.framework_keys(p) {
+        let mut entered = false;
+        if let Some((id, enter)) = self.framework_keys(p) {
             clicked = Some(id);
+            entered = enter;
         }
         let had_input = !self.input.is_empty();
         if self.mem.repaint_at.is_some_and(|at| at <= p.now()) {
@@ -803,6 +818,7 @@ impl<A: UiApp> View for UiView<A> {
             input: &mut self.input,
             mem: &mut self.mem,
             clicked,
+            entered,
             pressed: pressed.flatten(),
             consumed: false,
         };

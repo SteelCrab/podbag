@@ -1,7 +1,7 @@
 //! The modal dialogs: confirm, ask (one line of text that runs work while the dialog
 //! stays open), choose (several answers), the Kubernetes object viewer, the star prompt
-//! and the question about image compression; and the dialogs of Migrate and of the
-//! import from Docker, which their views paint. Escape closes them; Tab stays inside
+//! and the question about image compression; and the dialogs of Migrate, of the import
+//! from Docker and the run form, which their views paint. Escape closes them; Tab stays inside
 //! them.
 
 use podbag_desktop_core::Kind;
@@ -91,6 +91,7 @@ pub enum Dialog {
     Compression,
     Migration(Box<crate::views::migrate::MigrationDialog>),
     Import(Box<crate::views::import::ImportDialog>),
+    Run(Box<crate::views::run::RunForm>),
 }
 
 pub const ID: Id = Id(0x6469_616c_6f67);
@@ -142,6 +143,7 @@ impl Dialog {
     pub fn first_focus(&self) -> Id {
         match self {
             Dialog::Ask { .. } => INPUT,
+            Dialog::Run(f) => f.first_focus(),
             _ => CANCEL,
         }
     }
@@ -171,6 +173,12 @@ pub fn paint(d: &mut Desktop, ui: &mut Ui) {
         }
         Dialog::Import(m) => {
             if crate::views::import::paint_dialog(d, ui, m) {
+                outcome = Outcome::Close;
+            }
+            false
+        }
+        Dialog::Run(f) => {
+            if crate::views::run::paint_dialog(d, ui, f) {
                 outcome = Outcome::Close;
             }
             false
@@ -440,6 +448,7 @@ fn finish(d: &mut Desktop, ui: &mut Ui, dlg: Dialog, yes: bool) {
         Dialog::Ask { .. }
         | Dialog::KubeObject { .. }
         | Dialog::Migration(_)
-        | Dialog::Import(_) => {}
+        | Dialog::Import(_)
+        | Dialog::Run(_) => {}
     }
 }

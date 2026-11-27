@@ -244,7 +244,8 @@ fn sidebar_items(d: &mut Desktop, ui: &mut Ui, side: Rect) -> f32 {
     y += 4.;
     views::training::nav(d, ui, inner, &mut y, collapsed);
     y += 4.;
-    // Kubernetes, with its resources below when expanded.
+    // Kubernetes, with its resources below when expanded. The total stays that of the
+    // kinds every cluster has.
     let r = item(&mut y, item_h);
     let counts: Vec<Option<usize>> = KubeKind::ALL
         .iter()
@@ -297,25 +298,26 @@ fn sidebar_items(d: &mut Desktop, ui: &mut Ui, side: Rect) -> f32 {
     if d.kube_expanded {
         let sub_x = if collapsed { 0. } else { 28. };
         let top = y;
-        for (n, (kind, icon)) in [
-            (KubeKind::Pods, Icon::KubePods),
-            (KubeKind::Services, Icon::KubeServices),
-            (KubeKind::Deployments, Icon::KubeDeployments),
-            (KubeKind::Claims, Icon::KubeClaims),
-        ]
-        .into_iter()
-        .enumerate()
-        {
+        // Routes only for an OpenShift context.
+        for &kind in d.kube_kinds() {
+            let icon = match kind {
+                KubeKind::Pods => Icon::KubePods,
+                KubeKind::Services => Icon::KubeServices,
+                KubeKind::Deployments => Icon::KubeDeployments,
+                KubeKind::Claims => Icon::KubeClaims,
+                KubeKind::Routes => Icon::KubeRoutes,
+            };
             let r = item(&mut y, 30.).inset(sub_x, 0., 0., 0.);
             let label = d.t(&format!("kube.{}", kind.key()));
             let current = active && d.kube.kind == kind;
+            let count = d.kube_counts.get(kind.key()).copied();
             if nav_item(
                 ui,
                 r,
                 kube_nav_id(kind),
                 icon,
                 &label,
-                counts[n],
+                count,
                 current,
                 collapsed,
             ) {

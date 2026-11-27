@@ -77,6 +77,10 @@ pub enum Done {
         generation: u64,
         result: Result<BTreeMap<String, usize>, String>,
     },
+    KubeOpenShift {
+        generation: u64,
+        result: Result<bool, String>,
+    },
     /// The result of a page's job, applied to the window (Training, Migrate, …).
     View(Box<dyn FnOnce(&mut crate::app::Desktop) + Send>),
 }
@@ -157,6 +161,18 @@ impl Jobs {
         let session = api.connection().token;
         let result = api.pull(image, location, host);
         api.events().send(Event::PullDone { session, result });
+    }
+
+    /// `Backend::start_run`: `Event::PullProgress` while a missing image is pulled, then
+    /// `Event::RunDone`.
+    pub fn run_container(&self, spec: podbag_desktop_core::RunSpec) {
+        if !self.inline {
+            return self.backend.start_run(spec);
+        }
+        let api = &*self.backend;
+        let session = api.connection().token;
+        let result = api.run_container(&spec);
+        api.events().send(Event::RunDone { session, result });
     }
 
     /// `Backend::start_vm`: `Event::EngineChanged`, then `Event::VmDone`.

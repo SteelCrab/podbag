@@ -5,12 +5,13 @@ use crate::engine::{self, EngineStatus, List};
 use crate::events::{Event, Events};
 use crate::images::{self, Search};
 use crate::lock;
+use crate::run;
 use crate::shell;
 use crate::tray::EngineState;
 use crate::vm::{self, VmResources, VmStatus};
 use podbag::client::{
     Choice, Client, Closer, ContainerSummary, Features, ImageSummary, Kind, NetworkSummary, Pruned,
-    Target, VolumeSummary,
+    RunSpec, Target, VolumeSummary,
 };
 use serde_json::Value;
 use std::path::PathBuf;
@@ -204,6 +205,23 @@ impl Session {
             },
         )?;
         Ok(reference)
+    }
+
+    /// Create and start a container; a missing image is pulled first, each line of it a
+    /// [`Event::PullProgress`]. Gives the container's id.
+    pub fn run_container(&self, spec: &RunSpec) -> Result<String, String> {
+        run::run(
+            &self.client,
+            &self.target,
+            spec,
+            podbag::client::registry_auth,
+            |line| {
+                self.emit(Event::PullProgress {
+                    session: self.id,
+                    line: line.to_string(),
+                });
+            },
+        )
     }
 
     /// Search Docker Hub through the engine.

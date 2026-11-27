@@ -1,5 +1,6 @@
-//! The four engine lists: the toolbar with the search box and the tools, the table
-//! with each row's actions, and the empty states.
+//! The four engine lists: the toolbar with the search box and the tools (Run container
+//! on Containers), the table with each row's actions (Run on an image), and the empty
+//! states.
 
 use podbag_desktop_core::Kind;
 use podbag_ui::focus::FocusKind;
@@ -14,7 +15,7 @@ use crate::app::{Desktop, Tab};
 use crate::fmt;
 use crate::icons::Icon;
 use crate::lists::{kind_index, ports_text, short_id};
-use crate::views::{TOOLBAR_H, badge, centered, chip, code_line, compression, title_bar};
+use crate::views::{TOOLBAR_H, badge, centered, chip, code_line, compression, run, title_bar};
 
 pub fn paint(d: &mut Desktop, ui: &mut Ui, r: Rect, kind: Kind) {
     let mut r = r;
@@ -44,13 +45,14 @@ fn toolbar(d: &mut Desktop, ui: &mut Ui, bar: Rect, kind: Kind) {
     let prune_w = button::width(ui, &prune_label, Some(Icon::Prune.id()), false);
     let prune = row.right_h(prune_w, 32.);
     let primary = match kind {
-        Kind::Images => Some((d.t("action.pull"), Some(Icon::Pull.id()), "pull")),
-        Kind::Volumes => Some((d.t("volume.create"), None, "create-volume")),
-        _ => None,
+        Kind::Containers => Some((d.t("run.button"), Some(Icon::Start.id()), run::OPEN)),
+        Kind::Images => Some((d.t("action.pull"), Some(Icon::Pull.id()), Id::of("pull"))),
+        Kind::Volumes => Some((d.t("volume.create"), None, Id::of("create-volume"))),
+        Kind::Networks => None,
     };
-    let primary = primary.map(|(label, icon, key)| {
+    let primary = primary.map(|(label, icon, id)| {
         let w = button::width(ui, &label, icon, false);
-        (row.right_h(w, 32.), label, icon, key)
+        (row.right_h(w, 32.), label, icon, id)
     });
     // Import from Docker. `button::button` takes glyphs only, so the import glyph stands
     // in for Docker's logo.
@@ -99,18 +101,11 @@ fn toolbar(d: &mut Desktop, ui: &mut Ui, bar: Rect, kind: Kind) {
     {
         crate::views::import::open(d);
     }
-    if let Some((rect, label, icon, key)) = primary
-        && button::button(
-            ui,
-            Id::of(key),
-            rect,
-            &label,
-            icon,
-            ButtonKind::Primary,
-            true,
-        )
+    if let Some((rect, label, icon, id)) = primary
+        && button::button(ui, id, rect, &label, icon, ButtonKind::Primary, true)
     {
         match kind {
+            Kind::Containers => run::open(d, ""),
             Kind::Images => d.open_pull(),
             _ => d.ask_create_volume(),
         }
@@ -169,7 +164,7 @@ fn columns(kind: Kind, window_w: f32, compressed: bool) -> Vec<(&'static str, Wi
             v.extend([
                 ("col.size", Width::Px(if compressed { 190. } else { 110. })),
                 ("col.created", Width::Px(150.)),
-                ("col.actions", Width::Px(56.)),
+                ("col.actions", Width::Px(76.)),
             ]);
             v
         }
@@ -447,6 +442,9 @@ pub fn row_actions(
             buttons.push(("shell", Icon::Shell, IconKind::Plain, "action.shell"));
         }
     }
+    if kind == Kind::Images {
+        buttons.push(("run", Icon::Start, IconKind::Accent, "action.run"));
+    }
     let builtin = kind == Kind::Networks && d.lists.networks[i].builtin();
     if !builtin {
         buttons.push(("remove", Icon::Remove, IconKind::Danger, "action.remove"));
@@ -469,6 +467,7 @@ pub fn row_actions(
     let Some(action) = chosen else { return };
     match action {
         "logs" => d.open_detail(kind, &id, Tab::Logs),
+        "run" => run::open(d, &name),
         "shell" => d.open_shell(&id),
         "rename" => d.ask_rename(i),
         "remove" => d.ask_remove(kind, i),
@@ -492,6 +491,25 @@ fn empty_state(d: &mut Desktop, ui: &mut Ui, r: Rect, kind: Kind) {
     let h2 = ui.style().with_size(18.).weight(700);
     let title = d.t(&format!("empty.{}.title", kind.segment()));
     y += centered(ui, cx, y, max_w, &title, h2, t.ink) + 8.;
+    // No containers: Run container is the first step; the terminal is another way.
+    if kind == Kind::Containers {
+        let text = d.t("empty.containers.run");
+        y += centered(ui, cx, y, max_w, &text, ui.style(), t.ink2) + 10.;
+        let label = d.t("run.button");
+        let w = button::width(ui, &label, Some(Icon::Start.id()), false);
+        if button::button(
+            ui,
+            run::EMPTY_OPEN,
+            Rect::new(cx - w / 2., y, w, 32.),
+            &label,
+            Some(Icon::Start.id()),
+            ButtonKind::Primary,
+            true,
+        ) {
+            run::open(d, "");
+        }
+        y += 32. + 14.;
+    }
     let podbag = d.is_podbag();
     let docker = d.engine.as_ref().is_some_and(|e| e.engine == "docker");
     if podbag || docker || kind == Kind::Images {

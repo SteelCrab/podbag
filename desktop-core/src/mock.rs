@@ -6,7 +6,9 @@
 //! [`Event::Changed`]; a pull streams progress and adds the image (a name with
 //! `notfound` fails); a followed log gets a line a second; `engine(true)` starts a
 //! stopped VM; `vm_set` keeps the values; image compression, like the engine, starts a
-//! stopped VM.
+//! stopped VM. `run_container` pulls an image it lacks (three lines of progress; a name
+//! with `notfound` fails), then adds a running container. Of the Kubernetes contexts `dev`, `staging` and `ocp`, only
+//! `ocp` is OpenShift: it alone has Routes.
 
 use crate::backend::Api;
 use crate::compression::{Compression, Mode};
@@ -15,9 +17,10 @@ use crate::dockercmd::DockerCommand;
 use crate::engine::{EngineStatus, List, engine_kind};
 use crate::events::{Event, Events};
 use crate::images::{self, ImportImage, LocationInfo, Search};
-use crate::kubernetes::{Resource, Snapshot};
+use crate::kubernetes::{Resource, Snapshot, route_url};
 use crate::lock;
 use crate::migration::Request;
+use crate::run::pull_reference;
 use crate::settings::Settings;
 use crate::strings;
 use crate::terminal_cli;
@@ -26,7 +29,7 @@ use crate::updates::{Check, Updates, Upgraded};
 use crate::vm::{VmDisk, VmLimits, VmSettings, VmStatus, VmValues};
 use podbag::client::{
     Choice, CompressionSizes, ContainerSummary, Features, ImageSummary, Ipam, IpamConfig, Kind,
-    NetworkSummary, Port, Pruned, SearchResult, VolumeSummary,
+    NetworkSummary, Port, Pruned, RunSpec, SearchResult, VolumeSummary,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -82,6 +85,34 @@ pub struct Options {
     /// version without it.
     pub compression_prompt: bool,
     pub compression: CompressionOptions,
+    /// Where the mock notes the calls a test checks.
+    pub calls: Calls,
+}
+
+/// The calls a test checks, in order: `run_container <spec as JSON>`,
+/// `kube_list <kind> <context>` and `kube_open_route <context> <namespace> <name>
+/// <address>`. Clones share the list.
+#[derive(Clone, Debug, Default)]
+pub struct Calls(Arc<Mutex<Vec<String>>>);
+
+impl Calls {
+    fn push(&self, call: String) {
+        lock(&self.0).push(call);
+    }
+
+    /// The calls so far.
+    pub fn all(&self) -> Vec<String> {
+        lock(&self.0).clone()
+    }
+
+    /// The calls whose name is `name`, without the name.
+    pub fn of(&self, name: &str) -> Vec<String> {
+        let prefix = format!("{name} ");
+        self.all()
+            .iter()
+            .filter_map(|c| c.strip_prefix(&prefix).map(str::to_string))
+            .collect()
+    }
 }
 
 /// The engine's image compression, and the cases the UI must handle.
@@ -436,6 +467,11 @@ fn sample_kube() -> Value {
         ],
         "services": [
             { "metadata": { "name": "frontend", "namespace": "default" }, "spec": { "type": "NodePort", "clusterIP": "10.43.0.80", "ports": [{ "port": 80, "nodePort": 30080, "protocol": "TCP" }] } }
+        ],
+        "routes": [
+            { "kind": "Route", "metadata": { "name": "shop", "namespace": "default" }, "spec": { "host": "shop.apps.ocp.example.com", "path": "/cart", "to": { "kind": "Service", "name": "frontend" }, "tls": { "termination": "edge" } } },
+            { "kind": "Route", "metadata": { "name": "api", "namespace": "default" }, "spec": { "host": "api.apps.ocp.example.com", "to": { "kind": "Service", "name": "api" } } },
+            { "kind": "Route", "metadata": { "name": "docs", "namespace": "staging" }, "spec": { "host": "docs-staging.apps.ocp.example.com", "to": { "kind": "Service", "name": "docs" }, "tls": { "termination": "passthrough" } } }
         ]
     })
 }
@@ -750,8 +786,21 @@ impl Mock {
         s.vm.overridden_by = overridden;
     }
 
-    fn kube_items(&self, kind: Resource, all: bool) -> Vec<Value> {
-        self.st().kube[kind.key()]
+    /// The objects of `kind` in `context` (None or empty: `dev`). Only `ocp` has Routes;
+    /// other clusters refuse the type, as kubectl does.
+    fn kube_items(
+        &self,
+        kind: Resource,
+        all: bool,
+        context: Option<&str>,
+    ) -> Result<Vec<Value>, String> {
+        if matches!(kind, Resource::Routes) && !mock_openshift(context) {
+            return Err(
+                "kubectl (exit status: 1): error: the server doesn't have a resource type \"routes\""
+                    .into(),
+            );
+        }
+        Ok(self.st().kube[kind.key()]
             .as_array()
             .map(|a| {
                 a.iter()
@@ -759,8 +808,13 @@ impl Mock {
                     .cloned()
                     .collect()
             })
-            .unwrap_or_default()
+            .unwrap_or_default())
     }
+}
+
+/// Only the `ocp` context is OpenShift.
+fn mock_openshift(context: Option<&str>) -> bool {
+    context == Some("ocp")
 }
 
 fn no_such(what: &str, id: &str) -> String {
@@ -989,6 +1043,100 @@ impl Api for Mock {
         }
         self.changed(Kind::Volumes);
         Ok(())
+    }
+
+    /// Like the engine: a missing image is pulled first (three lines, 60 ms apart), then
+    /// the container runs.
+    fn run_container(&self, spec: &RunSpec) -> Result<String, String> {
+        self.opts.calls.push(format!(
+            "run_container {}",
+            serde_json::to_string(spec).unwrap_or_default()
+        ));
+        spec.check()?;
+        let image = spec.image.trim().to_string();
+        let name = spec.name.trim();
+        let tag = pull_reference(&image);
+        let have = |s: &State| {
+            s.images
+                .iter()
+                .any(|i| i.repo_tags.contains(&image) || i.repo_tags.contains(&tag))
+        };
+        if !have(&self.st()) {
+            let session = self.token();
+            for (i, line) in [
+                format!("Pulling from library/{image}"),
+                "Download complete".into(),
+                "Pull complete".into(),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                if i == 1 && image.contains("notfound") {
+                    return Err(format!("{tag}: manifest unknown"));
+                }
+                self.events.send(Event::PullProgress { session, line });
+                self.wait(60);
+            }
+            let mut s = self.st();
+            let n = s.images.len();
+            s.images.push(ImageSummary {
+                id: format!("sha256:4e3d2c1b{n:08x}"),
+                repo_tags: vec![tag.clone()],
+                created: self.now,
+                size: 9_000_000,
+                containers: 0,
+                podbag_compression: None,
+            });
+            drop(s);
+            self.changed(Kind::Images);
+        }
+        let id = {
+            let mut s = self.st();
+            let id = format!("f00dfeed{:08}", s.containers.len());
+            if let Some(i) = s
+                .images
+                .iter_mut()
+                .find(|i| i.repo_tags.contains(&image) || i.repo_tags.contains(&tag))
+            {
+                i.containers += 1;
+            }
+            let ports = spec
+                .ports
+                .iter()
+                .map(|p| Port {
+                    ip: "0.0.0.0".into(),
+                    private_port: p.container,
+                    public_port: p.host,
+                    kind: if p.protocol.is_empty() {
+                        "tcp".into()
+                    } else {
+                        p.protocol.clone()
+                    },
+                })
+                .collect();
+            let created = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(self.now, |d| d.as_secs() as i64);
+            s.containers.insert(
+                0,
+                ContainerSummary {
+                    id: id.clone(),
+                    names: vec![format!(
+                        "/{}",
+                        if name.is_empty() { "eager_tesla" } else { name }
+                    )],
+                    image,
+                    command: spec.command.join(" "),
+                    created,
+                    state: "running".into(),
+                    status: "Up 1 second".into(),
+                    ports,
+                },
+            );
+            id
+        };
+        self.changed(Kind::Containers);
+        Ok(id)
     }
 
     fn open_shell(&self, _id: &str) -> Result<(), String> {
@@ -1302,28 +1450,31 @@ impl Api for Mock {
     fn refresh(&self, _asked: bool) {}
 
     fn kube_contexts(&self) -> Result<Vec<String>, String> {
-        Ok(vec!["dev".into(), "staging".into()])
+        Ok(vec!["dev".into(), "staging".into(), "ocp".into()])
     }
 
+    /// Routes count only on OpenShift (`ocp`).
     fn kube_counts(
         &self,
-        _context: Option<&str>,
+        context: Option<&str>,
         all_namespaces: bool,
     ) -> Result<BTreeMap<String, usize>, String> {
-        Ok([
+        let mut kinds = vec![
             Resource::Pods,
             Resource::Services,
             Resource::Deployments,
             Resource::Claims,
-        ]
-        .into_iter()
-        .map(|kind| {
-            (
-                kind.key().to_string(),
-                self.kube_items(kind, all_namespaces).len(),
-            )
-        })
-        .collect())
+        ];
+        if mock_openshift(context) {
+            kinds.push(Resource::Routes);
+        }
+        kinds
+            .into_iter()
+            .map(|kind| {
+                let n = self.kube_items(kind, all_namespaces, context)?.len();
+                Ok((kind.key().to_string(), n))
+            })
+            .collect()
     }
 
     fn kube_list(
@@ -1332,11 +1483,37 @@ impl Api for Mock {
         all_namespaces: bool,
         context: Option<&str>,
     ) -> Result<Snapshot, String> {
+        let context = context.filter(|c| !c.is_empty()).unwrap_or("dev");
+        self.opts
+            .calls
+            .push(format!("kube_list {} {context}", kind.key()));
         Ok(Snapshot {
-            context: context.filter(|c| !c.is_empty()).unwrap_or("dev").into(),
+            context: context.into(),
             namespace: "default".into(),
-            items: self.kube_items(kind, all_namespaces),
+            items: self.kube_items(kind, all_namespaces, Some(context))?,
         })
+    }
+
+    fn kube_openshift(&self, context: Option<&str>) -> Result<bool, String> {
+        Ok(mock_openshift(context))
+    }
+
+    /// Nothing opens: the address goes to [`Options::calls`].
+    fn kube_open_route(&self, context: &str, namespace: &str, name: &str) -> Result<(), String> {
+        let routes = self.kube_items(Resource::Routes, true, Some(context))?;
+        let route = routes
+            .iter()
+            .find(|r| r["metadata"]["namespace"] == namespace && r["metadata"]["name"] == name)
+            .ok_or_else(|| {
+                format!(
+                    "kubectl (exit status: 1): Error from server (NotFound): routes.route.openshift.io \"{name}\" not found"
+                )
+            })?;
+        let url = route_url(route)?;
+        self.opts.calls.push(format!(
+            "kube_open_route {context} {namespace} {name} {url}"
+        ));
+        Ok(())
     }
 
     fn migration_sources(&self) -> Vec<String> {
@@ -1578,6 +1755,105 @@ mod tests {
             serde_json::to_value(&vm).unwrap()["inUse"]["memoryMiB"],
             4096
         );
+    }
+
+    #[test]
+    fn a_run_pulls_a_missing_image_then_adds_a_running_container() {
+        let calls = Calls::default();
+        let (b, rx) = backend(Options {
+            calls: calls.clone(),
+            ..Options::default()
+        });
+        let images = b.images().unwrap().len();
+        let spec = RunSpec {
+            image: "busybox:1.37".into(),
+            command: vec!["sleep".into(), "60".into()],
+            ports: vec![podbag::client::PublishedPort {
+                host: 0,
+                container: 53,
+                protocol: "udp".into(),
+            }],
+            ..RunSpec::default()
+        };
+        let id = b.run_container(&spec).unwrap();
+        let lines: Vec<String> = rx
+            .try_iter()
+            .filter_map(|e| match e {
+                Event::PullProgress { line, .. } => Some(line),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                "Pulling from library/busybox:1.37",
+                "Download complete",
+                "Pull complete"
+            ]
+        );
+        assert_eq!(b.images().unwrap().len(), images + 1);
+        let c = &b.containers().unwrap()[0];
+        assert_eq!((c.id.as_str(), c.name()), (id.as_str(), "eager_tesla"));
+        assert_eq!(
+            (c.state.as_str(), c.command.as_str()),
+            ("running", "sleep 60")
+        );
+        assert_eq!(c.ports_text(), "53/udp");
+        assert_eq!(calls.of("run_container").len(), 1);
+        // An image it has runs at once; a missing image and a bad spec fail.
+        let web = RunSpec {
+            image: "nginx:alpine".into(),
+            name: "site".into(),
+            ..RunSpec::default()
+        };
+        b.run_container(&web).unwrap();
+        assert!(
+            !rx.try_iter()
+                .any(|e| matches!(e, Event::PullProgress { .. }))
+        );
+        let missing = RunSpec {
+            image: "notfound/app".into(),
+            ..RunSpec::default()
+        };
+        let e = b.run_container(&missing).unwrap_err();
+        assert_eq!(e, "notfound/app:latest: manifest unknown");
+        let bad = RunSpec {
+            env: vec!["NOPE".into()],
+            ..RunSpec::default()
+        };
+        assert!(b.run_container(&bad).is_err());
+    }
+
+    #[test]
+    fn only_the_openshift_context_has_routes() {
+        let calls = Calls::default();
+        let (b, _) = backend(Options {
+            calls: calls.clone(),
+            ..Options::default()
+        });
+        assert_eq!(b.kube_contexts().unwrap(), ["dev", "staging", "ocp"]);
+        assert!(!b.kube_openshift(None).unwrap());
+        assert!(b.kube_openshift(Some("ocp")).unwrap());
+        assert!(
+            !b.kube_counts(Some("dev"), false)
+                .unwrap()
+                .contains_key("routes")
+        );
+        let counts = b.kube_counts(Some("ocp"), false).unwrap();
+        assert_eq!(counts["routes"], 2);
+        assert_eq!(b.kube_counts(Some("ocp"), true).unwrap()["routes"], 3);
+        let e = b.kube_list(Resource::Routes, false, Some("dev")).err();
+        assert!(e.unwrap().contains("doesn't have a resource type"));
+        let routes = b.kube_list(Resource::Routes, false, Some("ocp")).unwrap();
+        assert_eq!(routes.items[0]["spec"]["host"], "shop.apps.ocp.example.com");
+        b.kube_open_route("ocp", "default", "shop").unwrap();
+        assert!(b.kube_open_route("ocp", "default", "docs").is_err());
+        assert!(b.kube_open_route("dev", "default", "shop").is_err());
+        assert_eq!(
+            calls.of("kube_open_route"),
+            ["ocp default shop https://shop.apps.ocp.example.com/cart"]
+        );
+        assert_eq!(calls.of("kube_list"), ["routes dev", "routes ocp"]);
     }
 
     #[test]

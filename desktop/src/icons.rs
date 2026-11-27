@@ -53,6 +53,8 @@ pub enum Icon {
     Check,
     Import,
     Compress,
+    KubeRoutes,
+    Plus,
 }
 
 impl Icon {
@@ -221,6 +223,11 @@ pub fn install() {
             rect(3., 4., 18., 5., 1.),
             p("M5 9v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V9M10 13h4"),
         ]),
+        sp(&[
+            circle(5., 19., 2.5),
+            p("M7.5 19H10a3 3 0 0 0 3-3V8a3 3 0 0 1 3-3h5m-3-3 3 3-3 3"),
+        ]),
+        s("M12 5v14M5 12h14"),
     ];
     register(icons);
 }

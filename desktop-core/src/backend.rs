@@ -23,7 +23,7 @@ use crate::tray::TrayModel;
 use crate::updates::{self, Check, Updates, Upgraded};
 use crate::vm::{VmSettings, VmStatus};
 use podbag::client::{
-    ContainerSummary, Features, ImageSummary, Kind, NetworkSummary, Pruned, VolumeSummary,
+    ContainerSummary, Features, ImageSummary, Kind, NetworkSummary, Pruned, RunSpec, VolumeSummary,
 };
 use podbag::dashboard::lab;
 use serde_json::Value;
@@ -71,6 +71,10 @@ pub trait Api: Send + Sync {
     fn prune(&self, kind: Kind) -> Result<Pruned, String>;
     fn rename(&self, id: &str, name: &str) -> Result<(), String>;
     fn create_volume(&self, name: &str) -> Result<(), String>;
+    /// Create and start a container from the run form; gives its id. A missing image is
+    /// pulled first, with [`Event::PullProgress`] for each line. Slow: see
+    /// [`Backend::start_run`].
+    fn run_container(&self, spec: &RunSpec) -> Result<String, String>;
     /// A terminal window with a shell in the container; the error is the command to run
     /// by hand.
     fn open_shell(&self, id: &str) -> Result<(), String>;
@@ -138,6 +142,10 @@ pub trait Api: Send + Sync {
         all_namespaces: bool,
         context: Option<&str>,
     ) -> Result<Snapshot, String>;
+    /// Whether the context serves OpenShift Routes (only then is there a Routes list).
+    fn kube_openshift(&self, context: Option<&str>) -> Result<bool, String>;
+    /// Open a Route's address (from the cluster, not from the UI) in the browser.
+    fn kube_open_route(&self, context: &str, namespace: &str, name: &str) -> Result<(), String>;
 
     // Migration.
     fn migration_sources(&self) -> Vec<String>;
@@ -273,6 +281,10 @@ impl Api for Desktop {
         self.current().create_volume(name)
     }
 
+    fn run_container(&self, spec: &RunSpec) -> Result<String, String> {
+        self.current().run_container(spec)
+    }
+
     fn open_shell(&self, id: &str) -> Result<(), String> {
         self.current().open_shell(id)
     }
@@ -378,6 +390,14 @@ impl Api for Desktop {
         context: Option<&str>,
     ) -> Result<Snapshot, String> {
         kubernetes::list(kind, all_namespaces, context.map(str::to_string))
+    }
+
+    fn kube_openshift(&self, context: Option<&str>) -> Result<bool, String> {
+        kubernetes::openshift(context)
+    }
+
+    fn kube_open_route(&self, context: &str, namespace: &str, name: &str) -> Result<(), String> {
+        kubernetes::open_route(context, namespace, name)
     }
 
     fn migration_sources(&self) -> Vec<String> {
@@ -573,6 +593,16 @@ impl Backend {
             let session = api.connection().token;
             let result = api.pull(&image, location.as_deref(), host.as_deref());
             api.events().send(Event::PullDone { session, result });
+        });
+    }
+
+    /// [`Api::run_container`] in the background: [`Event::PullProgress`] while a missing
+    /// image is pulled, then [`Event::RunDone`].
+    pub fn start_run(&self, spec: RunSpec) {
+        self.spawn(move |api| {
+            let session = api.connection().token;
+            let result = api.run_container(&spec);
+            api.events().send(Event::RunDone { session, result });
         });
     }
 

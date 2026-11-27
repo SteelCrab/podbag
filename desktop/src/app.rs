@@ -114,14 +114,26 @@ pub enum KubeKind {
     Services,
     Deployments,
     Claims,
+    /// OpenShift only.
+    Routes,
 }
 
 impl KubeKind {
+    /// The kinds every cluster has (and migration copies); the sidebar's total counts
+    /// these.
     pub const ALL: [KubeKind; 4] = [
         KubeKind::Pods,
         KubeKind::Services,
         KubeKind::Deployments,
         KubeKind::Claims,
+    ];
+    /// The kinds of an OpenShift cluster.
+    pub const OPENSHIFT: [KubeKind; 5] = [
+        KubeKind::Pods,
+        KubeKind::Services,
+        KubeKind::Deployments,
+        KubeKind::Claims,
+        KubeKind::Routes,
     ];
 
     pub fn key(self) -> &'static str {
@@ -130,6 +142,7 @@ impl KubeKind {
             KubeKind::Services => "services",
             KubeKind::Deployments => "deployments",
             KubeKind::Claims => "claims",
+            KubeKind::Routes => "routes",
         }
     }
 
@@ -139,6 +152,7 @@ impl KubeKind {
             KubeKind::Services => Resource::Services,
             KubeKind::Deployments => Resource::Deployments,
             KubeKind::Claims => Resource::Claims,
+            KubeKind::Routes => Resource::Routes,
         }
     }
 }
@@ -312,6 +326,7 @@ pub struct Desktop {
     pub update: views::updates::UpdateState,
     pub notices: views::notices::Notices,
     pub compression: views::compression::CompressionState,
+    pub run: views::run::RunState,
 }
 
 fn input(id: Id, placeholder: &str) -> TextInput {
@@ -417,11 +432,13 @@ impl Desktop {
             update: views::updates::UpdateState::default(),
             notices: views::notices::Notices::default(),
             compression: views::compression::CompressionState::default(),
+            run: views::run::RunState::default(),
             api,
             settings,
         };
         d.load_updates();
         d.refresh_kube_counts();
+        d.refresh_kube_openshift();
         views::training::start(&mut d);
         views::entered(&mut d);
         d.remember();
@@ -614,6 +631,7 @@ impl Desktop {
                 self.load_extras();
             }
         }
+        views::run::lists_loaded(self);
     }
 
     // ---- actions ----
@@ -959,14 +977,73 @@ impl Desktop {
         });
     }
 
-    /// The list of the chosen resource.
-    pub fn kube_load(&mut self) {
+    /// Whether the context serves Routes: only then do the Routes tab and sidebar item
+    /// show.
+    pub fn refresh_kube_openshift(&mut self) {
+        self.kube.openshift_generation += 1;
+        let generation = self.kube.openshift_generation;
+        let context = self.kube.context.clone();
+        self.jobs.run(move |api| Done::KubeOpenShift {
+            generation,
+            result: api.kube_openshift(context.as_deref()),
+        });
+    }
+
+    /// The kinds the page offers.
+    pub fn kube_kinds(&self) -> &'static [KubeKind] {
+        if self.kube.openshift {
+            &KubeKind::OPENSHIFT
+        } else {
+            &KubeKind::ALL
+        }
+    }
+
+    fn kube_openshift_done(&mut self, openshift: bool) {
+        self.kube.openshift = openshift;
+        let waiting = std::mem::take(&mut self.kube.load_after_openshift);
+        if self.kube.kind != KubeKind::Routes {
+            return;
+        }
+        if !openshift {
+            // Off OpenShift, the Routes page falls back to Pods.
+            if self.page == Page::Kubernetes {
+                self.go_kube(KubeKind::Pods);
+            } else {
+                self.kube.kind = KubeKind::Pods;
+            }
+        } else if waiting {
+            self.kube_load();
+        }
+    }
+
+    /// Use another cluster context (None: the current one).
+    pub fn set_kube_context(&mut self, context: Option<String>) {
+        self.kube.context = context;
+        self.refresh_kube_counts();
+        self.refresh_kube_openshift();
+        if self.kube.kind == KubeKind::Routes {
+            // A plain cluster has no Routes: its answer switches to Pods, which loads
+            // them. Until it comes, nothing loads.
+            self.kube_clear();
+            self.kube.load_after_openshift = true;
+        } else {
+            self.kube_load();
+        }
+    }
+
+    /// Empty the list; a load still running is dropped.
+    fn kube_clear(&mut self) {
         self.kube.generation += 1;
         self.kube.loading = true;
         self.kube.items.clear();
         self.kube.error = None;
         self.kube.shown_context.clear();
         self.kube.table.set_offset(0.);
+    }
+
+    /// The list of the chosen resource.
+    pub fn kube_load(&mut self) {
+        self.kube_clear();
         let generation = self.kube.generation;
         let (kind, all, context) = (
             self.kube.kind.resource(),
@@ -982,6 +1059,7 @@ impl Desktop {
     /// The counts, the contexts and the list.
     pub fn kube_reload(&mut self) {
         self.refresh_kube_counts();
+        self.refresh_kube_openshift();
         self.jobs.run(|api| Done::KubeContexts(api.kube_contexts()));
         self.kube_load();
     }
@@ -1152,6 +1230,11 @@ impl Desktop {
         let fresh = self.page != e.page;
         self.page = e.page;
         if let Some(kind) = e.kube {
+            let kind = if self.kube_kinds().contains(&kind) {
+                kind
+            } else {
+                KubeKind::Pods
+            };
             self.kube_expanded = true;
             if kind != self.kube.kind || fresh {
                 self.kube.kind = kind;
@@ -1311,10 +1394,12 @@ impl Desktop {
                 }
             }
             Event::PullProgress { line, .. } => {
+                views::run::progress(self, &line);
                 if let Some(p) = &mut self.pull {
                     p.progress(line);
                 }
             }
+            Event::RunDone { result, .. } => views::run::finished(self, result),
             Event::PullDone { result, .. } => {
                 if let Ok(name) = &result {
                     let text = self.tv("done.pull", &[("name", name)]);
@@ -1530,6 +1615,12 @@ impl Desktop {
                     self.kube_counts = counts;
                 }
             }
+            Done::KubeOpenShift { generation, result } => {
+                // An unreachable cluster shows the plain kinds.
+                if generation == self.kube.openshift_generation {
+                    self.kube_openshift_done(result.unwrap_or(false));
+                }
+            }
             Done::View(apply) => apply(self),
         }
     }
@@ -1680,7 +1771,7 @@ impl Desktop {
 
     // ---- preview commands ----
 
-    /// `nav <page>`, `kube <kind>`, `detail <kind> <n> [tab]`, `theme <t>`, `lang <l>`,
+    /// `nav <page>`, `kube <kind>`, `kube-context [name]`, `detail <kind> <n> [tab]`, `theme <t>`, `lang <l>`,
     /// `section <key>`, `pull [text]`, `remove <kind> <n>`, `rename <n>`, `quit`.
     pub fn command(&mut self, line: &str) {
         let mut words = line.split_whitespace();
@@ -1699,9 +1790,12 @@ impl Desktop {
                 }
             }
             Some("kube") => {
-                if let Some(k) = KubeKind::ALL.into_iter().find(|k| Some(k.key()) == a) {
+                if let Some(&k) = self.kube_kinds().iter().find(|k| Some(k.key()) == a) {
                     self.go_kube(k);
                 }
+            }
+            Some("kube-context") => {
+                self.set_kube_context(a.map(str::to_string));
             }
             Some("detail") => {
                 if let Some(kind) = kind(a)

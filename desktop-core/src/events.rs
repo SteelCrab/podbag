@@ -41,6 +41,11 @@ pub enum Event {
         session: u64,
         result: Result<String, String>,
     },
+    /// The end of `Backend::start_run`: the new container's id, or the error.
+    RunDone {
+        session: u64,
+        result: Result<String, String>,
+    },
     /// The end of `Backend::start_engine`.
     Engine { session: u64, status: EngineStatus },
     /// The end of `Backend::start_vm`.
@@ -68,6 +73,7 @@ impl Event {
             | Event::EngineChanged { session, .. }
             | Event::VmStatus { session, .. }
             | Event::PullDone { session, .. }
+            | Event::RunDone { session, .. }
             | Event::Engine { session, .. }
             | Event::VmDone { session, .. } => Some(*session),
             _ => None,

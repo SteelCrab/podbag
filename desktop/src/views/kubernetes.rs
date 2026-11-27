@@ -1,6 +1,8 @@
-//! The Kubernetes page: resource tabs, the all-namespaces toggle, the
-//! cluster context, and a table of the chosen resource. A row opens its JSON.
+//! The Kubernetes page: resource tabs (Routes only on OpenShift), the all-namespaces
+//! toggle, the cluster context, and a table of the chosen resource. A row opens its
+//! JSON; a Route's host opens its address in the browser.
 
+use podbag_desktop_core::kubernetes::route_url;
 use podbag_ui::focus::FocusKind;
 use podbag_ui::ui::Ui;
 use podbag_ui::widgets::button::{self, IconKind};
@@ -11,12 +13,13 @@ use podbag_ui::widgets::select::{Item, select};
 use podbag_ui::widgets::table::{Column, Width, table};
 use podbag_ui::widgets::tabs::tabs;
 use podbag_ui::widgets::text_field::text_field;
-use podbag_ui::{Color, Id, Rect, TextInput, TextStyle, VirtualList};
+use podbag_ui::{Color, CursorIcon, Id, Rect, TextInput, TextStyle, VirtualList};
 use serde_json::Value;
 
 use crate::app::{Desktop, KubeKind, pretty};
 use crate::dialogs::Dialog;
 use crate::icons::Icon;
+use crate::views::blocks::spawn;
 use crate::views::{TOOLBAR_H, centered, title_bar};
 
 pub const SEARCH: Id = Id(0x006b_7562_6501);
@@ -38,6 +41,11 @@ pub struct KubeState {
     /// Results of older loads are dropped.
     pub generation: u64,
     pub table: VirtualList,
+    /// The context serves OpenShift Routes.
+    pub openshift: bool,
+    pub openshift_generation: u64,
+    /// Load the list when the OpenShift answer comes (the context changed on Routes).
+    pub load_after_openshift: bool,
 }
 
 impl KubeState {
@@ -60,6 +68,9 @@ impl KubeState {
             loading: false,
             generation: 0,
             table: VirtualList::new(44., 40.),
+            openshift: false,
+            openshift_generation: 0,
+            load_after_openshift: false,
         }
     }
 }
@@ -71,6 +82,7 @@ fn columns(kind: KubeKind) -> Vec<&'static str> {
         KubeKind::Services => &["kube.type", "kube.address", "col.ports"],
         KubeKind::Deployments => &["kube.ready", "col.image"],
         KubeKind::Claims => &["kube.phase", "kube.capacity", "kube.storageClass"],
+        KubeKind::Routes => &["kube.host", "kube.path", "kube.service", "kube.tls"],
     });
     v
 }
@@ -127,6 +139,14 @@ pub fn cells(kind: KubeKind, item: &Value) -> Vec<String> {
                 s(&status["phase"]),
                 s(&status["capacity"]["storage"]),
                 s(&spec["storageClassName"]),
+            ]);
+        }
+        KubeKind::Routes => {
+            out.extend([
+                s(&spec["host"]),
+                s(&spec["path"]),
+                s(&spec["to"]["name"]),
+                s(&spec["tls"]["termination"]),
             ]);
         }
         KubeKind::Services => {
@@ -195,7 +215,7 @@ pub fn paint(d: &mut Desktop, ui: &mut Ui, r: Rect) {
     // The resource tabs and the all-namespaces toggle.
     let tab_bar = r.cut_top(44.);
     ui.p.border_bottom(tab_bar, t.line);
-    let kinds = KubeKind::ALL;
+    let kinds = d.kube_kinds();
     let labels: Vec<String> = kinds
         .iter()
         .map(|k| d.t(&format!("kube.{}", k.key())))
@@ -256,13 +276,8 @@ pub fn paint(d: &mut Desktop, ui: &mut Ui, r: Rect) {
         sel,
         true,
     ) {
-        d.kube.context = if i == 0 {
-            None
-        } else {
-            Some(names[i - 1].clone())
-        };
-        d.refresh_kube_counts();
-        d.kube_load();
+        let context = (i > 0).then(|| names[i - 1].clone());
+        d.set_kube_context(context);
     }
     // The scope line.
     r.cut_top(10.);
@@ -356,6 +371,16 @@ pub fn paint(d: &mut Desktop, ui: &mut Ui, r: Rect) {
             },
         })
         .collect();
+    // A Route's host is a link to its address.
+    let links: Vec<Option<String>> = item_ix
+        .iter()
+        .map(|&i| {
+            (kind == KubeKind::Routes)
+                .then(|| route_link(&d.kube.items[i]))
+                .flatten()
+        })
+        .collect();
+    let mut open_route = None;
     let base = ui.style();
     let mut table_state = std::mem::replace(&mut d.kube.table, VirtualList::new(44., 40.));
     let clicked = table(
@@ -368,7 +393,13 @@ pub fn paint(d: &mut Desktop, ui: &mut Ui, r: Rect) {
         |ui, row, col, cell| {
             let v = &rows[row][col];
             let text = if v.is_empty() { "—" } else { v.as_str() };
-            if col == 0 {
+            if col == 2
+                && let Some(url) = &links[row]
+            {
+                if link(ui, route_link_id(row), cell, text, url, base) {
+                    open_route = Some(row);
+                }
+            } else if col == 0 {
                 let style = base.weight(600);
                 ui.label(cell, text, style, t.ink);
                 let w = ui.p.layout(text, style, None).width.min(cell.w);
@@ -384,7 +415,23 @@ pub fn paint(d: &mut Desktop, ui: &mut Ui, r: Rect) {
         },
     );
     d.kube.table = table_state;
-    if let Some(row) = clicked {
+    if let Some(row) = open_route {
+        let item = &d.kube.items[item_ix[row]];
+        let (namespace, name) = (
+            s(&item["metadata"]["namespace"]),
+            s(&item["metadata"]["name"]),
+        );
+        let context = d.kube.shown_context.clone();
+        spawn(
+            d,
+            move |api| api.kube_open_route(&context, &namespace, &name),
+            |d, result| {
+                if let Err(e) = result {
+                    d.toasts.push(e, true);
+                }
+            },
+        );
+    } else if let Some(row) = clicked {
         let item = &d.kube.items[item_ix[row]];
         let title = format!(
             "{} / {}",
@@ -401,6 +448,33 @@ pub fn paint(d: &mut Desktop, ui: &mut Ui, r: Rect) {
             lines,
         });
     }
+}
+
+/// The id of the host link in a Routes row.
+pub fn route_link_id(row: usize) -> Id {
+    TABLE.with(("route", row))
+}
+
+/// The address a Route publishes (https with TLS settings), if it has a valid host.
+pub fn route_link(item: &Value) -> Option<String> {
+    route_url(item).ok()
+}
+
+/// Text in the accent color, underlined under the pointer, with the address as its
+/// tooltip. The app opens the address it reads from the cluster, not this one. True when
+/// clicked.
+fn link(ui: &mut Ui, id: Id, cell: Rect, text: &str, url: &str, style: TextStyle) -> bool {
+    let t = ui.theme;
+    let layout = ui.p.label(cell, text, style, t.accent_text);
+    let w = layout.width.min(cell.w);
+    let r = cell.center_v(style.line_height).with_w(w);
+    if ui.hovered(id) {
+        ui.p.fill(Rect::new(r.x, r.bottom() - 1., w, 1.), t.accent_text);
+    }
+    ui.p.hitbox(r, id, CursorIcon::Pointer);
+    ui.focusable(id, FocusKind::Activate, r, 4.);
+    ui.tooltip(id, r, url);
+    ui.clicked(id)
 }
 
 #[cfg(test)]
@@ -436,5 +510,33 @@ mod tests {
                 "80:30080/TCP, 53/UDP"
             ]
         );
+        let route = json!({
+            "metadata": {"name": "shop", "namespace": "default"},
+            "spec": {"host": "shop.apps.ocp.example.com", "path": "/cart",
+                     "to": {"kind": "Service", "name": "frontend"}, "tls": {"termination": "edge"}}
+        });
+        assert_eq!(
+            cells(KubeKind::Routes, &route),
+            [
+                "shop",
+                "default",
+                "shop.apps.ocp.example.com",
+                "/cart",
+                "frontend",
+                "edge"
+            ]
+        );
+        assert_eq!(
+            route_link(&route).as_deref(),
+            Some("https://shop.apps.ocp.example.com/cart")
+        );
+        let plain = json!({"metadata": {"name": "api", "namespace": "default"},
+            "spec": {"host": "api.apps.ocp.example.com", "to": {"name": "api"}}});
+        assert_eq!(cells(KubeKind::Routes, &plain)[3..], ["", "api", ""]);
+        assert_eq!(
+            route_link(&plain).as_deref(),
+            Some("http://api.apps.ocp.example.com")
+        );
+        assert_eq!(route_link(&json!({"spec": {}})), None);
     }
 }

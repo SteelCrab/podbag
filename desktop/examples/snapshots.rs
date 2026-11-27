@@ -22,8 +22,8 @@ struct Shot {
     commands: &'static [&'static str],
 }
 
-/// The pages and dialogs of Training, Migrate, updates, login, import and the notices
-/// (`views-<name>-<lang>-<theme>.png`).
+/// The pages and dialogs of Training, Migrate, updates, login, import, the notices, the
+/// run form and OpenShift Routes (`views-<name>-<lang>-<theme>.png`).
 const VIEW_SHOTS: &[(&str, &[&str], f32)] = &[
     ("migrate", &["nav migrate"], 1200.),
     ("migrate-kube", &["nav migrate", "migrate kube"], 1200.),
@@ -146,6 +146,15 @@ const VIEW_SHOTS: &[(&str, &[&str], f32)] = &[
     ("import", &["nav images", "import"], 1200.),
     ("notice", &["nav containers", "notice cli"], 1200.),
     ("star", &["nav migrate", "star"], 1200.),
+    ("run-form", &["nav containers", "run"], 1200.),
+    ("run-filled", &["run-fill"], 1200.),
+    ("run-image-row", &["nav images"], 1200.),
+    ("run-from-image", &["nav images", "run alpine:3.22"], 1200.),
+    (
+        "routes",
+        &["nav kubernetes", "kube-context ocp", "kube routes"],
+        1200.,
+    ),
     ("narrow", &["nav containers"], 700.),
 ];
 

@@ -12,6 +12,7 @@ pub mod notices;
 pub mod practice;
 pub mod pull;
 pub mod resources;
+pub mod run;
 pub mod settings;
 pub mod training;
 pub mod updates;
@@ -78,7 +79,8 @@ pub fn next_due(d: &Desktop) -> Option<std::time::Instant> {
 /// `training refresh` (a sync),
 /// `lab start|advance <id>` (the mock's terminal), `labs <action>` (the JSON lab),
 /// `migrate engine|kube [kind]`, `migration <n>` (its dialog), `check updates`,
-/// `upgrade`, `login <location>`, `import`, `notice cli|update`, `star`.
+/// `upgrade`, `login <location>`, `import`, `run [image]` (the run form), `run-fill` (the
+/// form filled in, with its options open), `notice cli|update`, `star`.
 pub fn command(d: &mut Desktop, line: &str) {
     let words: Vec<&str> = line.split_whitespace().collect();
     match words.as_slice() {
@@ -138,6 +140,9 @@ pub fn command(d: &mut Desktop, line: &str) {
         ["check", "updates"] => updates::load(d, podbag_desktop_core::updates::Check::Now),
         ["upgrade"] => updates::run_upgrade(d),
         ["import"] => import::open(d),
+        ["run"] => run::open(d, ""),
+        ["run", image] => run::open(d, image),
+        ["run-fill"] => run::fill(d),
         ["login", location] => {
             d.open_pull();
             if let Some(p) = &mut d.pull {

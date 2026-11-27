@@ -20,6 +20,7 @@ pub mod migration;
 pub mod mock;
 #[cfg(feature = "mock")]
 mod mock_training;
+pub mod run;
 pub mod session;
 pub mod settings;
 pub mod shell;
@@ -43,7 +44,7 @@ pub use tray::{EngineState, TrayModel};
 /// The engine's types, as the API gives them.
 pub use podbag::client::{
     CompressionSizes, ContainerSummary, Features, ImageSummary, Kind, NetworkSummary, Port, Pruned,
-    SearchResult, VolumeSummary,
+    PublishedPort, RESTART_POLICIES, RunSpec, SearchResult, VolumeMount, VolumeSummary,
 };
 pub use podbag::dashboard::lab;
 
