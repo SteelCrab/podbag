@@ -190,6 +190,9 @@
   // (another dialog is open when the window first asks for the VM's state).
   const compression = { mode: params.get("compression") === "idle" ? "idle" : "off", after: Number(params.get("after") ?? 604800) };
   const practiceModules = new Map();
+  const demoModel = { name: "smollm2:135m", size: 92_078_644, loaded: true };
+  const models = view === "models-report" ? [{ ...demoModel }] : [];
+  let modelRunner = view === "models-report";
   const commands = {
     "plugin:autostart|is_enabled": () => launchAtLogin,
     "plugin:autostart|enable": () => { launchAtLogin = true; },
@@ -210,6 +213,25 @@
       }
     },
     create_volume: ({ name }) => { volumes.push({ Name: name, Driver: "local" }); },
+    models: ({ request }) => {
+      (window.previewModelActions ||= []).push(request);
+      const { action, model } = request;
+      if (action === "start") {
+        if (params.get("ollama") === "missing") throw { kind: "missing" };
+        modelRunner = true;
+      } else if (action === "stop") {
+        modelRunner = false;
+        models.forEach((item) => { item.loaded = false; });
+      } else if (action === "pull") {
+        if (!models.some((item) => item.name === model)) models.push({ ...demoModel, name: model, loaded: false });
+      } else if (action === "run" || action === "unload") {
+        const selected = models.find((item) => item.name === model);
+        if (!selected) throw { kind: "notInstalled" };
+        selected.loaded = action === "run";
+        if (selected.loaded) return { response: "Blue." };
+      }
+      return { running: modelRunner, version: modelRunner ? "0.40.17" : "", models: modelRunner ? models.map((item) => ({ ...item })) : [] };
+    },
     engine: () => engine,
     list: ({ kind }) => lists[kind],
     kube_list: ({ kind, allNamespaces, context }) => ({
@@ -383,6 +405,19 @@
       images: () => app.go("images"),
       volumes: () => app.go("volumes"),
       networks: () => app.go("networks"),
+      models: () => app.go("models"),
+      "models-report": async () => {
+        await app.go("models");
+        const until = performance.now() + 1500;
+        let prompt;
+        while (!(prompt = document.getElementById("model-prompt")) && performance.now() < until) {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        if (!prompt) return;
+        prompt.value = "Name the color of a clear daytime sky.";
+        prompt.dispatchEvent(new Event("input"));
+        prompt.form.requestSubmit();
+      },
       settings: () => app.go("settings"),
       tutorials: () => app.go("tutorials"),
       "settings-vm": () => app.openSettingsSection("vm-settings"),

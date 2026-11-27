@@ -445,6 +445,33 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 .analysis-table .mono { white-space: nowrap; }
 .analysis-badge { font-weight: 600; }
 .analysis-results > .button { margin-top: 8px; }
+/* ---- local models ---- */
+.model-runner { display: grid; align-content: start; gap: 14px; padding-block-start: 18px; }
+.model-runner > p { margin: 0; }
+.model-runtime, .model-inline { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.model-runner-state { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
+.model-runner-state::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+.model-runner-state.running::before { background: var(--green); }
+.model-card { padding: 16px; min-width: 0; }
+.model-card .panel-title { margin: 0 0 14px; }
+.model-pull, .model-prompt { display: grid; gap: 7px; }
+.model-pull label, .model-prompt label { font-size: 13px; font-weight: 600; }
+.model-inline input { flex: 1; min-width: 160px; }
+.model-prompt select { width: max-content; min-width: 0; }
+.model-prompt textarea {
+  width: 100%; min-height: 75px; resize: vertical; padding: 8px 10px;
+  border: 1px solid var(--line); border-radius: 7px; color: var(--ink); background: var(--surface); font: inherit;
+}
+.models-table { margin-top: 12px; overflow-x: auto; }
+.models-table table { border-collapse: collapse; width: 100%; font-size: 13px; }
+.models-table th, .models-table td { padding: 8px 10px; text-align: start; border-bottom: 1px solid var(--line); }
+.models-table th { color: var(--ink-2); font-weight: 600; }
+.models-table td:last-child { text-align: end; }
+.models-table tr:last-child td { border-bottom: 0; }
+.model-answer { margin-top: 14px; }
+.model-answer h3 { margin: 0 0 8px; font-size: 13px; }
+.model-answer pre { margin: 0; padding: 10px; border: 1px solid var(--line); border-radius: 7px; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
+.model-error p { margin: 0; overflow-wrap: anywhere; }
 
 /* ---- settings ---- */
 .settings { display: grid; gap: 18px; align-content: start; padding-block-start: 20px; }

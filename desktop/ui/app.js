@@ -654,7 +654,8 @@ function renderNav() {
     "aria-label": label, title: count == null ? label : `${label} (${count})`,
   }, icon(symbol), h("span", { class: "label", text: label }), h("span", { class: "count", text: count ?? "" })));
   updateMigrationNav();
-  nav.replaceChildren(...KINDS.map(k => item(k, t(`nav.${k}`), S.loaded && !S.listErrors[k] ? S.lists[k].length : null)));
+  nav.replaceChildren(...KINDS.map(k => item(k, t(`nav.${k}`), S.loaded && !S.listErrors[k] ? S.lists[k].length : null)),
+    item("models", t("nav.models"), null, "vm"));
   updateTrainingNav();
   document.getElementById("nav-practice").replaceChildren(
     ...(S.practiceContainers ? [item("lab-containers", t("training.containers"), null, "containers")] : []),
@@ -1009,6 +1010,12 @@ function renderMain(fresh) {
     const rendered = fresh || shownView !== S.view ? renderTutorials(main) : undefined;
     shownView = S.view;
     return rendered;
+  }
+  if (S.view === "models") {
+    const redraw = fresh || shownView !== S.view;
+    shownView = S.view;
+    if (redraw) openModelRunner(main);
+    return;
   }
   if (S.view === "settings") {
     const redraw = fresh || shownView !== "settings";
@@ -2227,7 +2234,7 @@ function extraKeys() {}
 async function init() {
   S.connection = await API.connection();
   const view = sessionStorage.getItem("engine-view");
-  if ([...KINDS, "settings", "kubernetes", "migration"].includes(view)) S.view = view;
+  if ([...KINDS, "settings", "kubernetes", "migration", "models"].includes(view)) S.view = view;
   const kind = sessionStorage.getItem("engine-resource");
   if (KUBE_KINDS.includes(kind)) S.kubeKind = kind;
   S.kubeExpanded = S.view === "kubernetes";
