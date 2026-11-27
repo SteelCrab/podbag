@@ -22,7 +22,7 @@ async function until(read, message) {
 
 async function preview(id) {
   const frame = document.getElementById(id);
-  await until(() => frame.contentDocument?.documentElement.dataset.ready === "1" &&
+  await until(() => frame.contentDocument?.documentElement?.dataset.ready === "1" &&
     frame.contentDocument.querySelector("#vm-storage-settings"), `Load the ${id} VM storage settings`);
   const doc = frame.contentDocument, win = frame.contentWindow;
   const by = name => doc.getElementById(name);
