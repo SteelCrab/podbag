@@ -1286,6 +1286,8 @@ podbag lab remove container-network
 
 - Settings opens from the sidebar, from the tray (Settings…), with `⌘,` on macOS and
   with `Ctrl+,` elsewhere.
+- Search settings by name or a related term. Use the arrow keys to move through results,
+  Enter to open a setting, and Escape to clear the search.
 - Virtual machine (podbag on macOS): the state, the settings in use, uptime and disk use.
   Start, Stop and Restart. CPUs, memory and the idle power-off time (0 = never). Apply
   saves them with `podbag vm set`.

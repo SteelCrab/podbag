@@ -1412,6 +1412,11 @@ async function openSettingsSection(id) {
   if (S.view !== "settings" || !document.getElementById(id)) await go("settings");
   const section = document.getElementById(id);
   if (!section || section.hidden) return;
+  const search = document.getElementById("settings-search");
+  if (search?.value) {
+    search.value = "";
+    search.dispatchEvent(new Event("input"));
+  }
   section.open = true;
   section.querySelector("summary").focus({ preventScroll: true });
   section.scrollIntoView({ block: "start" });
@@ -1424,7 +1429,7 @@ function settingTitle(key, symbol) {
 
 function settingDetails(id, key, symbol, value, ...body) {
   return h("details", { id },
-    h("summary", {}, settingTitle(key, symbol), h("span", { class: "setting-value", text: value }), icon("forward")),
+    h("summary", searchableSetting(`settings.${key}`, `settings.search.terms.${key}`), settingTitle(key, symbol), h("span", { class: "setting-value", text: value }), icon("forward")),
     h("div", { class: "setting-body" }, body));
 }
 
@@ -1453,7 +1458,7 @@ function startupSettings() {
     readRegistration();
   });
   readRegistration();
-  return h("div", { class: "preference" },
+  return h("div", { class: "preference", ...searchableSetting("settings.launchAtLogin", "settings.startup settings.search.terms.startup") },
     settingTitle("startup", "power"),
     h("label", { class: "check" }, toggle, t("settings.launchAtLogin")), status);
 }
@@ -1481,26 +1486,32 @@ async function renderSettings(main) {
       h("span", {}, icon(symbol), t(`settings.${value}`))));
   const e = S.engine || {};
   const openSections = Array.from(main.querySelectorAll(".settings details[open]"), (el) => el.id);
+  const oldSearch = main.querySelector("#settings-search");
+  const searchFocused = document.activeElement === oldSearch;
+  const sections = h("div", { class: "settings-sections" },
+    h("div", { class: "card" },
+      startupSettings(),
+      h("div", { class: "preference", ...searchableSetting("settings.language", "settings.search.terms.language") },
+        h("label", { for: "language" }, settingTitle("language", "globe")), lang),
+      h("div", { class: "preference", ...searchableSetting("settings.theme", "settings.light settings.dark settings.search.terms.theme") },
+        h("span", { id: "theme-label" }, settingTitle("theme", "appearance")),
+        h("div", { class: "segments themes", role: "radiogroup", "aria-labelledby": "theme-label" }, themes))),
+    h("div", { class: "card" },
+      settingDetails("engine-settings", "engine", "engine", e.engineName,
+        h("div", { class: "setting-row" }, h("span", { class: "secondary-text", text: t("settings.engine") }), engineChoice()),
+        h("p", { class: "hint", text: t("settings.engineNote") }),
+        h("dl", { class: "fields" },
+          field(t("settings.socket"), e.endpoint, "mono"), field(t("settings.version"), e.version)),
+        dockerSettings(),
+        compressionSetting()),
+      settingDetails("vm-settings", "vm", "vm"),
+      settingDetails("updates", "updates", "update"),
+      settingDetails("terminal-command", "terminalCommand", "shell"),
+      settingDetails("about-settings", "about", "inspect", null, h("p", { text: t("settings.aboutText") }))));
   put(main,
     h("header", { class: "toolbar" }, h("h1", { text: t("settings.title") })),
-    h("div", { class: "content settings" },
-      h("div", { class: "card" },
-        startupSettings(),
-        h("div", { class: "preference" }, h("label", { for: "language" }, settingTitle("language", "globe")), lang),
-        h("div", { class: "preference" }, h("span", { id: "theme-label" }, settingTitle("theme", "appearance")),
-          h("div", { class: "segments themes", role: "radiogroup", "aria-labelledby": "theme-label" }, themes))),
-      h("div", { class: "card" },
-        settingDetails("engine-settings", "engine", "engine", e.engineName,
-          h("div", { class: "setting-row" }, h("span", { class: "secondary-text", text: t("settings.engine") }), engineChoice()),
-          h("p", { class: "hint", text: t("settings.engineNote") }),
-          h("dl", { class: "fields" },
-            field(t("settings.socket"), e.endpoint, "mono"), field(t("settings.version"), e.version)),
-          dockerSettings(),
-          compressionSetting()),
-        settingDetails("vm-settings", "vm", "vm"),
-        settingDetails("updates", "updates", "update"),
-        settingDetails("terminal-command", "terminalCommand", "shell"),
-        settingDetails("about-settings", "about", "inspect", null, h("p", { text: t("settings.aboutText") })))));
+    h("div", { class: "content settings" }, settingsSearch(sections, oldSearch?.value), sections));
+  if (searchFocused) main.querySelector("#settings-search").focus();
   renderVmSettings(true);
   renderUpdates();
   renderTerminalCommand();
@@ -1584,23 +1595,25 @@ const ENV_FIELD = { PODBAG_VM_CPUS: "cpus", PODBAG_VM_MEMORY: "memory", PODBAG_V
 function vmForm(vm) {
   const l = vm.limits || {};
   const over = new Map((vm.overriddenBy || []).map((name) => [ENV_FIELD[name], name]));
-  const input = (id, label, props, hint) => {
+  const input = (id, key, props, hint) => {
+    const label = t(`settings.${key}`);
     const value = h("input", { id, type: "number", inputmode: "decimal", required: true, ...props });
     const slider = id === "vm-idle" ? null : h("input", { type: "range", "aria-label": label, ...props });
     value.oninput = () => { vmFormDirty = true; if (slider) slider.value = value.value; };
     if (slider) slider.oninput = () => { vmFormDirty = true; value.value = slider.value; };
     const variable = over.get(id.slice(3));
-    return h("div", { class: "form-field" }, h("label", { for: id, text: label }), value, slider,
+    return h("div", { class: "form-field", ...searchableSetting(`settings.${key}`, `settings.search.terms.${key}`) },
+      h("label", { for: id, text: label }), value, slider,
       h("span", { class: "hint", text: hint }),
       variable ? h("span", { class: "hint warn", text: t("settings.vmOverridden", { name: variable }) }) : null);
   };
   const form = h("form", { class: "vm-form", novalidate: true, onsubmit: (e) => { e.preventDefault(); applyVm(form); } },
     h("div", { class: "form-grid" },
-      input("vm-cpus", t("settings.cpus"), { min: l.cpusMin || 1, max: l.cpusMax || 64, step: 1 },
+      input("vm-cpus", "cpus", { min: l.cpusMin || 1, max: l.cpusMax || 64, step: 1 },
         t("settings.limits", { min: l.cpusMin || 1, max: l.cpusMax || "?" })),
-      input("vm-memory", t("settings.memory"), { min: (l.memoryMinMiB || 1024) / 1024, max: (l.memoryMaxMiB || 65536) / 1024, step: 0.25 },
+      input("vm-memory", "memory", { min: (l.memoryMinMiB || 1024) / 1024, max: (l.memoryMaxMiB || 65536) / 1024, step: 0.25 },
         t("settings.limits", { min: mib(l.memoryMinMiB || 1024), max: mib(l.memoryMaxMiB) })),
-      input("vm-idle", t("settings.idle"), { min: 0, max: 1440, step: 1 }, t("settings.idleHint"))),
+      input("vm-idle", "idle", { min: 0, max: 1440, step: 1 }, t("settings.idleHint"))),
     h("p", { class: "hint vm-pending", text: t("settings.vmPending"), hidden: !vm.pending }),
     h("p", { class: "error-text vm-error", "aria-live": "polite" }),
     h("div", { class: "buttons-row" }, h("button", { type: "submit", class: "button primary", text: t("settings.apply") })));
@@ -1840,7 +1853,7 @@ function compressionSetting() {
     // A new switch comes back when its own read (readCompressionSwitch) is done.
     if (shown === toggle) shown.disabled = false;
   });
-  return h("div", { class: "compression-setting" },
+  return h("div", { class: "compression-setting", ...searchableSetting("compression.label", "settings.search.terms.compression") },
     h("div", { class: "compression-text" },
       h("label", { for: "compression-switch", class: "compression-label" }, icon("compress"), t("compression.label")),
       hint,
@@ -2004,6 +2017,7 @@ function renderTerminalCommand() {
     action = h("p", { class: "error-text", text: t(`cli.problem.${c.problem}`) });
   } else if (c.state === "missing") {
     const install = button("shell", t("cli.install"), () => installTerminalCommand(install, status), "primary");
+    install.dataset.settingSearch = "cli.install";
     action = [h("p", { class: "hint", text: terminalCommandWhere(c) }), h("div", { class: "buttons-row" }, install), status];
   }
   put(section.querySelector(".setting-body"),
@@ -2041,8 +2055,10 @@ function renderUpdates() {
       : u.newer ? t("update.available", { version: u.latest })
         : u.latest ? t("update.upToDate") : "";
   const check = button("refresh", t("update.check"), () => loadUpdates("now"));
+  check.dataset.settingSearch = "update.check";
   check.disabled = checking || upgrading;
   const install = button("update", upgrading ? t("update.installing") : t("update.install"), runUpgrade, "primary");
+  install.dataset.settingSearch = "update.install";
   install.disabled = !u.newer || checking || upgrading;
   const shown = u.installer ? u.app : u.engine;
   section.querySelector(".setting-value").textContent = u.newer && u.latest ? t("status.available", { version: u.latest }) : shown || "";
