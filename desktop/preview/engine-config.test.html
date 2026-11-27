@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Desktop engine configuration editor</title>
+<iframe id="local" src="preview.html?view=settings&amp;lang=en" width="900" height="650" title="Local Podbag settings"></iframe>
+<iframe id="external" src="preview.html?view=settings&amp;lang=en&amp;engine=docker" width="900" height="650" title="External engine settings"></iframe>
+<pre id="result">Running</pre>
+<script>
+"use strict";
+const result = document.getElementById("result");
+
+async function until(match) {
+  for (let i = 0; i < 150; i++) {
+    const value = match();
+    if (value) return value;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  throw new Error("Timed out waiting for the configuration editor");
+}
+
+function check(value, message) {
+  if (!value) throw new Error(message);
+}
+
+async function test() {
+  const local = document.getElementById("local");
+  const external = document.getElementById("external");
+  await until(() => local.contentDocument?.documentElement?.dataset.ready === "1"
+    && external.contentDocument?.documentElement?.dataset.ready === "1");
+  check(!external.contentDocument.getElementById("edit-engine-configuration"), "Hide the editor on an external engine");
+  const win = local.contentWindow;
+  const doc = local.contentDocument;
+  const find = selector => doc.querySelector(selector);
+  const search = await until(() => find("#settings-search"));
+  search.value = "config.toml";
+  search.dispatchEvent(new win.Event("input"));
+  find('[data-setting-result="engineConfig.title"]').click();
+  check(doc.activeElement.id === "edit-engine-configuration", "Focus the searchable editor shortcut");
+  doc.activeElement.click();
+
+  const editor = await until(() => find("#engine-config-text:not(:disabled)"));
+  const original = editor.value;
+  check(original.startsWith("# Local engine settings"), "Open the original file with its comment");
+  check(find("#engine-config-editor .mono").textContent.endsWith("/config.toml"), "Show the engine file path");
+  const validate = [...find("#engine-config-editor .buttons").children].find(button => button.textContent === "Validate");
+  const status = find(".engine-config-status");
+  const save = find('#engine-config-editor button[type="submit"]');
+  check(save.disabled, "Keep Apply disabled until the file changes");
+
+  function enter(text) {
+    editor.value = text;
+    editor.dispatchEvent(new win.Event("input"));
+  }
+
+  enter("invalid_setting = false");
+  validate.click();
+  await until(() => status.textContent.includes("unknown setting"));
+  check(status.classList.contains("error-text"), "Show validation errors without discarding the text");
+
+  const changed = original + "keeper = false\n";
+  enter(changed);
+  validate.click();
+  await until(() => status.textContent === "The configuration is valid.");
+  save.click();
+  await until(() => status.textContent === "Configuration saved.");
+  check(editor.value === changed && save.disabled, "Save the edited text and update the baseline");
+
+  const invoke = win.__TAURI__.core.invoke;
+  const updated = changed + "\n# my next change\n";
+  win.__TAURI__.core.invoke = (command, args) => {
+    if (command === "engine_config" && args.request.action === "save") {
+      check(args.request.edit.original === changed, "Send the original version for conflict checking");
+      throw new Error("config.toml changed after it was opened");
+    }
+    return invoke(command, args);
+  };
+  enter(updated);
+  save.click();
+  await until(() => status.textContent.includes("changed after it was opened"));
+  check(editor.value === updated && !save.disabled, "Keep the unsaved edits after a conflict");
+}
+
+test().then(() => { result.textContent = "PASS"; }, error => { result.textContent = "FAIL: " + error.message; });
+</script>
+</html>

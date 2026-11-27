@@ -469,6 +469,11 @@ pub enum CgroupDriverArg {
 
 #[derive(Subcommand)]
 pub enum SystemCmd {
+    /// View, check, or apply the local engine settings file
+    Config {
+        #[command(subcommand)]
+        cmd: ConfigCmd,
+    },
     /// Show disk use
     Df,
     /// Remove every image that no container uses
@@ -543,6 +548,16 @@ pub enum SystemCmd {
         #[command(subcommand)]
         cmd: DockerCmd,
     },
+}
+
+#[derive(Subcommand)]
+pub enum ConfigCmd {
+    /// Read the file as JSON, including its path and original text
+    Show,
+    /// Check config.toml text read from stdin
+    Check,
+    /// Apply a JSON edit read from stdin and reject a changed original
+    Apply,
 }
 
 #[derive(Subcommand)]

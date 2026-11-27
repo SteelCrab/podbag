@@ -365,6 +365,12 @@ fn mac_command(cli: &Cli, argv: Vec<String>) -> podbag::macos::cli::Forward {
                 socket: Some(p), ..
             },
         } => f.paths.push(p.display().to_string()),
+        Cmd::System {
+            cmd:
+                args::SystemCmd::Config {
+                    cmd: args::ConfigCmd::Check | args::ConfigCmd::Apply,
+                },
+        } => f.stdin = true,
         _ => {}
     }
     f

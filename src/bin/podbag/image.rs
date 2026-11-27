@@ -1,6 +1,6 @@
 //! `pull`, `images`, `load`, `save`, `rmi` and `system`.
 
-use crate::args::SystemCmd;
+use crate::args::{ConfigCmd, SystemCmd};
 use podbag::config::{self, ImageCompression};
 use podbag::image::human_size;
 use podbag::{Error, ErrorKind, Image};
@@ -128,8 +128,48 @@ pub fn rmi(names: &[String]) -> i32 {
     code
 }
 
+fn engine_config(cmd: ConfigCmd) -> podbag::Result<()> {
+    let invalid = |why: String| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            "cannot read engine configuration input",
+            why,
+            "send the original and edited text in the expected format",
+        )
+    };
+    let dirs = podbag::paths::dirs()?;
+    let document = match cmd {
+        ConfigCmd::Show => config::document(&dirs)?,
+        ConfigCmd::Check => {
+            let text = std::io::read_to_string(std::io::stdin().lock())
+                .map_err(|e| invalid(e.to_string()))?;
+            config::parse(&text)?;
+            return Ok(());
+        }
+        ConfigCmd::Apply => {
+            let edit = serde_json::from_reader(std::io::stdin().lock())
+                .map_err(|e| invalid(e.to_string()))?;
+            config::apply_edit(&dirs, edit)?
+        }
+    };
+    serde_json::to_writer(std::io::stdout().lock(), &document).map_err(|e| {
+        Error::new(
+            ErrorKind::Runtime,
+            "cannot write engine configuration output",
+            e.to_string(),
+            "check stdout",
+        )
+    })?;
+    println!();
+    Ok(())
+}
+
 pub fn system(cmd: SystemCmd) -> i32 {
     match cmd {
+        SystemCmd::Config { cmd } => match engine_config(cmd) {
+            Ok(()) => 0,
+            Err(e) => report(&e),
+        },
         SystemCmd::Df => match podbag::disk_usage() {
             Ok(u) => {
                 let rows = [

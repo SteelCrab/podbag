@@ -79,6 +79,7 @@ const API = (() => {
     installTerminalCommand: () => invoke("install_terminal_command"),
     openRepository: () => invoke("open_repository"),
     openTrainingGuide: (id) => invoke("open_training_guide", { id, lang: I18N.lang }),
+    engineConfig: (request) => scoped("engine_config", { request }),
     getSettings: () => invoke("get_settings"),
     setSettings: (settings) => invoke("set_settings", { settings }),
     // Events: changed, live, logs, pull-progress, shown, engine-changed, open-updates,
