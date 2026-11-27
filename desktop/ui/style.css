@@ -627,6 +627,38 @@ kbd {
   border-radius: 5px; background: var(--surface); font: 11.5px/1.5 var(--mono); color: var(--ink); text-align: center;
 }
 
+/* ---- the run form ---- */
+dialog.run { width: min(600px, calc(100vw - 48px)); max-height: calc(100vh - 48px); }
+dialog.run form { gap: 10px; max-height: calc(100vh - 50px); overflow: auto; padding-bottom: 0; }
+dialog.run .buttons { position: sticky; bottom: 0; margin: 0 -22px; padding: 12px 22px 18px; background: var(--surface); border-top: 1px solid var(--line); }
+.run-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; align-items: end; }
+dialog.run input[type="text"], dialog.run select { width: 100%; min-width: 0; }
+.run-section { display: grid; gap: 6px; justify-items: start; }
+.run-label { font-size: 13px; font-weight: 600; }
+.run-list { display: grid; gap: 6px; width: 100%; }
+.run-list:empty { display: none; }
+.run-row { display: flex; align-items: center; gap: 6px; }
+.run-row input[type="text"] { flex: 1 1 0; }
+dialog.run .run-row .run-host, dialog.run .run-row .run-container { flex: 0 1 110px; }
+dialog.run .run-row .run-protocol { flex: 0 0 auto; width: auto; }
+.run-sep { color: var(--muted); }
+.run-ro { flex: none; font-weight: 400 !important; }
+.run-remove { flex: none; }
+.run-add { color: var(--accent-text); }
+.run-section .hint { margin: 0; }
+.run-more { border-top: 1px solid var(--line); padding-top: 8px; }
+.run-more summary { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; font-size: 13px; font-weight: 600; list-style: none; border-radius: 6px; }
+.run-more summary::-webkit-details-marker { display: none; }
+.run-more summary .icon { width: 14px; height: 14px; color: var(--muted); }
+.run-more[open] summary .icon { transform: rotate(90deg); }
+.run-more-body { display: grid; gap: 10px; margin-top: 10px; }
+.run-rm { padding-bottom: 8px; font-weight: 400 !important; }
+.run-status { min-height: 1.4em; margin: 0; white-space: pre-wrap !important; }
+.run-status:empty { display: none; }
+.run-status.progress { color: var(--ink-2); }
+[aria-invalid="true"] { border-color: var(--red) !important; }
+.empty .empty-run { margin: 10px 0 14px; }
+
 /* ---- import from Docker ---- */
 #import-title { display: flex; align-items: center; gap: 8px; }
 dialog.import { width: min(520px, calc(100vw - 48px)); }

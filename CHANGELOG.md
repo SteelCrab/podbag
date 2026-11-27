@@ -48,6 +48,14 @@
 - On macOS and Windows, `podbag build` sends the host's logins for the registries in the
   Dockerfile to the engine. A Dockerfile on stdin sends none.
 
+### Desktop
+
+- Run a container from Podbag Desktop: Run container on the Containers page, and Run on
+  each image row. The form takes the image, a name and ports.
+- More options set environment variables, volumes, the command, a restart policy and
+  auto-remove.
+- A missing image is pulled first. The new container then opens with its logs.
+
 ## v0.3.2 (2026-11-23)
 
 ### Desktop

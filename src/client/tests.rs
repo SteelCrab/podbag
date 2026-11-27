@@ -191,6 +191,81 @@ fn events_arrive_one_by_one() {
 }
 
 #[test]
+fn run_creates_then_starts_a_container() {
+    let (_dir, client, seen) = fake_engine(|_, path| match path {
+        p if p.starts_with("/containers/create") => {
+            json(201, serde_json::json!({"Id": "c0ffee", "Warnings": []}))
+        }
+        _ => (204, "text/plain", Vec::new()),
+    });
+    let spec = RunSpec {
+        image: "nginx:alpine".into(),
+        name: "my web".into(),
+        ..RunSpec::default()
+    };
+    // A bad name is refused before anything is sent.
+    assert_eq!(client.run_container(&spec).unwrap_err().status, 400);
+    assert!(seen.lock().unwrap().is_empty());
+    let spec = RunSpec {
+        name: "web.1".into(),
+        ports: vec![PublishedPort {
+            host: 8080,
+            container: 80,
+            protocol: "tcp".into(),
+        }],
+        ..spec
+    };
+    assert_eq!(client.run_container(&spec).unwrap(), "c0ffee");
+    let unnamed = RunSpec {
+        name: String::new(),
+        ..spec.clone()
+    };
+    client.run_container(&unnamed).unwrap();
+    let seen = seen.lock().unwrap();
+    let requests: Vec<(&str, &str)> = seen
+        .iter()
+        .map(|(m, p, _)| (m.as_str(), p.as_str()))
+        .collect();
+    assert_eq!(
+        requests,
+        [
+            ("POST", "/containers/create?name=web.1"),
+            ("POST", "/containers/c0ffee/start"),
+            ("POST", "/containers/create"),
+            ("POST", "/containers/c0ffee/start"),
+        ]
+    );
+    let body: Value = serde_json::from_str(&seen[0].2).unwrap();
+    assert_eq!(body, spec.config());
+    assert_eq!(
+        body["HostConfig"]["PortBindings"]["80/tcp"][0]["HostPort"],
+        "8080"
+    );
+}
+
+#[test]
+fn run_removes_a_container_that_does_not_start() {
+    let (_dir, client, seen) = fake_engine(|_, path| match path {
+        "/containers/create?name=web" => json(201, serde_json::json!({"Id": "c0ffee"})),
+        "/containers/c0ffee/start" => json(
+            500,
+            serde_json::json!({"message": "port 8080 is already in use"}),
+        ),
+        _ => (204, "text/plain", Vec::new()),
+    });
+    let spec = RunSpec {
+        image: "nginx".into(),
+        name: "web".into(),
+        ..RunSpec::default()
+    };
+    let e = client.run_container(&spec).unwrap_err();
+    assert_eq!(e.message, "port 8080 is already in use");
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen[2].0, "DELETE");
+    assert_eq!(seen[2].1, "/containers/c0ffee?force=1");
+}
+
+#[test]
 fn features_podbag_lacks_are_found_missing() {
     // podbag today: 501 for stats, top, pause and rename.
     let (_dir, client, _) = fake_engine(|_, _| {
