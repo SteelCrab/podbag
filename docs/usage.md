@@ -389,6 +389,8 @@ podbag build -t myapp - < Dockerfile               # only a Dockerfile, no conte
 - No BuildKit and no daemon: podbag reads the Dockerfile and does each step itself.
 - Options: `-t` (more than once), `-f`, `--build-arg`, `--target`, `--no-cache`, `--pull`,
   `--label`, `--network`, `-q`.
+- Base images from private registries use your `podbag login`. Through the Docker API,
+  podbag uses the logins the docker CLI sends, then your own.
 
 ### How the steps work
 
@@ -445,7 +447,6 @@ podbag build -t myapp - < Dockerfile               # only a Dockerfile, no conte
   Git repository, heredocs in `COPY` and `ADD`. podbag stops with a message; build such
   Dockerfiles with buildx (see [buildx](#buildx)).
 - `ADD` of bzip2 or xz archives.
-- Base images from private registries: pulls are anonymous for now.
 - Image history (`docker history`).
 - Changes that a `RUN` makes in a `VOLUME` path stay in the image (Docker drops them).
 
@@ -725,7 +726,7 @@ podbag system docker restore    # back to the context you had (Docker Desktop, â
   `load`, `search`, `build` with the classic builder (see
   [Builds with the docker CLI](#builds-with-the-docker-cli)), `builder prune`.
 - Registries: `login` (the docker CLI keeps the login; podbag checks it), and private
-  pulls and pushes with the login the docker CLI sends.
+  pulls, pushes and build base images with the login the docker CLI sends.
 - Containers: `run` (attached, `-d`, `-i`, `-t`, `--rm`), `create`, `start [-a]`, `stop`,
   `restart`, `kill`, `wait`, `rm`, `logs` (`-f`, `--tail`, `-t`, `--since`), `attach`,
   `ps` (filters `label`, `name`, `id`, `status`), `inspect`, `port`,
@@ -1591,6 +1592,8 @@ sudo k3s server --container-runtime-endpoint unix:///run/podbag/cri.sock
   and its keychain (`credsStore: "osxkeychain"`).
 - `pull`, `push`, `run` and `create` take the Mac's login for the image's registry to the
   VM with the command. It stays in memory there: nothing is written to the VM's disk.
+- `build` takes the Mac's logins for the registries its Dockerfile pulls from, in the same
+  way. A Dockerfile on stdin takes no login.
 - `run` and `create` of Docker Hub's official images (like `alpine`) take no login, so they
   need no credential helper and start quickly.
 - The docker CLI sends its own logins, as with Docker.
@@ -1689,6 +1692,8 @@ docker buildx build --load -t app .
   config and its credential helper.
 - `pull`, `push`, `run` and `create` take the login for the image's registry to the engine
   through `WSLENV`, in memory. Nothing is written to the distribution's disk.
+- `build` takes the logins for the registries its Dockerfile pulls from, in the same way.
+  A Dockerfile on stdin takes no login.
 
 ### Limits
 

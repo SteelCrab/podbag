@@ -39,6 +39,15 @@
 - Where `host-gateway` has no address (rootless bridge, `--network none`, WSL), the CLI
   refuses it. The Docker API leaves the entry out with a warning.
 
+### Builds
+
+- `podbag build` and `docker build` pull private base images with the login for each
+  image's registry. Before, base images were pulled anonymously.
+- The Docker API reads the `X-Registry-Config` header from the docker CLI and falls back
+  to logins saved with `podbag login`. A malformed header gets a 400 reply.
+- On macOS and Windows, `podbag build` sends the host's logins for the registries in the
+  Dockerfile to the engine. A Dockerfile on stdin sends none.
+
 ## v0.3.2 (2026-11-23)
 
 ### Desktop

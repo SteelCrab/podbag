@@ -10,6 +10,7 @@ use super::dockerfile::{self, Dockerfile, Instruction};
 use super::ignore::Ignore;
 use super::plan::{self, Item, Placement, Plan, PlanEntry, PlanKind, Source};
 use super::steps::{self, Action, Args};
+use crate::image::auth::AuthConfig;
 use crate::image::{Image, ImageConfig};
 use crate::paths::Dirs;
 use crate::store::ops::StoreOp;
@@ -45,9 +46,10 @@ pub struct BuildOptions {
     pub network: Option<String>,
     /// Only the image ID, no step output.
     pub quiet: bool,
-    /// Registry logins for private base images: the API's X-Registry-Config header
-    /// (base64 JSON). Not used yet: pulls are anonymous until podbag keeps logins.
-    pub registry_config: Option<String>,
+    /// Logins for base images, by registry: the ones the API's `X-Registry-Config`
+    /// header gave. A registry not here uses the stored login, as `pull` does. Kept in
+    /// memory only.
+    pub registry_logins: Vec<(String, AuthConfig)>,
 }
 
 /// One stage's state between steps.
@@ -285,11 +287,10 @@ impl Builder<'_> {
         if !self.opts.pull && Image::get(name).is_ok() {
             return Ok(());
         }
-        // Private registries: the logins in `registry_config` belong here once the store
-        // keeps logins. Until then pulls are anonymous.
-        let _ = &self.opts.registry_config;
+        // Private registries: the login given for the registry, else the stored one.
+        let login = crate::image::login_for_image(name, &self.opts.registry_logins);
         self.say(&format!("Pulling {name}\n"));
-        Image::pull(name).map(drop)
+        Image::pull_with_login(name, login.as_ref(), |_| {}).map(drop)
     }
 
     fn next_step(&mut self, text: &str) {
