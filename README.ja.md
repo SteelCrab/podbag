@@ -55,10 +55,24 @@ Linux と macOS でコンテナ、イメージ、ボリューム、ネットワ�
 [最新リリース](https://github.com/SteelCrab/podbag/releases/latest)から環境に合ったパッケージをダウンロードします。
 
 - **Linux（x86_64、arm64）。** Debian と Ubuntu では `.deb`、Fedora では `.rpm` をインストールします。エンジンも同梱されています。
-- **macOS（Apple silicon、Intel）。** `podbag-desktop-aarch64-macos.zip`（Apple silicon）または `podbag-desktop-x86_64-macos.zip`（Intel）を展開し、`podbag.app` をアプリケーションフォルダーに移動して開きます。
+- **macOS（Apple silicon、Intel）。** `podbag-desktop-aarch64-macos.dmg`（Apple silicon）または `podbag-desktop-x86_64-macos.dmg`（Intel）を開きます。`podbag` をアプリケーションフォルダーにドラッグし、そこから開きます。初回は一度だけ許可が必要です：[macOS で初めて開くとき](#macos-で初めて開くとき)。
 - **Windows（x86_64、ARM64、実験的サポート）。** CPU に合った `.msi` を実行します。リリースに MSI がない場合は、成功した [CI の実行結果](https://github.com/SteelCrab/podbag/actions/workflows/ci.yml?query=branch%3Amain)からダウンロードします。コンテナを実行するには WSL 2 を有効にします。
 
 アプリには CLI が含まれています。ターミナルに `podbag` がない場合、アプリが `podbag` コマンドのインストールを提案します。このコマンドはアプリの CLI を使うため、アプリと一緒にアップデートされます。
+
+### macOS で初めて開くとき
+
+podbag は Apple の公証を受けていません。そのため、ブラウザでダウンロードしたアプリや CLI は、一度許可するまで macOS がブロックします。
+
+1. アプリケーションフォルダーから `podbag` を開きます。macOS は、podbag に悪質なソフトウェアが含まれていないことを確認できないと表示します。**完了**をクリックします。
+2. **システム設定 > プライバシーとセキュリティ**を開きます。`podbag` についてのメッセージの横にある**このまま開く**をクリックし、パスワードで確認します。
+
+この手順を省くには、ターミナルからインストールします。`curl` でダウンロードしたファイルはブロックされません。
+
+```sh
+curl -fsSL https://podbag.dev/install.sh | PODBAG_DESKTOP=1 sh   # Podbag Desktop
+curl -fsSL https://podbag.dev/install.sh | sh                    # CLI のみ
+```
 
 ### Linux（x86_64、arm64）と macOS（Apple silicon、Intel）向け CLI
 
@@ -71,7 +85,7 @@ podbag --version
 
 Linux カーネル 5.12 以降と cgroup v2 が必要です。`podbag check` で不足している項目を確認できます。一般ユーザーでブリッジネットワークを使う場合は `uidmap` と `passt` パッケージを確認してください。[Linux の要件](docs/usage.md#requirements-on-linux)
 
-手動でインストールする場合は、OS と CPU に合うファイルをダウンロードし、`SHA256SUMS` と照合します。[リリースのダウンロード](https://github.com/SteelCrab/podbag/releases/latest)
+手動でインストールする場合は、OS と CPU に合うファイルをダウンロードし、`SHA256SUMS` と照合します。`chmod +x` で実行権限を付けます。Mac では `xattr -d com.apple.quarantine` も実行します。[リリースのダウンロード](https://github.com/SteelCrab/podbag/releases/latest)
 
 ### Windows 向け CLI（実験的サポート）
 
