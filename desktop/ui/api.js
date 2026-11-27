@@ -33,6 +33,7 @@ const API = (() => {
     kubeOpenRoute: (context, namespace, name) => invoke("kube_open_route", { context, namespace, name }),
     createVolume: (name) => scoped("create_volume", { name }),
     engine: (start) => scoped("engine", { start: !!start }),
+    extensions: (request) => invoke("desktop_extensions", { request }),
     models: (request) => invoke("models", { request }),
     list: (kind) => scoped("list", { kind }),
     kubeList: (kind, allNamespaces, context) => invoke("kube_list", { kind, allNamespaces, context: context || null }),
@@ -61,6 +62,7 @@ const API = (() => {
     vmStorage: (edit = null) => scoped("vm_storage", { edit }),
     // No mode reads; "idle" or "off" sets. Resolves with { mode, after }.
     compression: (mode) => scoped("compression", { mode: mode || null }),
+    registryProxy: (values) => scoped("registry_proxy", { values: values || null }),
     launchAtLogin: () => invoke("plugin:autostart|is_enabled"),
     setLaunchAtLogin: (enabled) => invoke(enabled ? "plugin:autostart|enable" : "plugin:autostart|disable"),
     vmStatus: () => scoped("vm_status"),

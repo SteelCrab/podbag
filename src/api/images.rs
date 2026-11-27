@@ -241,7 +241,10 @@ pub fn login(req: &Request) -> Reply {
         );
     }
     let registry = crate::image::auth::registry_of(&login.serveraddress);
-    match crate::image::registry::Registry::with_auth(Some(login)).login(&registry) {
+    let checked = crate::paths::dirs()
+        .and_then(|dirs| crate::image::registry::Registry::for_engine(&dirs, Some(login)))
+        .and_then(|mut client| client.login(&registry));
+    match checked {
         Ok(token) => Reply::Json(
             200,
             json!({"Status": "Login Succeeded", "IdentityToken": token.unwrap_or_default()}),
