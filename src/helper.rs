@@ -693,6 +693,7 @@ pub(crate) fn send_framed(
 
 /// The input that [`send_framed`] wrote. It ends at the empty frame. An input that ends
 /// before it is an error, so a store job does not take a failed transfer as complete.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) struct FramedInput<R> {
     inner: R,
     /// Bytes left in the current frame.
@@ -701,6 +702,7 @@ pub(crate) struct FramedInput<R> {
 }
 
 impl<R: std::io::Read> FramedInput<R> {
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn new(inner: R) -> FramedInput<R> {
         FramedInput {
             inner,
