@@ -12,7 +12,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const MEDIA_TYPE: &str = "application/vnd.docker.plugins.v1.1+json";
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -59,7 +59,7 @@ fn invoke(dirs: &Dirs, driver: &str, operation: &str, body: Value) -> Result<Val
             format!("{} is not a Unix socket", registry.join(file).display()),
         ));
     }
-    let stream = UnixStream::connect(&socket).map_err(fail)?;
+    let stream = connect(&socket, TIMEOUT).map_err(fail)?;
     stream.set_read_timeout(Some(TIMEOUT)).map_err(fail)?;
     stream.set_write_timeout(Some(TIMEOUT)).map_err(fail)?;
     let encoded = body.to_string();
@@ -96,6 +96,39 @@ fn invoke(dirs: &Dirs, driver: &str, operation: &str, body: Value) -> Result<Val
         }
         _ => Ok(value),
     }
+}
+
+/// Connect within `limit`. A blocking connect waits as long as the driver's queue of
+/// connections is full; a non-blocking one fails at once then, so it is retried.
+fn connect(path: &Path, limit: Duration) -> std::io::Result<UnixStream> {
+    use rustix::net::{AddressFamily, SocketAddrUnix, SocketFlags, SocketType};
+    let deadline = Instant::now() + limit;
+    let socket = rustix::net::socket_with(
+        AddressFamily::UNIX,
+        SocketType::STREAM,
+        SocketFlags::CLOEXEC | SocketFlags::NONBLOCK,
+        None,
+    )?;
+    let address = SocketAddrUnix::new(path)?;
+    loop {
+        match rustix::net::connect(&socket, &address) {
+            Ok(()) => break,
+            Err(rustix::io::Errno::INTR) => {}
+            Err(rustix::io::Errno::AGAIN) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(rustix::io::Errno::AGAIN) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "the driver accepts no connections",
+                ));
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    // The read and write timeouts work on a blocking socket.
+    rustix::io::ioctl_fionbio(&socket, false)?;
+    Ok(UnixStream::from(socket))
 }
 
 pub(super) fn create(dirs: &Dirs, name: &str, plugin: &DriverVolume) -> Result<()> {
@@ -319,4 +352,40 @@ fn attach(dirs: &Dirs, spec: &mut ContainerSpec) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A driver that stops accepting fills its queue of connections; the next connect
+    /// must give up instead of waiting for room.
+    #[test]
+    fn connecting_to_a_full_queue_ends_in_time() {
+        use rustix::net::{AddressFamily, SocketAddrUnix, SocketType};
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("driver.sock");
+        let listener = rustix::net::socket(AddressFamily::UNIX, SocketType::STREAM, None).unwrap();
+        rustix::net::bind(&listener, &SocketAddrUnix::new(&path).unwrap()).unwrap();
+        // Room for one waiting connection, which nothing accepts.
+        rustix::net::listen(&listener, 0).unwrap();
+        let (sent, got) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut queued = Vec::new();
+            let start = Instant::now();
+            let result = loop {
+                match connect(&path, Duration::from_millis(100)) {
+                    Ok(stream) => queued.push(stream),
+                    Err(e) => break e,
+                }
+            };
+            sent.send((result.kind(), start.elapsed())).unwrap();
+        });
+        let (kind, took) = got
+            .recv_timeout(Duration::from_secs(5))
+            .expect("connect waited for room in the queue");
+        assert_eq!(kind, std::io::ErrorKind::TimedOut);
+        assert!(took < Duration::from_secs(2), "{took:?}");
+        drop(listener);
+    }
 }

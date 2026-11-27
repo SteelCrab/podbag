@@ -66,7 +66,7 @@ miniz_oxide = "0.9"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 hickory-proto = "0.26.3"
-rustix = { version = "1", features = ["fs", "mount", "pipe", "process", "system", "thread"] }
+rustix = { version = "1", features = ["fs", "mount", "net", "pipe", "process", "system", "thread"] }
 
 # The macOS front end: Virtualization.framework for the Linux VM.
 [target.'cfg(target_os = "macos")'.dependencies]
