@@ -500,11 +500,23 @@ pub(crate) fn lock_for_mounts(
 }
 
 pub(crate) fn remove_in(dirs: &Dirs, name: &str, force: bool) -> Result<()> {
+    remove_if(dirs, name, force, &|_| true).map(drop)
+}
+
+/// Remove volume `name` if its record, read under the volume lock, passes `eligible`.
+/// False when it does not: another process may have replaced the volume meanwhile.
+fn remove_if(
+    dirs: &Dirs,
+    name: &str,
+    force: bool,
+    eligible: &dyn Fn(&Volume) -> bool,
+) -> Result<bool> {
     check_name(name)?;
     let _lock = lock(dirs, true)?;
     match get_in(dirs, name) {
+        Ok(v) if !eligible(&v) => return Ok(false),
         Ok(_) => {}
-        Err(e) if e.kind == ErrorKind::NotFound && force => return Ok(()),
+        Err(e) if e.kind == ErrorKind::NotFound && force => return Ok(true),
         Err(e) => return Err(e),
     }
     let users = users_of(dirs, name)?;
@@ -516,7 +528,7 @@ pub(crate) fn remove_in(dirs: &Dirs, name: &str, force: bool) -> Result<()> {
             "remove those containers first (`podbag rm`)",
         ));
     }
-    remove_files(dirs, name)
+    remove_files(dirs, name).map(|()| true)
 }
 
 #[cfg(test)]
@@ -529,10 +541,12 @@ pub(crate) fn prune_matching_in(
     all: bool,
     pick: &dyn Fn(&Volume) -> bool,
 ) -> Result<(Vec<String>, u64)> {
+    // Prune never removes a driver's volume: its data follows the driver's own policy.
+    let eligible = |v: &Volume| v.plugin.is_none() && (all || v.anonymous) && pick(v);
     let mut gone = Vec::new();
     let mut bytes = 0;
     for v in list_in(dirs)? {
-        if v.plugin.is_some() || (!all && !v.anonymous) || !pick(&v) {
+        if !eligible(&v) {
             continue;
         }
         let size = if v.nfs.is_some() {
@@ -540,12 +554,14 @@ pub(crate) fn prune_matching_in(
         } else {
             tree_size(&dirs.volume_dir(&v.name))
         };
-        // Checks the users again under the volume lock: one mounted meanwhile stays.
-        match remove_in(dirs, &v.name, false) {
-            Ok(()) => {
+        // Checks the volume and its users again under the volume lock: one replaced or
+        // mounted meanwhile stays.
+        match remove_if(dirs, &v.name, false, &eligible) {
+            Ok(true) => {
                 gone.push(v.name);
                 bytes += size;
             }
+            Ok(false) => {}
             Err(e) if matches!(e.kind, ErrorKind::Conflict | ErrorKind::NotFound) => {}
             Err(e) => return Err(e),
         }
@@ -1118,6 +1134,39 @@ mod tests {
             .map(|v| v.name)
             .collect();
         assert_eq!(left, ["busy"]);
+    }
+
+    /// Another process replaces a pruned volume with a driver's volume between the list
+    /// and the removal: the driver's volume stays.
+    #[test]
+    fn prune_keeps_a_volume_replaced_by_a_driver_volume() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = dirs_in(tmp.path());
+        create_in(&dirs, Some("cache"), false).unwrap();
+        let replaced = std::cell::Cell::new(false);
+        let replace = |v: &Volume| {
+            if !replaced.replace(true) {
+                let meta = Meta {
+                    name: v.name.clone(),
+                    created: 1,
+                    anonymous: false,
+                    labels: Default::default(),
+                    nfs: None,
+                    plugin: Some(DriverVolume {
+                        name: "store".into(),
+                        options: Default::default(),
+                    }),
+                };
+                let dir = dirs.volume_dir(&v.name);
+                std::fs::remove_dir_all(&dir).unwrap();
+                std::fs::create_dir(&dir).unwrap();
+                std::fs::write(dir.join(META), serde_json::to_vec(&meta).unwrap()).unwrap();
+            }
+            true
+        };
+        let (gone, _) = prune_matching_in(&dirs, true, &replace).unwrap();
+        assert!(gone.is_empty(), "{gone:?}");
+        assert!(get_in(&dirs, "cache").unwrap().plugin.is_some());
     }
 
     #[test]
