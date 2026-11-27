@@ -18,6 +18,7 @@ frame.addEventListener("load", async () => {
   };
   const by = id => doc.getElementById(id);
   const check = (v, label) => { if (!v) throw Error(label); };
+  const glyph = el => el.querySelector(".migration-resource use")?.getAttribute("href");
   try {
     await wait(() => doc.documentElement.dataset.ready === "1");
     const real = win.__TAURI__.core.invoke;
@@ -40,6 +41,9 @@ frame.addEventListener("load", async () => {
     check(!by("engine-switch"), "Remove the window engine selector");
     const total = doc.querySelectorAll(".migration-row").length;
     check(Number(doc.querySelector("#mnav-root .count").textContent) === total, "Count the listed resources");
+    for (const item of doc.querySelectorAll(".migration-row")) {
+      check(glyph(item) === "#i-" + item.dataset.kind, "Show the icon for each engine resource type");
+    }
     check([...doc.querySelectorAll(".migration-group")].every(g => g.querySelector(".migration-row")), "Hide empty groups");
     const leaf = by("mnav-volumes");
     check(!leaf.parentElement.hidden && Number(leaf.querySelector(".count").textContent) === doc.querySelectorAll('[data-kind="volumes"]').length, "Show each available resource count");
@@ -50,6 +54,9 @@ frame.addEventListener("load", async () => {
     by("mnav-toggle").click();
     by("mnav-kube").click();
     await wait(() => !by("mnav-claims").parentElement.hidden);
+    for (const item of doc.querySelectorAll(".migration-row")) {
+      check(glyph(item) === "#i-kube-" + item.dataset.kind, "Show the icon for each Kubernetes resource type");
+    }
     by("mnav-claims").click();
     check(!!doc.querySelector('.migration-row[data-kind="claims"]'), "Open a cluster claim from the migration tree");
     by("mnav-engine").click();
@@ -57,6 +64,7 @@ frame.addEventListener("load", async () => {
     row().click();
     const dlg = () => doc.querySelector(".migration-dialog");
     check(dlg().dataset.phase === "confirm" && calls === 0, "Review before writing");
+    check(glyph(dlg()) === glyph(row()), "Keep the selected resource icon in confirmation");
     dlg().querySelector(".buttons button").click();
     await wait(() => !dlg());
     check(calls === 0, "Cancel without migrating");

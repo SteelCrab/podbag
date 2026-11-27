@@ -704,6 +704,8 @@ dialog.import { width: min(520px, calc(100vw - 48px)); }
   padding: 9px 10px; text-align: start; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; color: var(--ink); font: inherit; cursor: pointer; }
 .migration-row:hover, .migration-row:focus-visible { background: var(--accent-soft); }
 .migration-row .icon { width: 14px; height: 14px; color: var(--muted); }
+.migration-resource { min-width: 0; display: flex; align-items: center; gap: 8px; }
+.migration-resource .icon { width: 14px; height: 14px; flex: none; color: var(--ink-2); }
 .migration-name, .migration-origin { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .migration-origin { color: var(--ink-2); font-size: 12px; max-width: 26vw; }
 .migration-statusline { margin-top: 12px; color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
