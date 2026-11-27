@@ -80,10 +80,12 @@ fn main() {
     }
     #[cfg(unix)]
     if let Some(root) = std::env::var_os(podbag::volume_lesson::SCOPE) {
-        std::process::exit(lesson::scoped(
-            std::path::Path::new(&root),
-            Cli::parse().cmd,
-        ));
+        let root = std::path::Path::new(&root);
+        let args: Vec<_> = std::env::args_os().skip(1).collect();
+        if args.len() >= 2 && args[0] == "lab" && args[1] == "docker-step" {
+            std::process::exit(lesson::docker_step(root, args[2..].to_vec()));
+        }
+        std::process::exit(lesson::scoped(root, Cli::parse().cmd));
     }
     #[cfg(target_os = "macos")]
     if let Some(code) = macos_front(std::env::args().skip(1).collect()) {

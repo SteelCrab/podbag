@@ -17,8 +17,8 @@ use crate::store::ops::StoreOp;
 use crate::store::tree::Tree;
 use crate::store::{Committed, Store};
 use crate::{Container, ContainerHandle, Error, ErrorKind, Result};
-use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 /// What to build, and how.
@@ -168,6 +168,7 @@ pub fn build(opts: &BuildOptions, out: &mut dyn FnMut(&str)) -> Result<Built> {
         ignore: Ignore::parse(&opts.ignore),
         work: work.clone(),
         lock: None,
+        thawed: HashSet::new(),
     }
     .run(&needed, target);
     let _ = std::fs::remove_dir_all(&work);
@@ -196,6 +197,9 @@ struct Builder<'a> {
     work: PathBuf,
     /// The store's shared lock while steps run: nothing removes the images steps made.
     lock: Option<crate::store::SharedLock>,
+    /// The layer lists whose compressed objects the store helper made plain in this
+    /// build. The shared lock keeps them plain: freezing takes the exclusive one.
+    thawed: HashSet<Vec<String>>,
 }
 
 impl Builder<'_> {
@@ -411,7 +415,7 @@ impl Builder<'_> {
                         "use COPY --from",
                     ));
                 }
-                let (entries, digest) = self.plan_copy(
+                let (entries, digest, thaw) = self.plan_copy(
                     &state,
                     &sources,
                     &dest,
@@ -429,7 +433,12 @@ impl Builder<'_> {
                     chmod
                 );
                 let key = cache::key(&parent, &text, &[], &digest);
-                self.cached(&key, |b| b.commit_plan(&state, entries))
+                self.cached(&key, |b| {
+                    if let Some(diff_ids) = thaw {
+                        b.thaw(&diff_ids)?;
+                    }
+                    b.commit_plan(&state, entries)
+                })
             }
         }
     }
@@ -553,6 +562,22 @@ impl Builder<'_> {
         result
     }
 
+    /// Have the store helper make the objects of the tree of `diff_ids` plain, once per
+    /// build: a compressed object has no file at its path to read or link.
+    fn thaw(&mut self, diff_ids: &[String]) -> Result<()> {
+        if self.thawed.contains(diff_ids) {
+            return Ok(());
+        }
+        store_op::<serde_json::Value>(
+            &StoreOp::ThawLayers {
+                diff_ids: diff_ids.to_vec(),
+            },
+            None,
+        )?;
+        self.thawed.insert(diff_ids.to_vec());
+        Ok(())
+    }
+
     fn commit_plan(&mut self, state: &State, entries: Vec<PlanEntry>) -> Result<State> {
         let json = serde_json::to_vec(&entries).unwrap_or_default();
         let committed: Committed = store_op(
@@ -566,7 +591,9 @@ impl Builder<'_> {
         Ok(after_commit(state, committed))
     }
 
-    /// The layer entries of a `COPY` or `ADD`, and the digest of what it copies.
+    /// The layer entries of a `COPY` or `ADD`, the digest of what it copies, and the
+    /// layers of the `--from` tree to thaw before the entries are stored: some of the
+    /// files they copy are compressed.
     #[allow(clippy::too_many_arguments)]
     fn plan_copy(
         &mut self,
@@ -578,27 +605,31 @@ impl Builder<'_> {
         chmod: Option<u32>,
         add: bool,
         stage: usize,
-    ) -> Result<(Vec<PlanEntry>, String)> {
+    ) -> Result<(Vec<PlanEntry>, String, Option<Vec<String>>)> {
         let store = self.store();
         let tree = self.tree_of(&state.diff_ids)?;
-        let read = |path: &str| -> Option<String> {
-            match &tree.entries.get(path)?.kind {
-                crate::store::layer::EntryKind::File { object, .. } => {
-                    std::fs::read_to_string(store.as_ref()?.object_path(object)).ok()
-                }
-                _ => None,
-            }
-        };
         let owner = match chown {
-            Some(c) => Some(steps::owner_of(
-                c,
-                read("etc/passwd").as_deref(),
-                read("etc/group").as_deref(),
-            )?),
+            Some(c) => {
+                let object = |path: &str| match &tree.entries.get(path)?.kind {
+                    crate::store::layer::EntryKind::File { object, .. } => Some(object.clone()),
+                    _ => None,
+                };
+                let files = [object("etc/passwd"), object("etc/group")];
+                if let Some(s) = &store
+                    && files.iter().flatten().any(|k| s.is_cold(k))
+                {
+                    self.thaw(&state.diff_ids)?;
+                }
+                let read = |key: &Option<String>| {
+                    std::fs::read_to_string(store.as_ref()?.object_path(key.as_ref()?)).ok()
+                };
+                let (passwd, group) = (read(&files[0]), read(&files[1]));
+                Some(steps::owner_of(c, passwd.as_deref(), group.as_deref())?)
+            }
             None => None,
         };
         // Where sources come from: another stage, an image, or the context.
-        let from_tree = match from {
+        let from_ids = match from {
             None => None,
             Some(f) => {
                 let names: Vec<Option<&str>> =
@@ -610,9 +641,10 @@ impl Builder<'_> {
                         s.find(f)?.1.diff_ids
                     }
                 };
-                Some(self.tree_of(&diff_ids)?)
+                Some(diff_ids)
             }
         };
+        let from_tree = from_ids.as_ref().map(|ids| self.tree_of(ids)).transpose()?;
         let mut downloads = BTreeMap::new();
         for s in sources {
             if add && (s.starts_with("http://") || s.starts_with("https://")) {
@@ -620,8 +652,19 @@ impl Builder<'_> {
                 downloads.insert(s.clone(), got);
             }
         }
+        // Whether a file the copy takes from the tree is compressed: looked for only until
+        // one is found, and not in a tree this build has thawed.
+        let thawed = from_ids
+            .as_ref()
+            .is_some_and(|ids| self.thawed.contains(ids));
+        let cold = Cell::new(false);
         let object = |k: &str| match &store {
-            Some(s) => s.object_path(k),
+            Some(s) => {
+                if !thawed && !cold.get() && s.is_cold(k) {
+                    cold.set(true);
+                }
+                s.object_path(k)
+            }
             None => PathBuf::new(),
         };
         let source = match &from_tree {
@@ -670,7 +713,7 @@ impl Builder<'_> {
             plan.place(&at, &name, items, unpack)?;
         }
         let entries = std::mem::take(&mut plan.entries);
-        Ok((entries, plan.digest()))
+        Ok((entries, plan.digest(), from_ids.filter(|_| cold.get())))
     }
 
     /// `ADD <url>`: the file, downloaded into the build's work directory.

@@ -1,6 +1,7 @@
 //! `pull`, `images`, `load`, `save`, `rmi` and `system`.
 
 use crate::args::SystemCmd;
+use podbag::config::{self, ImageCompression};
 use podbag::image::human_size;
 use podbag::{Error, ErrorKind, Image};
 
@@ -139,6 +140,15 @@ pub fn system(cmd: SystemCmd) -> i32 {
                         human_size(u.object_bytes),
                     ],
                     [
+                        "Compressed".to_string(),
+                        u.compressed_objects.to_string(),
+                        format!(
+                            "{} ({} before)",
+                            human_size(u.compressed_bytes),
+                            human_size(u.original_bytes)
+                        ),
+                    ],
+                    [
                         "Containers".to_string(),
                         u.containers.to_string(),
                         "-".to_string(),
@@ -189,6 +199,51 @@ pub fn system(cmd: SystemCmd) -> i32 {
             }
             Err(e) => report(&e),
         },
+        SystemCmd::Compress { images } => match podbag::image::compress_images(&images) {
+            Ok(r) => {
+                for name in &r.skipped {
+                    eprintln!("podbag: {name} is not compressed: a container uses it");
+                }
+                println!(
+                    "Compressed {} images: {} \u{2192} {}",
+                    r.report.images,
+                    human_size(r.report.bytes_before),
+                    human_size(r.report.bytes_after)
+                );
+                0
+            }
+            Err(e) => report(&e),
+        },
+        SystemCmd::Decompress { images } => match podbag::image::decompress_images(&images) {
+            Ok(n) => {
+                println!("Decompressed {n} images");
+                0
+            }
+            Err(e) => report(&e),
+        },
+        SystemCmd::Compression { mode, after, json } => {
+            match compression(mode.as_deref(), after.as_deref()) {
+                Ok(c) if json => {
+                    println!(
+                        "{{\"mode\":\"{}\",\"after\":{}}}",
+                        c.image_compression.name(),
+                        c.compress_idle_after
+                    );
+                    0
+                }
+                Ok(c) => {
+                    match c.image_compression {
+                        ImageCompression::Off => println!("Image compression: off"),
+                        ImageCompression::Idle => println!(
+                            "Image compression: idle (images unused for {})",
+                            config::format_age(c.compress_idle_after)
+                        ),
+                    }
+                    0
+                }
+                Err(e) => report(&e),
+            }
+        }
         SystemCmd::Prune { force: true } => match podbag::prune() {
             Ok(r) => {
                 println!(
@@ -201,6 +256,19 @@ pub fn system(cmd: SystemCmd) -> i32 {
             Err(e) => report(&e),
         },
     }
+}
+
+/// Save what `system compression` was given, then the settings in effect (environment
+/// overrides included). The age goes first: the mode is already checked by clap, so a bad
+/// age saves nothing.
+fn compression(mode: Option<&str>, after: Option<&str>) -> podbag::Result<config::Config> {
+    let dirs = podbag::paths::dirs()?;
+    for (key, value) in [("compress_idle_after", after), ("image_compression", mode)] {
+        if let Some(value) = value {
+            config::set_value(&dirs, key, value)?;
+        }
+    }
+    config::load(&dirs)
 }
 
 fn short_digest(d: &str) -> String {
