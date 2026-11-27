@@ -19,7 +19,7 @@ use crate::{Error, ErrorKind, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 
 /// What a load stored.
@@ -124,8 +124,9 @@ impl Store {
         let stored = {
             let _shared = self.lock(false)?;
             (|| {
-                let mut input = BufReader::new(input);
-                let magic = input.fill_buf().map_err(|e| bad_import(e.to_string()))?;
+                let (magic, filled) = read_magic(input).map_err(|e| bad_import(e.to_string()))?;
+                let magic = &magic[..filled];
+                let input = BufReader::new(magic.chain(input));
                 let decoded: Box<dyn Read> = if magic.starts_with(&[0x1f, 0x8b]) {
                     Box::new(flate2::bufread::MultiGzDecoder::new(input))
                 } else if magic.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
@@ -507,6 +508,23 @@ fn json<T: serde::de::DeserializeOwned>(data: &[u8], name: &str) -> Result<T> {
     serde_json::from_slice(data).map_err(|e| bad(format!("{name} is not valid: {e}")))
 }
 
+/// The first 4 bytes of `input`, to tell its compression, and how many there are: fewer
+/// only when the input is shorter. One read may return fewer, so this reads until it has
+/// them. Give them again before the rest of `input`.
+fn read_magic(input: &mut dyn Read) -> std::io::Result<([u8; 4], usize)> {
+    let mut magic = [0; 4];
+    let mut filled = 0;
+    while filled < magic.len() {
+        match input.read(&mut magic[filled..]) {
+            Ok(0) => break,
+            Ok(count) => filled += count,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok((magic, filled))
+}
+
 /// How a layer file is compressed, from its first bytes.
 fn sniff(path: &Path) -> Result<Compression> {
     let mut magic = [0u8; 4];
@@ -562,8 +580,9 @@ impl Files {
     /// limit: an archive larger than it could not be kept), and stop before the disk is
     /// nearly full (a small gzip stream can unpack to a great deal).
     fn unpack(input: &mut dyn Read, scratch: &Path, limit: u64) -> Result<Files> {
-        let mut input = BufReader::new(input);
-        let start = input.fill_buf().map_err(|e| bad(e.to_string()))?;
+        let (start, filled) = read_magic(input).map_err(|e| bad(e.to_string()))?;
+        let start = &start[..filled];
+        let input = BufReader::new(start.chain(input));
         let reader: Box<dyn Read + '_> = if start.starts_with(&[0x1f, 0x8b]) {
             Box::new(flate2::read::MultiGzDecoder::new(input))
         } else {
@@ -786,6 +805,74 @@ mod tests {
         );
         assert!(result.is_err(), "{result:?}");
         assert_eq!(store.find("demo:latest").unwrap().1.digest, old);
+    }
+
+    /// Gives at most one byte per read, as a slow pipe may.
+    struct OneByte<'a>(&'a [u8]);
+
+    impl Read for OneByte<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let Some((first, rest)) = self.0.split_first() else {
+                return Ok(0);
+            };
+            if buf.is_empty() {
+                return Ok(0);
+            }
+            buf[0] = *first;
+            self.0 = rest;
+            Ok(1)
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compression_is_found_when_the_input_comes_a_byte_at_a_time() {
+        let tar = tar_of(&[("file", b"data")]);
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        gz.write_all(&tar).unwrap();
+        let gz = gz.finish().unwrap();
+        let zst = ruzstd::encoding::compress_to_vec(
+            &tar[..],
+            ruzstd::encoding::CompressionLevel::Fastest,
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let store = open(&tmp);
+        let plain = store
+            .import(
+                &mut OneByte(&tar),
+                ImportOptions::default(),
+                u64::MAX,
+                &none,
+            )
+            .unwrap();
+        for compressed in [&gz, &zst] {
+            let digest = store
+                .import(
+                    &mut OneByte(compressed),
+                    ImportOptions::default(),
+                    u64::MAX,
+                    &none,
+                )
+                .unwrap();
+            // The same tar, so the same layer.
+            assert_eq!(
+                store.find(&digest).unwrap().1.diff_ids,
+                store.find(&plain).unwrap().1.diff_ids
+            );
+        }
+    }
+
+    #[test]
+    fn load_finds_gzip_when_the_input_comes_a_byte_at_a_time() {
+        let layer = tar_of(&[("file", b"data")]);
+        let archive = docker_archive(&layer, "/slow", serde_json::json!(["slow:latest"]));
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        gz.write_all(&archive).unwrap();
+        let gz = gz.finish().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = open(&tmp);
+        store.load(&mut OneByte(&gz), u64::MAX, &none).unwrap();
+        assert!(store.find("slow:latest").is_ok());
     }
 
     fn digest(data: &[u8]) -> String {
