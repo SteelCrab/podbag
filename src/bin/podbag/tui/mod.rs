@@ -751,6 +751,17 @@ impl Runtime {
     }
 
     fn select_engine(&mut self, next: Choice) -> bool {
+        // Training mode: steps are reported only for actions on the practice engine.
+        if self.training.is_some() {
+            self.app.message = Some((
+                format!(
+                    "Cannot use {}: This terminal is connected to the practice store.",
+                    next.label()
+                ),
+                true,
+            ));
+            return false;
+        }
         let target = match (self.engines.find)(&next) {
             Ok(t) => t,
             Err(e) => {
@@ -1492,6 +1503,29 @@ mod tests {
             rt.app.message.as_ref().unwrap().0,
             "Step done: Remove the container in the CLI"
         );
+    }
+
+    #[test]
+    fn training_mode_keeps_the_practice_engine() {
+        // The engines here would switch; training mode refuses before it asks them.
+        let engine = FakeEngine::start(small_engine);
+        let (_dir, mut rt) = training(&engine, "stop");
+        let endpoint = rt.app.endpoint.clone();
+        rt.apply(Effect::SwitchEngine);
+        assert_eq!(
+            rt.app.message,
+            Some((
+                "Cannot use Docker: This terminal is connected to the practice store.".into(),
+                true
+            ))
+        );
+        assert_eq!(
+            (rt.target.choice.clone(), &rt.app.endpoint),
+            (Choice::Podbag, &endpoint)
+        );
+        assert!(rt.training.is_some() && rt.app.training.is_some());
+        assert!(!rt.select_engine(Choice::Docker));
+        assert_eq!(rt.target.choice, Choice::Podbag);
     }
 
     #[test]
