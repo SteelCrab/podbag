@@ -55,10 +55,24 @@ Gestiona contenedores, imágenes, volúmenes y redes en Linux y macOS. La compat
 Descarga el paquete para tu sistema desde la [última versión](https://github.com/SteelCrab/podbag/releases/latest).
 
 - **Linux (x86_64, arm64).** Instala el `.deb` en Debian o Ubuntu, o el `.rpm` en Fedora. El paquete incluye el motor.
-- **macOS (Apple silicon, Intel).** Descomprime `podbag-desktop-aarch64-macos.zip` (Apple silicon) o `podbag-desktop-x86_64-macos.zip` (Intel), mueve `podbag.app` a la carpeta Aplicaciones y ábrela.
+- **macOS (Apple silicon, Intel).** Abre `podbag-desktop-aarch64-macos.dmg` (Apple silicon) o `podbag-desktop-x86_64-macos.dmg` (Intel). Arrastra `podbag` a la carpeta Aplicaciones y ábrela desde allí. La primera vez, debes permitirla una vez: [Abrirla por primera vez en macOS](#abrirla-por-primera-vez-en-macos).
 - **Windows (x86_64, ARM64, experimental).** Ejecuta el `.msi` para tu CPU. Si la versión no incluye un MSI, descárgalo desde una [ejecución de CI correcta](https://github.com/SteelCrab/podbag/actions/workflows/ci.yml?query=branch%3Amain). Activa WSL 2 para ejecutar contenedores.
 
 La app incluye la CLI. Si la terminal no tiene `podbag`, la app ofrece instalar el comando `podbag`. El comando usa la CLI de la app, así que se actualiza con la app.
+
+### Abrirla por primera vez en macOS
+
+Apple no ha notarizado podbag. Por eso macOS bloquea la app o la CLI descargadas con un navegador hasta que las permites una vez.
+
+1. Abre `podbag` desde la carpeta Aplicaciones. macOS dice que no puede comprobar si podbag contiene software malicioso. Cierra el aviso.
+2. Abre **Ajustes del Sistema > Privacidad y seguridad**. Junto al mensaje sobre `podbag`, haz clic en **Abrir igualmente** y confirma con tu contraseña.
+
+Para evitar estos pasos, instala desde la terminal. Los archivos que descarga `curl` no se bloquean.
+
+```sh
+curl -fsSL https://podbag.dev/install.sh | PODBAG_DESKTOP=1 sh   # Podbag Desktop
+curl -fsSL https://podbag.dev/install.sh | sh                    # solo la CLI
+```
 
 ### CLI en Linux (x86_64, arm64) y macOS (Apple silicon, Intel)
 
@@ -71,7 +85,7 @@ El instalador verifica la suma SHA-256 del archivo publicado e instala la CLI en
 
 Linux requiere el kernel 5.12 o posterior y cgroup v2. Ejecuta `podbag check` para detectar los requisitos pendientes. Para usar redes de puente sin privilegios de root, comprueba que estén instalados `uidmap` y `passt`. [Requisitos de Linux](docs/usage.md#requirements-on-linux)
 
-Para instalarlo manualmente, descarga el archivo para tu sistema y CPU y verifica su suma con `SHA256SUMS`. [Descargas](https://github.com/SteelCrab/podbag/releases/latest)
+Para instalarlo manualmente, descarga el archivo para tu sistema y CPU y verifica su suma con `SHA256SUMS`. Dale permiso de ejecución con `chmod +x`. En un Mac, ejecuta también `xattr -d com.apple.quarantine`. [Descargas](https://github.com/SteelCrab/podbag/releases/latest)
 
 ### CLI en Windows (experimental)
 

@@ -378,6 +378,13 @@ fn object_label(obj: &Value) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+        Some("Route") => format!(
+            "{}{}  {}  {}",
+            spec["host"].as_str().unwrap_or(""),
+            spec["path"].as_str().unwrap_or(""),
+            spec["to"]["name"].as_str().unwrap_or(""),
+            spec["tls"]["termination"].as_str().unwrap_or("")
+        ),
         Some("PersistentVolumeClaim") => format!(
             "{}  {}  {}",
             status["phase"].as_str().unwrap_or(""),
@@ -405,12 +412,16 @@ pub fn cluster(ui: &mut Screen, migrate: bool) -> Result<()> {
             kubernetes::kube_counts(selected.clone(), all)
         })
         .ok();
-    let kinds = [
+    let mut kinds = vec![
         ("pods", Resource::Pods),
         ("services", Resource::Services),
         ("deployments", Resource::Deployments),
         ("claims", Resource::Claims),
     ];
+    // Counts include Routes only on OpenShift. A Route's host is cluster-specific: no migration.
+    if !migrate && counts.as_ref().is_some_and(|c| c.contains_key("routes")) {
+        kinds.push(("routes", Resource::Routes));
+    }
     let labels = kinds
         .iter()
         .map(|(key, _)| {
@@ -502,5 +513,21 @@ pub fn cluster(ui: &mut Screen, migrate: bool) -> Result<()> {
             )
         })?;
         return ui.message(&ui.t("migration.done"), &ui.t("migration.verified"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn route_label_shows_address_service_and_tls() {
+        let route = serde_json::json!({"kind": "Route", "metadata": {"name": "shop", "namespace": "web"},
+            "spec": {"host": "shop.apps.example.com", "path": "/cart", "to": {"kind": "Service", "name": "frontend"},
+                "tls": {"termination": "edge"}}});
+        assert_eq!(
+            object_label(&route),
+            "web/shop   shop.apps.example.com/cart  frontend  edge"
+        );
     }
 }
