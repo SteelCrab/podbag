@@ -45,6 +45,8 @@ pub struct Container {
     mounts: Vec<crate::volume::MountRequest>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     devices: Vec<crate::spec::Device>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    gpu_requests: Vec<crate::gpu::Request>,
     #[serde(default)]
     network: Option<crate::network::NetworkMode>,
     #[serde(default)]
@@ -147,6 +149,7 @@ impl Container {
             security: crate::spec::Security::default(),
             mounts: Vec::new(),
             devices: Vec::new(),
+            gpu_requests: Vec::new(),
             network: None,
             publish: Vec::new(),
             labels: std::collections::BTreeMap::new(),
@@ -312,6 +315,12 @@ impl Container {
     /// Make a host device available inside a root-mode container.
     pub fn device(mut self, device: crate::spec::Device) -> Container {
         self.devices.push(device);
+        self
+    }
+
+    /// Select Linux DRM render devices by count or ID.
+    pub fn gpus(mut self, request: crate::gpu::Request) -> Container {
+        self.gpu_requests.push(request);
         self
     }
 
@@ -924,7 +933,8 @@ mod linux_launch {
         let limits = c.limits()?;
         // SAFETY: geteuid has no preconditions.
         let rootless = unsafe { libc::geteuid() } != 0;
-        if rootless && !c.devices.is_empty() {
+        let uses_devices = !c.devices.is_empty() || !c.gpu_requests.is_empty();
+        if rootless && uses_devices {
             return Err(Error::new(
                 ErrorKind::Unsupported,
                 "cannot map a host device",
@@ -932,9 +942,10 @@ mod linux_launch {
                 "run podbag as root, or omit the device mapping",
             ));
         }
+        crate::gpu::devices(&c.gpu_requests)?;
         crate::cgroup::device_rules(&c.devices)?;
         let (placement, warning) = crate::cgroup::choose_placement(rootless, &limits)?;
-        if !c.devices.is_empty()
+        if uses_devices
             && !c.security.privileged
             && matches!(placement, crate::cgroup::Placement::None)
         {
@@ -1076,6 +1087,7 @@ mod linux_launch {
                     extra_networks: c.extra_networks.clone(),
                     namespaces: Default::default(),
                     devices: c.devices,
+                    gpu_requests: c.gpu_requests,
                     cri_log: None,
                     stdin_fifo: None,
                 };
@@ -1120,6 +1132,7 @@ mod linux_launch {
                         extra_networks: c.extra_networks.clone(),
                         namespaces: Default::default(),
                         devices: c.devices,
+                        gpu_requests: c.gpu_requests,
                         cri_log: None,
                         stdin_fifo: None,
                     })

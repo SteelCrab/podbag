@@ -643,6 +643,9 @@ pub struct RunArgs {
     /// Map a device as root on Linux (HOST[:CONTAINER][:rwm])
     #[arg(long = "device", value_name = "DEVICE")]
     pub devices: Vec<podbag::spec::Device>,
+    /// Select Linux DRM render devices as root (all, COUNT, or device=ID)
+    #[arg(long, value_name = "GPUS")]
+    pub gpus: Vec<podbag::gpu::Request>,
     /// Start it again after it ends: no, always, unless-stopped, on-failure[:max]
     #[arg(long, value_name = "POLICY")]
     pub restart: Option<String>,

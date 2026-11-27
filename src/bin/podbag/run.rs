@@ -95,6 +95,9 @@ fn build(args: RunArgs) -> podbag::Result<Container> {
     for device in args.devices {
         c = c.device(device);
     }
+    for request in args.gpus {
+        c = c.gpus(request);
+    }
     if let Some(policy) = &args.restart {
         c = c.restart(policy.parse()?);
     }

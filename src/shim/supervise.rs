@@ -342,7 +342,21 @@ pub(super) fn run(
         started: false,
         handed_over: false,
     };
-    let device_rules = match crate::cgroup::device_rules(&spec.devices) {
+    let mut devices = spec.devices.clone();
+    match crate::gpu::devices(&spec.gpu_requests) {
+        Ok(gpus) => {
+            for gpu in gpus {
+                if !devices
+                    .iter()
+                    .any(|device| device.container == gpu.container)
+                {
+                    devices.push(gpu);
+                }
+            }
+        }
+        Err(e) => return failed(status, e),
+    }
+    let device_rules = match crate::cgroup::device_rules(&devices) {
         Ok(rules) => rules,
         Err(e) => return failed(status, e),
     };
@@ -469,7 +483,7 @@ pub(super) fn run(
         Ok(mut files) => {
             files.append(&mut run_spec.mounts);
             run_spec.mounts = files;
-            run_spec.mounts.extend(device_mounts(&spec.devices));
+            run_spec.mounts.extend(device_mounts(&devices));
         }
         Err(e) => {
             undo(group);

@@ -376,6 +376,7 @@ fn host_config(f: &Facts) -> Value {
         "SecurityOpt": security_opt,
         "ReadonlyRootfs": f.spec.security.read_only_rootfs,
         "Devices": devices,
+        "DeviceRequests": f.spec.gpu_requests,
         "PublishAllPorts": false,
         "Init": null,
         "ExtraHosts": f.spec.extra_hosts.iter().map(|e| e.docker()).collect::<Vec<_>>(),

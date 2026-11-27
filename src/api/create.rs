@@ -236,6 +236,20 @@ fn map_create_with(
             )?);
         }
     }
+    if !host["DeviceRequests"].is_null() {
+        let requests =
+            Vec::<crate::gpu::Request>::deserialize(&host["DeviceRequests"]).map_err(|e| {
+                invalid(
+                    "invalid DeviceRequests",
+                    &e.to_string(),
+                    "pass a list of GPU requests",
+                )
+            })?;
+        for request in requests {
+            request.validate()?;
+            c = c.gpus(request);
+        }
+    }
     let auto_remove = host["AutoRemove"].as_bool().unwrap_or(false);
     if auto_remove {
         c = c.remove_on_exit(true);
@@ -325,9 +339,6 @@ fn refuse_unsupported(host: &Value) -> Result<()> {
         ))
     };
     let listed = |key: &str| host[key].as_array().is_some_and(|a| !a.is_empty());
-    if listed("DeviceRequests") {
-        return refuse("GPU device requests", "omit --gpus");
-    }
     if listed("DeviceCgroupRules") {
         return refuse(
             "custom device cgroup rules",

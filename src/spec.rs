@@ -112,6 +112,9 @@ pub struct ContainerSpec {
     /// Device nodes of the host the container may use.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub devices: Vec<Device>,
+    /// GPU selections to resolve on the host when the container starts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gpu_requests: Vec<crate::gpu::Request>,
     /// Write the output to this file in the Kubernetes log format, not to `log.json`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cri_log: Option<String>,
@@ -588,6 +591,7 @@ pub(crate) fn spec_fixture() -> ContainerSpec {
         extra_networks: Vec::new(),
         namespaces: Default::default(),
         devices: Vec::new(),
+        gpu_requests: Vec::new(),
         cri_log: None,
         stdin_fifo: None,
     }

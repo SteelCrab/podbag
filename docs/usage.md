@@ -513,11 +513,16 @@ podbag build -t myapp - < Dockerfile               # only a Dockerfile, no conte
 | `--security-opt seccomp=unconfined` | turn off the default seccomp filter |
 | `--read-only` | make the root filesystem read-only; volumes and tmpfs keep their own access |
 | `--device HOST[:TARGET][:rwm]` | map a host block or character device when the Linux engine runs as root |
+| `--gpus all\|COUNT\|device=ID` | map Linux DRM render devices when the engine runs as root |
 | `--privileged` | every capability, no seccomp filter, kernel files shown, writable `/sys` and cgroup, any device; host devices are not added to `/dev` |
 
 The target of `--device` defaults to the host path. The access defaults to `rwm`: read,
 write, and make device nodes. Without `--privileged`, device access is enforced by the
 cgroup. In a VM, the source path names a device in the Linux guest.
+
+`--gpus` selects `/dev/dri/renderD*` nodes by count, zero-based index, or node name.
+The image must supply compatible userspace graphics libraries. Podbag does not inject
+NVIDIA CUDA libraries or run vendor GPU hooks.
 
 ### Memory budget
 
@@ -742,7 +747,7 @@ podbag system docker restore    # back to the context you had (Docker Desktop, â
 
 ### What does not work
 
-- Refused: GPU requests (`--gpus`), custom device cgroup rules, `--pid host`,
+- Refused: GPU drivers other than Linux DRM, custom device cgroup rules, `--pid host`,
   `--volumes-from`, `--link`, port ranges, and other network or volume drivers.
 - Accepted with a warning: ulimits, log drivers, and fixed addresses.
 - Answered with 501 and what to do instead: BuildKit's build API (use buildx with the
