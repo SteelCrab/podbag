@@ -22,7 +22,9 @@
     { Id: "sha256:8c2e5b1d7f3a55bb", RepoTags: ["postgres:16-alpine"], Created: now - 86400 * 20, Size: 251_000_000, Containers: 1 },
     { Id: "sha256:7b3d4c2e8a4b66cc", RepoTags: ["redis:7-alpine"], Created: now - 86400 * 30, Size: 41_200_000, Containers: 1 },
     { Id: "sha256:6a4c3d1f9b5c77dd", RepoTags: ["registry.example.com/team/worker:1.4.2"], Created: now - 86400 * 2, Size: 183_000_000, Containers: 1 },
-    { Id: "sha256:5f5b2e0a0c6d88ee", RepoTags: ["alpine:3.22"], Created: now - 86400 * 60, Size: 8_520_000, Containers: 0 },
+    // Unused for a long time, so the engine compressed it: 3.9 MB on disk, 54% smaller.
+    { Id: "sha256:5f5b2e0a0c6d88ee", RepoTags: ["alpine:3.22"], Created: now - 86400 * 60, Size: 8_520_000, Containers: 0,
+      PodbagCompression: { Size: 3_900_000, OriginalSize: 8_520_000 } },
   ];
   const volumes = [
     { Name: "pgdata", Driver: "local", Mountpoint: "/var/lib/podbag/volumes/pgdata/_data", CreatedAt: new Date((now - 86400 * 3) * 1000).toISOString() },
@@ -178,6 +180,11 @@
       endpoint: selected === "kiri" ? "unix:///Users/me/.kiri/run/docker.sock" : selected, vm: null, version: selected });
   }
   let launchAtLogin = false;
+  // podbag system compression --json. URL: compression=idle (already on), compression=broken
+  // (a reply without a mode), override (an environment setting keeps the mode as it is),
+  // after (seconds an image stays unused; 0: at once), vm-error (vm status fails), busy
+  // (another dialog is open when the window first asks for the VM's state).
+  const compression = { mode: params.get("compression") === "idle" ? "idle" : "off", after: Number(params.get("after") ?? 604800) };
   const practiceModules = new Map();
   const commands = {
     "plugin:autostart|is_enabled": () => launchAtLogin,
@@ -223,7 +230,23 @@
       vmStatus.state = engine.vm;
       emit("engine-changed", action);
     },
-    vm_status: () => (docker || engine.platform === "linux" ? null : vmStatus),
+    vm_status: () => {
+      if (params.has("busy") && !document.getElementById("busy-dialog")) {
+        const busy = document.createElement("dialog");
+        busy.id = "busy-dialog";
+        busy.textContent = "Another question";
+        document.body.append(busy);
+        busy.showModal();
+      }
+      if (params.has("vm-error")) throw "cannot read the VM's state";
+      return docker || engine.platform === "linux" ? null : vmStatus;
+    },
+    compression: ({ mode }) => {
+      if (selected !== "podbag") throw "Image compression requires the podbag engine";
+      if (mode && !params.has("override")) compression.mode = mode;
+      if (!mode) window.previewCompressionReads = (window.previewCompressionReads || 0) + 1;
+      return params.get("compression") === "broken" ? null : { ...compression };
+    },
     vm_set: () => "Saved.",
     set_engine: ({ engine }) => {
       sessionStorage.setItem("preview-engine", engine);
@@ -281,7 +304,9 @@
         const key = { "podbag-container-basics-v1": "container-basics",
           "podbag-cli-gui-volumes-v1": "volume-basics", "podbag-cli-tui-volumes-v1": "tui-volumes",
           "podbag-web-basics-v1": "web-basics", "podbag-volume-persistence-v1": "volume-persistence",
-          "podbag-web-service-lifecycle-v1": "web-service-lifecycle" }[pack.format];
+          "podbag-web-service-lifecycle-v1": "web-service-lifecycle",
+          "podbag-web-service-recovery-v1": "web-service-recovery",
+          "podbag-container-network-v1": "container-network" }[pack.format];
         practiceModules.set(key, { id: key, package: pack, completed: false });
       }
       if (action === "remove") practiceModules.delete(id);
@@ -294,8 +319,11 @@
     get_settings: () => ({
       language: params.get("lang") || "en", theme: params.get("theme") || "system",
       sidebarWidth: 216, sidebarCollapsed: view === "collapsed",
+      // compression-prompt (or ask in the URL): a new install, or an update from a version
+      // without the question.
+      compressionPromptSeen: view !== "compression-prompt" && !params.has("ask"),
     }),
-    set_settings: () => null,
+    set_settings: ({ settings }) => { window.previewSavedSettings = settings; },
   };
 
   window.__TAURI__ = {

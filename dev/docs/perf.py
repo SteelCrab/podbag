@@ -13,6 +13,9 @@ from motion import (DARK as C, FILL_BOX_CENTRE, FILL_BOX_LEFT, REPO, Motion, ico
                     icon_disk, icon_moon, icon_ram, icon_stopwatch, logo, render_video,
                     svg_doc, text)
 
+# podbag's own color, as on podbag.dev (--podbag, dark theme).
+PODBAG = "#b88ae0"
+
 W, H, T = 800, 450, 35.0
 START = [("podbag (rootless)", 4.1, True), ("podbag (root)", 4.4, True), ("Kiri", 9.1, False),
          ("Podman", 46.4, False), ("Docker", 73.8, False)]
@@ -36,7 +39,7 @@ def build():
 
     def bar_scene(t0, t1, icon, title, subtitle, rows, unit, decimals, callout):
         o.append(f'<g class="{m.window(t0, t1)}" opacity="0">')
-        o.append(icon(56, 48, 52, C["accent"], cls=m.pop(t0 + 0.1, t1), style=FILL_BOX_CENTRE))
+        o.append(icon(56, 48, 52, PODBAG, cls=m.pop(t0 + 0.1, t1), style=FILL_BOX_CENTRE))
         o.append(text(126, 78, title, 26, C["ink"], 700, cls=m.rise(t0 + 0.2, t1)))
         o.append(text(126, 104, subtitle, 14, C["muted"], cls=m.rise(t0 + 0.35, t1)))
         top = max(v for _, v, _ in rows)
@@ -47,12 +50,12 @@ def build():
             o.append(text(250, y + 19, label, 15, C["ink"] if mine else C["muted"],
                           700 if mine else None, "end", cls=m.rise(t0 + 0.5 + i * 0.08, t1)))
             width = max(4.0, 420 * value / top)
-            color = C["accent"] if mine else C["gray"]
+            color = PODBAG if mine else C["gray"]
             o.append(f'<rect class="{m.grow(g0, g1, t1)}" x="264" y="{y}" width="{width:.1f}" '
                      f'height="26" rx="5" fill="{color}" style="{FILL_BOX_LEFT}"/>')
             o.append(text(264 + width + 10, y + 19, f"{fmt(value, decimals)} {unit}", 15,
                           C["ink"], 700 if mine else None, cls=m.rise(g1 - 0.25, t1, dy=0)))
-        o.append(text(400, 424, callout, 23, C["accent"], 800, "middle",
+        o.append(text(400, 424, callout, 23, PODBAG, 800, "middle",
                       cls=m.pop(t0 + 2.6, t1), style=FILL_BOX_CENTRE))
         o.append("</g>")
 
@@ -66,7 +69,7 @@ def build():
     icons = [icon_stopwatch, icon_chip, icon_moon, icon_disk, icon_ram]
     for i, icon in enumerate(icons):
         x = 400 - (len(icons) * 64 - 20) / 2 + i * 64
-        o.append(icon(x, 252, 44, C["accent"], cls=m.pop(1.2 + i * 0.12, t1), style=FILL_BOX_CENTRE))
+        o.append(icon(x, 252, 44, PODBAG, cls=m.pop(1.2 + i * 0.12, t1), style=FILL_BOX_CENTRE))
     o.append("</g>")
 
     hand = m.spin(4.2, 6.2, 2)
@@ -80,7 +83,7 @@ def build():
     # Nothing at rest.
     t0, t1 = 14.6, 19.6
     o.append(f'<g class="{m.window(t0, t1)}" opacity="0">')
-    o.append(icon_moon(56, 48, 52, C["accent"], cls=m.pop(t0 + 0.1, t1), style=FILL_BOX_CENTRE))
+    o.append(icon_moon(56, 48, 52, PODBAG, cls=m.pop(t0 + 0.1, t1), style=FILL_BOX_CENTRE))
     o.append(text(126, 78, "With no containers running", 26, C["ink"], 700, cls=m.rise(t0 + 0.2, t1)))
     o.append(text(126, 104, "processes and memory the tool keeps", 14, C["muted"],
                   cls=m.rise(t0 + 0.35, t1)))
@@ -97,7 +100,7 @@ def build():
                      f'<circle class="beat" cx="{cx}" cy="{y + 14}" r="10" fill="{C["gray"]}"/></g>')
         o.append(text(560, y + 20, mem, 16, C["ink"], 700 if mine else None,
                       cls=m.rise(t0 + 1.3 + i * 0.1, t1, dy=0)))
-    o.append(text(400, 424, "Nothing runs once the last container ends", 23, C["accent"], 800,
+    o.append(text(400, 424, "Nothing runs once the last container ends", 23, PODBAG, 800,
                   "middle", cls=m.pop(t0 + 2.4, t1), style=FILL_BOX_CENTRE))
     o.append("</g>")
 
@@ -120,8 +123,8 @@ def build():
         cls = m.rise(t0 + 0.3 + i * 0.15, T)
         o.append(f'<g class="{cls}"><rect x="{x}" y="104" width="165" height="208" rx="14" '
                  f'fill="{C["panel"]}" stroke="{C["line"]}"/>'
-                 + icon(x + 60.5, 122, 44, C["accent"])
-                 + text(x + 82.5, 214, value, 26, C["accent"], 800, "middle")
+                 + icon(x + 60.5, 122, 44, PODBAG)
+                 + text(x + 82.5, 214, value, 26, PODBAG, 800, "middle")
                  + text(x + 82.5, 242, what, 13.5, C["ink"], None, "middle")
                  + text(x + 82.5, 290, docker, 12.5, C["muted"], None, "middle") + "</g>")
     o.append(logo(318, 344, 40, cls=m.rise(t0 + 1.0, T)))

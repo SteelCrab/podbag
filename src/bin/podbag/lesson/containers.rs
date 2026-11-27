@@ -169,43 +169,90 @@ pub fn scoped(root: &Path, cmd: Cmd) -> io::Result<i32> {
 }
 
 pub fn course_command(root: &Path) -> io::Result<i32> {
-    use volume_lesson::course::{Attempt, Step};
+    course_step(root, "podbag", std::env::args_os().skip(1).collect())
+}
+
+/// `docker …` in a course's practice shell, sent here by `bin/docker`: the same check as a
+/// podbag step, run with the Docker CLI against the session's engine.
+pub fn docker_step(root: &Path, args: Vec<std::ffi::OsString>) -> io::Result<i32> {
+    course_step(root, "docker", args)
+}
+
+/// The Docker CLI on this computer: the first `docker` in PATH after the practice `bin/`.
+fn docker_command(root: &Path) -> io::Result<Command> {
+    let bin = root.join("bin");
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let docker = std::env::split_paths(&path)
+        .filter(|dir| *dir != bin)
+        .map(|dir| dir.join("docker"))
+        .find(|file| file.is_file())
+        .ok_or_else(|| io::Error::other("Install the Docker CLI to do this step."))?;
+    let mut cmd = Command::new(docker);
+    cmd.current_dir(root)
+        .env(
+            "DOCKER_HOST",
+            format!("unix://{}", lab::socket(root).display()),
+        )
+        .env("DOCKER_CONFIG", root.join("docker"))
+        .env_remove("DOCKER_CONTEXT")
+        .env_remove("DOCKER_TLS_VERIFY")
+        .env_remove("DOCKER_CERT_PATH")
+        .env_remove(volume_lesson::SCOPE);
+    Ok(cmd)
+}
+
+/// Runs the current step's command when ARGS are exactly it, then checks the step.
+fn course_step(root: &Path, program: &str, args: Vec<std::ffi::OsString>) -> io::Result<i32> {
+    use volume_lesson::course::{Attempt, Output};
     let _lock = Attempt::lock(root)?;
     let mut attempt = Attempt::read(root)?;
     let step = attempt.step()?;
     let line = step
         .command(attempt.port)
         .and_then(|line| shlex::split(&line));
-    let args: Vec<_> = std::env::args_os().skip(1).collect();
     if !line.as_ref().is_some_and(|line| {
-        args.iter()
-            .eq(line.iter().skip(1).map(std::ffi::OsStr::new))
+        line.first().is_some_and(|first| first == program)
+            && args
+                .iter()
+                .eq(line.iter().skip(1).map(std::ffi::OsStr::new))
     }) {
         return Err(io::Error::other(
             "Use the command shown for the current Training step, or type exit.",
         ));
     }
-    if matches!(step, Step::RunWeb | Step::RunFirst) && attempt.refresh_port(root)? {
+    if step.publishes_port() && attempt.refresh_port(root)? {
         return Err(io::Error::other(format!(
             "That port is in use. Copy the updated Training command for port {}.",
             attempt.port
         )));
     }
-    let mut engine = engine_command(root)?;
-    engine.args(args);
-    let (status, output) = if step == Step::Read {
-        let result = engine.stderr(Stdio::inherit()).output()?;
-        io::stdout().write_all(&result.stdout)?;
-        (result.status, result.stdout)
+    let mut engine = if program == "docker" {
+        docker_command(root)?
     } else {
-        (engine.status()?, Vec::new())
+        engine_command(root)?
+    };
+    engine.args(args);
+    let (status, output) = match step.output() {
+        Output::All => {
+            let mut result = engine.output()?;
+            io::stdout().write_all(&result.stdout)?;
+            io::stderr().write_all(&result.stderr)?;
+            result.stdout.extend(result.stderr);
+            (result.status, result.stdout)
+        }
+        Output::Stdout => {
+            let result = engine.stderr(Stdio::inherit()).output()?;
+            io::stdout().write_all(&result.stdout)?;
+            (result.status, result.stdout)
+        }
+        Output::None => (engine.status()?, Vec::new()),
     };
     if !status.success() {
         return Ok(status.code().unwrap_or(1));
     }
-    step.verify_cli(root, &output)?;
+    step.verify_cli(root, attempt.port, &output)?;
     attempt.advance(root)?;
-    if attempt.step()? == Step::Finish {
+    if attempt.step()?.is_finish() {
         eprintln!("Verified. Type exit to finish the lab.");
     }
     Ok(0)
