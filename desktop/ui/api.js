@@ -60,7 +60,6 @@ const API = (() => {
     vmResources: (values) => scoped("vm_resources", { values: values || null }),
     // No mode reads; "idle" or "off" sets. Resolves with { mode, after }.
     compression: (mode) => scoped("compression", { mode: mode || null }),
-    engineConfig: (request) => scoped("engine_config", { request }),
     launchAtLogin: () => invoke("plugin:autostart|is_enabled"),
     setLaunchAtLogin: (enabled) => invoke(enabled ? "plugin:autostart|enable" : "plugin:autostart|disable"),
     vmStatus: () => scoped("vm_status"),
@@ -77,6 +76,7 @@ const API = (() => {
     installTerminalCommand: () => invoke("install_terminal_command"),
     openRepository: () => invoke("open_repository"),
     openTrainingGuide: (id) => invoke("open_training_guide", { id, lang: I18N.lang }),
+    engineConfig: (request) => scoped("engine_config", { request }),
     getSettings: () => invoke("get_settings"),
     setSettings: (settings) => invoke("set_settings", { settings }),
     // Events: changed, live, logs, pull-progress, shown, engine-changed, open-updates,

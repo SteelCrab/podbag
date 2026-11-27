@@ -188,6 +188,13 @@ pub fn compression(podbag: &Path, mode: Option<&str>) -> Result<Value, String> {
     serde_json::from_str(out.trim()).map_err(|e| format!("podbag system compression --json: {e}"))
 }
 
+/// `podbag --version`: `0.1.0` from `podbag 0.1.0`.
+pub fn engine_version(podbag: &Path) -> Option<String> {
+    let out = run_ok(podbag, &["--version"]).ok()?;
+    let v = out.split_whitespace().nth(1)?.trim_start_matches('v');
+    crate::upgrade::Version::parse(v).map(|v| v.to_string())
+}
+
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "snake_case", tag = "action")]
 pub enum EngineConfigRequest {
@@ -218,13 +225,6 @@ pub fn engine_config(
     serde_json::from_str(&call.stdout)
         .map(Some)
         .map_err(|e| format!("podbag system config {action}: {e}"))
-}
-
-/// `podbag --version`: `0.1.0` from `podbag 0.1.0`.
-pub fn engine_version(podbag: &Path) -> Option<String> {
-    let out = run_ok(podbag, &["--version"]).ok()?;
-    let v = out.split_whitespace().nth(1)?.trim_start_matches('v');
-    crate::upgrade::Version::parse(v).map(|v| v.to_string())
 }
 
 /// `latest` is newer than `current`.

@@ -197,7 +197,6 @@
       endpoint: selected === "kiri" ? "unix:///Users/me/.kiri/run/docker.sock" : selected, vm: null, version: selected });
   }
   let launchAtLogin = false;
-  let engineConfigText = "# Local engine settings\nstore_limit = \"10GiB\"\nembedded_dns = true\n";
   // podbag system compression --json. URL: compression=idle (already on), compression=broken
   // (a reply without a mode), override (an environment setting keeps the mode as it is),
   // after (seconds an image stays unused; 0: at once), vm-error (vm status fails), busy
@@ -208,6 +207,7 @@
   const demoModel = { name: "smollm2:135m", size: 92_078_644, loaded: true };
   const models = view === "models-report" ? [{ ...demoModel }] : [];
   let modelRunner = view === "models-report";
+  let engineConfigText = "# Local engine settings\nstore_limit = \"10GiB\"\nembedded_dns = true\n";
   const commands = {
     "plugin:autostart|is_enabled": () => launchAtLogin,
     "plugin:autostart|enable": () => { launchAtLogin = true; },
@@ -447,6 +447,10 @@
         prompt.form.requestSubmit();
       },
       settings: () => app.go("settings"),
+      "settings-engine-config": async () => {
+        await app.openSettingsSection("engine-settings");
+        document.getElementById("edit-engine-configuration")?.click();
+      },
       "settings-search": async () => {
         await app.go("settings");
         const input = document.getElementById("settings-search");
@@ -456,10 +460,6 @@
       },
       tutorials: () => app.go("tutorials"),
       "settings-vm": () => app.openSettingsSection("vm-settings"),
-      "settings-engine-config": async () => {
-        await app.openSettingsSection("engine-settings");
-        document.getElementById("edit-engine-configuration")?.click();
-      },
       "settings-sync": () => app.openSettingsSection("sync-settings"),
       "settings-cli": () => app.openSettingsSection("terminal-command"),
       "settings-updates": app.openUpdates,

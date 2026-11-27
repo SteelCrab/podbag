@@ -25,8 +25,8 @@ function check(value, message) {
 async function test() {
   const local = document.getElementById("local");
   const external = document.getElementById("external");
-  await until(() => local.contentDocument.documentElement.dataset.ready === "1"
-    && external.contentDocument.documentElement.dataset.ready === "1");
+  await until(() => local.contentDocument?.documentElement?.dataset.ready === "1"
+    && external.contentDocument?.documentElement?.dataset.ready === "1");
   check(!external.contentDocument.getElementById("edit-engine-configuration"), "Hide the editor on an external engine");
   const win = local.contentWindow;
   const doc = local.contentDocument;

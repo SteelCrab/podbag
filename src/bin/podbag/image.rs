@@ -128,8 +128,48 @@ pub fn rmi(names: &[String]) -> i32 {
     code
 }
 
+fn engine_config(cmd: ConfigCmd) -> podbag::Result<()> {
+    let invalid = |why: String| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            "cannot read engine configuration input",
+            why,
+            "send the original and edited text in the expected format",
+        )
+    };
+    let dirs = podbag::paths::dirs()?;
+    let document = match cmd {
+        ConfigCmd::Show => config::document(&dirs)?,
+        ConfigCmd::Check => {
+            let text = std::io::read_to_string(std::io::stdin().lock())
+                .map_err(|e| invalid(e.to_string()))?;
+            config::parse(&text)?;
+            return Ok(());
+        }
+        ConfigCmd::Apply => {
+            let edit = serde_json::from_reader(std::io::stdin().lock())
+                .map_err(|e| invalid(e.to_string()))?;
+            config::apply_edit(&dirs, edit)?
+        }
+    };
+    serde_json::to_writer(std::io::stdout().lock(), &document).map_err(|e| {
+        Error::new(
+            ErrorKind::Runtime,
+            "cannot write engine configuration output",
+            e.to_string(),
+            "check stdout",
+        )
+    })?;
+    println!();
+    Ok(())
+}
+
 pub fn system(cmd: SystemCmd) -> i32 {
     match cmd {
+        SystemCmd::Config { cmd } => match engine_config(cmd) {
+            Ok(()) => 0,
+            Err(e) => report(&e),
+        },
         SystemCmd::Df => match podbag::disk_usage() {
             Ok(u) => {
                 let rows = [
@@ -221,10 +261,6 @@ pub fn system(cmd: SystemCmd) -> i32 {
             }
             Err(e) => report(&e),
         },
-        SystemCmd::Config { cmd } => match engine_config(cmd) {
-            Ok(()) => 0,
-            Err(e) => report(&e),
-        },
         SystemCmd::Compression { mode, after, json } => {
             match compression(mode.as_deref(), after.as_deref()) {
                 Ok(c) if json => {
@@ -260,42 +296,6 @@ pub fn system(cmd: SystemCmd) -> i32 {
             Err(e) => report(&e),
         },
     }
-}
-
-fn engine_config(cmd: ConfigCmd) -> podbag::Result<()> {
-    let invalid = |why: String| {
-        Error::new(
-            ErrorKind::InvalidInput,
-            "cannot read engine configuration input",
-            why,
-            "send the original and edited text in the expected format",
-        )
-    };
-    let dirs = podbag::paths::dirs()?;
-    let document = match cmd {
-        ConfigCmd::Show => config::document(&dirs)?,
-        ConfigCmd::Check => {
-            let text = std::io::read_to_string(std::io::stdin().lock())
-                .map_err(|e| invalid(e.to_string()))?;
-            config::parse(&text)?;
-            return Ok(());
-        }
-        ConfigCmd::Apply => {
-            let edit = serde_json::from_reader(std::io::stdin().lock())
-                .map_err(|e| invalid(e.to_string()))?;
-            config::apply_edit(&dirs, edit)?
-        }
-    };
-    serde_json::to_writer(std::io::stdout().lock(), &document).map_err(|e| {
-        Error::new(
-            ErrorKind::Runtime,
-            "cannot write engine configuration output",
-            e.to_string(),
-            "check stdout",
-        )
-    })?;
-    println!();
-    Ok(())
 }
 
 /// Save what `system compression` was given, then the settings in effect (environment

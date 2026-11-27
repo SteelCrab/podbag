@@ -469,6 +469,11 @@ pub enum CgroupDriverArg {
 
 #[derive(Subcommand)]
 pub enum SystemCmd {
+    /// View, check, or apply the local engine settings file
+    Config {
+        #[command(subcommand)]
+        cmd: ConfigCmd,
+    },
     /// Show disk use
     Df,
     /// Remove every image that no container uses
@@ -504,11 +509,6 @@ pub enum SystemCmd {
         /// Print the state as JSON
         #[arg(long)]
         json: bool,
-    },
-    /// View, check, or apply the local engine settings file
-    Config {
-        #[command(subcommand)]
-        cmd: ConfigCmd,
     },
     /// Serve the Docker Engine API on a Unix socket, for the docker CLI
     ///

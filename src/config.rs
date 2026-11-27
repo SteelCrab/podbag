@@ -4,7 +4,7 @@ use crate::cgroup::{Budget, parse_budget};
 use crate::paths::Dirs;
 use crate::{Error, ErrorKind, Result};
 use std::fs::File;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// The default image store limit.
 pub const DEFAULT_STORE_LIMIT: u64 = 10 << 30;
@@ -151,44 +151,6 @@ pub fn load(dirs: &Dirs) -> Result<Config> {
     Ok(config)
 }
 
-#[derive(Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-pub struct Document {
-    pub path: PathBuf,
-    /// None means the configuration file has not been created.
-    pub text: Option<String>,
-}
-
-#[derive(serde::Deserialize, serde::Serialize)]
-pub struct Edit {
-    pub original: Option<String>,
-    pub text: String,
-}
-
-pub fn document(dirs: &Dirs) -> Result<Document> {
-    let path = dirs.config.join("config.toml");
-    let text = read_text(&path)?;
-    Ok(Document { path, text })
-}
-
-pub fn apply_edit(dirs: &Dirs, edit: Edit) -> Result<Document> {
-    parse(&edit.text)?;
-    let _lock = lock_config(dirs)?;
-    let current = document(dirs)?;
-    if current.text != edit.original {
-        return Err(Error::new(
-            ErrorKind::Conflict,
-            "cannot save the engine configuration",
-            "config.toml changed after it was opened",
-            "reload the file and apply your edits again",
-        ));
-    }
-    write_text(&current.path, &edit.text)?;
-    Ok(Document {
-        path: current.path,
-        text: Some(edit.text),
-    })
-}
-
 fn read_text(path: &Path) -> Result<Option<String>> {
     match std::fs::read_to_string(path) {
         Ok(text) => Ok(Some(text)),
@@ -201,7 +163,16 @@ fn read_text(path: &Path) -> Result<Option<String>> {
     }
 }
 
-fn lock_config(dirs: &Dirs) -> Result<File> {
+/// Set `key = "value"` in `<config>/config.toml`, which is made when missing. The line that
+/// sets `key` is replaced (each one, when there are several), or the line is added at the
+/// end; every other line stays as it is. A value [`parse`] refuses changes nothing. The
+/// file is replaced at once: a reader sees the old text or the new one.
+pub fn set_value(dirs: &Dirs, key: &str, value: &str) -> Result<()> {
+    let _lock = lock_config(dirs)?;
+    set_values_locked(dirs, &[(key, value)])
+}
+
+pub(crate) fn lock_config(dirs: &Dirs) -> Result<File> {
     let result = || -> std::io::Result<File> {
         std::fs::create_dir_all(&dirs.config)?;
         let file = File::options()
@@ -222,44 +193,45 @@ fn lock_config(dirs: &Dirs) -> Result<File> {
     })
 }
 
-/// Set `key = "value"` in `<config>/config.toml`, which is made when missing. The line that
-/// sets `key` is replaced (each one, when there are several), or the line is added at the
-/// end; every other line stays as it is. A value [`parse`] refuses changes nothing. The
-/// file is replaced at once: a reader sees the old text or the new one.
-pub fn set_value(dirs: &Dirs, key: &str, value: &str) -> Result<()> {
-    let _lock = lock_config(dirs)?;
-    let Document { path, text } = document(dirs)?;
-    let old = text.unwrap_or_default();
-    let setting = format!("{key} = \"{value}\"");
-    let sets_key = |line: &str| {
-        strip_comment(line)
-            .split_once('=')
-            .is_some_and(|(k, _)| k.trim() == key)
-    };
-    let mut found = false;
+/// Replace related settings in a single write while the caller holds config.lock.
+pub(crate) fn set_values_locked(dirs: &Dirs, values: &[(&str, &str)]) -> Result<()> {
+    if values.is_empty() {
+        return Ok(());
+    }
+    let mut settings: Vec<_> = values
+        .iter()
+        .map(|(key, value)| {
+            let setting = format!("{key} = \"{value}\"");
+            parse(&setting).map_err(|e| {
+                Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("invalid {key}"),
+                    e.why.trim_start_matches("line 1: "),
+                    "use a valid value",
+                )
+            })?;
+            Ok((*key, setting, false))
+        })
+        .collect::<Result<_>>()?;
+    let path = dirs.config.join("config.toml");
+    let old = read_text(&path)?.unwrap_or_default();
     let mut text = String::new();
     for line in old.lines() {
-        if sets_key(line) {
-            found = true;
-            text.push_str(&setting);
+        let key = strip_comment(line).split_once('=').map(|(k, _)| k.trim());
+        if let Some((_, setting, found)) = settings.iter_mut().find(|(k, _, _)| key == Some(*k)) {
+            *found = true;
+            text.push_str(setting);
         } else {
             text.push_str(line);
         }
         text.push('\n');
     }
-    if !found {
-        text.push_str(&setting);
-        text.push('\n');
+    for (_, setting, found) in settings {
+        if !found {
+            text.push_str(&setting);
+            text.push('\n');
+        }
     }
-    // The value alone first, so its error does not point at a line of the file.
-    parse(&setting).map_err(|e| {
-        Error::new(
-            ErrorKind::InvalidInput,
-            format!("invalid {key}"),
-            e.why.trim_start_matches("line 1: "),
-            "use a valid value",
-        )
-    })?;
     parse(&text).map_err(|mut e| {
         e.what = format!("invalid settings in {}", path.display());
         e
@@ -473,6 +445,44 @@ pub fn parse_size(s: &str) -> Result<u64> {
         _ => return Err(bad()),
     };
     Ok((value * multiplier as f64).round() as u64)
+}
+
+#[derive(Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct Document {
+    pub path: std::path::PathBuf,
+    /// None means the configuration file has not been created.
+    pub text: Option<String>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+pub struct Edit {
+    pub original: Option<String>,
+    pub text: String,
+}
+
+pub fn document(dirs: &Dirs) -> Result<Document> {
+    let path = dirs.config.join("config.toml");
+    let text = read_text(&path)?;
+    Ok(Document { path, text })
+}
+
+pub fn apply_edit(dirs: &Dirs, edit: Edit) -> Result<Document> {
+    parse(&edit.text)?;
+    let _lock = lock_config(dirs)?;
+    let current = document(dirs)?;
+    if current.text != edit.original {
+        return Err(Error::new(
+            ErrorKind::Conflict,
+            "cannot save the engine configuration",
+            "config.toml changed after it was opened",
+            "reload the file and apply your edits again",
+        ));
+    }
+    write_text(&current.path, &edit.text)?;
+    Ok(Document {
+        path: current.path,
+        text: Some(edit.text),
+    })
 }
 
 #[cfg(test)]
