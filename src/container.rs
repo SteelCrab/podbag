@@ -52,6 +52,10 @@ pub struct Container {
     #[serde(default)]
     aliases: Vec<String>,
     #[serde(default)]
+    extra_hosts: Vec<crate::netfiles::ExtraHost>,
+    #[serde(default)]
+    dns: crate::netfiles::DnsSettings,
+    #[serde(default)]
     extra_networks: Vec<crate::spec::Attachment>,
     #[serde(default)]
     stop_timeout: Option<i64>,
@@ -144,6 +148,8 @@ impl Container {
             publish: Vec::new(),
             labels: std::collections::BTreeMap::new(),
             aliases: Vec::new(),
+            extra_hosts: Vec::new(),
+            dns: Default::default(),
             extra_networks: Vec::new(),
             stop_timeout: None,
             restart: Default::default(),
@@ -169,6 +175,33 @@ impl Container {
     /// containers there find it by this name too. User networks only.
     pub fn network_alias(mut self, alias: impl Into<String>) -> Container {
         self.aliases.push(alias.into());
+        self
+    }
+
+    /// An extra `/etc/hosts` line (`--add-host NAME:IP`). The address may be
+    /// [`crate::netfiles::HostAddress::HostGateway`]: the host, found at each start.
+    pub fn add_host(mut self, entry: crate::netfiles::ExtraHost) -> Container {
+        self.extra_hosts.push(entry);
+        self
+    }
+
+    /// A DNS server for its `/etc/resolv.conf` (`--dns`). Given ones replace the default
+    /// servers.
+    pub fn dns_server(mut self, server: std::net::IpAddr) -> Container {
+        self.dns.servers.push(server);
+        self
+    }
+
+    /// A DNS search domain (`--dns-search`); `.` alone means none. Given ones replace the
+    /// host's.
+    pub fn dns_search(mut self, domain: impl Into<String>) -> Container {
+        self.dns.search.push(domain.into());
+        self
+    }
+
+    /// A resolver option, like `ndots:2` (`--dns-option`). Given ones replace the host's.
+    pub fn dns_option(mut self, option: impl Into<String>) -> Container {
+        self.dns.options.push(option.into());
         self
     }
 
@@ -901,6 +934,7 @@ mod linux_launch {
             }
         }
         crate::spec::check_networks(&network, &c.aliases, &c.extra_networks)?;
+        crate::netfiles::check_settings(&network, rootless, &c.extra_hosts, &c.dns)?;
         // Without the keeper, a rootless bridge container's shim is in the network
         // session's user namespace: only the user's service manager can start its restarter.
         if c.restart != crate::restart::RestartPolicy::No
@@ -998,6 +1032,8 @@ mod linux_launch {
                     network: network.clone(),
                     publish: c.publish.clone(),
                     aliases: c.aliases.clone(),
+                    extra_hosts: c.extra_hosts.clone(),
+                    dns: c.dns.clone(),
                     stop_timeout: c.stop_timeout,
                     restart: c.restart,
                     health: health.clone(),
@@ -1040,6 +1076,8 @@ mod linux_launch {
                         network: network.clone(),
                         publish: c.publish.clone(),
                         aliases: c.aliases.clone(),
+                        extra_hosts: c.extra_hosts.clone(),
+                        dns: c.dns.clone(),
                         stop_timeout: c.stop_timeout,
                         restart: c.restart,
                         health: health.clone(),

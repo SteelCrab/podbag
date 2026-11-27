@@ -49,6 +49,8 @@ The [README](../README.md) shows how to install podbag. This page shows what it 
 - [Networks](#networks)
   - [Options](#options-1)
   - [Names and addresses](#names-and-addresses)
+  - [Extra hosts and DNS](#extra-hosts-and-dns)
+  - [host-gateway](#host-gateway)
   - [How it works](#how-it-works)
 - [Docker API](#docker-api)
   - [Start it](#start-it)
@@ -387,6 +389,8 @@ podbag build -t myapp - < Dockerfile               # only a Dockerfile, no conte
 - No BuildKit and no daemon: podbag reads the Dockerfile and does each step itself.
 - Options: `-t` (more than once), `-f`, `--build-arg`, `--target`, `--no-cache`, `--pull`,
   `--label`, `--network`, `-q`.
+- Base images from private registries use your `podbag login`. Through the Docker API,
+  podbag uses the logins the docker CLI sends, then your own.
 
 ### How the steps work
 
@@ -443,7 +447,6 @@ podbag build -t myapp - < Dockerfile               # only a Dockerfile, no conte
   Git repository, heredocs in `COPY` and `ADD`. podbag stops with a message; build such
   Dockerfiles with buildx (see [buildx](#buildx)).
 - `ADD` of bzip2 or xz archives.
-- Base images from private registries: pulls are anonymous for now.
 - Image history (`docker history`).
 - Changes that a `RUN` makes in a `VOLUME` path stay in the image (Docker drops them).
 
@@ -621,6 +624,11 @@ podbag build -t myapp - < Dockerfile               # only a Dockerfile, no conte
 | `--network host` | the host's network |
 | `--network none` | loopback only |
 | `-p [IP:][HOST:]CONTAINER[/tcp\|udp]` | publish a port; without a host port, the kernel picks one (see `ps`, `inspect`) |
+| `--add-host NAME:IP` | one more line in `/etc/hosts`; `NAME=IP` and IPv6 (`NAME=[::1]`) work too |
+| `--add-host NAME:host-gateway` | `NAME` leads to the host (see [host-gateway](#host-gateway)) |
+| `--dns IP` | a DNS server; given ones replace the default servers |
+| `--dns-search DOMAIN` | a search domain; given ones replace the host's; `.` means none |
+| `--dns-option OPT` | a resolver option, like `ndots:2`; given ones replace the host's |
 
 ### Names and addresses
 
@@ -632,6 +640,35 @@ podbag build -t myapp - < Dockerfile               # only a Dockerfile, no conte
 - `podbag network connect [--alias NAME] NET CONTAINER` and
   `podbag network disconnect NET CONTAINER` change the networks of a stopped container,
   for its next start. A running container is refused.
+
+### Extra hosts and DNS
+
+- `--add-host` lines come after `localhost` and before the container's own line, as in
+  Docker. They stay when podbag rewrites `/etc/hosts`.
+- Without `--dns`, a bridge container gets the host's servers as root, and pasta's
+  forwarder (`169.254.1.1`) without root. `--dns` replaces them in both modes.
+- With `--network host` or `none`, the container gets the host's `/etc/resolv.conf`.
+  Each `--dns` option replaces its part of that file.
+- The Docker API takes `ExtraHosts`, `Dns`, `DnsSearch` and `DnsOptions`, and `inspect`
+  shows them.
+
+### host-gateway
+
+`--add-host NAME:host-gateway` writes the host's address, found at each start:
+
+| Where | Address |
+|---|---|
+| Linux, as root, bridge network | the network's gateway (the host's side of the bridge) |
+| Linux, `--network host` | `127.0.0.1` |
+| macOS VM | the Mac's address on the VM network; it reaches Mac services that listen on all addresses, not on `127.0.0.1` only |
+| Linux without root, bridge network | refused: pasta keeps the host's addresses away from containers |
+| `--network none` | refused: no network |
+| Windows (WSL) | refused: podbag cannot tell the Windows host's address |
+
+- Where it is refused, the CLI stops with an error. Give the host's address instead:
+  `--add-host NAME:IP`.
+- The Docker API (and so Compose) makes the container without that one entry, and says so
+  in a warning. The other entries and DNS settings still apply.
 
 ### How it works
 
@@ -689,7 +726,7 @@ podbag system docker restore    # back to the context you had (Docker Desktop, â
   `load`, `search`, `build` with the classic builder (see
   [Builds with the docker CLI](#builds-with-the-docker-cli)), `builder prune`.
 - Registries: `login` (the docker CLI keeps the login; podbag checks it), and private
-  pulls and pushes with the login the docker CLI sends.
+  pulls, pushes and build base images with the login the docker CLI sends.
 - Containers: `run` (attached, `-d`, `-i`, `-t`, `--rm`), `create`, `start [-a]`, `stop`,
   `restart`, `kill`, `wait`, `rm`, `logs` (`-f`, `--tail`, `-t`, `--since`), `attach`,
   `ps` (filters `label`, `name`, `id`, `status`), `inspect`, `port`,
@@ -701,8 +738,8 @@ podbag system docker restore    # back to the context you had (Docker Desktop, â
 
 - Refused, with the reason: devices, `--read-only`, `--pid host`, `--volumes-from`,
   `--link`, port ranges, other network or volume drivers.
-- Accepted with a warning, because ignoring them is safe: `--dns`, `--add-host`, ulimits,
-  log drivers, fixed addresses.
+- Accepted with a warning, because ignoring them is safe: ulimits, log drivers, fixed
+  addresses.
 - Answered with 501 and what to do instead: BuildKit's build API (use buildx with the
   `docker-container` driver), `image history` and plugins.
 - Swarm mode works on one node. See [Swarm mode](#swarm-mode).
@@ -857,6 +894,7 @@ podbag tui --engine unix:///run/kiri/docker.sock
   - Select two kubeconfig contexts and an existing destination namespace.
   - Kubernetes gives new UIDs, service addresses and node ports.
   - Migrate PVCs before the workloads that use them.
+  - OpenShift Routes are not copied. A Route's host belongs to its cluster.
   - The destination needs the referenced images, credentials and configuration.
   - A bound claim needs compatible storage and permission to create temporary Pods and
     use `pods/exec` in both namespaces. Podbag copies the files through those Pods and
@@ -923,16 +961,22 @@ podbag migrate --from context:staging --to podbag container web
 - The context's default namespace applies. `--namespace` selects another one. `-A`
   lists all namespaces.
 - Resource types: `pod`, `service`, `deployment` and `claim` (alias `pvc`).
+- On OpenShift, `route` also works. A Route is the public address of a Service.
+- A context is OpenShift when its API serves `route.openshift.io/v1`. Only then does
+  `counts` include `routes`.
 
 ```sh
 podbag kube contexts
 podbag kube counts --context dev -A
 podbag kube list pod --context dev -n apps
 podbag kube inspect pod web --context dev -n apps
+podbag kube list route --context ocp -n apps
 podbag kube migrate pod web --from dev --to staging --from-namespace apps --to-namespace review
 ```
 
 - `migrate` reads the source, creates the destination resource and verifies it.
+- `migrate` does not copy Routes. A Route's host belongs to its cluster. Create a new
+  Route in the destination cluster.
 - `--uid` requires that exact source object. Use the UID from an earlier inspection.
 - Without a namespace flag, that context's default namespace applies.
 
@@ -1096,7 +1140,7 @@ podbag lab remove container-network
 | Create volume | Create a named volume on the selected engine |
 | Pull image / Log in | Choose a registry, sign in, search Docker Hub or pull a reference |
 | Import from Docker | With Podbag selected, copy one or more tagged images from Docker. Press `Space` to mark tags and `Enter` to review |
-| Kubernetes | Choose a context, current or all namespaces, and Pods, Services, Deployments or PVCs. Filter rows, inspect JSON or refresh |
+| Kubernetes | Choose a context, current or all namespaces, and Pods, Services, Deployments or PVCs. On OpenShift, Routes are also listed. Filter rows, inspect JSON or refresh |
 | Migrate | Browse all local engines or select a source. Choose a resource and destination. For Kubernetes, choose the destination namespace. Review the transfer, follow its progress and verify the destination |
 | Tutorials | Install a local `.podbag` lesson, create a practice volume, edit JSON, serve it over HTTP, read the response and remove the module. `Ctrl+S` saves the file |
 | Settings | Connect to an engine, inspect it, check for updates, install an update, open a host shell or the project page. Set the terminal language and theme. Manage sign-in startup when Podbag Desktop is installed |
@@ -1168,6 +1212,8 @@ podbag lab remove container-network
   persistent volume claims in the context's namespace or select **All namespaces**.
   Select a name to inspect its JSON. These views change nothing. To copy a resource to
   another cluster, use [Migrate](#migrate-between-engines-or-kubernetes-clusters).
+- On an OpenShift context, a **Routes** tab also appears. It shows each Route's host,
+  path, Service and TLS mode. Select a host to open its address in the browser.
 
 ![Available migrations in a Kubernetes namespace and resource counts in the sidebar](images/migration-overview-en.png)
 
@@ -1175,7 +1221,19 @@ podbag lab remove container-network
   Drag the open space in the toolbar to move the window.
 - Each list has a search box, and the same actions as the TUI.
 - A container's page has its details, its logs (as they come) and all its data.
-- With no containers, the window shows how to start one.
+- Select **Containers â†’ Run container** to start a new container. Each image in
+  **Images** also has **Run**, with the image filled in.
+  - Give the image. A name and published ports (host:container, TCP or UDP) are optional.
+    With no host port, the engine chooses one.
+  - **More options** has environment variables (`KEY=VALUE`), volumes (a volume name or a
+    full host path, then the path in the container, read-only if needed), the command, the
+    restart policy and **Remove when it stops**.
+  - The form checks ports, variables and paths before it sends anything.
+  - When the engine does not have the image, the app pulls it first. It uses your
+    registry login, as **Pull image** does.
+  - Then the container's page opens with its logs. Errors from the engine show in the form.
+  - It works with every engine: it uses the Docker API.
+- With no containers, the window offers **Run container** and the terminal command.
 - The tray item shows the engine's state and how many containers run. It has Open podbag
   and Quit. On macOS, it also has Start VM or Stop VM.
 - On macOS, open **Settings â†’ Linux VM** to start or stop the local VM and choose its
@@ -1546,6 +1604,8 @@ sudo k3s server --container-runtime-endpoint unix:///run/podbag/cri.sock
   and its keychain (`credsStore: "osxkeychain"`).
 - `pull`, `push`, `run` and `create` take the Mac's login for the image's registry to the
   VM with the command. It stays in memory there: nothing is written to the VM's disk.
+- `build` takes the Mac's logins for the registries its Dockerfile pulls from, in the same
+  way. A Dockerfile on stdin takes no login.
 - `run` and `create` of Docker Hub's official images (like `alpine`) take no login, so they
   need no credential helper and start quickly.
 - The docker CLI sends its own logins, as with Docker.
@@ -1649,6 +1709,8 @@ docker buildx build --load -t app .
   config and its credential helper.
 - `pull`, `push`, `run` and `create` take the login for the image's registry to the engine
   through `WSLENV`, in memory. Nothing is written to the distribution's disk.
+- `build` takes the logins for the registries its Dockerfile pulls from, in the same way.
+  A Dockerfile on stdin takes no login.
 
 ### Limits
 
