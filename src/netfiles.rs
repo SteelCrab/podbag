@@ -339,6 +339,7 @@ pub fn check_dns_option(option: &str) -> Result<()> {
 /// One container of a user network as the others see it: its address and names.
 pub struct Peer<'a> {
     pub ip: Ipv4Addr,
+    pub ip6: Option<std::net::Ipv6Addr>,
     pub name: &'a str,
     /// Further names on this network (`--network-alias`).
     pub aliases: &'a [String],
@@ -373,12 +374,14 @@ impl PeerBlock {
         let mut text = String::with_capacity(peers.len() * 32);
         let mut ends = Vec::with_capacity(peers.len());
         for p in peers {
-            let _ = write!(text, "{}\t", p.ip);
-            push_names(
-                &mut text,
-                std::iter::once(p.name).chain(p.aliases.iter().map(String::as_str)),
-            );
-            text.push('\n');
+            for ip in std::iter::once(IpAddr::from(p.ip)).chain(p.ip6.map(IpAddr::from)) {
+                let _ = write!(text, "{ip}\t");
+                push_names(
+                    &mut text,
+                    std::iter::once(p.name).chain(p.aliases.iter().map(String::as_str)),
+                );
+                text.push('\n');
+            }
             ends.push(text.len());
         }
         PeerBlock { text, ends }
@@ -410,7 +413,7 @@ pub fn bridge_hosts(
     hostname: &str,
     name: &str,
     extra: &[HostEntry],
-    own: &[(Ipv4Addr, &[String])],
+    own: &[(IpAddr, &[String])],
     lists: &[(&PeerBlock, Option<usize>)],
 ) -> String {
     use std::fmt::Write;
@@ -444,11 +447,13 @@ fn is_loopback(server: &str) -> bool {
 }
 
 /// The name servers of a resolv.conf.
-fn nameservers(text: &str) -> impl Iterator<Item = &str> {
-    text.lines()
-        .filter_map(|l| l.trim().strip_prefix("nameserver"))
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
+pub(crate) fn nameservers(text: &str) -> impl Iterator<Item = &str> {
+    text.lines().filter_map(|line| {
+        let mut fields = line.split_whitespace();
+        (fields.next()? == "nameserver")
+            .then(|| fields.next())
+            .flatten()
+    })
 }
 
 /// Name servers in a resolv.conf that a container can reach (not loopback).
@@ -542,6 +547,7 @@ mod tests {
     fn peer<'a>(name: &'a str, ip: [u8; 4], aliases: &'a [String]) -> Peer<'a> {
         Peer {
             ip: Ipv4Addr::from(ip),
+            ip6: None,
             name,
             aliases,
         }
@@ -562,7 +568,7 @@ mod tests {
         let block = PeerBlock::new(&peers);
         let own = Ipv4Addr::new(10, 78, 1, 2);
         assert_eq!(
-            bridge_hosts("db", "db", &[], &[(own, &[])], &[(&block, Some(0))]),
+            bridge_hosts("db", "db", &[], &[(own.into(), &[])], &[(&block, Some(0))]),
             format!("{LOCAL}10.78.1.2\tdb\n10.78.1.3\tweb front\n")
         );
     }
@@ -578,7 +584,7 @@ mod tests {
                 "abc123",
                 "web",
                 &[],
-                &[(own, &aliases)],
+                &[(own.into(), &aliases)],
                 &[(&block, Some(0))]
             ),
             format!("{LOCAL}10.78.1.3\tabc123 web api\n")
@@ -598,8 +604,8 @@ mod tests {
         ];
         let (front, back) = (PeerBlock::new(&front), PeerBlock::new(&back));
         let own = [
-            (Ipv4Addr::new(10, 1, 0, 2), &[][..]),
-            (Ipv4Addr::new(10, 2, 0, 3), &w[..]),
+            (IpAddr::from([10, 1, 0, 2]), &[][..]),
+            (IpAddr::from([10, 2, 0, 3]), &w[..]),
         ];
         assert_eq!(
             bridge_hosts(
@@ -620,16 +626,16 @@ mod tests {
         let ip = Ipv4Addr::new(10, 78, 1, 9);
         let all = format!("{LOCAL}10.78.1.9\tnew\n10.78.1.2\tdb\n");
         assert_eq!(
-            bridge_hosts("new", "new", &[], &[(ip, &[])], &[(&block, Some(7))]),
+            bridge_hosts("new", "new", &[], &[(ip.into(), &[])], &[(&block, Some(7))]),
             all
         );
         assert_eq!(
-            bridge_hosts("new", "new", &[], &[(ip, &[])], &[(&block, None)]),
+            bridge_hosts("new", "new", &[], &[(ip.into(), &[])], &[(&block, None)]),
             all
         );
         let none = PeerBlock::new(&[]);
         assert_eq!(
-            bridge_hosts("a", "a", &[], &[(ip, &[])], &[(&none, Some(0))]),
+            bridge_hosts("a", "a", &[], &[(ip.into(), &[])], &[(&none, Some(0))]),
             format!("{LOCAL}10.78.1.9\ta\n")
         );
     }
@@ -646,7 +652,7 @@ mod tests {
             "same",
             "b",
             &[],
-            &[(own, &[])],
+            &[(own.into(), &[])],
             &[(&PeerBlock::new(&peers), Some(1))],
         );
         let lines: Vec<&str> = text.lines().collect();
@@ -815,7 +821,7 @@ mod tests {
         let block = PeerBlock::new(&peers);
         let own = Ipv4Addr::new(10, 78, 1, 2);
         assert_eq!(
-            bridge_hosts("me", "me", &extra, &[(own, &[])], &[(&block, None)]),
+            bridge_hosts("me", "me", &extra, &[(own.into(), &[])], &[(&block, None)]),
             format!("{LOCAL}10.1.2.3\tdb\nfd00::1\tv6\n10.78.1.2\tme\n10.78.1.3\tweb\n")
         );
         assert_eq!(

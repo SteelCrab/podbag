@@ -140,9 +140,23 @@ fn build(args: RunArgs) -> podbag::Result<Container> {
         c = c.cap_drop(name);
     }
     let mut networks = args.network.iter();
-    if let Some(n) = networks.next() {
-        c = c.network(podbag::network::parse_network_arg(n)?);
-    }
+    let primary = networks
+        .next()
+        .map(|n| podbag::network::parse_network_arg(n))
+        .transpose()?
+        .unwrap_or_default();
+    let name = match &primary {
+        podbag::network::NetworkMode::Bridge { network } => network.clone(),
+        podbag::network::NetworkMode::Host => "host".into(),
+        podbag::network::NetworkMode::None => "none".into(),
+    };
+    c = c.network(primary).fixed_addresses(
+        name,
+        podbag::network::FixedAddresses {
+            ipv4: args.ip,
+            ipv6: args.ip6,
+        },
+    );
     for n in networks {
         // `host` and `none` stay as given: the check refuses them with a reason.
         let name = match podbag::network::parse_network_arg(n)? {

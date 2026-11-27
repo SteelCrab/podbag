@@ -279,6 +279,12 @@ pub enum Cmd {
     },
     #[command(name = "__store", hide = true)]
     Store { op: String },
+    #[command(name = "__network-attachment", hide = true)]
+    NetworkAttachment {
+        id: String,
+        network: String,
+        change: String,
+    },
     #[command(name = "__session", hide = true)]
     Session,
     /// The init that holds a Kubernetes pod's PID namespace
@@ -332,6 +338,12 @@ pub enum NetworkCmd {
         /// Subnet in CIDR form (default: the next free 10.78.<n>.0/24)
         #[arg(long)]
         subnet: Option<String>,
+        /// Give the bridge IPv6 addresses as well as IPv4
+        #[arg(long)]
+        ipv6: bool,
+        /// IPv6 subnet in CIDR form (default with --ipv6: a ULA /64)
+        #[arg(long, value_name = "CIDR")]
+        subnet6: Option<podbag::network::Ipv6Subnet>,
         /// A label, as key=value or key (may be repeated)
         #[arg(long = "label", value_name = "KEY=VALUE")]
         labels: Vec<String>,
@@ -346,15 +358,21 @@ pub enum NetworkCmd {
     },
     /// Show a network's details as JSON
     Inspect { name: String },
-    /// Connect a stopped container to a further network (from its next start on)
+    /// Connect a container to a secondary bridge network
     Connect {
         /// A further name of the container on this network (may be repeated)
         #[arg(long = "alias", value_name = "ALIAS")]
         aliases: Vec<String>,
+        /// Request a fixed IPv4 address
+        #[arg(long)]
+        ip: Option<std::net::Ipv4Addr>,
+        /// Request a fixed IPv6 address
+        #[arg(long)]
+        ip6: Option<std::net::Ipv6Addr>,
         network: String,
         container: String,
     },
-    /// Disconnect a stopped container from a further network
+    /// Disconnect a container from a secondary bridge network
     Disconnect { network: String, container: String },
 }
 
@@ -713,6 +731,12 @@ pub struct RunArgs {
     /// A further name on the container's (first) network, for the other containers there
     #[arg(long = "network-alias", alias = "net-alias", value_name = "ALIAS")]
     pub network_alias: Vec<String>,
+    /// Request a fixed IPv4 address on the first network
+    #[arg(long)]
+    pub ip: Option<std::net::Ipv4Addr>,
+    /// Request a fixed IPv6 address on the first network
+    #[arg(long)]
+    pub ip6: Option<std::net::Ipv6Addr>,
     /// Publish a port ([IP:][HOST_PORT:]CONTAINER_PORT[/tcp|udp])
     #[arg(short = 'p', long = "publish")]
     pub publish: Vec<String>,

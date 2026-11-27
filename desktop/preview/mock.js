@@ -67,14 +67,15 @@
     throw 'kubectl (exit status: 1): error: the server doesn\'t have a resource type "routes"';
   };
   const docker = view.startsWith("docker");
+  const platform = params.get("platform") || "macos";
   const engine = {
-    platform: "macos",
+    platform,
     engine: docker ? "docker" : "podbag",
     engineName: docker ? "Docker" : "podbag",
     shell: true,
     endpoint: "unix:///Users/me/.podbag/run/docker.sock",
     reachable: !["offline", "vm"].includes(view),
-    vm: view === "vm" ? "stopped" : "running",
+    vm: platform === "linux" ? null : view === "vm" ? "stopped" : "running",
     version: "podbag 0.1.0 (API 1.47)",
     error: view === "vm" ? "vm-stopped" : view === "offline" ? "cannot connect to unix:///Users/me/.podbag/run/docker.sock: No such file or directory" : null,
   };
@@ -103,6 +104,7 @@
     platform: "macos", state: "stopped", resourcesEditable: true, inUse: null,
     next: { cpus: 4, memoryMiB: 4096, idleSeconds: 300 }, saved: { cpus: 4, memoryMiB: 4096, idleSeconds: null },
     overriddenBy: [], pending: false,
+    sharedPaths: { inUse: null, next: ["/Users"] },
     limits: { cpusMin: 1, cpusMax: 10, memoryMinMiB: 1024, memoryMaxMiB: 20480, macMemoryMiB: 24576 },
     uptimeSeconds: null, containers: null, cpuPercent: null, memoryUsedMiB: null, memoryTotalMiB: null,
     disk: { path: "/Users/me/.podbag/vm/disk.img", allocatedBytes: 3_400_000_000, sizeBytes: 68_719_476_736 },
@@ -111,10 +113,12 @@
     inUse: { cpus: 4, memoryMiB: 4096, idleSeconds: 300 },
     next: { cpus: 4, memoryMiB: 6144, idleSeconds: 300 }, saved: { cpus: null, memoryMiB: 6144, idleSeconds: null },
     overriddenBy: view === "settings-vm" ? ["PODBAG_VM_CPUS"] : [], pending: true,
+    sharedPaths: { inUse: ["/Users"], next: ["/Users"] },
     limits: { cpusMin: 1, cpusMax: 10, memoryMinMiB: 1024, memoryMaxMiB: 20480, macMemoryMiB: 24576 },
     uptimeSeconds: 7560, containers: 3, cpuPercent: 12.5, memoryUsedMiB: 1350, memoryTotalMiB: 3900,
     disk: { path: "/Users/me/.podbag/vm/disk.img", allocatedBytes: 5_800_000_000, sizeBytes: 68_719_476_736 },
   };
+  if (platform === "windows") Object.assign(vmStatus, { platform, resourcesEditable: false });
   // A packaged app with a separate podbag for the terminal; update-source: a build of its own.
   const packaged = { installer: "macos-app", terminal: "/usr/local/bin/podbag", terminalVersion: "0.1.0", appNewer: true, cliNewer: true };
   const source = { installer: null, terminal: null, terminalVersion: null, appNewer: false, cliNewer: true };
@@ -186,6 +190,9 @@
   // (another dialog is open when the window first asks for the VM's state).
   const compression = { mode: params.get("compression") === "idle" ? "idle" : "off", after: Number(params.get("after") ?? 604800) };
   const practiceModules = new Map();
+  const demoModel = { name: "smollm2:135m", size: 92_078_644, loaded: true };
+  const models = view === "models-report" ? [{ ...demoModel }] : [];
+  let modelRunner = view === "models-report";
   const commands = {
     "plugin:autostart|is_enabled": () => launchAtLogin,
     "plugin:autostart|enable": () => { launchAtLogin = true; },
@@ -206,6 +213,25 @@
       }
     },
     create_volume: ({ name }) => { volumes.push({ Name: name, Driver: "local" }); },
+    models: ({ request }) => {
+      (window.previewModelActions ||= []).push(request);
+      const { action, model } = request;
+      if (action === "start") {
+        if (params.get("ollama") === "missing") throw { kind: "missing" };
+        modelRunner = true;
+      } else if (action === "stop") {
+        modelRunner = false;
+        models.forEach((item) => { item.loaded = false; });
+      } else if (action === "pull") {
+        if (!models.some((item) => item.name === model)) models.push({ ...demoModel, name: model, loaded: false });
+      } else if (action === "run" || action === "unload") {
+        const selected = models.find((item) => item.name === model);
+        if (!selected) throw { kind: "notInstalled" };
+        selected.loaded = action === "run";
+        if (selected.loaded) return { response: "Blue." };
+      }
+      return { running: modelRunner, version: modelRunner ? "0.40.17" : "", models: modelRunner ? models.map((item) => ({ ...item })) : [] };
+    },
     engine: () => engine,
     list: ({ kind }) => lists[kind],
     kube_list: ({ kind, allNamespaces, context }) => ({
@@ -262,7 +288,11 @@
       if (!mode) window.previewCompressionReads = (window.previewCompressionReads || 0) + 1;
       return params.get("compression") === "broken" ? null : { ...compression };
     },
-    vm_set: () => "Saved.",
+    vm_set: ({ settings }) => {
+      if (settings.sharedPaths) vmStatus.sharedPaths.next = settings.sharedPaths;
+      if (settings.restart) vmStatus.sharedPaths.inUse = vmStatus.sharedPaths.next;
+      return "Saved.";
+    },
     set_engine: ({ engine }) => {
       sessionStorage.setItem("preview-engine", engine);
       sessionStorage.setItem("preview-token", String(token + 1));
@@ -357,7 +387,27 @@
       images: () => app.go("images"),
       volumes: () => app.go("volumes"),
       networks: () => app.go("networks"),
+      models: () => app.go("models"),
+      "models-report": async () => {
+        await app.go("models");
+        const until = performance.now() + 1500;
+        let prompt;
+        while (!(prompt = document.getElementById("model-prompt")) && performance.now() < until) {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        if (!prompt) return;
+        prompt.value = "Name the color of a clear daytime sky.";
+        prompt.dispatchEvent(new Event("input"));
+        prompt.form.requestSubmit();
+      },
       settings: () => app.go("settings"),
+      "settings-search": async () => {
+        await app.go("settings");
+        const input = document.getElementById("settings-search");
+        input.value = "Virtual machine";
+        input.dispatchEvent(new Event("input"));
+        input.focus();
+      },
       tutorials: () => app.go("tutorials"),
       "settings-vm": () => app.openSettingsSection("vm-settings"),
       "settings-cli": () => app.openSettingsSection("terminal-command"),
