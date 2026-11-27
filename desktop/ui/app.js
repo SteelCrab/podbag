@@ -1440,6 +1440,108 @@ function settingDetails(id, key, symbol, value, ...body) {
     h("div", { class: "setting-body" }, body));
 }
 
+function vmStorageSetting() {
+  if (!isPodbag() || S.engine?.platform !== "macos") return null;
+  const key = (suffix, data) => t(`settings.vmStorage${suffix}`, data);
+  const gib = 2 ** 30;
+  const units = new Intl.NumberFormat(I18N.lang, { maximumFractionDigits: 2 });
+  const capacityText = bytes => `${units.format(bytes / gib)} GiB`;
+  const data = h("dl", { class: "fields" });
+  const unavailable = h("p", { class: "hint" });
+  const status = h("p", { id: "vm-storage-status", role: "status", class: "vm-storage-status" });
+  const capacity = h("input", { id: "vm-storage-capacity", type: "number", inputmode: "numeric", step: 1, required: true });
+  const path = h("input", { id: "vm-storage-path", type: "text", required: true, spellcheck: "false", autocomplete: "off", placeholder: "/Volumes/Work/podbag.img" });
+  const control = (label, field, id, action, edit) => h("form", {
+    class: "vm-storage-action", onsubmit: (event) => {
+      event.preventDefault();
+      change(edit());
+    },
+  }, h("label", { for: field.id }, h("span", { text: key(label) }), field),
+  h("button", { id, type: "submit", class: "button", text: key(action) }));
+  const actions = h("fieldset", { class: "vm-storage-actions", disabled: true },
+    control("NewCapacity", capacity, "vm-storage-grow", "Grow", () => ({ action: "grow", gib: capacity.valueAsNumber })),
+    control("NewPath", path, "vm-storage-move", "Move", () => ({ action: "move", path: path.value.trim() })));
+  const section = settingDetails("vm-storage-settings", "vmStorage", "volumes", null,
+    data, unavailable, actions, status);
+  let busy = false, info, lastState = S.vm?.state;
+  const canEdit = () => info?.editable && info.exists && info.filesystemBytes != null;
+  function refreshControls() {
+    actions.disabled = busy || !canEdit();
+    const reason = !info ? "" : !info.editable ? key("Stop")
+      : !info.exists ? key(info.configured ? "Missing" : "Initialize") : info.filesystemBytes == null ? key("Unreadable") : "";
+    unavailable.textContent = reason;
+    unavailable.hidden = !reason;
+  }
+  function show(result) {
+    info = result;
+    const label = capacityText(result.sizeBytes);
+    section.querySelector(".setting-value").textContent = result.exists ? label : "";
+    put(data,
+      field(key("Location"), result.path, "mono"),
+      result.exists ? field(key("Capacity"), label) : [],
+      result.filesystemBytes != null ? field(key("Filesystem"), capacityText(result.filesystemBytes)) : [],
+      result.exists ? field(key("Allocated"), size(result.allocatedBytes)) : [],
+      result.growthPending ? field(key("Growth"), key("Pending")) : []);
+    if (result.exists) {
+      capacity.min = Math.floor(result.sizeBytes / gib) + 1;
+      capacity.max = result.maxSizeGib;
+      capacity.placeholder = String(capacity.min);
+    }
+    refreshControls();
+  }
+  async function read() {
+    if (!section.open || busy) return;
+    busy = true;
+    refreshControls();
+    try {
+      show(await API.vmStorage());
+      if (status.classList.contains("error-text")) {
+        status.textContent = "";
+        status.classList.remove("error-text");
+      }
+    } catch (error) {
+      info = undefined;
+      data.replaceChildren();
+      section.querySelector(".setting-value").textContent = "";
+      status.textContent = String(error);
+      status.classList.add("error-text");
+    } finally {
+      busy = false;
+      refreshControls();
+    }
+  }
+  async function change(edit) {
+    if (busy || !canEdit()) return;
+    busy = true;
+    refreshControls();
+    status.textContent = key("Working");
+    status.classList.remove("error-text");
+    try {
+      const updated = await API.vmStorage(edit);
+      show(updated);
+      capacity.value = "";
+      path.value = "";
+      status.textContent = updated.backupPath
+        ? key("Backup", { path: updated.backupPath })
+        : key("Saved");
+    } catch (error) {
+      status.textContent = String(error);
+      status.classList.add("error-text");
+    } finally {
+      busy = false;
+      refreshControls();
+    }
+  }
+  section.addEventListener("toggle", read);
+  section.addEventListener("vm-state-change", () => {
+    if (lastState === S.vm?.state) return;
+    lastState = S.vm?.state;
+    read();
+  });
+  refreshControls();
+  return section;
+}
+
 // Settings can be reopened while the operating system is updating its login entry.
 let startupWrite = Promise.resolve();
 
@@ -1513,6 +1615,7 @@ async function renderSettings(main) {
         compressionSetting()),
       settingDetails("vm-settings", "vm", "vm"),
       settingDetails("sync-settings", "syncShares", "volumes"),
+      vmStorageSetting(),
       settingDetails("updates", "updates", "update"),
       settingDetails("terminal-command", "terminalCommand", "shell"),
       settingDetails("about-settings", "about", "inspect", null, h("p", { text: t("settings.aboutText") }))));
@@ -1632,6 +1735,7 @@ let vmFormDirty = false;
 // so what the user types stays).
 function renderVmSettings(fresh) {
   renderSyncSettings(fresh);
+  document.getElementById("vm-storage-settings")?.dispatchEvent(new Event("vm-state-change"));
   const section = document.getElementById("vm-settings");
   if (!section) return;
   const box = section.querySelector(".setting-body");

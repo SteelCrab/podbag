@@ -58,6 +58,7 @@ const API = (() => {
     openShell: (id) => scoped("open_shell", { id }),
     vm: (action) => scoped("vm", { action }),
     vmResources: (values) => scoped("vm_resources", { values: values || null }),
+    vmStorage: (edit = null) => scoped("vm_storage", { edit }),
     // No mode reads; "idle" or "off" sets. Resolves with { mode, after }.
     compression: (mode) => scoped("compression", { mode: mode || null }),
     launchAtLogin: () => invoke("plugin:autostart|is_enabled"),

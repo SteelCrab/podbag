@@ -681,6 +681,20 @@ fn vm_resources(
     serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())
 }
 
+/// Read or edit the local macOS VM disk through the companion CLI.
+#[tauri::command(async)]
+fn vm_storage(
+    state: State<'_, AppState>,
+    token: u64,
+    edit: Option<cli::VmStorageEdit>,
+) -> Result<Value, String> {
+    let session = state.session(token)?;
+    if !cfg!(target_os = "macos") || session.target.choice != Choice::Podbag {
+        return Err("VM storage requires the local macOS engine".into());
+    }
+    cli::vm_storage(&state.podbag, edit)
+}
+
 /// `podbag system compression [idle|off] --json`: `{"mode", "after"}`. With no mode it
 /// only reads. On macOS the command runs in the VM (it starts the VM when none runs).
 #[tauri::command(async)]
@@ -1461,6 +1475,7 @@ fn main() {
             docker_images,
             import_images,
             vm_resources,
+            vm_storage,
             compression,
             take_star_prompt,
             terminal_command,

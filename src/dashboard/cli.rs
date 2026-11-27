@@ -166,6 +166,27 @@ pub fn compression(podbag: &Path, mode: Option<&str>) -> Result<Value, String> {
     serde_json::from_str(out.trim()).map_err(|e| format!("podbag system compression --json: {e}"))
 }
 
+/// An offline change to the local macOS VM data disk.
+#[derive(serde::Deserialize)]
+#[serde(tag = "action", rename_all = "lowercase")]
+pub enum VmStorageEdit {
+    Grow { gib: u64 },
+    Move { path: String },
+}
+
+/// Read or edit the storage of the macOS VM without connecting to the guest.
+pub fn vm_storage(podbag: &Path, edit: Option<VmStorageEdit>) -> Result<Value, String> {
+    let base = ["vm", "storage"];
+    let output = match edit {
+        None => run_ok(podbag, &base)?,
+        Some(VmStorageEdit::Grow { gib }) => {
+            run_ok(podbag, &[base[0], base[1], "grow", &gib.to_string()])?
+        }
+        Some(VmStorageEdit::Move { path }) => run_ok(podbag, &[base[0], base[1], "move", &path])?,
+    };
+    serde_json::from_str(output.trim()).map_err(|e| format!("podbag vm storage: {e}"))
+}
+
 /// `podbag --version`: `0.1.0` from `podbag 0.1.0`.
 pub fn engine_version(podbag: &Path) -> Option<String> {
     let out = run_ok(podbag, &["--version"]).ok()?;
