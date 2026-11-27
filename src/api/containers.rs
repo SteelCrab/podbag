@@ -234,9 +234,8 @@ pub(super) fn shape(
     })
 }
 
-/// Docker's `name` filter is a regular expression on `/name`; the anchors `^` and `$`
-/// and plain text cover how clients use it.
-fn name_matches(pattern: &str, name: &str) -> bool {
+/// The name filter forms used by clients such as Compose and kind.
+pub(super) fn name_matches(pattern: &str, name: &str) -> bool {
     let (start, p) = match pattern.strip_prefix('^') {
         Some(p) => (true, p),
         None => (false, pattern),
@@ -246,6 +245,8 @@ fn name_matches(pattern: &str, name: &str) -> bool {
         None => (false, p),
     };
     let p = p.trim_start_matches('/');
+    let literal = p.contains(r"\.").then(|| p.replace(r"\.", "."));
+    let p = literal.as_deref().unwrap_or(p);
     match (start, end) {
         (true, true) => name == p,
         (true, false) => name.starts_with(p),
@@ -853,6 +854,8 @@ mod tests {
         assert!(!name_matches("^/web$", "web2"));
         assert!(name_matches("^web", "web2"));
         assert!(name_matches("1$", "web1"));
+        assert!(name_matches(r"^kind\.local$", "kind.local"));
+        assert!(!name_matches(r"^kind\.local$", "kind-local"));
     }
 
     fn keys(keys: &[&str]) -> BTreeMap<String, Vec<String>> {
