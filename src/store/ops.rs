@@ -312,7 +312,7 @@ mod linux_ops {
                 created,
             } => {
                 let store = open_for_change(dirs, rootless)?;
-                let mut input = std::io::stdin().lock();
+                let mut input = crate::helper::FramedInput::new(std::io::stdin().lock());
                 to_json(&store.commit_layer(
                     &base,
                     &mut |w| crate::store::copy_all(&mut input, w, "the layer"),
@@ -326,15 +326,17 @@ mod linux_ops {
                 created,
             } => {
                 let store = open_for_change(dirs, rootless)?;
-                let plan: Vec<crate::build::plan::PlanEntry> =
-                    serde_json::from_reader(std::io::stdin().lock()).map_err(|e| {
-                        crate::Error::new(
-                            crate::ErrorKind::Internal,
-                            "cannot read a copy plan",
-                            e.to_string(),
-                            "report this bug",
-                        )
-                    })?;
+                let plan: Vec<crate::build::plan::PlanEntry> = serde_json::from_reader(
+                    crate::helper::FramedInput::new(std::io::stdin().lock()),
+                )
+                .map_err(|e| {
+                    crate::Error::new(
+                        crate::ErrorKind::Internal,
+                        "cannot read a copy plan",
+                        e.to_string(),
+                        "report this bug",
+                    )
+                })?;
                 to_json(&store.commit_layer(
                     &base,
                     &mut |w| crate::build::plan::write_plan(&plan, w),
