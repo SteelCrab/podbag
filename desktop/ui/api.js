@@ -63,6 +63,9 @@ const API = (() => {
     // No mode reads; "idle" or "off" sets. Resolves with { mode, after }.
     compression: (mode) => scoped("compression", { mode: mode || null }),
     registryProxy: (values) => scoped("registry_proxy", { values: values || null }),
+    networkSettings: (values, expectedRevision) => scoped("network_settings", {
+      values: values || null, expectedRevision: expectedRevision || null,
+    }),
     launchAtLogin: () => invoke("plugin:autostart|is_enabled"),
     setLaunchAtLogin: (enabled) => invoke(enabled ? "plugin:autostart|enable" : "plugin:autostart|disable"),
     vmStatus: () => scoped("vm_status"),

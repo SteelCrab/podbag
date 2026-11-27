@@ -511,6 +511,15 @@ pub enum SystemCmd {
         #[arg(long)]
         set: bool,
     },
+    /// Read or save default bridge and embedded DNS settings as JSON
+    NetworkSettings {
+        /// Save the supplied network preferences
+        #[arg(long, value_name = "JSON")]
+        set: Option<String>,
+        /// Save only if the network settings still match this revision
+        #[arg(long, value_name = "REVISION", requires = "set")]
+        expect_revision: Option<String>,
+    },
     /// Serve the Docker Engine API on a Unix socket, for the docker CLI
     ///
     /// Point the CLI at it with DOCKER_HOST=unix://<socket>. Containers do not depend on

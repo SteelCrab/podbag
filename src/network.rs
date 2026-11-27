@@ -7,7 +7,9 @@ use crate::{Error, ErrorKind, Result};
 use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
+#[cfg(unix)]
 mod attachment;
+#[cfg(unix)]
 pub(crate) use attachment::AttachmentChange;
 #[cfg(target_os = "linux")]
 pub use attachment::attachment_main;
@@ -668,8 +670,186 @@ fn not_found(name: &str) -> Error {
     )
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NetworkPreferences {
+    pub default_subnet: String,
+    pub default_ipv6_subnet: Option<String>,
+    pub embedded_dns: bool,
+    pub dns_filter: crate::config::DnsFilter,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkSettings {
+    pub preferences: NetworkPreferences,
+    pub revision: String,
+    pub active_subnet: Option<String>,
+    pub active_ipv6_subnet: Option<String>,
+    pub overrides: Vec<&'static str>,
+}
+
+const SETTING_ENV: [&str; 4] = [
+    "PODBAG_DEFAULT_SUBNET",
+    "PODBAG_DEFAULT_IPV6_SUBNET",
+    "PODBAG_EMBEDDED_DNS",
+    "PODBAG_DNS_FILTER",
+];
+
+/// Inspect the local engine's defaults without initializing or changing its bridges.
+pub fn settings(dirs: &Dirs) -> Result<NetworkSettings> {
+    use sha2::{Digest, Sha256};
+
+    let config = crate::config::load(dirs)?;
+    let preferences = NetworkPreferences {
+        default_subnet: config.default_subnet,
+        default_ipv6_subnet: config.default_ipv6_subnet.map(|subnet| subnet.to_string()),
+        embedded_dns: config.embedded_dns,
+        dns_filter: config.dns_filter,
+    };
+    let overrides: Vec<_> = SETTING_ENV
+        .into_iter()
+        .filter(|name| std::env::var(name).is_ok())
+        .collect();
+    let snapshot = serde_json::json!([&preferences, &overrides]).to_string();
+    let revision = Sha256::digest(snapshot)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let active = read_record(dirs, DEFAULT)?.map(|record| record.network);
+    Ok(NetworkSettings {
+        preferences,
+        revision,
+        active_subnet: active.as_ref().map(|network| network.subnet.clone()),
+        active_ipv6_subnet: active
+            .and_then(|network| network.ipv6)
+            .map(|subnet| subnet.to_string()),
+        overrides,
+    })
+}
+
+/// Save new bridge defaults and DNS settings together. Initialized networks retain their configuration.
+pub fn save_settings(
+    dirs: &Dirs,
+    requested: NetworkPreferences,
+    expected_revision: Option<&str>,
+) -> Result<NetworkSettings> {
+    let (addr, prefix) = parse_cidr(&requested.default_subnet)?;
+    let ipv6 = requested
+        .default_ipv6_subnet
+        .as_deref()
+        .map(str::parse::<Ipv6Subnet>)
+        .transpose()?;
+    let subnet = format!("{addr}/{prefix}");
+    let ipv6_text = ipv6.map(|subnet| subnet.to_string());
+    let _network_lock = lock(dirs)?;
+    let _config_lock = crate::config::lock_config(dirs)?;
+    let current = settings(dirs)?;
+    if expected_revision.is_some_and(|expected| expected != current.revision) {
+        return Err(Error::new(
+            ErrorKind::Conflict,
+            "cannot save the network settings",
+            "network settings changed after they were opened",
+            "reload the saved settings and apply your edits again",
+        ));
+    }
+    let old = &current.preferences;
+    let ipv4_changed = subnet != old.default_subnet;
+    let ipv6_changed = ipv6_text != old.default_ipv6_subnet;
+    let mut changes = Vec::new();
+    for (index, key, value, changed) in [
+        (0, "default_subnet", subnet.as_str(), ipv4_changed),
+        (
+            1,
+            "default_ipv6_subnet",
+            ipv6_text.as_deref().unwrap_or_default(),
+            ipv6_changed,
+        ),
+        (
+            2,
+            "embedded_dns",
+            if requested.embedded_dns {
+                "true"
+            } else {
+                "false"
+            },
+            requested.embedded_dns != old.embedded_dns,
+        ),
+        (
+            3,
+            "dns_filter",
+            requested.dns_filter.name(),
+            requested.dns_filter != old.dns_filter,
+        ),
+    ] {
+        if !changed {
+            continue;
+        }
+        let env = SETTING_ENV[index];
+        if current.overrides.contains(&env) {
+            return Err(Error::new(
+                ErrorKind::Conflict,
+                format!("cannot change {key}"),
+                format!("{env} overrides this setting"),
+                "change or unset the environment variable",
+            ));
+        }
+        changes.push((key, value));
+    }
+    let conflict = |subnet: &str, owner: String| {
+        invalid(
+            format!("cannot use the default subnet {subnet}"),
+            format!("it overlaps {owner}"),
+            "choose a subnet that no network or host route uses",
+        )
+    };
+    if ipv4_changed || ipv6_changed {
+        for other in all_records(dirs)?
+            .into_iter()
+            .map(|r| r.network)
+            .filter(|n| n.name != DEFAULT)
+        {
+            if ipv4_changed && overlaps((addr, prefix), other.cidr()) {
+                return Err(conflict(
+                    &subnet,
+                    format!("network {} ({})", other.name, other.subnet),
+                ));
+            }
+            if ipv6_changed
+                && let (Some(wanted), Some(active)) = (ipv6, other.ipv6)
+                && wanted.overlaps(active)
+            {
+                return Err(conflict(
+                    &wanted.to_string(),
+                    format!("network {} ({active})", other.name),
+                ));
+            }
+        }
+    }
+    if ipv4_changed
+        && let Some((a, p)) = host_routes()
+            .into_iter()
+            .find(|r| overlaps(*r, (addr, prefix)))
+    {
+        return Err(conflict(&subnet, format!("the host route {a}/{p}")));
+    }
+    if ipv6_changed
+        && let Some(wanted) = ipv6
+        && let Some(route) = host_routes6().into_iter().find(|r| r.overlaps(wanted))
+    {
+        return Err(conflict(
+            &wanted.to_string(),
+            format!("the host route {route}"),
+        ));
+    }
+    crate::config::set_values_locked(dirs, &changes)?;
+    settings(dirs)
+}
+
 fn default_record(dirs: &Dirs, host_routes: &[(Ipv4Addr, u8)]) -> Result<Record> {
-    let subnet = crate::config::load(dirs)?.default_subnet;
+    let config = crate::config::load(dirs)?;
+    let subnet = config.default_subnet;
+    let ipv6 = config.default_ipv6_subnet;
     let (addr, prefix) = parse_cidr(&subnet)?;
     if let Some((a, p)) = host_routes.iter().find(|r| overlaps(**r, (addr, prefix))) {
         return Err(Error::new(
@@ -679,16 +859,27 @@ fn default_record(dirs: &Dirs, host_routes: &[(Ipv4Addr, u8)]) -> Result<Record>
             "set default_subnet in config.toml (or PODBAG_DEFAULT_SUBNET) to a free subnet",
         ));
     }
+    if let Some(wanted) = ipv6
+        && let Some(route) = host_routes6().into_iter().find(|r| r.overlaps(wanted))
+    {
+        return Err(invalid(
+            "cannot set up the default network".to_string(),
+            format!("its subnet {wanted} overlaps the host route {route}"),
+            "set default_ipv6_subnet in config.toml (or PODBAG_DEFAULT_IPV6_SUBNET) to a free subnet",
+        ));
+    }
     Ok(Record {
         network: Network {
             name: DEFAULT.to_string(),
             id: sha_id(DEFAULT),
             subnet: format!("{addr}/{prefix}"),
             gateway: Ipv4Addr::from(u32::from(addr) + 1).to_string(),
-            ipv6: None,
+            ipv6,
             // podbag0 for the usual subnet; another subnet gets a bridge of its own, so
             // data directories with different default subnets can share a root host.
-            bridge: if (addr, prefix) == DEFAULT_SUBNET {
+            bridge: if let Some(ipv6) = ipv6 {
+                format!("pbg-{}", &sha_id(&format!("{addr}/{prefix},{ipv6}"))[..8])
+            } else if (addr, prefix) == DEFAULT_SUBNET {
                 DEFAULT_BRIDGE.to_string()
             } else {
                 format!("pbg-{}", &sha_id(&subnet)[..8])
@@ -1408,6 +1599,102 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn network_settings_keep_the_initialized_default_bridge() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = dirs_in(tmp.path());
+        crate::config::set_value(&dirs, "image_compression", "idle").unwrap();
+        let initial = settings(&dirs).unwrap();
+        assert!(initial.active_subnet.is_none());
+
+        let requested = NetworkPreferences {
+            default_subnet: "10.246.205.0/24".into(),
+            default_ipv6_subnet: Some("fd35:d51a:133::/64".into()),
+            embedded_dns: true,
+            dns_filter: crate::config::DnsFilter::Ipv6,
+        };
+        let saved = save_settings(&dirs, requested.clone(), Some(&initial.revision)).unwrap();
+        assert_eq!(saved.preferences, requested);
+        assert!(saved.active_subnet.is_none());
+        let bridge = ensure_default(&dirs).unwrap();
+        assert_eq!(bridge.subnet, requested.default_subnet);
+        assert_eq!(
+            bridge.ipv6.unwrap().to_string(),
+            requested.default_ipv6_subnet.clone().unwrap()
+        );
+
+        let changed = NetworkPreferences {
+            default_subnet: "10.246.206.0/24".into(),
+            default_ipv6_subnet: None,
+            ..requested
+        };
+        let saved = save_settings(&dirs, changed.clone(), Some(&saved.revision)).unwrap();
+        assert_eq!(saved.preferences, changed);
+        assert_eq!(saved.active_subnet.as_deref(), Some(bridge.subnet.as_str()));
+        assert_eq!(
+            saved.active_ipv6_subnet,
+            bridge.ipv6.map(|subnet| subnet.to_string())
+        );
+        assert_eq!(ensure_default(&dirs).unwrap().bridge, bridge.bridge);
+        assert_eq!(
+            crate::config::load(&dirs).unwrap().image_compression,
+            crate::config::ImageCompression::Idle
+        );
+    }
+
+    #[test]
+    fn network_settings_reject_stale_values_but_keep_unrelated_edits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = dirs_in(tmp.path());
+        let before = settings(&dirs).unwrap();
+        crate::config::set_value(&dirs, "image_compression", "idle").unwrap();
+
+        let first = NetworkPreferences {
+            dns_filter: crate::config::DnsFilter::Ipv4,
+            ..before.preferences.clone()
+        };
+        let saved = save_settings(&dirs, first, Some(&before.revision)).unwrap();
+        assert_ne!(saved.revision, before.revision);
+        let second = NetworkPreferences {
+            embedded_dns: !before.preferences.embedded_dns,
+            ..before.preferences
+        };
+        let error = save_settings(&dirs, second, Some(&before.revision)).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Conflict);
+        assert_eq!(settings(&dirs).unwrap().preferences, saved.preferences);
+        assert_eq!(
+            crate::config::load(&dirs).unwrap().image_compression,
+            crate::config::ImageCompression::Idle
+        );
+    }
+
+    #[test]
+    fn network_settings_reject_conflicts_without_changing_dns() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = dirs_in(tmp.path());
+        let created = create_in(&dirs, "app", Some("10.246.207.0/24"), &[]).unwrap();
+        let before = settings(&dirs).unwrap();
+        let conflict = NetworkPreferences {
+            default_subnet: created.subnet,
+            embedded_dns: !before.preferences.embedded_dns,
+            ..before.preferences.clone()
+        };
+        assert!(
+            save_settings(&dirs, conflict, None)
+                .unwrap_err()
+                .why
+                .contains("network app")
+        );
+        let invalid = NetworkPreferences {
+            default_subnet: "10.246.207.1/24".into(),
+            embedded_dns: !before.preferences.embedded_dns,
+            ..before.preferences.clone()
+        };
+        assert!(save_settings(&dirs, invalid, None).is_err());
+        assert_eq!(settings(&dirs).unwrap().preferences, before.preferences);
+        assert!(!dirs.config.join("config.toml").exists());
     }
 
     #[test]

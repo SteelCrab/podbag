@@ -729,6 +729,19 @@ fn compression(
 }
 
 #[tauri::command(async)]
+fn network_settings(
+    state: State<'_, AppState>,
+    token: u64,
+    values: Option<podbag::network::NetworkPreferences>,
+    expected_revision: Option<String>,
+) -> Result<Value, String> {
+    if state.session(token)?.target.choice != Choice::Podbag {
+        return Err("Network settings require the local podbag engine".into());
+    }
+    cli::network_settings(&state.podbag, values, expected_revision.as_deref())
+}
+
+#[tauri::command(async)]
 fn registry_proxy(
     state: State<'_, AppState>,
     token: u64,
@@ -1520,6 +1533,7 @@ fn main() {
             vm_resources,
             compression,
             registry_proxy,
+            network_settings,
             take_star_prompt,
             terminal_command,
             install_terminal_command,

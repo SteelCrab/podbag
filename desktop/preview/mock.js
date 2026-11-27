@@ -201,6 +201,18 @@
       endpoint: selected === "kiri" ? "unix:///Users/me/.kiri/run/docker.sock" : selected, vm: null, version: selected });
   }
   let launchAtLogin = false;
+  const networkSettings = {
+    revision: "0",
+    preferences: {
+      defaultSubnet: "10.77.0.0/16",
+      defaultIpv6Subnet: "fd77:706f:6462::/64",
+      embeddedDns: true,
+      dnsFilter: "none",
+    },
+    activeSubnet: "10.77.0.0/16",
+    activeIpv6Subnet: null,
+    overrides: [],
+  };
   // podbag system compression --json. URL: compression=idle (already on), compression=broken
   // (a reply without a mode), override (an environment setting keeps the mode as it is),
   // after (seconds an image stays unused; 0: at once), vm-error (vm status fails), busy
@@ -381,6 +393,22 @@
       if (!mode) window.previewCompressionReads = (window.previewCompressionReads || 0) + 1;
       return params.get("compression") === "broken" ? null : { ...compression };
     },
+    network_settings: ({ values, expectedRevision }) => {
+      if (selected !== "podbag") throw "Network settings require the local podbag engine";
+      if (!values && params.has("network-settings-error")) {
+        params.delete("network-settings-error");
+        throw "Cannot read the network configuration.";
+      }
+      if (values?.defaultSubnet === "10.79.4.1/24") throw "The IPv4 subnet has host bits set.";
+      if (values) {
+        if (expectedRevision !== networkSettings.revision) {
+          throw "Network settings changed after they were opened.";
+        }
+        networkSettings.preferences = values;
+        networkSettings.revision = String(Number(networkSettings.revision) + 1);
+      }
+      return structuredClone(networkSettings);
+    },
     vm_set: ({ settings }) => {
       if (settings.sharedPaths) vmStatus.sharedPaths.next = settings.sharedPaths;
       if (settings.restart) vmStatus.sharedPaths.inUse = vmStatus.sharedPaths.next;
@@ -520,6 +548,7 @@
       "settings-vm": () => app.openSettingsSection("vm-settings"),
       "settings-notifications": () => app.openSettingsSection("notification-settings"),
       "settings-sync": () => app.openSettingsSection("sync-settings"),
+      "settings-network": () => app.openSettingsSection("network-settings"),
       "settings-cli": () => app.openSettingsSection("terminal-command"),
       "settings-updates": app.openUpdates,
       "update-source": app.openUpdates,

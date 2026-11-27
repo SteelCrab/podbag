@@ -186,6 +186,25 @@ pub fn compression(podbag: &Path, mode: Option<&str>) -> Result<Value, String> {
     serde_json::from_str(out.trim()).map_err(|e| format!("podbag system compression --json: {e}"))
 }
 
+/// Read or save network preferences using the companion CLI on the engine's host.
+pub fn network_settings(
+    podbag: &Path,
+    values: Option<crate::network::NetworkPreferences>,
+    expected_revision: Option<&str>,
+) -> Result<Value, String> {
+    let mut args = vec!["system", "network-settings"];
+    let json;
+    if let Some(values) = values {
+        json = serde_json::to_string(&values).map_err(|e| e.to_string())?;
+        let revision = expected_revision
+            .filter(|revision| !revision.is_empty())
+            .ok_or("Reload Network settings before saving changes")?;
+        args.extend(["--set", &json, "--expect-revision", revision]);
+    }
+    let out = run_ok(podbag, &args)?;
+    serde_json::from_str(out.trim()).map_err(|e| format!("podbag system network-settings: {e}"))
+}
+
 /// Query the local engine's settings through the companion CLI, including the macOS VM.
 pub fn registry_proxy(
     podbag: &Path,

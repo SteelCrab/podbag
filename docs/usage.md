@@ -708,6 +708,27 @@ podbag build -t myapp - < Dockerfile               # only a Dockerfile, no conte
   applies to later starts. The primary bridge and its default route stay in place.
   Containers using host, none or a shared network namespace cannot join another bridge.
 
+### Desktop network settings
+
+Open **Settings → Network** with the local podbag engine selected. Set the default
+IPv4 subnet and choose IPv4-only or IPv4 and IPv6. Dual stack requires a free IPv6
+subnet. The Desktop shows both the saved defaults and any initialized bridge subnets.
+Subnet defaults apply when the default bridge is first created. Saving never
+readdresses an initialized bridge or any other existing network. IPv6 addresses
+reach peers on the bridge. External routing and published ports use IPv4.
+
+Enable embedded DNS or filter direct IPv4 (A) or IPv6 (AAAA) queries. The resolver
+returns an empty successful answer for the filtered query type and omits that
+address family from local ANY responses. DNS settings apply the next time an
+eligible bridge container starts. Running containers retain their resolver settings.
+Explicit DNS servers and a custom `/etc/resolv.conf` bypass the embedded resolver.
+
+The matching settings in `config.toml` are `default_subnet`, `default_ipv6_subnet`
+(an empty string selects IPv4-only), `embedded_dns` and `dns_filter`
+(`none`, `ipv4` or `ipv6`). The corresponding `PODBAG_DEFAULT_SUBNET`,
+`PODBAG_DEFAULT_IPV6_SUBNET`, `PODBAG_EMBEDDED_DNS` and `PODBAG_DNS_FILTER`
+environment variables take precedence.
+
 ### Extra hosts and DNS
 
 - `--add-host` lines come after `localhost` and before the container's own line, as in
