@@ -21,7 +21,9 @@ function Get-MsiRows([string]$Msi, [string]$Sql) {
         [void](Invoke-Com $view Execute InvokeMethod)
         while ($null -ne ($record = Invoke-Com $view Fetch InvokeMethod)) {
             $n = Invoke-Com $record FieldCount GetProperty
-            (1..$n | ForEach-Object { Invoke-Com $record StringData GetProperty @($_) }) -join "`t"
+            # A for loop: ForEach-Object wraps $_ in a PSObject, which COM rejects.
+            $fields = for ($i = 1; $i -le $n; $i++) { Invoke-Com $record StringData GetProperty @($i) }
+            @($fields) -join "`t"
         }
     } finally {
         [void](Invoke-Com $view Close InvokeMethod)
