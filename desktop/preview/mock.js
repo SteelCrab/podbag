@@ -203,6 +203,7 @@
   // (another dialog is open when the window first asks for the VM's state).
   const compression = { mode: params.get("compression") === "idle" ? "idle" : "off", after: Number(params.get("after") ?? 604800) };
   const practiceModules = new Map();
+  const synchronized = view === "settings-sync" ? [{ name: "project", source: "/Users/me/projects/app", volume: "podbag-sync-project", conflicts: [], lastError: null }] : [];
   const demoModel = { name: "smollm2:135m", size: 92_078_644, loaded: true };
   const models = view === "models-report" ? [{ ...demoModel }] : [];
   let modelRunner = view === "models-report";
@@ -314,6 +315,19 @@
       if (settings.sharedPaths) vmStatus.sharedPaths.next = settings.sharedPaths;
       if (settings.restart) vmStatus.sharedPaths.inUse = vmStatus.sharedPaths.next;
       return "Saved.";
+    },
+    vm_sync: ({ action, name, path }) => {
+      if (action === "list") return synchronized.map(share => ({ ...share }));
+      const existing = synchronized.find(share => share.name === name);
+      if (action === "add") {
+        if (existing) throw "Share already exists";
+        const share = { name, source: path, volume: `podbag-sync-${name}`, conflicts: [], lastError: null };
+        synchronized.push(share);
+        return share;
+      }
+      if (!existing) throw "Share not found";
+      if (action === "remove") synchronized.splice(synchronized.indexOf(existing), 1);
+      return existing;
     },
     set_engine: ({ engine }) => {
       sessionStorage.setItem("preview-engine", engine);
@@ -432,6 +446,7 @@
       },
       tutorials: () => app.go("tutorials"),
       "settings-vm": () => app.openSettingsSection("vm-settings"),
+      "settings-sync": () => app.openSettingsSection("sync-settings"),
       "settings-cli": () => app.openSettingsSection("terminal-command"),
       "settings-updates": app.openUpdates,
       "update-source": app.openUpdates,

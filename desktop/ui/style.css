@@ -564,12 +564,17 @@ select, input[type="text"] {
 .shared-folder input { flex: 1; min-width: 0; }
 .shared-folder span { overflow-wrap: anywhere; }
 .shared-folder button { flex-shrink: 0; }
-input[type="number"], input[type="password"], input[type="search"].field, .shared-folder input {
+input[type="number"], input[type="password"], input[type="search"].field, .sync-share-form input, .shared-folder input {
   height: 34px; width: 100%; padding: 0 10px; border: 1px solid var(--line); border-radius: 7px;
   background: var(--surface); color: var(--ink); font: inherit;
 }
 input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; border-color: var(--accent); }
-.vm-error:empty { display: none; }
+.vm-error:empty, .sync-error:empty, .sync-share-list:empty { display: none; }
+.sync-share-list { list-style: none; display: grid; gap: 8px; padding: 0; }
+.sync-share { border-bottom: 1px solid var(--line); padding: 9px 0; overflow-wrap: anywhere; }
+.sync-share .buttons-row { margin-top: 7px; }
+.sync-share-form { display: grid; gap: 8px; max-width: 480px; }
+.sync-share-form .buttons-row { margin-top: 3px; }
 .update-note { color: var(--accent-text) !important; font-weight: 600; margin-top: 12px !important; }
 .setting-body > [role="status"] { margin-top: 12px; }
 .upgrade-result { margin-top: 14px; display: grid; gap: 6px; }
