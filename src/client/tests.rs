@@ -458,3 +458,33 @@ fn a_failing_body_stops_the_load_without_waiting() {
     let e = client.load_images(Broken(false)).unwrap_err();
     assert_eq!(e.message, "the source went away");
 }
+
+#[test]
+fn an_image_list_keeps_podbags_compression_field() {
+    let (_dir, client, _) = fake_engine(|_, path| match path {
+        "/images/json" => json(
+            200,
+            serde_json::json!([
+                {"Id": "sha256:aa", "RepoTags": ["cold:1"], "Size": 718,
+                 "PodbagCompression": {"Size": 330, "OriginalSize": 718}},
+                {"Id": "sha256:bb", "RepoTags": ["warm:1"], "Size": 7}
+            ]),
+        ),
+        _ => json(404, serde_json::json!({"message": "no"})),
+    });
+    let images = client.images().unwrap();
+    assert_eq!(
+        images[0].podbag_compression,
+        Some(CompressionSizes {
+            size: 330,
+            original_size: 718
+        })
+    );
+    // Passed on to the window with the engine's names; a plain image gets no field.
+    let out = serde_json::to_value(&images).unwrap();
+    assert_eq!(
+        out[0]["PodbagCompression"],
+        serde_json::json!({"Size": 330, "OriginalSize": 718})
+    );
+    assert!(out[1].get("PodbagCompression").is_none(), "{out}");
+}

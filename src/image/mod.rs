@@ -294,6 +294,43 @@ pub fn prune_dangling() -> Result<PruneReport> {
     from_output(store_op(&crate::store::ops::StoreOp::PruneDangling, false)?)
 }
 
+/// Compress the files of the images `names` (names or ID prefixes) now; with no name,
+/// those of the images unused for `compress_idle_after`. Images a container uses stay as
+/// they are; the report names the ones asked for.
+pub fn compress_images(names: &[String]) -> Result<CompressReport> {
+    from_output(store_op(
+        &crate::store::ops::StoreOp::Compress {
+            images: names.to_vec(),
+        },
+        false,
+    )?)
+}
+
+/// Make the files of the images `names` plain again, so that their next container starts
+/// at once. Returns how many images it built a tree (or EROFS image) for: those that had
+/// none for the current mount method, which compressed images never have.
+pub fn decompress_images(names: &[String]) -> Result<u64> {
+    from_output(store_op(
+        &crate::store::ops::StoreOp::Decompress {
+            images: names.to_vec(),
+        },
+        false,
+    )?)
+}
+
+/// Build what containers of the image need, in the store helper: a rootless process
+/// cannot build it itself (the files belong to the user namespace's root).
+#[cfg(target_os = "linux")]
+pub(crate) fn ensure_artifact_with_helper(digest: &str) -> Result<()> {
+    store_op(
+        &crate::store::ops::StoreOp::EnsureArtifact {
+            digest: digest.to_string(),
+        },
+        false,
+    )
+    .map(drop)
+}
+
 /// How a pull or push reports its steps.
 enum Report<'a> {
     Quiet,
@@ -406,6 +443,15 @@ pub struct DiskUsage {
     pub objects: u64,
     pub object_bytes: u64,
     pub containers: u64,
+    /// How many of the objects are compressed.
+    #[serde(default)]
+    pub compressed_objects: u64,
+    /// What the compressed objects take on disk.
+    #[serde(default)]
+    pub compressed_bytes: u64,
+    /// What the compressed objects would take as plain files.
+    #[serde(default)]
+    pub original_bytes: u64,
 }
 
 /// What `prune` removed.
@@ -417,6 +463,14 @@ pub struct PruneReport {
     #[serde(default)]
     pub removed_ids: Vec<String>,
     pub freed_bytes: u64,
+}
+
+/// What `podbag system compress` did.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+pub struct CompressReport {
+    pub report: crate::store::FreezeReport,
+    /// The images asked for that a container uses: they were not compressed.
+    pub skipped: Vec<String>,
 }
 
 /// What `podbag system verify` found, and what `--fix` removed.
