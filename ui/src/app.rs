@@ -46,6 +46,9 @@ pub struct WindowOptions {
     /// The window's icon (title bar and taskbar on Windows and Linux; macOS takes the
     /// app bundle's).
     pub icon: Option<ImageData>,
+    /// Linux: the X11 class and the Wayland app id, which tie the window to the app's
+    /// `.desktop` file (its name without `.desktop`) for the dock and taskbar icon.
+    pub app_id: Option<String>,
 }
 
 impl Default for WindowOptions {
@@ -60,6 +63,7 @@ impl Default for WindowOptions {
             activate: true,
             always_on_top: false,
             icon: None,
+            app_id: None,
         }
     }
 }
@@ -178,6 +182,12 @@ impl<V: View, B: FnOnce() -> V> ApplicationHandler<UserEvent<V::Message>> for Ru
         }
         if let Some((w, h)) = o.min_size {
             attrs = attrs.with_min_inner_size(LogicalSize::new(w, h));
+        }
+        // One setting for both X11 and Wayland.
+        #[cfg(target_os = "linux")]
+        if let Some(id) = &o.app_id {
+            use winit::platform::wayland::WindowAttributesExtWayland;
+            attrs = attrs.with_name(id.clone(), id.clone());
         }
         if let Some(m) = el.primary_monitor() {
             let s = m.scale_factor();

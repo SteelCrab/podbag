@@ -8,6 +8,7 @@
 
 pub mod autostart;
 pub mod backend;
+pub mod compression;
 pub mod desktop;
 pub mod dockercmd;
 pub mod engine;
@@ -30,6 +31,7 @@ pub mod updates;
 pub mod vm;
 
 pub use backend::{Api, Backend, Monitor};
+pub use compression::Compression;
 pub use desktop::{Connection, Desktop};
 pub use dockercmd::DockerCommand;
 pub use engine::{EngineStatus, List, parse_kind};
@@ -40,8 +42,8 @@ pub use tray::{EngineState, TrayModel};
 
 /// The engine's types, as the API gives them.
 pub use podbag::client::{
-    ContainerSummary, Features, ImageSummary, Kind, NetworkSummary, Port, Pruned, SearchResult,
-    VolumeSummary,
+    CompressionSizes, ContainerSummary, Features, ImageSummary, Kind, NetworkSummary, Port, Pruned,
+    SearchResult, VolumeSummary,
 };
 pub use podbag::dashboard::lab;
 

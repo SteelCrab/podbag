@@ -74,6 +74,29 @@ dev/vm.sh static       # the static release binary, and a check of its size
 - `PODBAG_TEST_NETWORK=1` adds the tests that pull images or use the network.
 - `PODBAG_TEST_MACOS_VM=1 cargo test --test macos_vm` tests the macOS VM.
 
+### Podbag Desktop
+
+The app is three crates: `ui/` (its UI layer), `desktop-core/` (the engine and system
+calls, with sample data under the `mock` feature) and `desktop/`. Their tests drive the
+window on sample data, without a window or a GPU:
+
+```sh
+cargo test -p podbag-ui -p podbag-desktop-core -p podbag-desktop --all-features
+cargo run -p podbag-desktop -- --mock   # the app on sample data
+```
+
+On Linux, `--all-features` builds the tray item: install `libgtk-3-dev` first.
+
+The packages, one script each ([docs/build.md](docs/build.md) has the details):
+
+- macOS: `desktop/bundle-macos.sh release` makes `podbag.app`;
+  `dev/macos/release-files.sh` makes the release ZIP with the CLI and its VM guest.
+- Windows: `desktop/windows/build-msi.ps1` makes the MSI with WiX, and
+  `desktop/windows/test-installed.ps1` installs, opens and removes it (CI runs it on a
+  fresh install and on an upgrade from 0.3.2).
+- Linux: `desktop/linux/package.sh` makes the `.deb` and the `.rpm` with nFPM;
+  `desktop/linux/test-installed.sh` opens the installed app under Xvfb.
+
 ### End-to-end tests
 
 They pull real images from `mirror.gcr.io`, and compare podbag with Docker (or Podman,
@@ -101,8 +124,7 @@ In the VM: `dev/vm.sh run bash -c 'cargo build && PODBAG=$CARGO_TARGET_DIR/debug
 ## Release
 
 - Open a pull request that sets the new version and adds its changelog section:
-  - the version in `Cargo.toml`, `desktop/Cargo.toml`, `desktop/tauri.conf.json` and
-    `Cargo.lock`;
+  - the version in `Cargo.toml`, `desktop/Cargo.toml` and `Cargo.lock`;
   - a `## vX.Y.Z (date)` section in `CHANGELOG.md`.
 - After the merge, tag the merge commit and push the tag:
 

@@ -1,5 +1,5 @@
 //! What the app asks the `podbag` program: the VM's state and settings, the version, the
-//! update check and the upgrade. No Tauri here, so it is tested with a fake program.
+//! update check and the upgrade. No UI here, so it is tested with a fake program.
 
 use serde::Serialize;
 use serde_json::Value;

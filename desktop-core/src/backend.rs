@@ -8,6 +8,7 @@
 //! with `try_recv`, after the waker asked for a redraw.
 
 use crate::autostart::LoginItem;
+use crate::compression::{self, Compression};
 use crate::desktop::{Connection, Desktop};
 use crate::dockercmd::DockerCommand;
 use crate::engine::{EngineStatus, List};
@@ -117,6 +118,9 @@ pub trait Api: Send + Sync {
     /// None for an engine without a VM (Docker, Linux).
     fn vm_status(&self) -> Result<Option<VmStatus>, String>;
     fn vm_set(&self, settings: &VmSettings) -> Result<String, String>;
+    /// Image compression (podbag only): read it (None) or set it. On a Mac or Windows
+    /// it runs in the VM, which it starts when it is stopped. Slow.
+    fn compression(&self, mode: Option<compression::Mode>) -> Result<Compression, String>;
     /// Read the engine's state again ([`Event::VmStatus`] when the VM changed). `asked`:
     /// also ask the API while the window is hidden.
     fn refresh(&self, asked: bool);
@@ -344,6 +348,13 @@ impl Api for Desktop {
         Desktop::vm_set(self, &self.current(), settings)
     }
 
+    fn compression(&self, mode: Option<compression::Mode>) -> Result<Compression, String> {
+        let reply = self
+            .current()
+            .compression(mode.map(compression::Mode::as_str))?;
+        Ok(Compression::from_json(&reply))
+    }
+
     fn refresh(&self, asked: bool) {
         Desktop::refresh(self, asked)
     }
@@ -509,16 +520,19 @@ impl Backend {
     }
 
     /// The real engine, for an app of version `app_version` whose settings are in
-    /// `config_dir`. `waker` runs after each event (ask the UI for a redraw there).
+    /// `config_dir`. `webview_data`: where an older app kept its web page's data (see
+    /// [`Desktop::load_config`]). `waker` runs after each event (ask the UI for a redraw
+    /// there).
     pub fn real(
         app_version: &'static str,
         config_dir: Option<&Path>,
+        webview_data: Option<&Path>,
         waker: impl Fn() + Send + Sync + 'static,
     ) -> (Backend, Receiver<Event>) {
         let (events, rx) = Events::channel(waker);
         let desktop = Desktop::new(app_version, events);
         if let Some(dir) = config_dir {
-            desktop.load_config(dir, None);
+            desktop.load_config(dir, webview_data);
         }
         (Backend::new(desktop), rx)
     }

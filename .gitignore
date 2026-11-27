@@ -4,5 +4,3 @@ logs/
 __pycache__/
 /dev/cri/gen/Cargo.lock
 /dev/cri/gen/target/
-/desktop/gen/
-/desktop/preview/out/

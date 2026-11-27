@@ -72,10 +72,13 @@ sudo dnf install ./podbag-desktop-*.rpm     # Fedora 44
 
 #### Build the packages
 
-- On Debian 12, install Rust, nFPM, jq, a C compiler, pkg-config,
-  libwebkit2gtk-4.1-dev, libayatana-appindicator3-dev, librsvg2-dev and libxdo-dev.
-- Run `desktop/linux/package.sh` on the target architecture.
+- On Debian 12, install Rust, nFPM, jq, a C compiler, pkg-config and libgtk-3-dev.
+- Run `desktop/linux/package.sh` on the target architecture. It builds the engine and
+  the app with its tray item (`--features podbag-desktop/linux-tray`).
 - The packages are in `packages/` in Cargo's target directory.
+- The app links GTK 3. When it starts, it loads libayatana-appindicator, xkbcommon, the
+  X11 or Wayland client libraries, and EGL or Vulkan. The packages depend on them.
+  A GPU driver draws the window: Mesa, or the driver of the GPU's vendor.
 
 ## Android
 
@@ -173,23 +176,28 @@ adb shell /data/local/tmp/podbag --version
 - A build of `main` is an installer artifact of
   [CI](https://github.com/SteelCrab/podbag/actions/workflows/ci.yml).
 - Install the MSI and open **Podbag Desktop** from the Start menu.
+- It replaces an installed Podbag Desktop in place, also one from v0.3.2 or earlier.
 - Enable WSL 2 to run containers.
 
 #### Build the MSI
 
 - On Windows x86_64 or ARM64, build the CLI with the Linux engine for the same CPU.
 - Use a native Rust toolchain for that CPU.
-- Install the Visual Studio C++ build tools for your CPU, WebView2 and Node.js.
-- Run from the repository root:
+- Install the Visual Studio C++ build tools for your CPU and the .NET SDK 8 or later.
+  The script installs WiX 6.0.2 into `target/wix`.
+- Run from the repository root (`-Arch aarch64` on ARM64):
 
 ```powershell
 New-Item -ItemType Directory -Force target/windows-engine | Out-Null
 Copy-Item target/release/podbag.exe target/windows-engine/podbag.exe
-Set-Location desktop
-npx --yes --package @tauri-apps/cli@2.12.6 tauri build --config windows/msi.json -- --locked
+cargo build --locked --release -p podbag-desktop
+./desktop/windows/build-msi.ps1 -Arch x86_64
 ```
 
-- The MSI is in `target/release/bundle/msi`. It includes the GUI and its matching CLI.
+- The MSI is `target/msi/podbag-desktop-<arch>-windows.msi`. It includes the GUI and
+  its matching CLI. The script checks the values that let it replace an earlier install.
+- `desktop/windows/test-installed.ps1` installs it, opens the app and removes it. Run it
+  only on a computer you can reset, such as a CI runner.
 - CI publishes the tested MSI as `podbag-desktop-x86_64-windows` or
   `podbag-desktop-aarch64-windows`. The ARM64 one runs natively on Windows on Arm.
 

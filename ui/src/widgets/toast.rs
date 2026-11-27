@@ -32,6 +32,11 @@ impl Toasts {
         self.items.is_empty()
     }
 
+    /// The messages shown, oldest first, with whether each is an error.
+    pub fn texts(&self) -> impl Iterator<Item = (&str, bool)> {
+        self.items.iter().map(|t| (t.text.as_str(), t.error))
+    }
+
     /// Drop the toasts whose time is up; true if any went.
     pub fn expire(&mut self) -> bool {
         let now = Instant::now();

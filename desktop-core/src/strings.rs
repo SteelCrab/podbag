@@ -1,5 +1,5 @@
-//! The words the app shows outside its web page (the tray menu), from the same string
-//! tables as the page (`desktop/ui/i18n/<language>.json`).
+//! The app's words in its 7 languages, from the string tables in
+//! `desktop-core/i18n/<language>.json`.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -8,13 +8,13 @@ use std::sync::OnceLock;
 pub const LANGUAGES: [&str; 7] = ["en", "ko", "ja", "zh-CN", "fil", "es", "vi"];
 
 const TABLES: [(&str, &str); 7] = [
-    ("en", include_str!("../../desktop/ui/i18n/en.json")),
-    ("ko", include_str!("../../desktop/ui/i18n/ko.json")),
-    ("ja", include_str!("../../desktop/ui/i18n/ja.json")),
-    ("zh-CN", include_str!("../../desktop/ui/i18n/zh-CN.json")),
-    ("fil", include_str!("../../desktop/ui/i18n/fil.json")),
-    ("es", include_str!("../../desktop/ui/i18n/es.json")),
-    ("vi", include_str!("../../desktop/ui/i18n/vi.json")),
+    ("en", include_str!("../i18n/en.json")),
+    ("ko", include_str!("../i18n/ko.json")),
+    ("ja", include_str!("../i18n/ja.json")),
+    ("zh-CN", include_str!("../i18n/zh-CN.json")),
+    ("fil", include_str!("../i18n/fil.json")),
+    ("es", include_str!("../i18n/es.json")),
+    ("vi", include_str!("../i18n/vi.json")),
 ];
 
 type Table = HashMap<String, String>;

@@ -46,23 +46,10 @@ impl Gpu {
             wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(display)),
         );
         let surface = instance.create_surface(window).expect("create surface");
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower,
-            force_fallback_adapter: false,
-            compatible_surface: Some(&surface),
-            ..Default::default()
-        }))
-        .expect("no GPU adapter");
+        let (adapter, device, queue) = open_device(&instance, Some(&surface))
+            .expect("no GPU adapter that can draw into the window, not even a software one");
         let info = adapter.get_info();
-        let adapter_info = format!("{} ({:?})", info.name, info.backend);
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("ui"),
-            // Low limits keep the device usable on old GPUs and GL.
-            required_limits:
-                wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits()),
-            ..Default::default()
-        }))
-        .expect("request device");
+        let adapter_info = format!("{} ({:?}, {:?})", info.name, info.backend, info.device_type);
 
         // Prefer a non-sRGB format: blending then happens in sRGB space, like GPUI and browsers.
         let caps = surface.get_capabilities(&adapter);
@@ -92,20 +79,9 @@ impl Gpu {
     pub fn headless(width: u32, height: u32) -> Option<Self> {
         let instance =
             wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower,
-            ..Default::default()
-        }))
-        .ok()?;
+        let (adapter, device, queue) = open_device(&instance, None)?;
         let info = adapter.get_info();
-        let adapter_info = format!("{} ({:?})", info.name, info.backend);
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("ui"),
-            required_limits:
-                wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits()),
-            ..Default::default()
-        }))
-        .ok()?;
+        let adapter_info = format!("{} ({:?}, {:?})", info.name, info.backend, info.device_type);
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             format: wgpu::TextureFormat::Rgba8Unorm,
@@ -451,6 +427,38 @@ impl Gpu {
     }
 }
 
+/// The adapter that wgpu picks (a GPU first), then a software one: WARP on Windows,
+/// llvmpipe or SwiftShader elsewhere. Machines without a working GPU driver, such as
+/// virtual machines and CI runners, still get a device.
+fn open_device(
+    instance: &wgpu::Instance,
+    surface: Option<&wgpu::Surface<'_>>,
+) -> Option<(wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
+    for fallback in [false, true] {
+        let request = wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            force_fallback_adapter: fallback,
+            compatible_surface: surface,
+            ..Default::default()
+        };
+        let Ok(adapter) = pollster::block_on(instance.request_adapter(&request)) else {
+            continue;
+        };
+        let descriptor = wgpu::DeviceDescriptor {
+            label: Some("ui"),
+            // Low limits keep the device usable on old GPUs and GL.
+            required_limits: wgpu::Limits::downlevel_webgl2_defaults()
+                .using_resolution(adapter.limits()),
+            ..Default::default()
+        };
+        match pollster::block_on(adapter.request_device(&descriptor)) {
+            Ok((device, queue)) => return Some((adapter, device, queue)),
+            Err(e) => eprintln!("podbag-ui: {}: {e}", adapter.get_info().name),
+        }
+    }
+    None
+}
+
 fn physical_bounds(r: &Rect, scale: f32) -> TextBounds {
     TextBounds {
         left: (r.x * scale).floor() as i32,
@@ -596,4 +604,25 @@ fn quad_pipeline(
         multiview_mask: None,
     });
     (pipeline, globals, bind)
+}
+
+/// Windows always has WARP, so the app gets a device on a machine without a GPU, such as
+/// the CI runner.
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn windows_has_a_software_adapter() {
+        let instance =
+            wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        let warp = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            force_fallback_adapter: true,
+            ..Default::default()
+        }))
+        .expect("WARP");
+        assert_eq!(warp.get_info().device_type, wgpu::DeviceType::Cpu);
+        assert!(open_device(&instance, None).is_some());
+        assert!(Gpu::headless(64, 64).is_some());
+    }
 }

@@ -10,6 +10,7 @@ pub mod scroll;
 pub mod select;
 pub mod selectable;
 pub mod slider;
+pub mod switch;
 pub mod table;
 pub mod tabs;
 pub mod text_field;

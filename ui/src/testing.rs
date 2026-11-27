@@ -167,6 +167,19 @@ impl<V: View> Harness<V> {
         &self.host.scene
     }
 
+    /// The texts drawn in the last frame, in paint order.
+    pub fn texts(&self) -> Vec<String> {
+        let layers = self.host.scene.layers.iter();
+        layers
+            .flat_map(|l| l.texts.iter().map(|t| t.layout.text().to_string()))
+            .collect()
+    }
+
+    /// Whether the last frame drew a text that contains `part`.
+    pub fn shows(&self, part: &str) -> bool {
+        self.texts().iter().any(|t| t.contains(part))
+    }
+
     pub fn hitbox(&self, id: Id) -> Option<Rect> {
         self.host.scene.hitbox_rect(id)
     }

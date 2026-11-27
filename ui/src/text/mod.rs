@@ -80,6 +80,8 @@ pub struct TextLayout {
     /// Byte offset of each paragraph (text between line breaks).
     starts: Rc<[usize]>,
     len: usize,
+    /// The text as given.
+    source: Rc<str>,
 }
 
 impl TextLayout {
@@ -90,6 +92,11 @@ impl TextLayout {
 
     pub fn is_empty(&self) -> bool {
         self.len == 0
+    }
+
+    /// The text as given (before an ellipsis).
+    pub fn text(&self) -> &str {
+        &self.source
     }
 
     /// The closest byte index to a point.
@@ -301,6 +308,7 @@ impl TextSystem {
             lines: lines.max(1),
             starts: starts.into(),
             len: text.len(),
+            source: text.into(),
         };
         self.cache.insert(key, (layout.clone(), frame));
         layout

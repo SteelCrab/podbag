@@ -1,13 +1,15 @@
-//! A backend on sample data, with no engine: the data and results of the web preview
-//! (`desktop/preview/mock.js`), in the real API's types. For previews and UI tests.
+//! A backend on sample data, with no engine, in the real API's types. For previews and
+//! UI tests.
 //!
-//! Where mock.js does nothing, this mock changes its lists, so a UI can show the result:
+//! The mock changes its lists, so a UI can show the result:
 //! `act`, `remove`, `rename` and `create_volume` change them and send
 //! [`Event::Changed`]; a pull streams progress and adds the image (a name with
 //! `notfound` fails); a followed log gets a line a second; `engine(true)` starts a
-//! stopped VM; `vm_set` keeps the values.
+//! stopped VM; `vm_set` keeps the values; image compression, like the engine, starts a
+//! stopped VM.
 
 use crate::backend::Api;
+use crate::compression::{Compression, Mode};
 use crate::desktop::Connection;
 use crate::dockercmd::DockerCommand;
 use crate::engine::{EngineStatus, List, engine_kind};
@@ -23,8 +25,8 @@ use crate::tray::{EngineState, TrayInput, TrayModel};
 use crate::updates::{Check, Updates, Upgraded};
 use crate::vm::{VmDisk, VmLimits, VmSettings, VmStatus, VmValues};
 use podbag::client::{
-    Choice, ContainerSummary, Features, ImageSummary, Ipam, IpamConfig, Kind, NetworkSummary, Port,
-    Pruned, SearchResult, VolumeSummary,
+    Choice, CompressionSizes, ContainerSummary, Features, ImageSummary, Ipam, IpamConfig, Kind,
+    NetworkSummary, Port, Pruned, SearchResult, VolumeSummary,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -32,7 +34,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-/// Which preview view to start from (mock.js `view`).
+/// Which preview view to start from.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Scenario {
     /// podbag on macOS, the VM running, sample data.
@@ -40,11 +42,11 @@ pub enum Scenario {
     Default,
     /// No containers and no volumes.
     Empty,
-    /// The VM is stopped (mock.js `vm`).
+    /// The VM is stopped.
     VmStopped,
-    /// The engine does not answer, on Linux (mock.js `offline`).
+    /// The engine does not answer, on Linux.
     Offline,
-    /// Docker Desktop is the engine (mock.js `docker`).
+    /// Docker Desktop is the engine.
     Docker,
 }
 
@@ -66,24 +68,66 @@ pub struct Options {
     pub scenario: Scenario,
     /// Some(n): the containers are n synthetic rows, for long lists.
     pub rows: Option<usize>,
-    /// `features` all on (stats, top, pause, rename). mock.js has them off.
+    /// `features` all on (stats, top, pause, rename); else they are off.
     pub all_features: bool,
-    /// The first language setting ("en" as in mock.js).
+    /// The first language setting ("en" when none).
     pub language: Option<String>,
-    /// A newer release is known (mock.js `settings-updates`).
+    /// A newer release is known.
     pub update: bool,
     /// The first launch: the star prompt shows once.
     pub first_launch: bool,
-    /// No waiting: what mock.js does after a time happens at once (tests).
+    /// No waiting: what takes a while happens at once (tests).
     pub instant: bool,
+    /// The question about image compression shows: a new install, or an update from a
+    /// version without it.
+    pub compression_prompt: bool,
+    pub compression: CompressionOptions,
+}
+
+/// The engine's image compression, and the cases the UI must handle.
+#[derive(Clone, Debug)]
+pub struct CompressionOptions {
+    /// On at start.
+    pub on: bool,
+    /// Seconds an image stays unused before it is compressed.
+    pub after: u64,
+    /// Replies name no mode.
+    pub broken: bool,
+    /// An environment setting keeps the mode as it is.
+    pub kept: bool,
+    /// Changes fail with this error.
+    pub fail: Option<String>,
+    /// The VM's state cannot be read.
+    pub vm_error: bool,
+}
+
+impl Default for CompressionOptions {
+    fn default() -> Self {
+        CompressionOptions {
+            on: false,
+            after: 7 * 86_400,
+            broken: false,
+            kept: false,
+            fail: None,
+            vm_error: false,
+        }
+    }
 }
 
 impl Options {
     /// From the environment: PODBAG_MOCK_SCENARIO (default, empty, vm, offline, docker),
-    /// PODBAG_MOCK_ROWS=N, PODBAG_MOCK_FEATURES=all, PODBAG_MOCK_LANG (en, ko, …, system).
+    /// PODBAG_MOCK_ROWS=N, PODBAG_MOCK_FEATURES=all, PODBAG_MOCK_LANG (en, ko, …, system),
+    /// PODBAG_MOCK_COMPRESSION (`on`, `ask` or both, comma-separated).
     pub fn from_env() -> Options {
         let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+        let compression = var("PODBAG_MOCK_COMPRESSION").unwrap_or_default();
+        let has = |word: &str| compression.split(',').any(|w| w.trim() == word);
         Options {
+            compression_prompt: has("ask"),
+            compression: CompressionOptions {
+                on: has("on"),
+                ..CompressionOptions::default()
+            },
             scenario: var("PODBAG_MOCK_SCENARIO")
                 .and_then(|s| Scenario::parse(&s))
                 .unwrap_or_default(),
@@ -112,6 +156,7 @@ struct State {
     logs_generation: u64,
     logs_following: bool,
     update_found: bool,
+    compression: Compression,
 }
 
 /// The mocked backend. Use it through [`crate::Backend::mock`].
@@ -293,6 +338,14 @@ fn sample_images(now: i64) -> Vec<ImageSummary> {
         containers,
         podbag_compression: None,
     };
+    // Unused for a long time, so the engine compressed it: 3.9 MB on disk, 54% smaller.
+    let alpine = ImageSummary {
+        podbag_compression: Some(CompressionSizes {
+            size: 3_900_000,
+            original_size: 8_520_000,
+        }),
+        ..i("sha256:5f5b2e0a0c6d88ee", "alpine:3.22", 60, 8_520_000, 0)
+    };
     vec![
         i("sha256:9d1f6a0c3e2b44aa", "nginx:alpine", 12, 52_400_000, 1),
         i(
@@ -316,7 +369,7 @@ fn sample_images(now: i64) -> Vec<ImageSummary> {
             183_000_000,
             1,
         ),
-        i("sha256:5f5b2e0a0c6d88ee", "alpine:3.22", 60, 8_520_000, 0),
+        alpine,
     ]
 }
 
@@ -448,7 +501,7 @@ fn stopped_vm() -> VmStatus {
     }
 }
 
-/// mock.js `engine` for a scenario and the engine chosen.
+/// The engine's state for a scenario and the engine chosen.
 fn engine_info(scenario: Scenario, selected: &str) -> EngineStatus {
     let docker = scenario == Scenario::Docker;
     let mut e = EngineStatus {
@@ -597,6 +650,7 @@ impl Mock {
             token: 1,
             settings: Settings {
                 language: opts.language.clone().unwrap_or_else(|| "en".into()),
+                compression_prompt_seen: !opts.compression_prompt,
                 ..Settings::default()
             }
             .checked(),
@@ -611,6 +665,14 @@ impl Mock {
             logs_generation: 0,
             logs_following: false,
             update_found: false,
+            compression: Compression {
+                mode: Some(if opts.compression.on {
+                    Mode::Idle
+                } else {
+                    Mode::Off
+                }),
+                after: Some(opts.compression.after),
+            },
         };
         Mock {
             state: Arc::new(Mutex::new(state)),
@@ -645,7 +707,7 @@ impl Mock {
         });
     }
 
-    /// Wait `ms` milliseconds, as mock.js does (not with `instant`).
+    /// Wait `ms` milliseconds (not with `instant`).
     fn wait(&self, ms: u64) {
         if !self.opts.instant {
             std::thread::sleep(Duration::from_millis(ms));
@@ -763,7 +825,7 @@ impl Api for Mock {
         Ok(self.st().networks.clone())
     }
 
-    /// A sample, whatever the object (as in mock.js).
+    /// A sample, whatever the object.
     fn inspect(&self, kind: Kind, id: &str) -> Result<Value, String> {
         Ok(json!({
             "Id": id, "Name": "/web", "Created": "2026-11-20T01:12:00Z",
@@ -881,7 +943,7 @@ impl Api for Mock {
         Ok(())
     }
 
-    /// mock.js: always 2 objects and 61 MB; the lists stay.
+    /// Always 2 objects and 61 MB; the lists stay.
     fn prune(&self, _kind: Kind) -> Result<Pruned, String> {
         Ok(Pruned {
             count: 2,
@@ -918,7 +980,7 @@ impl Api for Mock {
             if s.volumes.iter().any(|v| v.name == name) {
                 return Err(format!("volume {name} already exists"));
             }
-            // mock.js pushes only Name and Driver.
+            // Only the name and the driver.
             s.volumes.push(VolumeSummary {
                 name: name.into(),
                 driver: "local".into(),
@@ -1057,7 +1119,7 @@ impl Api for Mock {
         }
     }
 
-    /// The real locations; someone is logged in at GitHub (as in mock.js).
+    /// The real locations; someone is logged in at GitHub.
     fn registries(&self, hosts: &[(String, String)]) -> Vec<LocationInfo> {
         images::locations(&[("ghcr.io".into(), "octocat".into())], hosts)
     }
@@ -1152,11 +1214,46 @@ impl Api for Mock {
     }
 
     fn vm_status(&self) -> Result<Option<VmStatus>, String> {
+        if self.opts.compression.vm_error {
+            return Err("cannot read the VM's state".into());
+        }
         let s = self.st();
         if s.selected != "podbag" || s.engine.platform == "linux" {
             return Ok(None);
         }
         Ok(Some(s.vm.clone()))
+    }
+
+    fn compression(&self, mode: Option<Mode>) -> Result<Compression, String> {
+        let o = &self.opts.compression;
+        let (state, started) = {
+            let mut s = self.st();
+            if s.selected != "podbag" {
+                return Err("Image compression requires the podbag engine".into());
+            }
+            if let (Some(mode), None) = (mode, &o.fail)
+                && !o.kept
+            {
+                s.compression.mode = Some(mode);
+            }
+            // The command runs in the VM, as the engine's does.
+            let started = s.engine.vm.as_deref() == Some("stopped");
+            if started {
+                Mock::set_vm_running(&mut s, true);
+            }
+            (s.compression, started.then_some(s.token))
+        };
+        if let Some(session) = started {
+            self.events.send(Event::EngineChanged {
+                session,
+                action: "start".into(),
+            });
+        }
+        match (&o.fail, mode) {
+            (Some(e), Some(_)) => Err(e.clone()),
+            _ if o.broken => Ok(Compression::default()),
+            _ => Ok(state),
+        }
     }
 
     fn vm_set(&self, change: &VmSettings) -> Result<String, String> {
@@ -1309,7 +1406,7 @@ impl Api for Mock {
         }
     }
 
-    /// The upgrade needs an administrator (mock.js `update-admin`).
+    /// The upgrade needs an administrator.
     fn upgrade(&self, _version: Option<&str>) -> Upgraded {
         Upgraded {
             ok: false,
@@ -1666,6 +1763,63 @@ mod tests {
             b.vm_status().unwrap().unwrap().in_use.unwrap().memory_mib,
             Some(2048)
         );
+    }
+
+    #[test]
+    fn image_compression_is_set_in_the_vm_and_its_cases_show() {
+        let (b, rx) = backend(Options {
+            scenario: Scenario::VmStopped,
+            compression_prompt: true,
+            ..Options::default()
+        });
+        assert!(!b.settings().compression_prompt_seen);
+        let alpine = b.images().unwrap().pop().unwrap();
+        assert_eq!(
+            alpine.podbag_compression.map(|c| c.size),
+            Some(3_900_000),
+            "the sample has a compressed image"
+        );
+        // A change starts the stopped VM, as the engine's command does.
+        let on = b.compression(Some(Mode::Idle)).unwrap();
+        assert_eq!((on.mode, on.after), (Some(Mode::Idle), Some(604_800)));
+        assert!(b.engine(false).reachable);
+        assert!(
+            rx.try_iter()
+                .any(|e| matches!(e, Event::EngineChanged { .. }))
+        );
+        assert!(b.compression(None).unwrap().is_on());
+        // An environment setting, a reply without a mode, a failed change.
+        let kept = |o: CompressionOptions| {
+            backend(Options {
+                compression: o,
+                ..Options::default()
+            })
+            .0
+        };
+        let b = kept(CompressionOptions {
+            kept: true,
+            ..CompressionOptions::default()
+        });
+        assert_eq!(
+            b.compression(Some(Mode::Idle)).unwrap().mode,
+            Some(Mode::Off)
+        );
+        let b = kept(CompressionOptions {
+            broken: true,
+            ..CompressionOptions::default()
+        });
+        assert_eq!(b.compression(None).unwrap().mode, None);
+        let b = kept(CompressionOptions {
+            fail: Some("disk is full".into()),
+            vm_error: true,
+            ..CompressionOptions::default()
+        });
+        assert_eq!(b.compression(Some(Mode::Idle)), Err("disk is full".into()));
+        assert!(b.vm_status().is_err());
+        assert!(!b.compression(None).unwrap().is_on());
+        // Another engine has none.
+        b.set_engine("docker").unwrap();
+        assert!(b.compression(None).is_err());
     }
 
     #[test]
