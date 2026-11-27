@@ -55,10 +55,24 @@ Quản lý container, image, volume và mạng trên Linux và macOS. Hỗ trợ
 Tải gói cho hệ điều hành của bạn từ [bản phát hành mới nhất](https://github.com/SteelCrab/podbag/releases/latest).
 
 - **Linux (x86_64, arm64).** Cài gói `.deb` trên Debian hoặc Ubuntu, hoặc gói `.rpm` trên Fedora. Gói cài đặt có sẵn engine.
-- **macOS (Apple silicon, Intel).** Giải nén `podbag-desktop-aarch64-macos.zip` (Apple silicon) hoặc `podbag-desktop-x86_64-macos.zip` (Intel), chuyển `podbag.app` vào thư mục Applications rồi mở.
+- **macOS (Apple silicon, Intel).** Mở `podbag-desktop-aarch64-macos.dmg` (Apple silicon) hoặc `podbag-desktop-x86_64-macos.dmg` (Intel). Kéo `podbag` vào thư mục Applications rồi mở từ đó. Lần đầu mở, bạn cần cho phép một lần: [Mở lần đầu trên macOS](#mở-lần-đầu-trên-macos).
 - **Windows (x86_64, ARM64, thử nghiệm).** Chạy tệp `.msi` phù hợp với CPU. Nếu bản phát hành chưa có MSI, tải tệp từ một [lần chạy CI thành công](https://github.com/SteelCrab/podbag/actions/workflows/ci.yml?query=branch%3Amain). Bật WSL 2 để chạy container.
 
 Ứng dụng có sẵn CLI. Nếu terminal chưa có `podbag`, ứng dụng sẽ đề nghị cài lệnh `podbag`. Lệnh này dùng CLI của ứng dụng, nên được cập nhật cùng ứng dụng.
+
+### Mở lần đầu trên macOS
+
+podbag chưa được Apple công chứng (notarize). Vì vậy macOS chặn ứng dụng hoặc CLI tải bằng trình duyệt cho đến khi bạn cho phép một lần.
+
+1. Mở `podbag` từ thư mục Applications. macOS báo rằng không thể kiểm tra podbag có phần mềm độc hại hay không. Nhấn **Xong**.
+2. Mở **Cài đặt hệ thống > Quyền riêng tư & Bảo mật**. Bên cạnh thông báo về `podbag`, nhấn **Vẫn mở** rồi xác nhận bằng mật khẩu.
+
+Để bỏ qua các bước này, hãy cài từ terminal. Tệp tải bằng `curl` không bị chặn.
+
+```sh
+curl -fsSL https://podbag.dev/install.sh | PODBAG_DESKTOP=1 sh   # Podbag Desktop
+curl -fsSL https://podbag.dev/install.sh | sh                    # chỉ CLI
+```
 
 ### CLI trên Linux (x86_64, arm64) và macOS (Apple silicon, Intel)
 
@@ -71,7 +85,7 @@ Script kiểm tra mã SHA-256 của tệp phát hành rồi cài CLI vào `/usr/
 
 Linux cần kernel 5.12 trở lên và cgroup v2. Chạy `podbag check` để biết hệ thống còn thiếu gì. Nếu dùng mạng bridge mà không có quyền root, hãy kiểm tra các gói `uidmap` và `passt`. [Yêu cầu trên Linux](docs/usage.md#requirements-on-linux)
 
-Để cài thủ công, tải tệp phù hợp với hệ điều hành và CPU rồi đối chiếu mã kiểm tra với `SHA256SUMS`. [Tải bản phát hành](https://github.com/SteelCrab/podbag/releases/latest)
+Để cài thủ công, tải tệp phù hợp với hệ điều hành và CPU rồi đối chiếu mã kiểm tra với `SHA256SUMS`. Cấp quyền chạy bằng `chmod +x`. Trên Mac, chạy thêm `xattr -d com.apple.quarantine`. [Tải bản phát hành](https://github.com/SteelCrab/podbag/releases/latest)
 
 ### CLI trên Windows (thử nghiệm)
 

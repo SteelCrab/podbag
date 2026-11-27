@@ -55,6 +55,17 @@
       { metadata: { name: "frontend", namespace: "default" }, spec: { type: "NodePort", clusterIP: "10.43.0.80", ports: [{ port: 80, nodePort: 30080, protocol: "TCP" }] } },
     ],
   };
+  // Only the "ocp" context is OpenShift: it alone serves Routes.
+  const routes = [
+    { kind: "Route", metadata: { name: "shop", namespace: "default" }, spec: { host: "shop.apps.ocp.example.com", path: "/cart", to: { kind: "Service", name: "frontend" }, tls: { termination: "edge" } } },
+    { kind: "Route", metadata: { name: "api", namespace: "default" }, spec: { host: "api.apps.ocp.example.com", to: { kind: "Service", name: "api" } } },
+    { kind: "Route", metadata: { name: "docs", namespace: "staging" }, spec: { host: "docs-staging.apps.ocp.example.com", to: { kind: "Service", name: "docs" }, tls: { termination: "passthrough" } } },
+  ];
+  const kubeItems = (kind, context) => {
+    if (kind !== "routes") return kube[kind];
+    if (context === "ocp") return routes;
+    throw 'kubectl (exit status: 1): error: the server doesn\'t have a resource type "routes"';
+  };
   const docker = view.startsWith("docker");
   const engine = {
     platform: "macos",
@@ -181,10 +192,12 @@
     "plugin:autostart|disable": () => { launchAtLogin = false; },
     connection: () => [token, selected, selected === "podbag"],
     contexts: () => ["desktop-linux", "orbstack"],
-    kube_contexts: () => ["dev", "staging"],
+    kube_contexts: () => ["dev", "staging", "ocp"],
+    kube_openshift: ({ context }) => context === "ocp",
+    kube_open_route: () => null,
     migration_sources: () => ["docker", "podman", "kiri", "podbag"],
-    kube_counts: ({ allNamespaces }) => Object.fromEntries(Object.entries(kube).map(([kind,items]) =>
-      [kind,items.filter(i=>allNamespaces||i.metadata.namespace==="default").length])),
+    kube_counts: ({ allNamespaces, context }) => Object.fromEntries(Object.keys(context === "ocp" ? { ...kube, routes } : kube).map((kind) =>
+      [kind, kubeItems(kind, context).filter(i=>allNamespaces||i.metadata.namespace==="default").length])),
     migration_list: ({ kind }) => lists[kind],
     migrate: async ({ request, updates }) => {
       for (const phase of ["prepare", request.kind === "images" ? "image" : "files", "verify"]) {
@@ -197,7 +210,7 @@
     list: ({ kind }) => lists[kind],
     kube_list: ({ kind, allNamespaces, context }) => ({
       context: context || "dev", namespace: "default",
-      items: kube[kind].filter((item) => allNamespaces || item.metadata.namespace === "default"),
+      items: kubeItems(kind, context).filter((item) => allNamespaces || item.metadata.namespace === "default"),
     }),
     inspect: ({ kind, id }) => ({ Id: id, Name: "/web", Created: "2026-11-20T01:12:00Z", State: { Status: "running", Running: true, Pid: 4182, StartedAt: "2026-11-20T01:12:01Z" }, Config: { Image: "nginx:alpine", Cmd: ["nginx", "-g", "daemon off;"], Env: ["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "NGINX_VERSION=1.27.3"], Tty: false }, HostConfig: { PortBindings: { "80/tcp": [{ HostIp: "", HostPort: "8080" }] }, RestartPolicy: { Name: "no" } }, NetworkSettings: { IPAddress: "10.77.0.2" }, Kind: kind }),
     act: () => null,

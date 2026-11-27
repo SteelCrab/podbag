@@ -55,10 +55,24 @@ Sa Linux at macOS, puwede mong pamahalaan ang mga container, image, volume at ne
 I-download ang package para sa iyong system mula sa [pinakabagong release](https://github.com/SteelCrab/podbag/releases/latest).
 
 - **Linux (x86_64, arm64).** I-install ang `.deb` sa Debian o Ubuntu, o ang `.rpm` sa Fedora. Kasama sa package ang engine.
-- **macOS (Apple silicon, Intel).** I-extract ang `podbag-desktop-aarch64-macos.zip` (Apple silicon) o `podbag-desktop-x86_64-macos.zip` (Intel), ilipat ang `podbag.app` sa Applications folder, at buksan ito.
+- **macOS (Apple silicon, Intel).** Buksan ang `podbag-desktop-aarch64-macos.dmg` (Apple silicon) o `podbag-desktop-x86_64-macos.dmg` (Intel). I-drag ang `podbag` sa Applications folder, at buksan ito mula roon. Sa unang pagbukas, kailangan mo itong payagan nang isang beses: [Unang pagbukas sa macOS](#unang-pagbukas-sa-macos).
 - **Windows (x86_64, ARM64, eksperimental).** Patakbuhin ang `.msi` para sa iyong CPU. Kung walang MSI sa release, i-download ito mula sa matagumpay na [CI run](https://github.com/SteelCrab/podbag/actions/workflows/ci.yml?query=branch%3Amain). I-enable ang WSL 2 para makapagpatakbo ng mga container.
 
 Kasama sa app ang CLI. Kapag walang `podbag` sa terminal, iaalok ng app na i-install ang `podbag` command. Ginagamit ng command ang CLI ng app, kaya naa-update ito kasabay ng app.
+
+### Unang pagbukas sa macOS
+
+Hindi notarized ng Apple ang podbag. Kaya bina-block ng macOS ang app o CLI na na-download gamit ang browser, hanggang payagan mo ito nang isang beses.
+
+1. Buksan ang `podbag` mula sa Applications folder. Sasabihin ng macOS na hindi nito masuri kung may malware ang podbag. I-click ang **Done**.
+2. Buksan ang **System Settings > Privacy & Security**. Sa tabi ng mensahe tungkol sa `podbag`, i-click ang **Open Anyway**, at kumpirmahin gamit ang iyong password.
+
+Para laktawan ang mga hakbang na ito, mag-install mula sa terminal. Hindi bina-block ang mga file na dina-download ng `curl`.
+
+```sh
+curl -fsSL https://podbag.dev/install.sh | PODBAG_DESKTOP=1 sh   # Podbag Desktop
+curl -fsSL https://podbag.dev/install.sh | sh                    # CLI lang
+```
 
 ### CLI sa Linux (x86_64, arm64) at macOS (Apple silicon, Intel)
 
@@ -71,7 +85,7 @@ Sinusuri ng installer ang SHA-256 checksum ng release file at ini-install ang CL
 
 Kailangan ang Linux kernel 5.12 o mas bago at cgroup v2. Patakbuhin ang `podbag check` para makita kung ano pa ang kulang. Para sa bridge network na walang root access, tingnan kung naka-install ang mga package na `uidmap` at `passt`. [Mga kailangan sa Linux](docs/usage.md#requirements-on-linux)
 
-Para sa manu-manong pag-install, i-download ang file para sa iyong OS at CPU at ihambing ang checksum nito sa `SHA256SUMS`. [Mga release file](https://github.com/SteelCrab/podbag/releases/latest)
+Para sa manu-manong pag-install, i-download ang file para sa iyong OS at CPU at ihambing ang checksum nito sa `SHA256SUMS`. Gawin itong executable gamit ang `chmod +x`. Sa Mac, patakbuhin din ang `xattr -d com.apple.quarantine`. [Mga release file](https://github.com/SteelCrab/podbag/releases/latest)
 
 ### CLI sa Windows (eksperimental)
 

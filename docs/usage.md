@@ -858,6 +858,7 @@ podbag tui --engine unix:///run/kiri/docker.sock
   - Select two kubeconfig contexts and an existing destination namespace.
   - Kubernetes gives new UIDs, service addresses and node ports.
   - Migrate PVCs before the workloads that use them.
+  - OpenShift Routes are not copied. A Route's host belongs to its cluster.
   - The destination needs the referenced images, credentials and configuration.
   - A bound claim needs compatible storage and permission to create temporary Pods and
     use `pods/exec` in both namespaces. Podbag copies the files through those Pods and
@@ -924,16 +925,22 @@ podbag migrate --from context:staging --to podbag container web
 - The context's default namespace applies. `--namespace` selects another one. `-A`
   lists all namespaces.
 - Resource types: `pod`, `service`, `deployment` and `claim` (alias `pvc`).
+- On OpenShift, `route` also works. A Route is the public address of a Service.
+- A context is OpenShift when its API serves `route.openshift.io/v1`. Only then does
+  `counts` include `routes`.
 
 ```sh
 podbag kube contexts
 podbag kube counts --context dev -A
 podbag kube list pod --context dev -n apps
 podbag kube inspect pod web --context dev -n apps
+podbag kube list route --context ocp -n apps
 podbag kube migrate pod web --from dev --to staging --from-namespace apps --to-namespace review
 ```
 
 - `migrate` reads the source, creates the destination resource and verifies it.
+- `migrate` does not copy Routes. A Route's host belongs to its cluster. Create a new
+  Route in the destination cluster.
 - `--uid` requires that exact source object. Use the UID from an earlier inspection.
 - Without a namespace flag, that context's default namespace applies.
 
@@ -1097,7 +1104,7 @@ podbag lab remove container-network
 | Create volume | Create a named volume on the selected engine |
 | Pull image / Log in | Choose a registry, sign in, search Docker Hub or pull a reference |
 | Import from Docker | With Podbag selected, copy one or more tagged images from Docker. Press `Space` to mark tags and `Enter` to review |
-| Kubernetes | Choose a context, current or all namespaces, and Pods, Services, Deployments or PVCs. Filter rows, inspect JSON or refresh |
+| Kubernetes | Choose a context, current or all namespaces, and Pods, Services, Deployments or PVCs. On OpenShift, Routes are also listed. Filter rows, inspect JSON or refresh |
 | Migrate | Browse all local engines or select a source. Choose a resource and destination. For Kubernetes, choose the destination namespace. Review the transfer, follow its progress and verify the destination |
 | Tutorials | Install a local `.podbag` lesson, create a practice volume, edit JSON, serve it over HTTP, read the response and remove the module. `Ctrl+S` saves the file |
 | Settings | Connect to an engine, inspect it, check for updates, install an update, open a host shell or the project page. Set the terminal language and theme. Manage sign-in startup when Podbag Desktop is installed |
@@ -1169,6 +1176,8 @@ podbag lab remove container-network
   persistent volume claims in the context's namespace or select **All namespaces**.
   Select a name to inspect its JSON. These views change nothing. To copy a resource to
   another cluster, use [Migrate](#migrate-between-engines-or-kubernetes-clusters).
+- On an OpenShift context, a **Routes** tab also appears. It shows each Route's host,
+  path, Service and TLS mode. Select a host to open its address in the browser.
 
 ![Available migrations in a Kubernetes namespace and resource counts in the sidebar](images/migration-overview-en.png)
 

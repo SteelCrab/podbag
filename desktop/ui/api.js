@@ -29,6 +29,8 @@ const API = (() => {
     migrationSources: () => invoke("migration_sources"),
     kubeCounts: (context, allNamespaces) => invoke("kube_counts", { context: context || null, allNamespaces }),
     kubeContexts: () => invoke("kube_contexts"),
+    kubeOpenShift: (context) => invoke("kube_openshift", { context: context || null }),
+    kubeOpenRoute: (context, namespace, name) => invoke("kube_open_route", { context, namespace, name }),
     createVolume: (name) => scoped("create_volume", { name }),
     engine: (start) => scoped("engine", { start: !!start }),
     list: (kind) => scoped("list", { kind }),
