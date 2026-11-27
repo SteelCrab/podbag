@@ -131,21 +131,14 @@ fn open_nfs(options: &NfsOptions, read_only: bool) -> std::io::Result<OwnedFd> {
     }
     let mut attrs = MountAttrFlags::empty();
     for option in options.parameters() {
-        match option {
-            "ro" => attrs |= MountAttrFlags::MOUNT_ATTR_RDONLY,
-            "rw" => attrs -= MountAttrFlags::MOUNT_ATTR_RDONLY,
-            "nosuid" => attrs |= MountAttrFlags::MOUNT_ATTR_NOSUID,
-            "suid" => attrs -= MountAttrFlags::MOUNT_ATTR_NOSUID,
-            "nodev" => attrs |= MountAttrFlags::MOUNT_ATTR_NODEV,
-            "dev" => attrs -= MountAttrFlags::MOUNT_ATTR_NODEV,
-            "noexec" => attrs |= MountAttrFlags::MOUNT_ATTR_NOEXEC,
-            "exec" => attrs -= MountAttrFlags::MOUNT_ATTR_NOEXEC,
-            _ => match option.split_once('=') {
-                Some(("addr", _)) => {}
-                Some(("source", _)) => return Err(rustix::io::Errno::INVAL.into()),
-                Some((key, value)) => rustix::mount::fsconfig_set_string(&fs, key, value)?,
-                None => rustix::mount::fsconfig_set_flag(&fs, option)?,
-            },
+        if set_mount_attr(&mut attrs, option) {
+            continue;
+        }
+        match option.split_once('=') {
+            Some(("addr", _)) => {}
+            Some(("source", _)) => return Err(rustix::io::Errno::INVAL.into()),
+            Some((key, value)) => rustix::mount::fsconfig_set_string(&fs, key, value)?,
+            None => rustix::mount::fsconfig_set_flag(&fs, option)?,
         }
     }
     if read_only {
@@ -157,6 +150,33 @@ fn open_nfs(options: &NfsOptions, read_only: bool) -> std::io::Result<OwnedFd> {
         FsMountFlags::FSMOUNT_CLOEXEC,
         attrs,
     )?)
+}
+
+/// Apply a mount option that is a per-mount attribute, not a filesystem parameter (the
+/// filesystem context rejects these). Returns false for every other option.
+fn set_mount_attr(attrs: &mut MountAttrFlags, option: &str) -> bool {
+    // The access-time mode is one field: the last of these options wins.
+    let atime = |attrs: &mut MountAttrFlags, mode: MountAttrFlags| {
+        *attrs -= MountAttrFlags::MOUNT_ATTR__ATIME;
+        *attrs |= mode;
+    };
+    match option {
+        "ro" => *attrs |= MountAttrFlags::MOUNT_ATTR_RDONLY,
+        "rw" => *attrs -= MountAttrFlags::MOUNT_ATTR_RDONLY,
+        "nosuid" => *attrs |= MountAttrFlags::MOUNT_ATTR_NOSUID,
+        "suid" => *attrs -= MountAttrFlags::MOUNT_ATTR_NOSUID,
+        "nodev" => *attrs |= MountAttrFlags::MOUNT_ATTR_NODEV,
+        "dev" => *attrs -= MountAttrFlags::MOUNT_ATTR_NODEV,
+        "noexec" => *attrs |= MountAttrFlags::MOUNT_ATTR_NOEXEC,
+        "exec" => *attrs -= MountAttrFlags::MOUNT_ATTR_NOEXEC,
+        "noatime" => atime(attrs, MountAttrFlags::MOUNT_ATTR_NOATIME),
+        "relatime" | "atime" => atime(attrs, MountAttrFlags::MOUNT_ATTR_RELATIME),
+        "strictatime" => atime(attrs, MountAttrFlags::MOUNT_ATTR_STRICTATIME),
+        "nodiratime" => *attrs |= MountAttrFlags::MOUNT_ATTR_NODIRATIME,
+        "diratime" => *attrs -= MountAttrFlags::MOUNT_ATTR_NODIRATIME,
+        _ => return false,
+    }
+    true
 }
 
 fn open_shared_source(path: &Path, roots: &[std::path::PathBuf]) -> std::io::Result<OwnedFd> {
@@ -575,6 +595,35 @@ mod tests {
         let mode = std::fs::metadata(&outside).unwrap().permissions().mode() & 0o7777;
         assert_eq!(mode, 0o600);
         assert!(!outdir.join("f").exists(), "wrote through a planted link");
+    }
+
+    /// The filesystem context rejects access-time options, so they must become attributes.
+    #[test]
+    fn access_time_options_are_mount_attributes() {
+        let attrs = |options: &[&str]| {
+            let mut attrs = MountAttrFlags::empty();
+            for option in options {
+                assert!(set_mount_attr(&mut attrs, option), "{option}");
+            }
+            attrs
+        };
+        assert_eq!(attrs(&["noatime"]), MountAttrFlags::MOUNT_ATTR_NOATIME);
+        assert_eq!(
+            attrs(&["noatime", "strictatime"]),
+            MountAttrFlags::MOUNT_ATTR_STRICTATIME
+        );
+        assert_eq!(attrs(&["strictatime", "relatime"]), MountAttrFlags::empty());
+        assert_eq!(attrs(&["noatime", "atime"]), MountAttrFlags::empty());
+        assert_eq!(
+            attrs(&["nosuid", "nodiratime", "noatime"]),
+            MountAttrFlags::MOUNT_ATTR_NOSUID
+                | MountAttrFlags::MOUNT_ATTR_NODIRATIME
+                | MountAttrFlags::MOUNT_ATTR_NOATIME
+        );
+        assert_eq!(attrs(&["nodiratime", "diratime"]), MountAttrFlags::empty());
+        let mut other = MountAttrFlags::empty();
+        assert!(!set_mount_attr(&mut other, "vers=4"));
+        assert!(!set_mount_attr(&mut other, "hard"));
     }
 
     #[test]
