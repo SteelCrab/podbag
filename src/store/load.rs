@@ -1,4 +1,4 @@
-//! `docker load`: an image archive into the store.
+//! Image archives: `docker load` and root filesystem import.
 //!
 //! The archive may hold `docker save`'s `manifest.json`, an OCI image layout (`index.json`
 //! and `blobs/`), or both, as BuildKit and newer Docker write them. It is untrusted input:
@@ -6,11 +6,15 @@
 //! disk), every digest it names is checked, and its layers pass the same checks as a
 //! pull's (blob digest, diff ID, safe paths).
 
+#[cfg(unix)]
+use super::HashingReader;
 use super::{Source, Store, io_error, now, remove_tree};
 use crate::config::ImageCompression;
 use crate::image::manifest::{self, Compression, Descriptor, Fetched, Platform};
 use crate::image::reference::{Reference, is_digest};
 use crate::image::registry::sha256_hex;
+#[cfg(unix)]
+use crate::image::{ImageConfig, ImportOptions, manifest::HistoryEntry};
 use crate::{Error, ErrorKind, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -85,6 +89,103 @@ impl Store {
             }
             Err(e) => {
                 // What this load left behind goes, as after a failed pull.
+                if let Ok(_exclusive) = self.lock(true) {
+                    let _ = self.collect_garbage();
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Store a root filesystem as one image layer, keeping its original tar digest.
+    #[cfg(unix)]
+    pub fn import(
+        &self,
+        input: &mut dyn Read,
+        options: ImportOptions,
+        limit: u64,
+        in_use: &dyn Fn() -> HashMap<String, String>,
+    ) -> Result<String> {
+        let bad_import = |why: String| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                "cannot import the root filesystem",
+                why,
+                "provide a complete tar archive",
+            )
+        };
+        let name = options.name.as_deref().map(Reference::parse).transpose()?;
+        if name.as_ref().is_some_and(|name| name.digest.is_some()) {
+            return Err(bad_import("the image name must use a tag".to_string()));
+        }
+        let mut config = ImageConfig::default();
+        crate::build::commit::apply_changes(&mut config, &options.changes)?;
+        let created = now();
+        let stored = {
+            let _shared = self.lock(false)?;
+            (|| {
+                let mut input = BufReader::new(input);
+                let magic = input.fill_buf().map_err(|e| bad_import(e.to_string()))?;
+                let decoded: Box<dyn Read> = if magic.starts_with(&[0x1f, 0x8b]) {
+                    Box::new(flate2::bufread::MultiGzDecoder::new(input))
+                } else if magic.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
+                    Box::new(super::zstd::ZstdFrames::new(input))
+                } else {
+                    Box::new(input)
+                };
+                let capacity = free_space(&self.root)
+                    .map_or(limit, |free| free.saturating_sub(DISK_RESERVE).min(limit));
+                let mut tar = HashingReader::new(decoded.take(capacity.saturating_add(1)));
+                let entries = super::layer::read_layer(&mut tar, &self.objects);
+                // The tar parser stops at a zero block. Drain the rest to include padding in
+                // the diff ID and check the gzip or zstd trailer.
+                if entries.is_ok() {
+                    std::io::copy(&mut tar, &mut std::io::sink())
+                        .map_err(|e| bad_import(e.to_string()))?;
+                }
+                if tar.count > capacity {
+                    return Err(bad_import(format!(
+                        "the archive exceeds the available store space ({capacity} bytes)"
+                    )));
+                }
+                let entries = entries.map_err(|e| bad_import(e.to_string()))?;
+                if tar.count < 512 {
+                    return Err(bad_import(
+                        "the archive has no complete tar header".to_string(),
+                    ));
+                }
+                let diff_id = tar.digest();
+                self.write_layer_index(&diff_id, entries)?;
+                let history = vec![HistoryEntry {
+                    created: Some(crate::shim::logbook::rfc3339(created, 0)),
+                    comment: options.message,
+                    ..HistoryEntry::default()
+                }];
+                let digest = self.record_image(config, vec![diff_id], created, true, history)?;
+                let mut replaced = Vec::new();
+                if let Some(name) = name {
+                    let name = name.name();
+                    self.update_refs(|refs| {
+                        let next = super::RefEntry {
+                            digest: digest.clone(),
+                            last_used: created,
+                        };
+                        if let Some(old) =
+                            refs.insert(name, next).filter(|old| old.digest != digest)
+                        {
+                            replaced.push(old.digest);
+                        }
+                    })?;
+                }
+                Ok((digest, replaced))
+            })()
+        };
+        match stored {
+            Ok((digest, replaced)) => {
+                self.after_naming(&replaced, std::slice::from_ref(&digest), limit, in_use)?;
+                Ok(digest)
+            }
+            Err(e) => {
                 if let Ok(_exclusive) = self.lock(true) {
                     let _ = self.collect_garbage();
                 }
@@ -210,14 +311,20 @@ impl Store {
                 .clone()
                 .unwrap_or_else(|| config_digest.clone());
             if self.image_dir(&digest).join("image.json").exists() {
+                self.remember_history(&digest, config.history)?;
                 self.ensure_artifact(&digest)?;
             } else {
                 self.assemble(
-                    &digest,
-                    config.config,
-                    config.diff_ids,
-                    Some(config_digest.clone()),
-                    false,
+                    super::ImageRecord {
+                        digest: digest.clone(),
+                        config_digest: Some(config_digest),
+                        config: config.config,
+                        diff_ids: config.diff_ids,
+                        history: config.history,
+                        created: now(),
+                        size: 0,
+                        oci: false,
+                    },
                     true,
                 )?;
             }

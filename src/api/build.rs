@@ -182,7 +182,11 @@ pub fn commit(req: &Request) -> Reply {
                 .collect::<Vec<_>>()
         })
         .collect();
-    match c.commit(&crate::build::CommitOptions { name, changes }) {
+    match c.commit_with_metadata(
+        &crate::build::CommitOptions { name, changes },
+        q.get("author").unwrap_or_default(),
+        q.get("comment").unwrap_or_default(),
+    ) {
         Ok(built) => {
             for n in &built.names {
                 let short = super::docker::docker_image_name(n);

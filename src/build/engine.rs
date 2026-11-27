@@ -10,7 +10,7 @@ use super::dockerfile::{self, Dockerfile, Instruction};
 use super::ignore::Ignore;
 use super::plan::{self, Item, Placement, Plan, PlanEntry, PlanKind, Source};
 use super::steps::{self, Action, Args};
-use crate::image::{Image, ImageConfig};
+use crate::image::{Image, ImageConfig, manifest::HistoryEntry};
 use crate::paths::Dirs;
 use crate::store::ops::StoreOp;
 use crate::store::tree::Tree;
@@ -58,6 +58,7 @@ struct State {
     diff_ids: Vec<String>,
     config: ImageConfig,
     created: u64,
+    history: Vec<HistoryEntry>,
 }
 
 impl State {
@@ -67,7 +68,12 @@ impl State {
 
     /// The ID the image of this state gets.
     fn image_id(&self) -> String {
-        let json = crate::image::manifest::config_json(&self.config, &self.diff_ids, self.created);
+        let json = crate::image::manifest::config_json(
+            &self.config,
+            &self.diff_ids,
+            self.created,
+            &self.history,
+        );
         format!("sha256:{}", crate::image::registry::sha256_hex(&json))
     }
 
@@ -77,6 +83,7 @@ impl State {
             diff_ids: e.diff_ids,
             config: e.config,
             created: e.created,
+            history: Vec::new(),
         }
     }
 
@@ -240,6 +247,7 @@ impl Builder<'_> {
                 config: state.config.clone(),
                 diff_ids: state.diff_ids.clone(),
                 created: state.created,
+                history: state.history,
                 artifact: true,
             },
             None,
@@ -313,6 +321,7 @@ impl Builder<'_> {
                 diff_ids: Vec::new(),
                 config: ImageConfig::default(),
                 created: 0,
+                history: Vec::new(),
             }
         } else if let Some(j) = steps::stage_ref(&names, &base.to_ascii_lowercase(), i) {
             self.stages[j].clone().expect("an earlier stage was built")
@@ -321,7 +330,9 @@ impl Builder<'_> {
                 .store()
                 .ok_or_else(|| crate::image::not_pulled(&base))?;
             let (_, record) = store.find(&base)?;
+            let history = record.history_with_layers();
             State {
+                history,
                 image: Some(record.digest.clone()),
                 diff_ids: record.diff_ids,
                 config: record.config,
@@ -356,32 +367,32 @@ impl Builder<'_> {
     fn instruction(
         &mut self,
         ins: &Instruction,
-        state: State,
+        mut state: State,
         vars: &mut steps::Stage,
         stage: usize,
     ) -> Result<State> {
+        // Cache entries hold the result's filesystem and config. The same result may
+        // come from a different Dockerfile, so take its history from this build.
+        let mut history = std::mem::take(&mut state.history);
+        let before = state.diff_ids.len();
         let parent = state.id();
         let mut config = state.config.clone();
         let action = steps::apply(ins, &mut config, vars, &mut self.args, self.df.escape)?;
-        match action {
-            Action::Config => {
-                let next = State { config, ..state };
-                self.say(&format!(" ---> {}\n", short(&next.image_id())));
-                Ok(next)
-            }
+        let mut next = match action {
+            Action::Config => Ok(State { config, ..state }),
             Action::Workdir(dir) => {
                 let next = State { config, ..state };
                 let tree = self.tree_of(&next.diff_ids)?;
                 let rel = dir.trim_start_matches('/');
                 if rel.is_empty() || tree.entries.contains_key(rel) {
-                    self.say(&format!(" ---> {}\n", short(&next.image_id())));
-                    return Ok(next);
+                    Ok(next)
+                } else {
+                    let mut plan = Plan::default();
+                    plan.mkdir(&tree, &dir);
+                    let entries = std::mem::take(&mut plan.entries);
+                    let key = cache::key(&parent, &format!("WORKDIR {dir}"), &[], &plan.digest());
+                    self.cached(&key, |b| b.commit_plan(&next, entries))
                 }
-                let mut plan = Plan::default();
-                plan.mkdir(&tree, &dir);
-                let entries = std::mem::take(&mut plan.entries);
-                let key = cache::key(&parent, &format!("WORKDIR {dir}"), &[], &plan.digest());
-                self.cached(&key, |b| b.commit_plan(&next, entries))
             }
             Action::Run { argv, network } => {
                 let run_args: Vec<(String, String)> = vars
@@ -439,7 +450,16 @@ impl Builder<'_> {
                     b.commit_plan(&state, entries)
                 })
             }
-        }
+        }?;
+        history.push(HistoryEntry {
+            created: (next.created != 0).then(|| crate::shim::logbook::rfc3339(next.created, 0)),
+            created_by: ins.text.clone(),
+            empty_layer: next.diff_ids.len() == before,
+            ..HistoryEntry::default()
+        });
+        next.history = history;
+        self.say(&format!(" ---> {}\n", short(&next.image_id())));
+        Ok(next)
     }
 
     /// A step through the cache: the stored result when it is valid, else `run`'s.
@@ -452,17 +472,12 @@ impl Builder<'_> {
                 None => e.diff_ids.is_empty(),
             };
             if valid {
-                let next = State::from_entry(e);
-                self.say(&format!(
-                    " ---> Using cache\n ---> {}\n",
-                    short(&next.image_id())
-                ));
-                return Ok(next);
+                self.say(" ---> Using cache\n");
+                return Ok(State::from_entry(e));
             }
         }
         let next = run(self)?;
         cache::put(&self.cache_dir, key, &next.entry());
-        self.say(&format!(" ---> {}\n", short(&next.image_id())));
         Ok(next)
     }
 
@@ -490,6 +505,7 @@ impl Builder<'_> {
                     config: ImageConfig::default(),
                     diff_ids: Vec::new(),
                     created: 0,
+                    history: Vec::new(),
                     artifact: true,
                 },
                 None,
@@ -770,6 +786,7 @@ fn after_commit(state: &State, c: Committed) -> State {
         diff_ids,
         config: state.config.clone(),
         created: now(),
+        history: Vec::new(),
     }
 }
 

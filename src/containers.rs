@@ -693,6 +693,24 @@ impl ContainerHandle {
         }
     }
 
+    /// Commit with an author and comment in the image history.
+    pub fn commit_with_metadata(
+        &self,
+        options: &crate::build::CommitOptions,
+        author: &str,
+        message: &str,
+    ) -> Result<crate::build::Built> {
+        #[cfg(target_os = "linux")]
+        {
+            crate::build::commit::commit_with_metadata(self, options, author, message)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (options, author, message);
+            Err(Error::unsupported_os())
+        }
+    }
+
     /// All the container's files, without its volumes, as a tar (`docker export`).
     pub fn export(&self) -> Result<CopyOut> {
         self.tar_of(

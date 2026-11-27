@@ -39,6 +39,59 @@ pub fn load(input: Option<&std::path::Path>, quiet: bool) -> i32 {
     }
 }
 
+#[cfg(unix)]
+pub fn import(source: &str, options: podbag::image::ImportOptions) -> i32 {
+    let imported = match source {
+        "-" => Image::import(&mut std::io::stdin().lock(), options),
+        url if podbag::image::archive_url(url) => Image::import_url(url, options),
+        path => std::fs::File::open(path)
+            .map_err(|e| Error::io(format!("cannot open {path}"), &e, "check the path"))
+            .and_then(|mut file| Image::import(&mut file, options)),
+    };
+    match imported {
+        Ok(id) => {
+            println!("{id}");
+            0
+        }
+        Err(e) => report(&e),
+    }
+}
+
+#[cfg(unix)]
+pub fn history(name: &str, no_trunc: bool) -> i32 {
+    match Image::history(name) {
+        Ok(history) => {
+            let rows = history
+                .into_iter()
+                .map(|row| {
+                    let id = if no_trunc || row.id == "<missing>" {
+                        row.id
+                    } else {
+                        short_digest(&row.id)
+                    };
+                    let created = if row.created > 0 {
+                        podbag::shim::logbook::rfc3339(row.created as u64, 0)
+                    } else {
+                        "-".to_string()
+                    };
+                    let command = if no_trunc || row.created_by.chars().count() <= 45 {
+                        row.created_by
+                    } else {
+                        format!("{}…", row.created_by.chars().take(44).collect::<String>())
+                    };
+                    [id, created, command, human_size(row.size), row.comment]
+                })
+                .collect::<Vec<_>>();
+            print_table(
+                &["IMAGE", "CREATED", "CREATED BY", "SIZE", "COMMENT"],
+                &rows,
+            );
+            0
+        }
+        Err(e) => report(&e),
+    }
+}
+
 pub fn save(output: Option<&std::path::Path>, names: &[String]) -> i32 {
     use std::io::IsTerminal;
     let saved = match output {

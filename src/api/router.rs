@@ -119,6 +119,9 @@ pub fn strip_version(path: &str) -> &str {
 pub fn streams_body(req: &Request) -> bool {
     let path = strip_version(&req.path);
     let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
+    if req.method == "POST" && segments == ["images", "create"] {
+        return req.query.get("fromSrc") == Some("-");
+    }
     matches!(
         (req.method.as_str(), segments.as_slice()),
         ("PUT", ["containers", _, "archive"]) | ("POST", ["images", "load"] | ["build"])

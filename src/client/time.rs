@@ -1,12 +1,29 @@
-/// Seconds since the epoch for an RFC 3339 UTC time like `2006-01-02T15:04:05.999999999Z`.
+/// Seconds since the epoch for an RFC 3339 time.
 pub fn epoch_of(time: &str) -> Option<f64> {
     let (date, clock) = time.split_once('T')?;
     let mut d = date.splitn(3, '-').map(|p| p.parse::<i64>().ok());
     let (y, m, day) = (d.next()??, d.next()??, d.next()??);
-    let clock = clock.strip_suffix('Z')?;
+    if !(0..=9999).contains(&y) || !(1..=12).contains(&m) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let (clock, offset) = if let Some(clock) = clock.strip_suffix('Z') {
+        (clock, 0)
+    } else {
+        let at = clock.rfind(['+', '-'])?;
+        let sign = if clock.as_bytes()[at] == b'+' { 1 } else { -1 };
+        let (hours, minutes) = clock[at + 1..].split_once(':')?;
+        let (hours, minutes): (i64, i64) = (hours.parse().ok()?, minutes.parse().ok()?);
+        if !(0..=23).contains(&hours) || !(0..=59).contains(&minutes) {
+            return None;
+        }
+        (&clock[..at], sign * (hours * 3600 + minutes * 60))
+    };
     let (hms, fraction) = clock.split_once('.').unwrap_or((clock, "0"));
     let mut t = hms.splitn(3, ':').map(|p| p.parse::<i64>().ok());
     let (h, min, sec) = (t.next()??, t.next()??, t.next()??);
+    if !(0..=23).contains(&h) || !(0..=59).contains(&min) || !(0..=60).contains(&sec) {
+        return None;
+    }
     // Days from the civil date (Howard Hinnant's algorithm).
     let y = if m <= 2 { y - 1 } else { y };
     let era = y.div_euclid(400);
@@ -15,7 +32,7 @@ pub fn epoch_of(time: &str) -> Option<f64> {
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     let days = era * 146_097 + doe - 719_468;
     let fraction: f64 = format!("0.{fraction}").parse().ok()?;
-    Some((days * 86_400 + h * 3600 + min * 60 + sec) as f64 + fraction)
+    Some((days * 86_400 + h * 3600 + min * 60 + sec - offset) as f64 + fraction)
 }
 
 /// Docker's human durations (go-units HumanDuration).

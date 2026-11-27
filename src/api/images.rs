@@ -2,10 +2,10 @@
 
 use super::docker::{docker_arch, docker_image_name, docker_repo, rfc3339};
 use super::http::Request;
-use super::router::{Ctx, Reply, check_filters, error_text, message, not_supported, reply_error};
+use super::router::{Ctx, Reply, check_filters, error_text, message, reply_error};
 use crate::image::auth::AuthConfig;
 use crate::image::reference::Reference;
-use crate::image::{Image, ImageConfig, PullEvent, PushEvent};
+use crate::image::{Image, ImageConfig, ImportOptions, PullEvent, PushEvent};
 use crate::store::{ImageRecord, Store};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -23,9 +23,7 @@ pub fn route(req: &Request, ctx: &Ctx, rest: &str) -> Option<Reply> {
         ("GET", "get") => save(req.query.all("names")),
         ("GET", r) if r.ends_with("/json") => inspect(ctx, &r[..r.len() - "/json".len()]),
         ("GET", r) if r.ends_with("/get") => save(vec![&r[..r.len() - "/get".len()]]),
-        ("GET", r) if r.ends_with("/history") => {
-            not_supported("image history", "use `docker image inspect`")
-        }
+        ("GET", r) if r.ends_with("/history") => history(ctx, &r[..r.len() - "/history".len()]),
         ("POST", r) if r.ends_with("/tag") => tag(req, &r[..r.len() - "/tag".len()]),
         ("POST", r) if r.ends_with("/push") => push(req, &r[..r.len() - "/push".len()]),
         ("DELETE", r) if !r.is_empty() => remove(ctx, r),
@@ -150,13 +148,81 @@ fn send(out: &mut impl Write, messages: Vec<Value>) {
     let _ = out.flush();
 }
 
+/// `GET /images/{name}/history`: newest entry first.
+fn history(ctx: &Ctx, name: &str) -> Reply {
+    let Some(store) = Store::open_existing(&ctx.dirs) else {
+        return message(404, format!("No such image: {name}"));
+    };
+    let record = match store.find(name) {
+        Ok((_, record)) => record,
+        Err(e) if e.kind == crate::ErrorKind::NotFound => {
+            return message(404, format!("No such image: {name}"));
+        }
+        Err(e) => return reply_error(&e),
+    };
+    match store.image_history(&record) {
+        Ok(mut rows) => {
+            for entry in &mut rows {
+                entry
+                    .tags
+                    .iter_mut()
+                    .for_each(|name| *name = docker_image_name(name));
+            }
+            Reply::Json(200, json!(rows))
+        }
+        Err(e) => reply_error(&e),
+    }
+}
+
+/// `POST /images/create?fromSrc=…`: import a root filesystem from the body or an URL.
+fn import(req: &Request, source: &str) -> Reply {
+    let q = &req.query;
+    if let Some(platform) = q
+        .get("platform")
+        .filter(|p| !p.is_empty() && !is_this_platform(p))
+    {
+        return message(
+            400,
+            format!("cannot import an image for {platform}: podbag uses this machine's platform"),
+        );
+    }
+    let name = q.get("repo").filter(|s| !s.is_empty()).map(|repo| {
+        match q.get("tag").filter(|s| !s.is_empty()) {
+            Some(tag) => format!("{repo}:{tag}"),
+            None => repo.to_string(),
+        }
+    });
+    let options = ImportOptions {
+        name,
+        message: q.get("message").unwrap_or_default().to_string(),
+        changes: q.all("changes").into_iter().map(String::from).collect(),
+    };
+    let finish = move |result: crate::Result<String>| match result {
+        Ok(id) => {
+            super::events::publish("image", "import", &id, &[]);
+            Reply::Stream {
+                content_type: "application/json",
+                body: Box::new(move |out| {
+                    send(out, vec![json!({"status": id})]);
+                    Ok(())
+                }),
+            }
+        }
+        Err(e) => reply_error(&e),
+    };
+    if source == "-" {
+        return Reply::WithBody(Box::new(move |body| finish(Image::import(body, options))));
+    }
+    let source = source.to_string();
+    Reply::WithBody(Box::new(move |_| {
+        finish(Image::import_url(&source, options))
+    }))
+}
+
 /// `POST /images/create?fromImage=…&tag=…`: pull, streaming progress.
 fn create(req: &Request) -> Reply {
-    if req.query.get("fromSrc").is_some_and(|s| !s.is_empty()) {
-        return not_supported(
-            "importing a root filesystem (fromSrc)",
-            "pull an image, or run a directory with `podbag run --rootfs`",
-        );
+    if let Some(source) = req.query.get("fromSrc").filter(|s| !s.is_empty()) {
+        return import(req, source);
     }
     let Some(from) = req.query.get("fromImage").filter(|f| !f.is_empty()) else {
         return message(400, "fromImage is required");

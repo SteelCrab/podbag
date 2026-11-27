@@ -87,6 +87,11 @@ pub enum Cmd {
         #[arg(short, long)]
         quiet: bool,
     },
+    /// Import a root filesystem or inspect an image's history
+    Image {
+        #[command(subcommand)]
+        cmd: ImageCmd,
+    },
     /// Save images to an archive (`docker save` format) on stdout or a file
     Save {
         /// Write to this file instead of stdout
@@ -107,10 +112,10 @@ pub enum Cmd {
         /// A Dockerfile instruction for the image's config (CMD, ENV, EXPOSE, …)
         #[arg(short, long = "change")]
         change: Vec<String>,
-        /// Ignored: podbag keeps no image history
+        /// Set the history comment
         #[arg(short, long)]
         message: Option<String>,
-        /// Ignored: podbag keeps no image history
+        /// Set the history author
         #[arg(short, long)]
         author: Option<String>,
         container: String,
@@ -322,6 +327,29 @@ pub enum Cmd {
         /// With --check: print the result as JSON (for apps)
         #[arg(long)]
         json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ImageCmd {
+    /// Import a root filesystem tar from a file, URL, or stdin (-)
+    Import {
+        /// Set the image configuration with a Dockerfile instruction
+        #[arg(short, long)]
+        change: Vec<String>,
+        /// Set the history comment
+        #[arg(short, long)]
+        message: Option<String>,
+        source: String,
+        /// REPOSITORY[:TAG] to give the new image
+        image: Option<String>,
+    },
+    /// Show the history of an image
+    History {
+        /// Print full image IDs and commands
+        #[arg(long)]
+        no_trunc: bool,
+        image: String,
     },
 }
 
