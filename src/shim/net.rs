@@ -2,12 +2,12 @@
 //! its address, link and published ports.
 
 use crate::netfiles::{self, HostEntry, HostGateway, Own};
-use crate::network::NetworkMode;
+use crate::network::{Addresses, NetworkMode};
 use crate::paths::Dirs;
 use crate::spec::ContainerSpec;
 use crate::volume::{Mount, MountSource};
 use crate::{Error, Result};
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 /// The files `/etc/hostname`, `/etc/hosts` and `/etc/resolv.conf`, written into the
 /// container directory, as mounts that go before the user's (a user mount on the same
@@ -17,32 +17,54 @@ pub(super) fn files(
     dirs: &Dirs,
     rootless: bool,
     own: Own<'_>,
-) -> Result<Vec<Mount>> {
+    embedded_dns: bool,
+) -> Result<(Vec<Mount>, Option<Vec<SocketAddr>>)> {
     let dir = dirs.container_dir(&spec.id);
     let read = |p: &str| std::fs::read_to_string(p).unwrap_or_default();
-    // `rootless` comes from the caller: after joining the session's user namespace this
-    // process's user ID reads 0.
-    let systemd = std::fs::read_to_string("/run/systemd/resolve/resolv.conf").ok();
-    let wanted = [
-        ("hostname", format!("{}\n", spec.hostname)),
-        ("hosts", netfiles::hosts_file(&own, &read("/etc/hosts"))),
-        (
-            "resolv.conf",
-            netfiles::resolv_conf(
-                &spec.network,
-                rootless,
-                &read("/etc/resolv.conf"),
-                systemd.as_deref(),
-                &spec.dns,
-            ),
-        ),
-    ];
     let covered = |target: &str| {
         spec.mounts.iter().any(|m| {
             target == m.target
                 || target.starts_with(&format!("{}/", m.target.trim_end_matches('/')))
         })
     };
+    // `rootless` comes from the caller: after joining the session's user namespace this
+    // process's user ID reads 0.
+    let systemd = std::fs::read_to_string("/run/systemd/resolve/resolv.conf").ok();
+    let mut resolv = netfiles::resolv_conf(
+        &spec.network,
+        rootless,
+        &read("/etc/resolv.conf"),
+        systemd.as_deref(),
+        &spec.dns,
+    );
+    let mut upstream = None;
+    if embedded_dns
+        && !spec.bridge_networks().is_empty()
+        && spec.own_netns()
+        && spec.dns.servers.is_empty()
+        && !covered("/etc/resolv.conf")
+    {
+        let servers = netfiles::nameservers(&resolv)
+            .filter_map(|server| server.parse::<IpAddr>().ok())
+            .filter(|ip| !ip.is_loopback())
+            .map(|ip| SocketAddr::new(ip, 53))
+            .take(3)
+            .collect();
+        let mut local = format!("nameserver {}\n", super::dns::LISTENER);
+        for line in resolv.lines() {
+            if line.split_whitespace().next() != Some("nameserver") {
+                local.push_str(line);
+                local.push('\n');
+            }
+        }
+        resolv = local;
+        upstream = Some(servers);
+    }
+    let wanted = [
+        ("hostname", format!("{}\n", spec.hostname)),
+        ("hosts", netfiles::hosts_file(&own, &read("/etc/hosts"))),
+        ("resolv.conf", resolv),
+    ];
     let mut mounts = Vec::new();
     for (name, content) in wanted {
         let target = format!("/etc/{name}");
@@ -68,7 +90,7 @@ pub(super) fn files(
             copy_up: false,
         });
     }
-    Ok(mounts)
+    Ok((mounts, upstream))
 }
 
 /// The container's networks and its address on each, its primary network first (none
@@ -78,8 +100,11 @@ pub(super) fn bridge_addresses(
     dirs: &Dirs,
     spec: &ContainerSpec,
     extra_hosts: &[HostEntry],
-) -> Result<Vec<(crate::network::Network, std::net::Ipv4Addr)>> {
+) -> Result<Vec<(crate::network::Network, Addresses)>> {
     let networks = spec.bridge_networks();
+    if !networks.is_empty() {
+        crate::network::release_container(dirs, &spec.id, &networks)?;
+    }
     // Written down only for a container on several networks: its hosts file names the
     // containers of each.
     let all: Vec<String> = if networks.len() > 1 {
@@ -100,6 +125,11 @@ pub(super) fn bridge_addresses(
                 aliases: spec.aliases_on(index),
                 networks: &all,
                 extra_hosts,
+                fixed: spec
+                    .fixed_addresses
+                    .get(*network)
+                    .copied()
+                    .unwrap_or_default(),
             },
         )?;
         out.push((net, ip));
@@ -148,7 +178,7 @@ pub(super) fn extra_hosts(
 pub(super) fn own<'a>(
     dirs: &Dirs,
     spec: &'a ContainerSpec,
-    addresses: &[(crate::network::Network, std::net::Ipv4Addr)],
+    addresses: &[(crate::network::Network, Addresses)],
     extra_hosts: &'a [HostEntry],
 ) -> Result<Own<'a>> {
     if addresses.is_empty() {
@@ -190,7 +220,7 @@ pub(super) fn join_session(dirs: &Dirs, spec: &ContainerSpec) -> Result<u32> {
 /// the bridges live in the session's network namespace.
 pub(super) fn attach(
     spec: &ContainerSpec,
-    addresses: &[(crate::network::Network, std::net::Ipv4Addr)],
+    addresses: &[(crate::network::Network, Addresses)],
     session: Option<u32>,
     pid: u32,
 ) -> Result<()> {
@@ -229,11 +259,10 @@ pub(super) fn announce(dirs: &Dirs, spec: &ContainerSpec) {
 /// Give back what a container held on its networks: its addresses (the others forget its
 /// names), and its place in the rootless session.
 pub(super) fn detach(dirs: &Dirs, spec: &ContainerSpec, session: bool) {
-    for network in spec.bridge_networks() {
-        if let Err(e) = crate::network::release(dirs, network, &spec.id) {
-            eprintln!("podbag: {e}");
-        }
-        crate::network::refresh_hosts(dirs, network);
+    if !spec.bridge_networks().is_empty()
+        && let Err(e) = crate::network::release_container(dirs, &spec.id, &[])
+    {
+        eprintln!("podbag: {e}");
     }
     if session {
         crate::linux::session::release(dirs, &spec.id);

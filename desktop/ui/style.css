@@ -558,7 +558,13 @@ select, input[type="text"] {
 .form-field { display: grid; gap: 5px; align-content: start; }
 .form-field label { font-size: 13px; font-weight: 600; }
 .form-field .hint { margin: 0; }
-input[type="number"], input[type="password"], input[type="search"].field, .sync-share-form input {
+.vm-shares { margin-top: 14px; }
+.shared-folders { display: grid; gap: 5px; margin: 0; padding: 0; list-style: none; }
+.shared-folder { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.shared-folder input { flex: 1; min-width: 0; }
+.shared-folder span { overflow-wrap: anywhere; }
+.shared-folder button { flex-shrink: 0; }
+input[type="number"], input[type="password"], input[type="search"].field, .sync-share-form input, .shared-folder input {
   height: 34px; width: 100%; padding: 0 10px; border: 1px solid var(--line); border-radius: 7px;
   background: var(--surface); color: var(--ink); font: inherit;
 }

@@ -46,8 +46,9 @@ fn run() -> Result<()> {
     let sync_dirs = dirs.clone();
     std::thread::spawn(move || super::sync::watch(sync_dirs));
     let mut ctx = crate::api::router::Ctx::new(dirs);
-    // The Mac's paths: the VM sees only its /Users, at the same place.
-    ctx.binds_under = Some("/Users".into());
+    // Use only folders that the init process mounted successfully.
+    ctx.binds_under = Some(super::shares::active().unwrap_or_default());
+    let shares = ctx.binds_under.clone().unwrap_or_default();
     let ctx = Arc::new(ctx);
     crate::helper::helpers_in_own_group();
     crate::helper::raise_descriptor_limit();
@@ -65,9 +66,11 @@ fn run() -> Result<()> {
             std::thread::spawn(move || forward(stream));
         })
     });
+    let shares = Arc::new(shares);
     accept_each(&cli, |stream| {
+        let shares = shares.clone();
         std::thread::spawn(move || {
-            if let Err(e) = serve_cli(stream) {
+            if let Err(e) = serve_cli(stream, &shares) {
                 eprintln!("podbag: a command from the Mac failed: {e}");
             }
         });
@@ -166,7 +169,7 @@ fn broken() -> Option<String> {
 }
 
 /// Run one command for the Mac and stream it.
-fn serve_cli(stream: UnixStream) -> std::io::Result<()> {
+fn serve_cli(stream: UnixStream, shares: &[std::path::PathBuf]) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut line = String::new();
     reader.read_line(&mut line)?;
@@ -191,6 +194,15 @@ fn serve_cli(stream: UnixStream) -> std::io::Result<()> {
     }
     let code = if let Some(why) = broken() {
         out.send(Frame::Stderr(format!("podbag: {why}\n").into_bytes()))?;
+        125
+    } else if let Some(path) = req
+        .paths
+        .iter()
+        .find(|path| !super::shares::contains(shares, &Path::new(&req.cwd).join(path)))
+    {
+        out.send(Frame::Stderr(
+            format!("podbag: cannot use {path}: the path is outside the Mac folders shared with the VM\n").into_bytes(),
+        ))?;
         125
     } else {
         match first {
@@ -954,6 +966,7 @@ mod tests {
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
             cwd: "/".into(),
+            paths: Vec::new(),
             tty: false,
             rows: 0,
             cols: 0,

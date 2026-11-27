@@ -7,6 +7,8 @@ pub mod dhcp;
 #[cfg(target_os = "linux")]
 pub mod guest;
 pub mod proto;
+#[cfg(unix)]
+pub(crate) mod shares;
 #[cfg(target_os = "linux")]
 pub(crate) mod sync;
 pub mod template;

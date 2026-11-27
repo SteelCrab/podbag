@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{self, Write};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 use tree::{Entry, Fingerprints, Snapshot, Tree};
@@ -177,9 +177,7 @@ impl<'a> Registry<'a> {
         if path.exists() {
             return Err(format!("synchronized share {name} already exists"));
         }
-        if !valid_source(source) {
-            return Err("choose a project folder under /Users".into());
-        }
+        check_source(source)?;
         // The Mac supplies a canonical path. Refuse it if a folder became a link.
         Tree::open(source).map_err(|e| format!("cannot open {}: {e}", source.display()))?;
         for share in self.list()? {
@@ -234,9 +232,9 @@ impl<'a> Registry<'a> {
     }
 
     fn sync(&self, share: &mut Share, scans: &mut ScanCache) -> Result<(), String> {
-        if !valid_source(&share.source) {
-            return Err("a synchronized source must be a project folder under /Users".into());
-        }
+        // A folder that is no longer shared is not mounted from the Mac. Stop instead
+        // of reading the VM's own path at that place.
+        check_source(&share.source)?;
         // A removed cache must never be interpreted as a user deleting all its files.
         let _volume_lock = crate::volume::lock_shared(self.dirs).map_err(|e| e.to_string())?;
         let volume = crate::volume::get_in(self.dirs, &share.volume).map_err(|e| e.to_string())?;
@@ -274,13 +272,10 @@ impl<'a> Registry<'a> {
     }
 }
 
-fn valid_source(source: &Path) -> bool {
-    source.strip_prefix("/Users").is_ok_and(|relative| {
-        !relative.as_os_str().is_empty()
-            && relative
-                .components()
-                .all(|part| matches!(part, Component::Normal(_)))
-    })
+/// The source must be inside a folder that this VM mounted from the Mac.
+fn check_source(source: &Path) -> Result<(), String> {
+    let roots = crate::vm::shares::active().unwrap_or_default();
+    crate::vm::shares::check_sync_source(&roots, source)
 }
 
 fn read_share(path: &Path) -> Result<Share, String> {

@@ -323,6 +323,7 @@ jobs:
           two_commands_share_one_vm_and_it_stops_when_idle
           only_paths_under_users_reach_the_vm
           synchronized_share_moves_edits_across_the_vm_restart
+          configured_mac_folder_reaches_cli_and_docker_after_restart
           a_stopped_host_keeps_what_was_written
           a_bare_env_name_takes_the_macs_value
           the_sockets_stay_while_the_vm_is_off

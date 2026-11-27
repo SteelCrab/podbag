@@ -57,6 +57,8 @@ pub struct Container {
     dns: crate::netfiles::DnsSettings,
     #[serde(default)]
     extra_networks: Vec<crate::spec::Attachment>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    fixed_addresses: crate::network::FixedByNetwork,
     #[serde(default)]
     stop_timeout: Option<i64>,
     #[serde(default)]
@@ -151,6 +153,7 @@ impl Container {
             extra_hosts: Vec::new(),
             dns: Default::default(),
             extra_networks: Vec::new(),
+            fixed_addresses: Default::default(),
             stop_timeout: None,
             restart: Default::default(),
             health: None,
@@ -175,6 +178,18 @@ impl Container {
     /// containers there find it by this name too. User networks only.
     pub fn network_alias(mut self, alias: impl Into<String>) -> Container {
         self.aliases.push(alias.into());
+        self
+    }
+
+    /// Set the requested addresses of an attached bridge network.
+    pub fn fixed_addresses(
+        mut self,
+        network: impl Into<String>,
+        addresses: crate::network::FixedAddresses,
+    ) -> Container {
+        if !addresses.is_empty() {
+            self.fixed_addresses.insert(network.into(), addresses);
+        }
         self
     }
 
@@ -852,13 +867,28 @@ mod linux_launch {
         } else {
             std::env::current_dir().map_err(fail)?.join(path)
         };
+        let shares = crate::vm::shares::active().filter(|_| crate::vm::shares::valid_target(&path));
+        let check = |path: &std::path::Path| {
+            if shares
+                .as_ref()
+                .is_some_and(|roots| !crate::vm::shares::contains(roots, path))
+            {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("cannot use {source} as a volume"),
+                    "the path is outside the Mac folders shared with the VM",
+                    "share the folder or use a named volume",
+                ));
+            }
+            Ok(())
+        };
+        check(&path)?;
         if !path.exists() {
             std::fs::create_dir_all(&path).map_err(fail)?;
         }
-        Ok(std::fs::canonicalize(&path)
-            .map_err(fail)?
-            .to_string_lossy()
-            .into_owned())
+        let real = std::fs::canonicalize(&path).map_err(fail)?;
+        check(&real)?;
+        Ok(real.to_string_lossy().into_owned())
     }
 
     /// Save the settings and start the shim. Returns after the command started.
@@ -936,6 +966,7 @@ mod linux_launch {
             }
         }
         crate::spec::check_networks(&network, &c.aliases, &c.extra_networks)?;
+        crate::spec::check_address_networks(&network, &c.extra_networks, &c.fixed_addresses)?;
         crate::netfiles::check_settings(&network, rootless, &c.extra_hosts, &c.dns)?;
         // Without the keeper, a rootless bridge container's shim is in the network
         // session's user namespace: only the user's service manager can start its restarter.
@@ -959,10 +990,16 @@ mod linux_launch {
             ));
         }
         if let crate::network::NetworkMode::Bridge { network } = &network {
-            crate::network::get_in(&dirs, network)?;
+            crate::network::get_in(&dirs, network)?
+                .check_addresses(c.fixed_addresses.get(network).copied().unwrap_or_default())?;
         }
         for a in &c.extra_networks {
-            crate::network::get_in(&dirs, &a.network)?;
+            crate::network::get_in(&dirs, &a.network)?.check_addresses(
+                c.fixed_addresses
+                    .get(&a.network)
+                    .copied()
+                    .unwrap_or_default(),
+            )?;
         }
         let id = id::new_id()?;
         let short = id::short_id(&id).to_string();
@@ -1041,6 +1078,7 @@ mod linux_launch {
                     health: health.clone(),
                     console_size: c.console_size,
                     extra_networks: c.extra_networks.clone(),
+                    fixed_addresses: c.fixed_addresses.clone(),
                     namespaces: Default::default(),
                     devices: Vec::new(),
                     cri_log: None,
@@ -1085,6 +1123,7 @@ mod linux_launch {
                         health: health.clone(),
                         console_size: c.console_size,
                         extra_networks: c.extra_networks.clone(),
+                        fixed_addresses: c.fixed_addresses.clone(),
                         namespaces: Default::default(),
                         devices: Vec::new(),
                         cri_log: None,

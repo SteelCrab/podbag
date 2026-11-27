@@ -15,6 +15,8 @@ pub struct Config {
     pub memory_budget: Budget,
     /// The default network's subnet.
     pub default_subnet: String,
+    /// Use a private DNS resolver in each bridge container.
+    pub embedded_dns: bool,
     /// How root mode mounts images.
     pub image_mount: ImageMount,
     /// One keeper process watches the detached containers; without it each
@@ -89,6 +91,7 @@ impl Default for Config {
             store_limit: DEFAULT_STORE_LIMIT,
             memory_budget: Budget::default(),
             default_subnet: "10.77.0.0/16".to_string(),
+            embedded_dns: false,
             image_mount: ImageMount::Auto,
             keeper: KEEPER_DEFAULT,
             keeper_linger_ms: 10_000,
@@ -129,7 +132,8 @@ fn parse_age(text: &str) -> std::result::Result<u64, String> {
 }
 
 /// Read `<config>/config.toml` (missing file = defaults). `PODBAG_STORE_LIMIT`,
-/// `PODBAG_MEMORY_BUDGET`, `PODBAG_DEFAULT_SUBNET`, `PODBAG_IMAGE_MOUNT`, `PODBAG_KEEPER`,
+/// `PODBAG_MEMORY_BUDGET`, `PODBAG_DEFAULT_SUBNET`, `PODBAG_EMBEDDED_DNS`, `PODBAG_IMAGE_MOUNT`,
+/// `PODBAG_KEEPER`,
 /// `PODBAG_KEEPER_LINGER_MS`, `PODBAG_IMAGE_COMPRESSION` and `PODBAG_COMPRESS_IDLE_AFTER`
 /// override it.
 pub fn load(dirs: &Dirs) -> Result<Config> {
@@ -295,6 +299,10 @@ fn apply_overrides(config: &mut Config, var: impl Fn(&str) -> Option<String>) ->
             "set it to 1 or 0, or unset it",
         )
     };
+    if let Some(v) = var("PODBAG_EMBEDDED_DNS") {
+        config.embedded_dns =
+            parse_switch(&v).map_err(|why| invalid("PODBAG_EMBEDDED_DNS", why))?;
+    }
     if let Some(v) = var("PODBAG_KEEPER") {
         config.keeper = parse_switch(&v).map_err(|why| invalid("PODBAG_KEEPER", why))?;
     }
@@ -343,6 +351,7 @@ pub fn parse(text: &str) -> Result<Config> {
                 config.image_compression = ImageCompression::parse(value).map_err(bad)?
             }
             "compress_idle_after" => config.compress_idle_after = parse_age(value).map_err(bad)?,
+            "embedded_dns" => config.embedded_dns = parse_switch(value).map_err(bad)?,
             "keeper" => config.keeper = parse_switch(value).map_err(bad)?,
             "keeper_linger" => {
                 config.keeper_linger_ms = value
@@ -446,6 +455,16 @@ mod tests {
         let c = parse("default_subnet = \"172.31.0.0/16\"").unwrap();
         assert_eq!(c.default_subnet, "172.31.0.0/16");
         assert!(parse("default_subnet = \"10.0.0.1/16\"").is_err());
+    }
+
+    #[test]
+    fn embedded_dns_is_opt_in() {
+        assert!(!Config::default().embedded_dns);
+        let mut config = parse("embedded_dns = true").unwrap();
+        assert!(config.embedded_dns);
+        let off = |key: &str| (key == "PODBAG_EMBEDDED_DNS").then(|| "0".to_string());
+        apply_overrides(&mut config, off).unwrap();
+        assert!(!config.embedded_dns);
     }
 
     #[test]

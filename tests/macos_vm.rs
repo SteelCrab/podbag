@@ -1002,6 +1002,119 @@ fn synchronized_share_moves_edits_across_the_vm_restart() {
     status(&["vm", "sync", "remove", "project"]);
     assert_eq!(mac.ok(&["vm", "sync", "list"]), "[]");
     assert!(mac.ok(&["volume", "ls"]).contains("podbag-sync-project"));
+
+    // A synchronized share reads its source through a shared folder.
+    let outside = tempfile::tempdir_in("/private/tmp").unwrap();
+    let refused = mac.run(&[
+        "vm",
+        "sync",
+        "add",
+        "outside",
+        outside.path().to_str().unwrap(),
+    ]);
+    assert!(!refused.status.success(), "{refused:?}");
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("Add it to the shared folders first"),
+        "{refused:?}"
+    );
+}
+
+#[test]
+fn configured_mac_folder_reaches_cli_and_docker_after_restart() {
+    if !enabled() {
+        return;
+    }
+    let mac = Mac::bare(60);
+    let image = IMAGES[0].0;
+    let folder = tempfile::Builder::new()
+        .prefix("podbag shared folder ")
+        .tempdir_in("/private/tmp")
+        .unwrap();
+    let path = folder.path().canonicalize().unwrap();
+    let path = path.to_str().unwrap();
+    let source = format!("{path}:/project");
+    let read = ["run", "--rm", "-v", &source, image, "cat", "/project/note"];
+    std::fs::write(folder.path().join("note"), "from the Mac\n").unwrap();
+
+    assert_eq!(mac.run(&read).status.code(), Some(125));
+    mac.ok(&["pull", image]);
+    mac.ok(&["vm", "set", "--share", "/Users", "--share", path]);
+    assert_eq!(status_json(&mac)["pending"], true);
+    assert_eq!(mac.run(&read).status.code(), Some(125));
+
+    mac.ok(&["vm", "restart", "--yes"]);
+    assert_eq!(mac.ok(&read), "from the Mac");
+    if have_docker() {
+        assert_eq!(mac.docker_ok(&read), "from the Mac");
+    }
+    let relative = mac
+        .cmd(&[
+            "run",
+            "--rm",
+            "-v",
+            "./:/project",
+            image,
+            "cat",
+            "/project/note",
+        ])
+        .current_dir(path)
+        .output()
+        .unwrap();
+    assert!(relative.status.success(), "{relative:?}");
+    assert_eq!(relative.stdout, b"from the Mac\n");
+
+    let link = folder.path().join("out");
+    std::os::unix::fs::symlink("/private/etc", &link).unwrap();
+    let escape = format!("{}:/escaped", link.display());
+    assert_eq!(
+        mac.run(&["run", "--rm", "-v", &escape, image, "true"])
+            .status
+            .code(),
+        Some(125)
+    );
+    if have_docker() {
+        let out = mac
+            .docker(&["run", "--rm", "-v", &escape, image, "true"])
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("mounts denied"),
+            "{out:?}"
+        );
+    }
+
+    mac.ok(&[
+        "create",
+        "--name",
+        "binds-old-share",
+        "-v",
+        "/Users:/old",
+        image,
+        "true",
+    ]);
+    mac.ok(&["vm", "set", "--no-shares", "--restart", "--yes"]);
+    let old = mac.run(&["start", "binds-old-share"]);
+    assert!(!old.status.success(), "{old:?}");
+    assert!(
+        String::from_utf8_lossy(&old.stderr).contains("outside the Mac folders"),
+        "{old:?}"
+    );
+    assert_eq!(
+        status_json(&mac)["sharedPaths"]["inUse"],
+        serde_json::json!([])
+    );
+    assert_eq!(mac.run(&read).status.code(), Some(125));
+    if have_docker() {
+        let out = mac.docker(&read).output().unwrap();
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("mounts denied"),
+            "{out:?}"
+        );
+    }
+    assert_eq!(
+        mac.ok(&["run", "--rm", image, "echo", "still runs"]),
+        "still runs"
+    );
 }
 
 #[test]
@@ -1142,6 +1255,7 @@ fn agent_request(mac: &Mac, argv: &[&str]) {
         argv: argv.iter().map(|a| a.to_string()).collect(),
         env: Vec::new(),
         cwd: "/".into(),
+        paths: Vec::new(),
         tty: false,
         rows: 0,
         cols: 0,
