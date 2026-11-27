@@ -290,6 +290,9 @@ struct Member {
     /// before it was stored here have none: the container's config has it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     hostname: Option<String>,
+    /// The container's extra `/etc/hosts` lines (`--add-host`), their addresses found.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    extra_hosts: Vec<crate::netfiles::HostEntry>,
 }
 
 /// The host's IPv4 routes (destination and prefix), except the default route, so a new
@@ -701,6 +704,8 @@ pub(crate) struct Endpoint<'a> {
     pub aliases: &'a [String],
     /// All the container's networks, its primary one first, when it has more than one.
     pub networks: &'a [String],
+    /// Its extra `/etc/hosts` lines (`--add-host`).
+    pub extra_hosts: &'a [crate::netfiles::HostEntry],
 }
 
 /// An address for container `id` in `network`: its old one, or the lowest free one after
@@ -722,6 +727,7 @@ pub(crate) fn allocate(
             hostname,
             aliases: &[],
             networks: &[],
+            extra_hosts: &[],
         },
     )
 }
@@ -741,10 +747,12 @@ pub(crate) fn join(dirs: &Dirs, network: &str, id: &str, endpoint: &Endpoint) ->
         if m.hostname != hostname
             || m.aliases != endpoint.aliases
             || m.networks != endpoint.networks
+            || m.extra_hosts != endpoint.extra_hosts
         {
             m.hostname = hostname;
             m.aliases = endpoint.aliases.to_vec();
             m.networks = endpoint.networks.to_vec();
+            m.extra_hosts = endpoint.extra_hosts.to_vec();
             write_record(dirs, &record)?;
         }
         return Ok(ip);
@@ -776,6 +784,7 @@ pub(crate) fn join(dirs: &Dirs, network: &str, id: &str, endpoint: &Endpoint) ->
             aliases: endpoint.aliases.to_vec(),
             networks: endpoint.networks.to_vec(),
             hostname: Some(endpoint.hostname.to_string()),
+            extra_hosts: endpoint.extra_hosts.to_vec(),
         },
     );
     write_record(dirs, &record)?;
@@ -886,7 +895,11 @@ fn compose_hosts(loads: &Loads, dirs: &Dirs, id: &str, networks: &[&str]) -> Opt
     let m = first?;
     let hostname = hostname_of(m, dirs, id)?;
     Some(crate::netfiles::bridge_hosts(
-        &hostname, &m.name, &own, &lists,
+        &hostname,
+        &m.name,
+        &m.extra_hosts,
+        &own,
+        &lists,
     ))
 }
 
@@ -960,6 +973,7 @@ pub(crate) fn refresh_hosts(dirs: &Dirs, network: &str) {
             crate::netfiles::bridge_hosts(
                 &hostname,
                 &m.name,
+                &m.extra_hosts,
                 &[(m.ip, m.aliases.as_slice())],
                 &[(&loaded.block, Some(place))],
             )
@@ -1568,6 +1582,7 @@ mod tests {
                 hostname: name,
                 aliases: &aliases,
                 networks: &networks,
+                extra_hosts: &[],
             },
         )
         .unwrap()
@@ -1597,6 +1612,42 @@ mod tests {
             hosts_text(&dirs, &web, &["app".to_string()]).unwrap(),
             hosts_of(&dirs, &web)
         );
+    }
+
+    #[test]
+    fn extra_hosts_stay_in_the_file_through_refreshes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = dirs_in(tmp.path());
+        create_in(&dirs, "app", None, &[]).unwrap();
+        let (web, db) = (container(&dirs, "web", "web"), container(&dirs, "db", "db"));
+        let extra = [crate::netfiles::HostEntry {
+            name: "cache".into(),
+            ip: "10.9.9.9".parse().unwrap(),
+        }];
+        let endpoint = Endpoint {
+            name: "web",
+            hostname: "web",
+            aliases: &[],
+            networks: &[],
+            extra_hosts: &extra,
+        };
+        let web_ip = join(&dirs, "app", &web, &endpoint).unwrap();
+        let want = format!("{LOCAL}10.9.9.9\tcache\n{web_ip}\tweb\n");
+        assert_eq!(hosts_text(&dirs, &web, &["app".to_string()]).unwrap(), want);
+        // Another container arrives: the file is written again, the extra line kept.
+        let db_ip = join_as(&dirs, "app", &db, "db", &[], &[]);
+        refresh_hosts(&dirs, "app");
+        assert_eq!(hosts_of(&dirs, &web), format!("{want}{db_ip}\tdb\n"));
+        // The extra line is its own: the others do not get it.
+        assert!(!hosts_of(&dirs, &db).contains("cache"));
+        // Its next start without the line drops it.
+        let endpoint = Endpoint {
+            extra_hosts: &[],
+            ..endpoint
+        };
+        join(&dirs, "app", &web, &endpoint).unwrap();
+        refresh_hosts(&dirs, "app");
+        assert!(!hosts_of(&dirs, &web).contains("cache"));
     }
 
     #[test]

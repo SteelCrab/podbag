@@ -4,7 +4,7 @@
 //! `--network none`, so no test here needs the network turn.
 
 mod common;
-use common::registry::{FakeRegistry, TestImage, alpine_layer};
+use common::registry::{Auth, FakeRegistry, TestImage, alpine_layer};
 use common::*;
 use std::path::{Path, PathBuf};
 use std::process::Output;
@@ -27,7 +27,11 @@ impl Drop for Setup {
 
 impl Setup {
     fn new() -> Setup {
-        let reg = FakeRegistry::start(false);
+        Setup::on(FakeRegistry::start(false), Sandbox::new())
+    }
+
+    /// The base image in this registry, for podbag in this sandbox.
+    fn on(reg: FakeRegistry, sb: Sandbox) -> Setup {
         reg.push(
             "test/alpine",
             "v1",
@@ -38,7 +42,7 @@ impl Setup {
         );
         let base = format!("{}/test/alpine:v1", reg.host);
         Setup {
-            sb: Sandbox::new(),
+            sb,
             _reg: reg,
             base,
         }
@@ -379,6 +383,54 @@ fn failures_are_clear() {
         "left in {}",
         builds.display()
     );
+}
+
+#[test]
+fn a_private_base_image_uses_the_login() {
+    // Made at run time: no secret in the source.
+    let user = format!("builder{}", std::process::id());
+    let password = format!("pw-{}", std::process::id());
+    let reg = FakeRegistry::start_with(Auth::token(&user, &password));
+    let host = reg.host.clone();
+    let mut sb = Sandbox::new();
+    let config = sb.tmp.path().join("docker-config");
+    sb.env
+        .push(("DOCKER_CONFIG".to_string(), config.display().to_string()));
+    let s = Setup::on(reg, sb);
+    let dir = s.context(
+        "private",
+        &[("Dockerfile", "FROM @BASE@\nRUN echo private > /p\n")],
+    );
+    let ctx = dir.display().to_string();
+
+    // Without a login: the pull is refused, with a hint to log in.
+    let out = s.podbag(&["build", "--network", "none", &ctx]);
+    assert_ne!(out.status.code(), Some(0), "{}", stdout(&out));
+    assert!(
+        stderr(&out).contains(&format!("podbag login {host}")),
+        "{}",
+        stderr(&out)
+    );
+
+    let mut child =
+        s.sb.podbag()
+            .args(["login", &host, "-u", &user, "--password-stdin"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+    use std::io::Write;
+    let mut stdin = child.stdin.take().unwrap();
+    writeln!(stdin, "{password}").unwrap();
+    drop(stdin);
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+
+    let out = s.build(&dir, &["-t", "private:1"]);
+    assert!(out.contains(&format!("Pulling {}", s.base)), "{out}");
+    assert!(!out.contains(&password), "{out}");
+    assert_eq!(s.run("private:1", "cat /p"), "private");
 }
 
 #[test]

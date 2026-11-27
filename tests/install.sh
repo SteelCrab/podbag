@@ -15,6 +15,7 @@ cat > "$work/bin/curl" <<'EOF'
 while [ "$1" != -o ]; do shift; done
 case "$3" in
   */SHA256SUMS) cp "$fixture/SHA256SUMS" "$2" ;;
+  *.zip) cp "$fixture/desktop.zip" "$2" ;;
   *) cp "$fixture/podbag" "$2" ;;
 esac
 EOF
@@ -90,3 +91,75 @@ expect_file x86_64 '' podbag-x86_64-macos
 echo 'PASS  Install the Intel build on an Intel Mac'
 expect_file x86_64 1 podbag-aarch64-macos
 echo 'PASS  Install the Apple silicon build from a shell that Rosetta runs'
+
+# Podbag Desktop on a Mac: the app from the release's .zip, into the Applications folder.
+# A fake ditto unpacks the fixture's podbag.app: the test also runs on Linux.
+export PODBAG_APP_DIR="$work/Applications dir"
+cat > "$work/bin/ditto" <<'EOF'
+#!/bin/sh
+[ "$1 $2" = "-x -k" ] || exit 1
+cmp -s "$3" "$fixture/desktop.zip" || exit 1
+mkdir -p "$4" && cp -R "$fixture/app/podbag.app" "$4/"
+EOF
+chmod +x "$work/bin/ditto"
+make_app() { # VERSION-LINE
+  rm -rf "$fixture/app"
+  mkdir -p "$fixture/app/podbag.app/Contents/MacOS"
+  printf '%s\n' '#!/bin/sh' "$1" > "$fixture/app/podbag.app/Contents/MacOS/podbag"
+  chmod +x "$fixture/app/podbag.app/Contents/MacOS/podbag"
+  echo "$1" > "$fixture/desktop.zip"
+  for arch in aarch64 x86_64; do
+    if command -v sha256sum >/dev/null 2>&1; then
+      sha256sum "$fixture/desktop.zip"
+    else
+      shasum -a 256 "$fixture/desktop.zip"
+    fi | awk -v f="podbag-desktop-$arch-macos.zip" '{ print $1 "  " f }'
+  done > "$fixture/SHA256SUMS"
+}
+desktop() { fake_cpu=arm64 PODBAG_DESKTOP=1 sh "$installer" > "$work/log" 2>&1; }
+
+make_app 'echo podbag 9.8.7'
+if ! desktop || ! grep -F 'Downloading podbag-desktop-aarch64-macos.zip (' "$work/log" >/dev/null ||
+  ! cmp "$fixture/app/podbag.app/Contents/MacOS/podbag" \
+    "$PODBAG_APP_DIR/podbag.app/Contents/MacOS/podbag"; then
+  cat "$work/log" >&2
+  exit 1
+fi
+grep -F "Installed $PODBAG_APP_DIR/podbag.app (podbag 9.8.7)" "$work/log" >/dev/null
+echo 'PASS  Install Podbag Desktop into the Applications folder on a Mac'
+
+make_app 'echo podbag 9.8.8'
+desktop || { cat "$work/log" >&2; exit 1; }
+cmp "$fixture/app/podbag.app/Contents/MacOS/podbag" \
+  "$PODBAG_APP_DIR/podbag.app/Contents/MacOS/podbag"
+[ "$(ls -A "$PODBAG_APP_DIR")" = podbag.app ] || { ls -A "$PODBAG_APP_DIR" >&2; exit 1; }
+echo 'PASS  Replace an installed Podbag Desktop and leave nothing else behind'
+
+cp -R "$PODBAG_APP_DIR/podbag.app" "$work/app-before"
+make_app 'exit 1'
+if desktop || ! grep -F 'cannot run' "$work/log" >/dev/null; then
+  cat "$work/log" >&2
+  exit 1
+fi
+diff -r "$work/app-before" "$PODBAG_APP_DIR/podbag.app"
+make_app 'echo podbag 9.9.9'
+echo corrupt >> "$fixture/desktop.zip"
+if desktop || ! grep -F 'does not match SHA256SUMS' "$work/log" >/dev/null; then
+  cat "$work/log" >&2
+  exit 1
+fi
+diff -r "$work/app-before" "$PODBAG_APP_DIR/podbag.app"
+echo 'PASS  Keep the installed Podbag Desktop when the new one fails its checks'
+
+cat > "$work/bin/uname" <<'EOF'
+#!/bin/sh
+case $1 in
+  -s) echo Linux ;;
+  -m) echo x86_64 ;;
+esac
+EOF
+if PODBAG_DESKTOP=1 sh "$installer" > "$work/log" 2>&1 || ! grep -F '.deb or .rpm' "$work/log" >/dev/null; then
+  cat "$work/log" >&2
+  exit 1
+fi
+echo 'PASS  Point Linux users to the packages for Podbag Desktop'

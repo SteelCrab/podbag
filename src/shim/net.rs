@@ -1,12 +1,13 @@
 //! The shim's network work: the container's generated `/etc` files, and (with a bridge)
 //! its address, link and published ports.
 
-use crate::netfiles::{self, Own};
+use crate::netfiles::{self, HostEntry, HostGateway, Own};
 use crate::network::NetworkMode;
 use crate::paths::Dirs;
 use crate::spec::ContainerSpec;
 use crate::volume::{Mount, MountSource};
 use crate::{Error, Result};
+use std::net::{IpAddr, Ipv4Addr};
 
 /// The files `/etc/hostname`, `/etc/hosts` and `/etc/resolv.conf`, written into the
 /// container directory, as mounts that go before the user's (a user mount on the same
@@ -32,6 +33,7 @@ pub(super) fn files(
                 rootless,
                 &read("/etc/resolv.conf"),
                 systemd.as_deref(),
+                &spec.dns,
             ),
         ),
     ];
@@ -75,6 +77,7 @@ pub(super) fn files(
 pub(super) fn bridge_addresses(
     dirs: &Dirs,
     spec: &ContainerSpec,
+    extra_hosts: &[HostEntry],
 ) -> Result<Vec<(crate::network::Network, std::net::Ipv4Addr)>> {
     let networks = spec.bridge_networks();
     // Written down only for a container on several networks: its hosts file names the
@@ -96,6 +99,7 @@ pub(super) fn bridge_addresses(
                 hostname: &spec.hostname,
                 aliases: spec.aliases_on(index),
                 networks: &all,
+                extra_hosts,
             },
         )?;
         out.push((net, ip));
@@ -103,15 +107,52 @@ pub(super) fn bridge_addresses(
     Ok(out)
 }
 
+/// The container's extra `/etc/hosts` lines with their addresses: `host-gateway` is
+/// found now, as the host is reached from this start's network.
+pub(super) fn extra_hosts(
+    dirs: &Dirs,
+    spec: &ContainerSpec,
+    rootless: bool,
+) -> Result<Vec<HostEntry>> {
+    netfiles::resolve_extra_hosts(&spec.extra_hosts, || {
+        let unknown = |why: String| {
+            Error::new(
+                crate::ErrorKind::Runtime,
+                format!("cannot find the address of {}", netfiles::HOST_GATEWAY),
+                why,
+                "give the host's address instead: --add-host NAME:IP",
+            )
+        };
+        match netfiles::host_gateway(&spec.network, rootless, netfiles::Place::detect())? {
+            HostGateway::Loopback => Ok(Ipv4Addr::LOCALHOST.into()),
+            HostGateway::Bridge => {
+                let first = spec.bridge_networks().first().copied().unwrap_or_default();
+                let net = crate::network::get_in(dirs, first)?;
+                net.gateway
+                    .parse::<Ipv4Addr>()
+                    .map(IpAddr::from)
+                    .map_err(|_| unknown(format!("network {first} has no gateway address")))
+            }
+            HostGateway::VmRoute => std::fs::read_to_string("/proc/net/route")
+                .ok()
+                .as_deref()
+                .and_then(netfiles::default_gateway)
+                .map(IpAddr::from)
+                .ok_or_else(|| unknown("the VM has no default route to the Mac".to_string())),
+        }
+    })
+}
+
 /// What the container's `/etc/hosts` is made of: with addresses, the names of its
-/// networks' containers.
+/// networks' containers (the network records hold its extra lines too).
 pub(super) fn own<'a>(
     dirs: &Dirs,
     spec: &'a ContainerSpec,
     addresses: &[(crate::network::Network, std::net::Ipv4Addr)],
+    extra_hosts: &'a [HostEntry],
 ) -> Result<Own<'a>> {
     if addresses.is_empty() {
-        return Ok(own_without_address(spec));
+        return Ok(own_without_address(spec, extra_hosts));
     }
     let networks: Vec<String> = spec
         .bridge_networks()
@@ -199,10 +240,13 @@ pub(super) fn detach(dirs: &Dirs, spec: &ContainerSpec, session: bool) {
     }
 }
 
-/// The container's own `/etc/hosts` line for modes without a bridge address.
-pub(super) fn own_without_address(spec: &ContainerSpec) -> Own<'_> {
+/// The container's own `/etc/hosts` lines for modes without a bridge address.
+pub(super) fn own_without_address<'a>(
+    spec: &'a ContainerSpec,
+    extra_hosts: &'a [HostEntry],
+) -> Own<'a> {
     match spec.network {
-        NetworkMode::None => Own::Loopback(&spec.hostname),
-        _ => Own::Host(&spec.hostname),
+        NetworkMode::None => Own::Loopback(&spec.hostname, extra_hosts),
+        _ => Own::Host(&spec.hostname, extra_hosts),
     }
 }

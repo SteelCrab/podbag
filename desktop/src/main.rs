@@ -1392,6 +1392,8 @@ fn main() {
             migration::migrate,
             kubernetes::kube_list,
             kubernetes::kube_contexts,
+            kubernetes::kube_openshift,
+            kubernetes::kube_open_route,
             connection,
             contexts,
             create_volume,
