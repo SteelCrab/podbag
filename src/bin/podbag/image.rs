@@ -1,6 +1,6 @@
 //! `pull`, `images`, `load`, `save`, `rmi` and `system`.
 
-use crate::args::SystemCmd;
+use crate::args::{ConfigCmd, SystemCmd};
 use podbag::config::{self, ImageCompression};
 use podbag::image::human_size;
 use podbag::{Error, ErrorKind, Image};
@@ -128,8 +128,48 @@ pub fn rmi(names: &[String]) -> i32 {
     code
 }
 
+fn engine_config(cmd: ConfigCmd) -> podbag::Result<()> {
+    let invalid = |why: String| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            "cannot read engine configuration input",
+            why,
+            "send the original and edited text in the expected format",
+        )
+    };
+    let dirs = podbag::paths::dirs()?;
+    let document = match cmd {
+        ConfigCmd::Show => config::document(&dirs)?,
+        ConfigCmd::Check => {
+            let text = std::io::read_to_string(std::io::stdin().lock())
+                .map_err(|e| invalid(e.to_string()))?;
+            config::parse(&text)?;
+            return Ok(());
+        }
+        ConfigCmd::Apply => {
+            let edit = serde_json::from_reader(std::io::stdin().lock())
+                .map_err(|e| invalid(e.to_string()))?;
+            config::apply_edit(&dirs, edit)?
+        }
+    };
+    serde_json::to_writer(std::io::stdout().lock(), &document).map_err(|e| {
+        Error::new(
+            ErrorKind::Runtime,
+            "cannot write engine configuration output",
+            e.to_string(),
+            "check stdout",
+        )
+    })?;
+    println!();
+    Ok(())
+}
+
 pub fn system(cmd: SystemCmd) -> i32 {
     match cmd {
+        SystemCmd::Config { cmd } => match engine_config(cmd) {
+            Ok(()) => 0,
+            Err(e) => report(&e),
+        },
         SystemCmd::Df => match podbag::disk_usage() {
             Ok(u) => {
                 let rows = [
@@ -263,6 +303,16 @@ pub fn system(cmd: SystemCmd) -> i32 {
                 Err(e) => report(&e),
             }
         }
+        SystemCmd::NetworkSettings {
+            set,
+            expect_revision,
+        } => match network_settings(set.as_deref(), expect_revision.as_deref()) {
+            Ok(settings) => {
+                println!("{}", serde_json::json!(settings));
+                0
+            }
+            Err(e) => report(&e),
+        },
         SystemCmd::Prune { force: true } => match podbag::prune() {
             Ok(r) => {
                 println!(
@@ -275,6 +325,25 @@ pub fn system(cmd: SystemCmd) -> i32 {
             Err(e) => report(&e),
         },
     }
+}
+
+fn network_settings(
+    set: Option<&str>,
+    expected_revision: Option<&str>,
+) -> podbag::Result<podbag::network::NetworkSettings> {
+    let dirs = podbag::paths::dirs()?;
+    let Some(set) = set else {
+        return podbag::network::settings(&dirs);
+    };
+    let requested = serde_json::from_str(set).map_err(|error| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            "cannot read the requested network settings",
+            error.to_string(),
+            "pass the network preferences as a JSON object",
+        )
+    })?;
+    podbag::network::save_settings(&dirs, requested, expected_revision)
 }
 
 /// Save what `system compression` was given, then the settings in effect (environment

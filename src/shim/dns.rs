@@ -1,6 +1,7 @@
 //! The opt-in DNS listener is private to one container's network namespace. The
 //! shim owns its lifetime, and the network store answers from that container's bridges.
 
+use crate::config::DnsFilter;
 use crate::paths::Dirs;
 use crate::{Error, Result, linux, network};
 use hickory_proto::op::{Edns, Message, MessageType, OpCode, ResponseCode};
@@ -32,6 +33,7 @@ impl Resolver {
         id: &str,
         pid: u32,
         upstream: Vec<SocketAddr>,
+        filter: DnsFilter,
     ) -> Result<Self> {
         let start = || -> io::Result<Self> {
             let ns = linux::net::namespace(pid)?;
@@ -41,6 +43,7 @@ impl Resolver {
                 dirs: dirs.clone(),
                 caller: id.to_string(),
                 upstream,
+                filter,
                 stopping: AtomicBool::new(false),
             };
             let thread = thread::Builder::new()
@@ -129,6 +132,7 @@ struct Server {
     dirs: Dirs,
     caller: String,
     upstream: Vec<SocketAddr>,
+    filter: DnsFilter,
     stopping: AtomicBool,
 }
 
@@ -241,17 +245,21 @@ impl Server {
                 || matches!(query.query_type, RecordType::AXFR | RecordType::IXFR)
             {
                 reply.metadata.response_code = ResponseCode::Refused;
-            } else {
+            } else if !blocks(self.filter, query.query_type) {
                 let name = query.name.to_ascii();
                 match network::lookup_peer(&self.dirs, &self.caller, name.trim_end_matches('.')) {
                     Ok(peers) if !peers.is_empty() => {
                         reply.metadata.authoritative = true;
                         for address in peers {
                             let data = match (address, query.query_type) {
-                                (IpAddr::V4(ip), RecordType::A | RecordType::ANY) => {
+                                (IpAddr::V4(ip), RecordType::A | RecordType::ANY)
+                                    if !blocks(self.filter, RecordType::A) =>
+                                {
                                     RData::A(A(ip))
                                 }
-                                (IpAddr::V6(ip), RecordType::AAAA | RecordType::ANY) => {
+                                (IpAddr::V6(ip), RecordType::AAAA | RecordType::ANY)
+                                    if !blocks(self.filter, RecordType::AAAA) =>
+                                {
                                     RData::AAAA(AAAA(ip))
                                 }
                                 _ => continue,
@@ -276,6 +284,13 @@ impl Server {
         }
         encode(reply, &request, transport)
     }
+}
+
+fn blocks(filter: DnsFilter, kind: RecordType) -> bool {
+    matches!(
+        (filter, kind),
+        (DnsFilter::Ipv4, RecordType::A) | (DnsFilter::Ipv6, RecordType::AAAA)
+    )
 }
 
 fn response_to(request: &Message, recursive: bool) -> Message {
@@ -403,6 +418,43 @@ mod tests {
     use super::*;
     use hickory_proto::op::Query;
     use hickory_proto::rr::Name;
+
+    #[test]
+    fn address_filter_returns_no_data_before_resolving_or_forwarding() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = Dirs {
+            data: tmp.path().join("data"),
+            config: tmp.path().join("config"),
+            runtime: tmp.path().join("run"),
+        };
+        for (filter, blocked, allowed) in [
+            (DnsFilter::Ipv4, RecordType::A, RecordType::AAAA),
+            (DnsFilter::Ipv6, RecordType::AAAA, RecordType::A),
+        ] {
+            let server = Server {
+                dirs: dirs.clone(),
+                caller: "caller".to_string(),
+                upstream: vec![],
+                filter,
+                stopping: AtomicBool::new(false),
+            };
+            let ask = |kind| {
+                let mut message = Message::query();
+                message.add_query(Query::query(
+                    Name::from_ascii("external.example.").unwrap(),
+                    kind,
+                ));
+                let request = message.to_vec().unwrap();
+                let answer = server.answer(&request, Transport::Udp).unwrap();
+                let reply = Message::from_vec(&answer).unwrap();
+                assert_eq!(reply.queries, message.queries);
+                assert!(reply.answers.is_empty());
+                reply.metadata.response_code
+            };
+            assert_eq!(ask(blocked), ResponseCode::NoError);
+            assert_eq!(ask(allowed), ResponseCode::ServFail);
+        }
+    }
 
     #[test]
     fn forwards_real_queries_to_an_upstream_over_udp_and_tcp() {

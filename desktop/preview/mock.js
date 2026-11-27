@@ -37,6 +37,10 @@
     { Name: "host", Id: "6a3e2d0c4b8f1a9e", Driver: "host", Scope: "local", IPAM: { Config: [] } },
     { Name: "none", Id: "7b4f3e1d5c9a2b0f", Driver: "null", Scope: "local", IPAM: { Config: [] } },
   ];
+  if (view.startsWith("analysis")) {
+    images[0].Id = `sha256:${"1".repeat(64)}`;
+    images[1].Id = `sha256:${"2".repeat(64)}`;
+  }
   const lists = { containers, images, volumes, networks };
   if (view === "empty") { lists.containers = []; lists.volumes = []; }
 
@@ -211,6 +215,18 @@
       endpoint: selected === "kiri" ? "unix:///Users/me/.kiri/run/docker.sock" : selected, vm: null, version: selected });
   }
   let launchAtLogin = false;
+  const networkSettings = {
+    revision: "0",
+    preferences: {
+      defaultSubnet: "10.77.0.0/16",
+      defaultIpv6Subnet: "fd77:706f:6462::/64",
+      embeddedDns: true,
+      dnsFilter: "none",
+    },
+    activeSubnet: "10.77.0.0/16",
+    activeIpv6Subnet: null,
+    overrides: [],
+  };
   // podbag system compression --json. URL: compression=idle (already on), compression=broken
   // (a reply without a mode), override (an environment setting keeps the mode as it is),
   // after (seconds an image stays unused; 0: at once), vm-error (vm status fails), busy
@@ -235,6 +251,7 @@
   const demoModel = { name: "smollm2:135m", size: 92_078_644, loaded: true };
   const models = view === "models-report" ? [{ ...demoModel }] : [];
   let modelRunner = view === "models-report";
+  let engineConfigText = "# Local engine settings\nstore_limit = \"10GiB\"\nembedded_dns = true\n";
   const commands = {
     "plugin:autostart|is_enabled": () => launchAtLogin,
     "plugin:autostart|enable": () => { launchAtLogin = true; },
@@ -314,6 +331,15 @@
       return { running: modelRunner, version: modelRunner ? "0.40.17" : "", models: modelRunner ? models.map((item) => ({ ...item })) : [] };
     },
     engine: () => engine,
+    engine_config: ({ request }) => {
+      if ((request.edit?.text ?? request.text)?.includes("invalid_setting")) throw "line 2: unknown setting invalid_setting";
+      if (request.action === "check") return null;
+      if (request.action === "save") {
+        if (request.edit.original !== engineConfigText) throw "config.toml changed after it was opened";
+        engineConfigText = request.edit.text;
+      }
+      return { path: "/home/podbag/.config/podbag/config.toml", text: engineConfigText };
+    },
     list: ({ kind }) => lists[kind],
     kube_list: ({ kind, allNamespaces, context }) => ({
       context: context || "dev", namespace: "default",
@@ -324,6 +350,28 @@
     remove: () => null,
     prune: () => ({ count: 2, bytes: 61_000_000 }),
     rename: () => null,
+    analyze_image: ({ id, token: requestToken }) => {
+      (window.previewScans ||= []).push({ id, token: requestToken });
+      if (requestToken !== token) throw "engineChanged";
+      if (!images.some((image) => image.Id === id)) throw "imageUnavailable";
+      const mode = params.get("scan");
+      if (mode === "missing") throw "scannerMissing";
+      const target = "Alpine Linux 3.22";
+      return {
+        imageId: id,
+        packages: mode === "empty" ? [] : [
+          { target, name: "busybox", version: "1.37.0-r18" },
+          { target, name: "libssl3", version: "3.5.1-r0" },
+          { target, name: "musl", version: "1.2.5-r10" },
+          { target, name: "zlib", version: "1.3.1-r2" },
+        ],
+        findings: mode === "empty" ? [] : [
+          { target, severity: "high", advisory: "DEMO-2026-0001", package: "libssl3", installed: "3.5.1-r0", fixed: "3.5.2-r0" },
+          { target, severity: "medium", advisory: "DEMO-2026-0002", package: "zlib", installed: "1.3.1-r2", fixed: "" },
+          { target, severity: "low", advisory: "DEMO-2026-0003", package: "busybox", installed: "1.37.0-r18", fixed: "1.37.0-r19" },
+        ],
+      };
+    },
     container_json: () => { throw "not supported"; },
     features: () => ({ stats: false, top: false, pause: false, rename: false }),
     pull: () => new Promise(() => {}),
@@ -385,6 +433,22 @@
       if (mode && !params.has("override")) compression.mode = mode;
       if (!mode) window.previewCompressionReads = (window.previewCompressionReads || 0) + 1;
       return params.get("compression") === "broken" ? null : { ...compression };
+    },
+    network_settings: ({ values, expectedRevision }) => {
+      if (selected !== "podbag") throw "Network settings require the local podbag engine";
+      if (!values && params.has("network-settings-error")) {
+        params.delete("network-settings-error");
+        throw "Cannot read the network configuration.";
+      }
+      if (values?.defaultSubnet === "10.79.4.1/24") throw "The IPv4 subnet has host bits set.";
+      if (values) {
+        if (expectedRevision !== networkSettings.revision) {
+          throw "Network settings changed after they were opened.";
+        }
+        networkSettings.preferences = values;
+        networkSettings.revision = String(Number(networkSettings.revision) + 1);
+      }
+      return structuredClone(networkSettings);
     },
     vm_set: ({ settings }) => {
       if (settings.sharedPaths) vmStatus.sharedPaths.next = settings.sharedPaths;
@@ -512,6 +576,10 @@
         prompt.form.requestSubmit();
       },
       settings: () => app.go("settings"),
+      "settings-engine-config": async () => {
+        await app.openSettingsSection("engine-settings");
+        document.getElementById("edit-engine-configuration")?.click();
+      },
       "settings-search": async () => {
         await app.go("settings");
         const input = document.getElementById("settings-search");
@@ -525,11 +593,21 @@
       "settings-vm": () => app.openSettingsSection("vm-settings"),
       "settings-notifications": () => app.openSettingsSection("notification-settings"),
       "settings-sync": () => app.openSettingsSection("sync-settings"),
+      "settings-network": () => app.openSettingsSection("network-settings"),
       "settings-cli": () => app.openSettingsSection("terminal-command"),
       "settings-updates": app.openUpdates,
       "update-source": app.openUpdates,
       "update-admin": async () => { await app.openUpdates(); await app.runUpgrade(); },
       "docker-settings": () => app.openSettingsSection("engine-settings"),
+      analysis: async () => {
+        await app.go("images");
+        app.openDetail("images", images[0].Id, "analysis");
+      },
+      "analysis-report": async () => {
+        await app.go("images");
+        app.openDetail("images", images[0].Id, "analysis");
+        document.querySelector(".image-analysis .primary").click();
+      },
       detail: () => app.openDetail("containers", containers[0].Id, "info"),
       logs: () => app.openDetail("containers", containers[0].Id, "logs"),
       inspect: () => app.openDetail("containers", containers[0].Id, "inspect"),

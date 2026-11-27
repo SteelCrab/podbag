@@ -708,6 +708,27 @@ podbag build -t myapp - < Dockerfile               # only a Dockerfile, no conte
   applies to later starts. The primary bridge and its default route stay in place.
   Containers using host, none or a shared network namespace cannot join another bridge.
 
+### Desktop network settings
+
+Open **Settings → Network** with the local podbag engine selected. Set the default
+IPv4 subnet and choose IPv4-only or IPv4 and IPv6. Dual stack requires a free IPv6
+subnet. The Desktop shows both the saved defaults and any initialized bridge subnets.
+Subnet defaults apply when the default bridge is first created. Saving never
+readdresses an initialized bridge or any other existing network. IPv6 addresses
+reach peers on the bridge. External routing and published ports use IPv4.
+
+Enable embedded DNS or filter direct IPv4 (A) or IPv6 (AAAA) queries. The resolver
+returns an empty successful answer for the filtered query type and omits that
+address family from local ANY responses. DNS settings apply the next time an
+eligible bridge container starts. Running containers retain their resolver settings.
+Explicit DNS servers and a custom `/etc/resolv.conf` bypass the embedded resolver.
+
+The matching settings in `config.toml` are `default_subnet`, `default_ipv6_subnet`
+(an empty string selects IPv4-only), `embedded_dns` and `dns_filter`
+(`none`, `ipv4` or `ipv6`). The corresponding `PODBAG_DEFAULT_SUBNET`,
+`PODBAG_DEFAULT_IPV6_SUBNET`, `PODBAG_EMBEDDED_DNS` and `PODBAG_DNS_FILTER`
+environment variables take precedence.
+
 ### Extra hosts and DNS
 
 - `--add-host` lines come after `localhost` and before the container's own line, as in
@@ -1327,6 +1348,35 @@ podbag lab remove container-network
 - Languages: English, 한국어, 日本語, 简体中文, Filipino, Español and Tiếng Việt. The app
   follows the system language. Settings can change it.
 
+#### Image security analysis
+
+Open an image's **Security** tab and select **Scan image** to see installed packages and
+known vulnerabilities by severity. Install [Trivy](https://trivy.dev/docs/latest/getting-started/installation/)
+and make its executable available to Podbag Desktop.
+
+Podbag exports the selected image by its full ID to a temporary archive and gives the archive
+to local Trivy. The scan uses the image already on the selected engine and uses no registry
+credentials. Podbag removes the temporary archive and report after the scan. If the engine
+sends no data for 2 minutes during the export, the scan stops with an error.
+
+Trivy keeps its databases in a `trivy` folder in Podbag Desktop's cache folder:
+`~/Library/Caches/io.github.steelcrab.podbag/trivy` on macOS,
+`~/.cache/io.github.steelcrab.podbag/trivy` on Linux (or under `$XDG_CACHE_HOME`) and
+`%LOCALAPPDATA%\io.github.steelcrab.podbag\trivy` on Windows. Podbag does not pass your
+Trivy environment variables or settings, so Trivy uses only this folder.
+
+- The first scan downloads the vulnerability database, so it needs network access.
+- Each database has a next-update time, at most a day after it was built. After that time,
+  the next scan downloads the database again. Before that time, a scan works without
+  network access.
+- An image with Java archives also needs the Java database. Trivy downloads it on the first
+  such scan and keeps it for 3 days.
+- Desktop runs Trivy with `--offline-scan`. This only stops online lookups of dependencies.
+  It does not stop the database downloads.
+- If a needed database is missing or out of date and Trivy cannot download it, the scan
+  fails and shows no results. Desktop shows "Trivy could not scan this image." Connect to
+  the network and scan again.
+
 #### Desktop extensions
 
 Open **Extensions** and select **Install manifest** to install a local UTF-8 JSON file.
@@ -1428,6 +1478,11 @@ in each Desktop session.
 - In **Notifications**, choose whether routine tasks show popups. Errors always show.
   The toolbar bell opens the latest 50 messages from this session. Clear the list
   from the history dialog.
+- In **Engine**, open **Engine configuration** to read or edit the selected local
+  Podbag engine's `config.toml`. **Validate** checks the text without saving. **Apply**
+  validates and saves the file. If it changed since it was opened, the editor keeps
+  your draft and reports a conflict. Environment variables still take precedence.
+  Opening the editor can start the VM on macOS or Windows.
 - Virtual machine (podbag on macOS): the state, the settings in use, uptime and disk use.
   Start, Stop and Restart. CPUs, memory and the idle power-off time (0 = never). Apply
   saves them with `podbag vm set`.

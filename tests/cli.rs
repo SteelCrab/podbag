@@ -178,3 +178,59 @@ fn system_compression_saves_the_mode_and_shows_it() {
         "compress_idle_after = \"2d\"\nimage_compression = \"off\"\n"
     );
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn system_network_settings_enforces_an_optional_revision() {
+    let tmp = tempfile::tempdir().unwrap();
+    let run = |args: &[&str]| {
+        Command::new(BIN)
+            .args(["system", "network-settings"])
+            .args(args)
+            .env("PODBAG_CONFIG_DIR", tmp.path().join("config"))
+            .env("PODBAG_DATA_DIR", tmp.path().join("data"))
+            .env("PODBAG_RUNTIME_DIR", tmp.path().join("run"))
+            .env_remove("PODBAG_DEFAULT_SUBNET")
+            .env_remove("PODBAG_DEFAULT_IPV6_SUBNET")
+            .env_remove("PODBAG_EMBEDDED_DNS")
+            .env_remove("PODBAG_DNS_FILTER")
+            .output()
+            .unwrap()
+    };
+    let read = || serde_json::from_slice::<serde_json::Value>(&run(&[]).stdout).unwrap();
+    let original = read();
+    let first_revision = original["revision"].as_str().unwrap();
+    let mut prefs = original["preferences"].clone();
+    prefs["embeddedDns"] = true.into();
+    let out = run(&[
+        "--set",
+        &prefs.to_string(),
+        "--expect-revision",
+        first_revision,
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let current = read();
+    assert_ne!(current["revision"], first_revision);
+    assert_eq!(current["preferences"], prefs);
+
+    prefs["dnsFilter"] = "ipv6".into();
+    let out = run(&[
+        "--set",
+        &prefs.to_string(),
+        "--expect-revision",
+        first_revision,
+    ]);
+    assert_eq!(out.status.code(), Some(125));
+    assert!(
+        String::from_utf8_lossy(&out.stderr)
+            .contains("network settings changed after they were opened")
+    );
+    assert_eq!(read(), current);
+
+    assert!(run(&["--set", &prefs.to_string()]).status.success());
+    assert_eq!(read()["preferences"], prefs);
+}
