@@ -1247,6 +1247,24 @@ podbag lab remove container-network
 - Languages: English, 한국어, 日本語, 简体中文, Filipino, Español and Tiếng Việt. The app
   follows the system language. Settings can change it.
 
+#### Local models
+
+Install [Ollama](https://docs.ollama.com/) and make its executable available to Podbag Desktop.
+Open **Models** and select **Start runner**. Podbag starts its own Ollama process on a
+loopback port with cloud features disabled. It uses a separate model folder in Podbag
+Desktop's application data. Startup never downloads models.
+
+Enter a model name from the [Ollama library](https://ollama.com/library), such as
+`smollm2:135m`, and select **Pull model**. The download must fit on disk. Running a
+model needs enough RAM or GPU memory for the model and its working data. The text
+generation form uses local Ollama models such as the library's GGUF text models.
+It sends one prompt per run and generates up to 512 output tokens.
+
+**Unload** frees a model's working memory. **Stop runner** interrupts active work and
+stops the process. Quitting Desktop also stops it. Downloaded models remain available
+the next time you start the runner. The runner is off until you explicitly start it
+in each Desktop session.
+
 #### Engine switch
 
 - Select the browsing engine in **Settings → Engine**. Migration uses its own source and destination.
@@ -1286,6 +1304,8 @@ podbag lab remove container-network
 
 - Settings opens from the sidebar, from the tray (Settings…), with `⌘,` on macOS and
   with `Ctrl+,` elsewhere.
+- Search settings by name or a related term. Use the arrow keys to move through results,
+  Enter to open a setting, and Escape to clear the search.
 - Virtual machine (podbag on macOS): the state, the settings in use, uptime and disk use.
   Start, Stop and Restart. CPUs, memory and the idle power-off time (0 = never). Apply
   saves them with `podbag vm set`.
