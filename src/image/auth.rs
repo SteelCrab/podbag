@@ -126,6 +126,44 @@ impl AuthConfig {
     }
 }
 
+/// Read `X-Registry-Config`, the logins the docker CLI sends with a build: base64
+/// (URL-safe or standard) JSON of a map from server address to [`AuthConfig`]. Keys
+/// become registries (`docker.io`, `ghcr.io`, `localhost:5000`). Empty, `{}` or `null`
+/// means none; anything else unreadable is an error.
+pub fn logins_from_config_header(value: &str) -> Result<Vec<(String, AuthConfig)>> {
+    let bad = |why: &str| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            "cannot read the X-Registry-Config header",
+            why,
+            "send base64-encoded JSON, as the docker CLI does",
+        )
+    };
+    if value.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let json = crate::base64::decode(value).ok_or_else(|| bad("it is not base64"))?;
+    let map: Option<std::collections::BTreeMap<String, AuthConfig>> =
+        serde_json::from_slice(&json).map_err(|_| bad("it is not the expected JSON"))?;
+    Ok(map
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(k, a)| (registry_of(&k), a.normalized()))
+        .filter(|(_, a)| !a.is_empty())
+        .collect())
+}
+
+/// The login for `registry` among `logins`, whose keys may take any of Docker's forms
+/// (`https://index.docker.io/v1/`, `docker.io`, `ghcr.io`).
+pub fn find_login(logins: &[(String, AuthConfig)], registry: &str) -> Option<AuthConfig> {
+    let registry = registry_of(registry);
+    logins
+        .iter()
+        .filter(|(k, _)| registry_of(k) == registry)
+        .map(|(_, a)| a.clone().normalized())
+        .find(|a| !a.is_empty())
+}
+
 /// The registry a server address names: `docker.io` for Docker Hub, else the host
 /// (`localhost:5000`, `ghcr.io`). Takes `https://…/v1/`, plain hosts and Hub's aliases.
 pub fn registry_of(server: &str) -> String {
@@ -524,15 +562,7 @@ fn from_env_var(registry: &str) -> Option<Option<AuthConfig>> {
         .get_or_init(|| std::env::var(AUTH_ENV).ok())
         .clone()
         .filter(|v| !v.is_empty())?;
-    Some(
-        decode_map(&value)
-            .and_then(|map| {
-                map.into_iter()
-                    .find(|(k, _)| registry_of(k) == registry)
-                    .map(|(_, a)| a.normalized())
-            })
-            .filter(|a| !a.is_empty()),
-    )
+    Some(decode_map(&value).and_then(|map| find_login(&map, registry)))
 }
 
 /// The value of [`AUTH_ENV`] for these logins.
@@ -874,5 +904,77 @@ esac
         let value = encode_map(&[("https://index.docker.io/v1/".into(), auth.clone())]);
         let map = decode_map(&value).unwrap();
         assert_eq!(map, vec![("docker.io".to_string(), auth)]);
+    }
+
+    /// A login made at run time: no secret-like text in the source.
+    fn made_login(user: &str) -> AuthConfig {
+        AuthConfig::with_password(user, &format!("pw-{user}-{}", std::process::id()))
+    }
+
+    /// `X-Registry-Config` as the docker CLI sends it: base64url JSON of a map.
+    fn config_header(map: serde_json::Value) -> String {
+        crate::base64::encode(&serde_json::to_vec(&map).unwrap())
+            .replace('+', "-")
+            .replace('/', "_")
+    }
+
+    #[test]
+    fn the_build_header_gives_logins_by_registry() {
+        let hub = made_login("hub");
+        let ghcr = made_login("ghcr");
+        let local = made_login("local");
+        let pair =
+            crate::base64::encode(format!("{}:{}", local.username, local.password).as_bytes());
+        let header = config_header(serde_json::json!({
+            DOCKER_HUB_KEY: {"username": hub.username, "password": hub.password},
+            "ghcr.io": {"Username": ghcr.username, "Password": ghcr.password},
+            "http://localhost:5000": {"auth": pair, "email": "x"},
+            "empty.example": {},
+        }));
+        let logins = logins_from_config_header(&header).unwrap();
+        let mut registries: Vec<&str> = logins.iter().map(|(k, _)| k.as_str()).collect();
+        registries.sort();
+        assert_eq!(registries, ["docker.io", "ghcr.io", "localhost:5000"]);
+
+        assert_eq!(find_login(&logins, "docker.io"), Some(hub.clone()));
+        assert_eq!(find_login(&logins, "index.docker.io"), Some(hub.clone()));
+        assert_eq!(find_login(&logins, DOCKER_HUB_KEY), Some(hub));
+        assert_eq!(find_login(&logins, "GHCR.io"), Some(ghcr));
+        assert_eq!(find_login(&logins, "localhost:5000"), Some(local));
+        assert_eq!(find_login(&logins, "localhost:5001"), None);
+        assert_eq!(find_login(&logins, "empty.example"), None);
+
+        // Docker Hub under its short key, as some clients send it.
+        let short = made_login("short");
+        let header = config_header(serde_json::json!({
+            "docker.io": {"username": short.username, "password": short.password},
+        }));
+        let logins = logins_from_config_header(&header).unwrap();
+        assert_eq!(find_login(&logins, DOCKER_HUB_KEY), Some(short));
+    }
+
+    #[test]
+    fn an_empty_build_header_means_no_logins_and_a_bad_one_fails() {
+        for empty in [
+            "",
+            "  ",
+            &config_header(serde_json::json!({})),
+            &config_header(serde_json::Value::Null),
+        ] {
+            assert!(
+                logins_from_config_header(empty).unwrap().is_empty(),
+                "{empty:?}"
+            );
+        }
+        for bad in [
+            "%%%".to_string(),
+            crate::base64::encode(b"not json"),
+            config_header(serde_json::json!(["a", "list"])),
+            config_header(serde_json::json!({"ghcr.io": "not a login"})),
+        ] {
+            let e = logins_from_config_header(&bad).unwrap_err();
+            assert_eq!(e.kind, ErrorKind::InvalidInput, "{bad:?}");
+            assert!(e.what.contains("X-Registry-Config"), "{e:?}");
+        }
     }
 }

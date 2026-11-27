@@ -365,6 +365,10 @@ fn host_config(f: &Facts) -> Value {
         "ReadonlyRootfs": false,
         "PublishAllPorts": false,
         "Init": null,
+        "ExtraHosts": f.spec.extra_hosts.iter().map(|e| e.docker()).collect::<Vec<_>>(),
+        "Dns": f.spec.dns.servers,
+        "DnsSearch": f.spec.dns.search,
+        "DnsOptions": f.spec.dns.options,
     })
 }
 
@@ -420,6 +424,16 @@ mod tests {
             network: "bridge".into(),
         };
         spec.publish = vec![port(0)];
+        spec.extra_hosts = vec![
+            crate::netfiles::ExtraHost::parse("db:10.1.2.3").unwrap(),
+            crate::netfiles::ExtraHost::parse("gw=host-gateway").unwrap(),
+            crate::netfiles::ExtraHost::parse("v6=[fd00::1]").unwrap(),
+        ];
+        spec.dns = crate::netfiles::DnsSettings {
+            servers: vec!["9.9.9.9".parse().unwrap()],
+            search: vec!["lan".into()],
+            options: vec!["ndots:2".into()],
+        };
         let state = State {
             status: Status::Running,
             pid: Some(42),
@@ -516,6 +530,13 @@ mod tests {
         // The default network gives no names.
         assert_eq!(bridge["Aliases"], serde_json::Value::Null);
         assert_eq!(i["HostConfig"]["NetworkMode"], "bridge");
+        assert_eq!(
+            i["HostConfig"]["ExtraHosts"],
+            json!(["db:10.1.2.3", "gw:host-gateway", "v6:fd00::1"])
+        );
+        assert_eq!(i["HostConfig"]["Dns"], json!(["9.9.9.9"]));
+        assert_eq!(i["HostConfig"]["DnsSearch"], json!(["lan"]));
+        assert_eq!(i["HostConfig"]["DnsOptions"], json!(["ndots:2"]));
         assert_eq!(
             i["HostConfig"]["PortBindings"],
             json!({"80/tcp": [{"HostIp": "", "HostPort": ""}]})

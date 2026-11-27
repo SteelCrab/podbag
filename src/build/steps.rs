@@ -538,10 +538,50 @@ pub fn stage_ref(names: &[Option<&str>], r: &str, i: usize) -> Option<usize> {
     names[..i].iter().rposition(|n| *n == Some(r))
 }
 
+/// The images a build may pull, each once: the expanded `FROM` words and the `--from`
+/// values that name no earlier stage and are not `scratch`.
+pub fn pulled_images(df: &Dockerfile, given: BTreeMap<String, String>) -> Result<Vec<String>> {
+    let mut args = Args::new(df, given)?;
+    let names: Vec<Option<&str>> = df.stages.iter().map(|s| s.name.as_deref()).collect();
+    let mut out: Vec<String> = Vec::new();
+    for (i, stage) in df.stages.iter().enumerate() {
+        let base = args.expand_global(&stage.base, df.escape)?;
+        let froms = stage.instructions.iter().filter_map(|ins| ins.flag("from"));
+        for word in std::iter::once(base.as_str()).chain(froms) {
+            let pulled = !word.eq_ignore_ascii_case("scratch")
+                && stage_ref(&names, &word.to_ascii_lowercase(), i).is_none();
+            if pulled && !out.iter().any(|o| o == word) {
+                out.push(word.to_string());
+            }
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::build::dockerfile::{parse, parse_line};
+
+    #[test]
+    fn pulled_images_leave_out_stages_and_scratch() {
+        let text = "ARG BASE=ghcr.io/team/base:1\n\
+                    FROM $BASE AS build\n\
+                    COPY --from=localhost:5000/tools:2 /bin/t /t\n\
+                    FROM scratch AS empty\n\
+                    FROM build\n\
+                    COPY --from=empty / /\n\
+                    COPY --from=0 / /\n\
+                    COPY --from=alpine /etc/os-release /\n\
+                    FROM ghcr.io/team/base:1\n";
+        let df = parse(text, "Dockerfile").unwrap();
+        assert_eq!(
+            pulled_images(&df, BTreeMap::new()).unwrap(),
+            ["ghcr.io/team/base:1", "localhost:5000/tools:2", "alpine"]
+        );
+        let given = BTreeMap::from([("BASE".to_string(), "quay.io/x/y".to_string())]);
+        assert_eq!(pulled_images(&df, given).unwrap()[0], "quay.io/x/y");
+    }
 
     fn run(lines: &[&str], given: &[(&str, &str)]) -> (ImageConfig, Stage, Args, Vec<Action>) {
         let text = format!("FROM base\n{}\n", lines.join("\n"));

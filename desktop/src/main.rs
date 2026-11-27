@@ -13,6 +13,7 @@ mod images;
 mod kubernetes;
 use podbag::dashboard::lab;
 mod migration;
+mod run;
 mod settings;
 mod strings;
 mod terminal_cli;
@@ -392,6 +393,27 @@ fn pull(
         },
     )?;
     Ok(reference)
+}
+
+/// Create and start a container from the form. A missing image is pulled first; its lines
+/// go out as pull progress. Gives the container's id.
+#[tauri::command(async)]
+fn run_container(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    token: u64,
+    spec: podbag::client::RunSpec,
+) -> Result<String, String> {
+    let session = state.session(token)?;
+    run::run(
+        &session.client,
+        &session.target,
+        &spec,
+        podbag::client::registry_auth,
+        |line| {
+            let _ = session.emit(&app, "pull-progress", line);
+        },
+    )
 }
 
 /// Search Docker Hub through the engine.
@@ -1374,6 +1396,8 @@ fn main() {
             kubernetes::local_kube_create,
             kubernetes::local_kube_reset,
             kubernetes::local_kube_remove,
+            kubernetes::kube_openshift,
+            kubernetes::kube_open_route,
             connection,
             contexts,
             create_volume,
@@ -1385,6 +1409,7 @@ fn main() {
             container_json,
             features,
             pull,
+            run_container,
             logs_start,
             logs_stop,
             watch,

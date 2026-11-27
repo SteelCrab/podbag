@@ -55,6 +55,17 @@
       { metadata: { name: "frontend", namespace: "default" }, spec: { type: "NodePort", clusterIP: "10.43.0.80", ports: [{ port: 80, nodePort: 30080, protocol: "TCP" }] } },
     ],
   };
+  // Only the "ocp" context is OpenShift: it alone serves Routes.
+  const routes = [
+    { kind: "Route", metadata: { name: "shop", namespace: "default" }, spec: { host: "shop.apps.ocp.example.com", path: "/cart", to: { kind: "Service", name: "frontend" }, tls: { termination: "edge" } } },
+    { kind: "Route", metadata: { name: "api", namespace: "default" }, spec: { host: "api.apps.ocp.example.com", to: { kind: "Service", name: "api" } } },
+    { kind: "Route", metadata: { name: "docs", namespace: "staging" }, spec: { host: "docs-staging.apps.ocp.example.com", to: { kind: "Service", name: "docs" }, tls: { termination: "passthrough" } } },
+  ];
+  const kubeItems = (kind, context) => {
+    if (kind !== "routes") return kube[kind];
+    if (context === "ocp") return routes;
+    throw 'kubectl (exit status: 1): error: the server doesn\'t have a resource type "routes"';
+  };
   const docker = view.startsWith("docker");
   const engine = {
     platform: "macos",
@@ -182,7 +193,7 @@
     "plugin:autostart|disable": () => { launchAtLogin = false; },
     connection: () => [token, selected, selected === "podbag"],
     contexts: () => ["desktop-linux", "orbstack"],
-    kube_contexts: () => ["dev", "staging", ...(localCluster ? [localCluster.context] : [])],
+    kube_contexts: () => ["dev", "staging", "ocp", ...(localCluster ? [localCluster.context] : [])],
     local_kube_status: () => localCluster,
     local_kube_create: ({ version, nodes }) => {
       localCluster = { context: "kind-podbag-demo123456", version, nodes, ready: true };
@@ -190,9 +201,11 @@
     },
     local_kube_reset: () => localCluster,
     local_kube_remove: () => { localCluster = null; },
+    kube_openshift: ({ context }) => context === "ocp",
+    kube_open_route: () => null,
     migration_sources: () => ["docker", "podman", "kiri", "podbag"],
-    kube_counts: ({ allNamespaces }) => Object.fromEntries(Object.entries(kube).map(([kind,items]) =>
-      [kind,items.filter(i=>allNamespaces||i.metadata.namespace==="default").length])),
+    kube_counts: ({ allNamespaces, context }) => Object.fromEntries(Object.keys(context === "ocp" ? { ...kube, routes } : kube).map((kind) =>
+      [kind, kubeItems(kind, context).filter(i=>allNamespaces||i.metadata.namespace==="default").length])),
     migration_list: ({ kind }) => lists[kind],
     migrate: async ({ request, updates }) => {
       for (const phase of ["prepare", request.kind === "images" ? "image" : "files", "verify"]) {
@@ -205,7 +218,7 @@
     list: ({ kind }) => lists[kind],
     kube_list: ({ kind, allNamespaces, context }) => ({
       context: context || "dev", namespace: "default",
-      items: kube[kind].filter((item) => allNamespaces || item.metadata.namespace === "default"),
+      items: kubeItems(kind, context).filter((item) => allNamespaces || item.metadata.namespace === "default"),
     }),
     inspect: ({ kind, id }) => ({ Id: id, Name: "/web", Created: "2026-11-20T01:12:00Z", State: { Status: "running", Running: true, Pid: 4182, StartedAt: "2026-11-20T01:12:01Z" }, Config: { Image: "nginx:alpine", Cmd: ["nginx", "-g", "daemon off;"], Env: ["PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "NGINX_VERSION=1.27.3"], Tty: false }, HostConfig: { PortBindings: { "80/tcp": [{ HostIp: "", HostPort: "8080" }] }, RestartPolicy: { Name: "no" } }, NetworkSettings: { IPAddress: "10.77.0.2" }, Kind: kind }),
     act: () => null,
@@ -215,6 +228,21 @@
     container_json: () => { throw "not supported"; },
     features: () => ({ stats: false, top: false, pause: false, rename: false }),
     pull: () => new Promise(() => {}),
+    // Like the engine: a missing image is pulled first, then the container starts.
+    run_container: async ({ spec }) => {
+      if (!images.some((i) => i.RepoTags.includes(spec.image))) {
+        for (const line of ["Pulling from library/" + spec.image, "Download complete", "Pull complete"]) {
+          emit("pull-progress", line);
+          await new Promise((resolve) => setTimeout(resolve, 60));
+        }
+        images.push({ Id: "sha256:4e3d2c1b0a9f8e7d", RepoTags: [spec.image], Created: now, Size: 9_000_000, Containers: 1 });
+      }
+      const id = "f00dfeed" + String(containers.length).padStart(8, "0");
+      const ports = spec.ports.map((p) => ({ IP: "0.0.0.0", PrivatePort: p.container, PublicPort: p.host, Type: p.protocol }));
+      lists.containers.unshift({ Id: id, Names: ["/" + (spec.name || "eager_tesla")], Image: spec.image, Command: spec.command.join(" "),
+        Created: Math.floor(Date.now() / 1000), State: "running", Status: "Up 1 second", Ports: ports });
+      return id;
+    },
     logs_start: () => { setTimeout(() => emit("logs", { generation: 1, lines: logLines }), 30); return 1; },
     logs_stop: () => null,
     watch: () => { setTimeout(() => emit("live", true), 10); return null; },
@@ -367,6 +395,29 @@
       "settings-docker": () => app.openSettingsSection("engine-settings"),
       import: async () => { app.go("images"); await app.importFromDocker(); },
       "empty-volumes": () => app.go("volumes"),
+      // The run form, filled in, with the options open.
+      "run-container": () => {
+        app.go("containers");
+        const form = app.run().querySelector("form");
+        const set = (selector, value) => { const el = form.querySelector(selector); el.value = value; };
+        set("#run-image", "nginx:alpine");
+        set("#run-name", "web");
+        set(".run-host", "8080");
+        set(".run-container", "80");
+        form.querySelector("details").open = true;
+        form.querySelector("#run-volumes ~ .run-add").click();
+        set(".run-source", "site");
+        set(".run-target", "/usr/share/nginx/html");
+        form.querySelector(".run-readonly").checked = true;
+        set("#run-restart", "unless-stopped");
+        form.querySelector("#run-image").focus();
+      },
+      // The image list: each image has Run (shown on the last one).
+      "run-image": () => {
+        app.go("images");
+        [...document.querySelectorAll(".list-images button[aria-label=Run]")].pop().focus();
+      },
+      "run-from-image": () => { app.go("images"); app.run("alpine:3.22"); },
     };
     if (view === "empty" && params.get("tab")) app.go(params.get("tab"));
     await (scenes[view] || (() => {}))();
