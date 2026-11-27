@@ -124,6 +124,23 @@ pub fn vm_set(podbag: &Path, s: &VmSettings) -> Result<String, String> {
     run_ok(podbag, &args).map(|out| out.trim().to_string())
 }
 
+/// `podbag vm sync`: list or change a running VM's synchronized shares.
+pub fn vm_sync(
+    podbag: &Path,
+    action: &str,
+    name: Option<&str>,
+    path: Option<&str>,
+) -> Result<Value, String> {
+    let mut args = vec!["vm", "sync", action];
+    match (action, name, path) {
+        ("list", None, None) => {}
+        ("now" | "remove", Some(name), None) => args.push(name),
+        ("add", Some(name), Some(path)) => args.extend([name, path]),
+        _ => return Err("invalid synchronized share command".into()),
+    }
+    serde_json::from_str(&run_ok(podbag, &args)?).map_err(|e| e.to_string())
+}
+
 /// `podbag vm start`, `stop` or `restart` (with `--yes`: the window asked first).
 pub fn vm_action(podbag: &Path, action: &str) -> Result<(), String> {
     let args: &[&str] = match action {

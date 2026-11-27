@@ -806,8 +806,11 @@ mod linux_launch {
                     nocopy,
                 } => {
                     let (v, _) = volume::create_in(dirs, Some(&name), false)?;
-                    let copy_up =
-                        !nocopy && v.nfs.is_none() && v.plugin.is_none() && empty(&v.mountpoint);
+                    let copy_up = !nocopy
+                        && v.nfs.is_none()
+                        && v.plugin.is_none()
+                        && !crate::vm::sync::is_cache_volume(&v)
+                        && empty(&v.mountpoint);
                     named_mount(v, target, access(a), copy_up)?
                 }
                 MountRequest::NamedNfs {
