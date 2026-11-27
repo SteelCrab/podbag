@@ -692,6 +692,20 @@ mod tests {
     }
 
     #[test]
+    fn lab_start_takes_tui() {
+        use crate::args::LabCmd;
+        let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let tui = |a: &[&str]| match parse(&argv(a)).unwrap().cmd {
+            Cmd::Lab {
+                cmd: LabCmd::Start { tui, .. },
+            } => tui,
+            _ => panic!("not lab start"),
+        };
+        assert!(tui(&["lab", "start", "web-basics", "--tui"]));
+        assert!(!tui(&["lab", "start", "web-basics"]));
+    }
+
+    #[test]
     fn tui_takes_an_engine_and_no_mouse() {
         use podbag::client::Choice;
         let tui = |args: &[&str]| {

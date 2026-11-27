@@ -36,7 +36,7 @@ function practiceFor(record) {
   return {
     id: record.id,
     namespace: "training.course.",
-    steps: [["start"], ...record.steps.map(step => [step.key, step.command])],
+    steps: [["start"], ...record.steps.map(step => [step.key, step.command, step.ui])],
     // The module file names its steps; the app names only the start.
     label(key) {
       if (key === "start") return t("training.course.start");
@@ -48,6 +48,45 @@ function practiceFor(record) {
       return state?.module === record.id ? state : null;
     },
   };
+}
+
+// The buttons of a module `ui` step. A row button sits on the row named by `ui.name`.
+// Both send the name, never the ID.
+const STEP_ROW_BUTTONS = {
+  start: ["start", "action.start"], stop: ["stop", "action.stop"], restart: ["restart", "action.restart"],
+  pause: ["pause", "action.pause"], resume: ["start", "action.resume"],
+  remove: ["remove", "action.remove"], logs: ["logs", "action.logs"],
+};
+const STEP_TOOLBAR_ICONS = {
+  pull: "pull", "remove-image": "remove", "create-volume": "volumes",
+  "remove-network": "remove", prune: "prune", inspect: "inspect",
+};
+const STEP_PRUNE_QUESTIONS = {
+  containers: "confirm.pruneContainers", images: "confirm.pruneImages",
+  volumes: "confirm.pruneVolumes", networks: "confirm.pruneNetworks",
+};
+
+// The action of the step when it belongs on the row named ROW_NAME and is one of ACTIONS.
+function stepRowAction(state, rowName, actions) {
+  return state.module && state.ui?.name === rowName && actions.includes(state.ui.action) ? state.ui.action : null;
+}
+
+// The step's button in the toolbar, when its action has no row on the page.
+// `rows` are the names of the rows of the page; `change(action, name)` sends the request.
+function practiceStepButton(state, change, rows) {
+  const ui = state.module && state.ui;
+  const icon = ui && STEP_TOOLBAR_ICONS[ui.action];
+  if (!icon || ui.action === "inspect" && rows.includes(ui.name)) return null;
+  const { action, name } = ui;
+  const question = {
+    "remove-image": () => t("confirm.removeImage", { name }),
+    "remove-network": () => t("confirm.removeNetwork", { name }),
+    prune: () => t(STEP_PRUNE_QUESTIONS[name] || "confirm.pruneContainers"),
+  }[action];
+  return h("div", { class: "buttons-row" }, button(icon, t("training.ui.button." + action, { name }), async () => {
+    if (question && !(await confirmDialog(question(), action === "prune" ? t("action.prune") : undefined))) return;
+    change(action, name);
+  }));
 }
 
 function practiceLabel(practice, key) {
@@ -76,12 +115,14 @@ function trainingGuideButton(id, style) {
 
 // Poll only while this view is mounted. Redraw on transitions so keyboard focus stays on the row or action.
 function watchPractice(panel, practice, onChange, { completed, onStage } = {}) {
-  let last, lastStage, lastCommand, timer, revision = 0;
-  function updateStage(stage, command) {
-    if (stage === lastStage && command === lastCommand) return;
+  let last, lastStage, lastCommand, lastUi, timer, revision = 0;
+  function updateStage(stage, command, ui) {
+    const uiKey = JSON.stringify(ui);
+    if (stage === lastStage && command === lastCommand && uiKey === lastUi) return;
     lastStage = stage;
     lastCommand = command;
-    onStage?.(stage, command);
+    lastUi = uiKey;
+    onStage?.(stage, command, ui);
   }
   const error = h("p", { role: "alert", class: "error-text" });
   panel.after(error);
@@ -94,7 +135,7 @@ function watchPractice(panel, practice, onChange, { completed, onStage } = {}) {
       // Completion is saved by the shell after it shuts down the practice engine.
       if (!state && onStage) completed = !!(await API.volumeToolsLab("summary", null, practice.id))[0]?.completed;
       if (!panel.isConnected || ticket !== revision) return;
-      updateStage(state?.stage || (completed ? "complete" : "start"), state?.command);
+      updateStage(state?.stage || (completed ? "complete" : "start"), state?.command, state?.ui);
       const key = JSON.stringify(state);
       if (last !== key) onChange?.(state);
       last = key;
@@ -135,17 +176,19 @@ function renderPracticeVolumes(main) {
       return;
     }
     const target = state.session;
-    const canRemove = row => state.module ? state.remove_volume === row.Name : row.Name !== "my-api" || state.stage === "remove";
+    const stepRemoves = row => stepRowAction(state, row.Name, ["remove-volume"]);
+    const canRemove = row => state.module ? state.remove_volume === row.Name || stepRemoves(row) : row.Name !== "my-api" || state.stage === "remove";
     const removeButton = row => {
-      const b = iconButton("remove", t("action.remove"), () => act("remove", row, target), "danger");
+      const b = iconButton("remove", t("action.remove"), () => act(stepRemoves(row) ? "remove-volume" : "remove", row, target), "danger");
       b.disabled = !canRemove(row);
       return b;
     };
+    const step = practiceStepButton(state, (action, name) => act(action, { Name: name }, target), state.volumes.map(v => v.Name));
     if (detail) {
       put(resources, h("header", { class: "toolbar" }, iconButton("back", t("action.back"), () => { detail = null; render(); }),
-        h("h2", { text: detail.Name }), removeButton(detail)), infoPanel("volumes", detail));
+        h("h2", { text: detail.Name }), removeButton(detail)), step, infoPanel("volumes", detail));
     } else {
-      put(resources, state.volumes.length
+      put(resources, step, state.volumes.length
         ? resourceTable("volumes", state.volumes, row => act("inspect", row, target), row => h("div", { class: "actions" }, removeButton(row)))
         : h("p", { class: "nothing", text: t("empty.volumes.title") }));
     }
@@ -154,7 +197,7 @@ function renderPracticeVolumes(main) {
     if (busy) return;
     busy = true;
     try {
-      if (action === "remove" && !(await confirmDialog(t("confirm.removeVolume", { name: row.Name })))) return;
+      if ((action === "remove" || action === "remove-volume") && !(await confirmDialog(t("confirm.removeVolume", { name: row.Name })))) return;
       if (!resources.isConnected || state?.session !== session) return;
       const result = await (state.module ? courseRequest : volumePractice.request)(action, session, row.Name);
       if (!resources.isConnected) return;
@@ -174,14 +217,18 @@ function renderPracticeContainers(main) {
     iconButton("back", t("nav.tutorials"), () => go("tutorials")),
     h("h1", { text: t("training.containers") }), guide),
   h("div", { class: "content practice-workspace" }, resources));
-  let state, detailId, busy = false;
+  // log: the text of a logs step, { id, stage, text }: shown only under container `id`,
+  // and dropped when the step moves on from `stage` or the container is gone.
+  let state, detailId, log = null, busy = false;
   const refresh = watchPractice(resources, practiceResources(containerPractice), next => {
     const id = next?.module || containerPractice.id;
     if (guide.dataset.module !== id) {
       put(guide, trainingGuideButton(id));
       guide.dataset.module = id;
     }
-    if (next?.session !== state?.session) detailId = null;
+    if (next?.session !== state?.session) { detailId = null; log = null; }
+    if (next?.text) log = { id: detailId, stage: next.stage, text: next.text };
+    if (log && (next?.stage !== log.stage || !next.containers.some(row => row.Id === log.id))) log = null;
     state = next;
     render();
   });
@@ -192,24 +239,50 @@ function renderPracticeContainers(main) {
       return;
     }
     const canStop = row => state.module ? state.stop === containerName(row) : state.stage === "stop";
-    const resourceAction = row => canStop(row) && iconButton("stop", t("action.stop"),
-      () => change("stop", row.Id, state.session));
+    const resourceAction = row => {
+      const step = stepRowAction(state, containerName(row), Object.keys(STEP_ROW_BUTTONS));
+      if (step) {
+        const [name, label] = STEP_ROW_BUTTONS[step];
+        return iconButton(name, t(label), () => stepRow(step, row), step === "remove" ? "danger" : "");
+      }
+      return canStop(row) && iconButton("stop", t("action.stop"), () => change("stop", row.Id, state.session));
+    };
+    const session = state.session;
+    const stepButton = practiceStepButton(state, (action, name) => change(action, name, session), state.containers.map(containerName));
     const detail = state.containers.find(row => row.Id === detailId);
     if (detail) {
       put(resources, h("header", { class: "toolbar" },
-        iconButton("back", t("action.back"), () => { detailId = null; render(); }),
-        h("h2", { text: containerName(detail) }), resourceAction(detail)), infoPanel("containers", detail),
+        iconButton("back", t("action.back"), () => { detailId = null; log = null; render(); }),
+        h("h2", { text: containerName(detail) }), resourceAction(detail)), stepButton, infoPanel("containers", detail),
+        log?.id === detail.Id ? h("pre", { class: "lab-output", text: log.text }) : null,
         state.web?.container === containerName(detail) ? renderPorts(detail) : null);
       return;
     }
-    put(resources, state.containers.length
+    put(resources, stepButton, state.containers.length
       ? resourceTable("containers", state.containers, openContainer,
         row => h("div", { class: "actions" }, resourceAction(row)))
       : h("p", { class: "nothing", text: t("empty.containers.title") }));
   }
+  async function stepRow(action, row) {
+    const name = containerName(row);
+    if (action === "remove") {
+      const running = ["running", "paused", "restarting"].includes(row.State);
+      if (!(await confirmDialog(t(running ? "confirm.removeRunning" : "confirm.removeContainer", { name })))) return;
+    }
+    const result = await change(action, name, state?.session);
+    if (action === "logs" && result?.text) {
+      log = { id: row.Id, stage: result.stage, text: result.text };
+      detailId = row.Id;
+      render();
+    }
+  }
   function openContainer(row) {
+    if (log?.id !== row.Id) log = null;
     detailId = row.Id;
     render();
+    if (state.module && state.ui?.action === "inspect" && state.ui.name === containerName(row)) {
+      change("inspect", containerName(row), state.session);
+    }
     if (state.inspect_container === containerName(row)) change("inspect-failed", row.Id, state.session);
   }
   function renderPorts(detail) {
@@ -226,7 +299,7 @@ function renderPracticeContainers(main) {
     busy = true;
     try {
       if (state?.session !== session) return;
-      await (state.module ? courseRequest : containerPractice.request)(action, session, id);
+      return await (state.module ? courseRequest : containerPractice.request)(action, session, id);
     } catch (e) { toast(String(e), true); }
     finally { busy = false; await refresh(); }
   }

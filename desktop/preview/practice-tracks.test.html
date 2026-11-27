@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Practice pages show the button of the current UI step</title>
+<iframe src="preview.html?view=practice-tracks&amp;lang=en" title="Desktop preview"></iframe>
+<pre id="result">Running</pre>
+<script>
+"use strict";
+const frame = document.querySelector("iframe");
+const result = document.getElementById("result");
+async function test() {
+  const win = frame.contentWindow, doc = frame.contentDocument;
+  const check = (condition, message) => { if (!condition) throw Error(message); };
+  const btn = (label) => [...doc.querySelectorAll("#main button")].find((b) => (b.textContent || b.getAttribute("aria-label")) === label);
+  const wait = async (predicate, message, attempts = 150) => {
+    for (let i = 0; i < attempts; i++) {
+      if (predicate()) return;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+    throw Error(message);
+  };
+  // The page polls every 800 ms; poll faster so the test fits in the time budget.
+  const setTimer = win.setTimeout.bind(win);
+  win.setTimeout = (fn, ms, ...args) => setTimer(fn, ms === 800 ? 30 : ms, ...args);
+  const called = (text) => win.practiceCalls.some(c => c.join() === text);
+  // A toolbar step: the button asks first, then sends the name.
+  await wait(() => btn("Remove image my-busybox:1"), "Show the step's toolbar button");
+  check(!btn("Stop"), "Show no row button for another step");
+  btn("Remove image my-busybox:1").click();
+  await wait(() => doc.getElementById("confirm").open, "Ask first");
+  check(doc.getElementById("confirm-text").textContent === "Remove the image my-busybox:1?", "Ask about the image");
+  check(win.practiceCalls.length === 0, "Send nothing before the answer");
+  doc.getElementById("confirm-yes").click();
+  await wait(() => called("remove-image,podbag-container-abc,my-busybox:1"), "Send the name");
+
+  // Headless Chrome with virtual time delivers a dialog's close event only in a rendering frame,
+  // and later frames do not come. The later steps answer through a stand-in for the dialog.
+  const asked = [];
+  let answerYes = true;
+  win.confirmDialog = async (text) => { asked.push(text); return answerYes; };
+  const wasAsked = (text) => asked.some(question => question.startsWith(text));
+
+  // A row step: the row of the named container has the button; it sends the name, not the ID.
+  win.practiceUi = { action: "stop", name: "web" };
+  await wait(() => btn("Stop"), "Show Stop on the named row");
+  check(!btn("Remove image my-busybox:1"), "Drop the old toolbar button");
+  btn("Stop").click();
+  await wait(() => called("stop,podbag-container-abc,web"), "Send the name, not the ID");
+
+  // Logs: the output shows in the details.
+  win.practiceUi = { action: "logs", name: "web" };
+  await wait(() => btn("Logs"), "Show Logs on the named row");
+  btn("Logs").click();
+  await wait(() => called("logs,podbag-container-abc,web"), "Send logs");
+  await wait(() => doc.querySelector("pre.lab-output")?.textContent === "hello from web\n", "Show the log text");
+  // The log is web's: when web is gone, another container shows none of it.
+  const web = { Id: "c1", Names: ["/web"], Image: "busybox:1.37.0", Command: "httpd -f", Created: 0, State: "running", Status: "Up 1 minute", Ports: [] };
+  const api = { ...web, Id: "c2", Names: ["/api"] };
+  win.practiceContainers = [api];
+  await wait(() => !doc.querySelector("pre.lab-output") && doc.querySelector("#main td button.link"), "Return to the list when web is gone");
+  doc.querySelector("#main td button.link").click();
+  await wait(() => doc.querySelector("#main h2")?.textContent === "api", "Open api");
+  await new Promise(resolve => setTimeout(resolve, 100));
+  check(!doc.querySelector("pre.lab-output"), "Show no log of web under api");
+  doc.querySelector('#main button[aria-label="Back"]').click();
+  // The log goes when the step changes.
+  win.practiceContainers = [web];
+  await wait(() => btn("Logs"), "Show Logs on web again");
+  btn("Logs").click();
+  await wait(() => doc.querySelector("pre.lab-output"), "Show the log text again");
+  win.practiceStage = "removeJob";
+  await wait(() => !doc.querySelector("pre.lab-output"), "Drop the log when the step changes");
+  check(doc.querySelector("#main h2")?.textContent === "web", "Stay on web");
+  win.practiceStage = undefined;
+
+  // Remove asks about a running container.
+  win.practiceUi = { action: "remove", name: "web" };
+  await wait(() => btn("Remove"), "Show Remove on the named row");
+  answerYes = false;
+  btn("Remove").click();
+  await wait(() => wasAsked("web is running. Stop it and remove it?"), "Ask about the running container");
+  await new Promise(resolve => setTimeout(resolve, 100));
+  check(!called("remove,podbag-container-abc,web"), "Send nothing after Cancel");
+  answerYes = true;
+  btn("Remove").click();
+  await wait(() => called("remove,podbag-container-abc,web"), "Send remove");
+
+  // Inspect of a name that no row has: a toolbar button.
+  win.practiceUi = { action: "inspect", name: "ghost" };
+  await wait(() => btn("Details: ghost"), "Show the toolbar button for an unknown name");
+  // Inspect of a row: opening the row sends inspect.
+  win.practiceUi = { action: "inspect", name: "web" };
+  await wait(() => !btn("Details: ghost"), "Drop the toolbar button when a row has the name");
+  doc.querySelector('#main button[aria-label="Back"]').click();
+  await wait(() => doc.querySelector("#main td button.link"), "Return to the list");
+  doc.querySelector("#main td button.link").click();
+  await wait(() => called("inspect,podbag-container-abc,web"), "Send inspect when opening the row");
+
+  // Prune asks its own question.
+  win.practiceUi = { action: "prune", name: "containers" };
+  doc.querySelector('#main button[aria-label="Back"]')?.click();
+  await wait(() => btn("Clean up containers"), "Show the prune button");
+  btn("Clean up containers").click();
+  await wait(() => wasAsked("Remove all stopped containers?"), "Ask the prune question");
+  await wait(() => called("prune,podbag-container-abc,containers"), "Send prune");
+
+  // The volumes page.
+  win.practiceUi = { action: "remove-volume", name: "data" };
+  doc.querySelector('[data-view="lab-volumes"]')?.click() || win.podbag.go("lab-volumes");
+  await wait(() => doc.querySelector(".list-volumes"), "Open the volumes page");
+  await wait(() => !doc.querySelector('.list-volumes button[aria-label="Remove"]')?.disabled, "Enable Remove on the named volume");
+  doc.querySelector('.list-volumes button[aria-label="Remove"]').click();
+  await wait(() => wasAsked("Remove the volume data?"), "Ask about the volume");
+  await wait(() => called("remove-volume,podbag-container-abc,data"), "Send remove-volume");
+  win.practiceUi = { action: "create-volume", name: "fresh" };
+  await wait(() => btn("Create volume fresh"), "Show the create-volume button on the volumes page");
+  btn("Create volume fresh").click();
+  await wait(() => called("create-volume,podbag-container-abc,fresh"), "Send create-volume");
+
+  // The Training step list says where to click. The current step reads the state's `ui`
+  // (the attempt's port: my-busybox:1); the other steps read the module's default.
+  win.practiceUi = { action: "remove-image", name: "my-busybox:1" };
+  win.podbag.go("training:image-basics");
+  const main = () => doc.getElementById("main").textContent;
+  await wait(() => /In Podbag Desktop: Practice containers → Remove image my-busybox:1/.test(main()), "Say where to click");
+  check(!/my-busybox:old/.test(main()), "Show the attempt's name, not the module default");
+  check(/Or run this command in the training shell:/.test(main()), "Keep the command");
+  check(/podbag rmi my-busybox:1/.test(main()), "Show the command");
+  check(/In Podbag Desktop: Practice containers → web → Stop/.test(main()), "Say where to click for another step");
+  check(/In Podbag Desktop: Practice containers → Pull busybox:1.37.0/.test(main()), "Say where to click for an earlier step");
+  const steps = [...doc.querySelectorAll(".training-step")];
+  const stepOf = (text) => steps.find(step => step.textContent.includes(text));
+  check(!/In Podbag Desktop/.test(stepOf("Check the list").textContent), "Say nothing for a step without ui");
+  check(/podbag ps -a/.test(stepOf("Check the list").textContent) === false, "Show the command of the current step only");
+  // A new port renders again.
+  win.practiceUi = { action: "remove-image", name: "my-busybox:2" };
+  await wait(() => /Remove image my-busybox:2/.test(main()), "Render again when the port changes");
+}
+frame.addEventListener("load", () => {
+  const root = frame.contentDocument.documentElement;
+  const observer = new MutationObserver(start);
+  function start() {
+    if (root.dataset.ready !== "1") return;
+    observer.disconnect();
+    test().then(() => { result.textContent = "PASS"; }, err => { result.textContent = "FAIL: " + err.message; });
+  }
+  observer.observe(root, { attributes: true, attributeFilter: ["data-ready"] });
+  start();
+});
+</script>
+</html>

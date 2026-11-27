@@ -1023,9 +1023,13 @@ printf '%s\n' \
 ```sh
 podbag lab list                        # refresh, then list the modules
 podbag lab start container-network     # open the practice shell
+podbag lab start container-network --tui   # do it in podbag tui
 podbag lab install my-module.podbag    # a local module file
 podbag lab remove container-network
 ```
+
+- The TUI track (`--tui`, course modules only) opens `podbag tui` on the practice engine.
+  `:` opens the training shell for CLI steps. `q` ends the session.
 
 - `PODBAG_TRAINING_CATALOG` reads another catalog, for example a local copy of the site
   at `http://127.0.0.1:8000/training/catalog.json`. Other addresses must use HTTPS.
@@ -1056,6 +1060,38 @@ podbag lab remove container-network
 | `desktop-ports`, `desktop-browser` | `name` (`page` for the browser) | Desktop showed the ports / opened the page |
 | `desktop-stop` | `name` | Desktop stopped the container |
 | `desktop-inspect-volume`, `desktop-delete-volume` | `name` | Desktop opened / deleted the volume |
+
+- A step may add `"ui": {"action": …, "name": …}`: how to do the step in a UI (Podbag
+  Desktop or the TUI) instead of the command. The step keeps its `command`.
+  - Released apps ignore `ui`, so a module with `ui` keeps its format.
+  - The app ignores a `ui` it does not know (an unknown action, or a check the action
+    cannot complete). The step then stays a command step.
+  - `name` is the object: a container, image, volume or network name, with no spaces,
+    at most 200 bytes. `{port}` needs the module's `port`. For `prune` it is one of
+    `containers`, `images`, `volumes`, `networks`.
+  - The action must fit the step's check:
+
+| Action | Object | Checks it may complete |
+|---|---|---|
+| `start` | container | `container-running` |
+| `stop` | container | `container-stopped`, `container-exited` |
+| `restart` | container | `container-restarted`, `container-running` |
+| `pause` | container | `container-paused` |
+| `resume` | container | `container-running`, `container-published` |
+| `remove` | container | `container-absent` |
+| `logs` | container | `output-has-line`, `output-contains` |
+| `inspect` | container, volume or network | `output-contains`, `output-has-line` |
+| `pull` | image | `image-exists` |
+| `remove-image` | image | `image-absent` |
+| `create-volume` | volume | `volume-exists` |
+| `remove-volume` | volume | `volume-absent` |
+| `remove-network` | network | `network-absent` |
+| `prune` | `containers`, `images`, `volumes` or `networks` | `containers-empty`, `volumes-empty`, `image-absent`, `network-absent` |
+
+  - `desktop-*` steps need no `ui`. Their UI form is fixed: `desktop-inspect-exited`,
+    `desktop-ports` and `desktop-inspect-volume` are `inspect`; `desktop-stop` is `stop`;
+    `desktop-delete-volume` is `remove-volume`; `desktop-browser` opens the page in the
+    browser.
 
 ##### Version 2 (`podbag-course-v2`)
 

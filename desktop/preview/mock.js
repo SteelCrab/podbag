@@ -186,6 +186,8 @@
   // (another dialog is open when the window first asks for the VM's state).
   const compression = { mode: params.get("compression") === "idle" ? "idle" : "off", after: Number(params.get("after") ?? 604800) };
   const practiceModules = new Map();
+  window.practiceUi = { action: "remove-image", name: "my-busybox:1" };
+  window.practiceCalls = [];
   const commands = {
     "plugin:autostart|is_enabled": () => launchAtLogin,
     "plugin:autostart|enable": () => { launchAtLogin = true; },
@@ -312,7 +314,21 @@
     },
     open_repository: () => null,
     open_training_guide: () => null,
-    practice_volumes: () => null,
+    // practice-tracks: a course session at a module `ui` step. A test sets window.practiceUi to
+    // switch the step (window.practiceStage and window.practiceContainers change the stage and
+    // the containers), and reads window.practiceCalls: [action, session, name] of each request.
+    practice_volumes: ({ action, session, name, course }) => {
+      if (view !== "practice-tracks" || !course) return null;
+      const volume = { Name: "data", Driver: "local", Mountpoint: "/var/lib/podbag/volumes/data/_data", CreatedAt: new Date(now * 1000).toISOString() };
+      const state = {
+        module: "image-basics", session: "podbag-container-abc", stage: window.practiceStage ?? "removeTag", command: "podbag rmi my-busybox:1",
+        containers: window.practiceContainers ?? [{ Id: "c1", Names: ["/web"], Image: "busybox:1.37.0", Command: "httpd -f", Created: now, State: "running", Status: "Up 1 minute", Ports: [] }],
+        volumes: [volume], ui: window.practiceUi, text: null, detail: null,
+      };
+      if (action === "status") return state;
+      window.practiceCalls.push([action, session, name]);
+      return { ...state, text: action === "logs" ? "hello from web\n" : null, detail: action === "inspect" ? volume : null };
+    },
     volume_tools_lab: ({ action, package: file, id }) => {
       if (action === "install") {
         const pack = JSON.parse(file);
@@ -325,6 +341,22 @@
         practiceModules.set(key, { id: key, package: pack, completed: false });
       }
       if (action === "remove") practiceModules.delete(id);
+      // practice-tracks: a course whose steps carry the module default `ui` (the course's port).
+      if (view === "practice-tracks" && !practiceModules.size) {
+        const words = { title: "Podbag Training · Image basics", goal: "", guide: "" };
+        const names = (en) => ({ en });
+        practiceModules.set("image-basics", { id: "image-basics", completed: false,
+          package: { format: "podbag-image-basics-v1", translations: { en: words } },
+          steps: [
+            { key: "pullImage", command: "podbag pull busybox:1.37.0", names: names("Pull the image"),
+              ui: { action: "pull", name: "busybox:1.37.0" } },
+            { key: "removeTag", command: "podbag rmi my-busybox:1", names: names("Remove the tag"),
+              ui: { action: "remove-image", name: "my-busybox:old" } },
+            { key: "stopWeb", command: "podbag stop web", names: names("Stop the server"),
+              ui: { action: "stop", name: "web" } },
+            { key: "checkList", command: "podbag ps -a", names: names("Check the list") },
+          ] });
+      }
       return [...practiceModules.values()].filter(record => action !== "summary" || !id || record.id === id);
     },
     tutorial_lab: ({ action }) => {
@@ -382,6 +414,7 @@
       banner: () => {},
       "settings-docker": () => app.openSettingsSection("engine-settings"),
       import: async () => { app.go("images"); await app.importFromDocker(); },
+      "practice-tracks": () => app.go("lab-containers"),
       "empty-volumes": () => app.go("volumes"),
       // The run form, filled in, with the options open.
       "run-container": () => {

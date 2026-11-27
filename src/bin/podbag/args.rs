@@ -389,6 +389,9 @@ pub enum LabCmd {
         lang: Option<String>,
         #[arg(long, hide = true)]
         library: Option<std::path::PathBuf>,
+        /// Do the module in podbag tui instead of the training shell
+        #[arg(long)]
+        tui: bool,
     },
     /// Remove the installed module and its progress
     Remove { module: Option<String> },
