@@ -544,6 +544,15 @@ pub(super) fn run(
             .map(|g| g.path().to_string_lossy().into_owned()),
         oom: None,
         ip: addresses.first().map(|(_, ip)| ip.ipv4.to_string()),
+        network_inode: if addresses.is_empty() {
+            None
+        } else {
+            use std::os::unix::fs::MetadataExt;
+            linux::net::namespace(child.pid)
+                .and_then(|ns| ns.metadata())
+                .ok()
+                .map(|metadata| metadata.ino())
+        },
         ports: published.iter().map(|(m, _)| *m).collect(),
         paused: false,
     };
@@ -703,6 +712,7 @@ pub(crate) fn finish(
     waiters: &[UnixStream],
 ) {
     st.status = Status::Exited;
+    st.network_inode = None;
     st.paused = false;
     st.exit_code = Some(code);
     st.oom = oom;

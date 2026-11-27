@@ -9,8 +9,15 @@ fn podbag(sb: &Sandbox, args: &[&str]) -> Output {
     sb.podbag().args(args).output().unwrap()
 }
 
+#[track_caller]
 fn ok(out: &Output) -> String {
-    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(out));
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        stdout(out),
+        stderr(out),
+    );
     stdout(out)
 }
 
@@ -950,10 +957,6 @@ fn connect_and_disconnect_a_stopped_container() {
     ok(&podbag(&sb, &["network", "create", "front"]));
     ok(&podbag(&sb, &["network", "create", "back"]));
     start(&sb, "web", &["--network", "front"], &["sleep", "300"]);
-    // A container that runs keeps its networks until it stops.
-    let busy = podbag(&sb, &["network", "connect", "back", "web"]);
-    assert_eq!(busy.status.code(), Some(125), "{}", stderr(&busy));
-    assert!(stderr(&busy).contains("stop"), "{}", stderr(&busy));
     ok(&podbag(&sb, &["stop", "-t", "0", "web"]));
     ok(&podbag(
         &sb,
@@ -979,17 +982,216 @@ fn connect_and_disconnect_a_stopped_container() {
 }
 
 #[test]
+fn secondary_bridges_connect_and_disconnect_while_running() {
+    let _turn = network_turn();
+    let sb = Sandbox::new();
+    ok(&podbag(
+        &sb,
+        &[
+            "network",
+            "create",
+            "--subnet",
+            "10.231.53.0/24",
+            "--ipv6",
+            "--subnet6",
+            "fdc3:391:103::/64",
+            "back",
+        ],
+    ));
+    ok(&podbag(&sb, &["network", "create", "side"]));
+    start(&sb, "db", &["--network", "back"], &["sleep", "300"]);
+    start(&sb, "web", &[], &["sleep", "300"]);
+    let inspect = || -> serde_json::Value {
+        serde_json::from_str(&ok(&podbag(&sb, &["inspect", "web"]))).unwrap()
+    };
+    let pid = inspect()["state"]["pid"].clone();
+    let attach = [
+        "network",
+        "connect",
+        "--alias",
+        "web-back",
+        "--ip",
+        "10.231.53.23",
+        "--ip6",
+        "fdc3:391:103::23",
+        "back",
+        "web",
+    ];
+    ok(&podbag(&sb, &attach));
+    ok(&podbag(&sb, &["network", "connect", "side", "web"]));
+    assert_eq!(inspect()["state"]["pid"], pid);
+    let addresses = ok(&podbag(&sb, &["exec", "web", "ip", "-o", "addr"]));
+    for expected in [
+        "eth0",
+        "eth1",
+        "eth2",
+        "10.231.53.23/24",
+        "fdc3:391:103::23/64",
+    ] {
+        assert!(addresses.contains(expected), "{addresses}");
+    }
+    let verify_default_route = || {
+        let routes = ok(&podbag(&sb, &["exec", "web", "ip", "route"]));
+        let default: Vec<_> = routes
+            .lines()
+            .filter(|line| line.starts_with("default"))
+            .collect();
+        assert_eq!(default.len(), 1, "{routes}");
+        assert!(default[0].contains("eth0"), "{routes}");
+    };
+    verify_default_route();
+    ok(&podbag(
+        &sb,
+        &["exec", "web", "ping", "-4", "-c1", "-W2", "db"],
+    ));
+    ok(&podbag(
+        &sb,
+        &["exec", "db", "ping", "-4", "-c1", "-W2", "web-back"],
+    ));
+    assert!(wait_until(5, || {
+        podbag(
+            &sb,
+            &["exec", "db", "ping6", "-c1", "-W1", "fdc3:391:103::23"],
+        )
+        .status
+        .success()
+    }));
+
+    start(&sb, "other", &[], &["sleep", "300"]);
+    let in_use = podbag(
+        &sb,
+        &[
+            "network",
+            "connect",
+            "--ip",
+            "10.231.53.23",
+            "back",
+            "other",
+        ],
+    );
+    assert!(
+        stderr(&in_use).contains("address is in use"),
+        "{}",
+        stderr(&in_use)
+    );
+    let other = ok(&podbag(&sb, &["exec", "other", "ip", "-o", "link"]));
+    assert!(!other.contains("eth1"), "{other}");
+
+    let primary = podbag(&sb, &["network", "disconnect", "bridge", "web"]);
+    assert!(
+        stderr(&primary).contains("first network"),
+        "{}",
+        stderr(&primary)
+    );
+    ok(&podbag(&sb, &["network", "disconnect", "back", "web"]));
+    let link = ok(&podbag(&sb, &["exec", "web", "ip", "-o", "link"]));
+    assert!(!link.contains("eth1") && link.contains("eth2"), "{link}");
+    for (container, stale) in [("web", "db"), ("db", "web-back")] {
+        let hosts = ok(&podbag(&sb, &["exec", container, "cat", "/etc/hosts"]));
+        assert!(
+            !hosts.split_whitespace().any(|name| name == stale),
+            "{hosts}"
+        );
+    }
+    ok(&podbag(&sb, &["network", "disconnect", "side", "web"]));
+    let hosts = ok(&podbag(&sb, &["exec", "web", "cat", "/etc/hosts"]));
+    assert!(
+        !hosts.contains("10.231.53.23") && !hosts.contains("web-back"),
+        "{hosts}"
+    );
+    verify_default_route();
+    assert_eq!(inspect()["state"]["pid"], pid);
+
+    // Reuse the released address, then verify that it is configured after restart.
+    ok(&podbag(&sb, &attach));
+    ok(&podbag(&sb, &["stop", "-t", "0", "web"]));
+    assert_eq!(
+        network_record(&sb, "back")["containers"]
+            .as_object()
+            .unwrap()
+            .len(),
+        1
+    );
+    ok(&podbag(&sb, &["start", "web"]));
+    // Learn the restarted peer's new MAC before probing from the original container.
+    ok(&podbag(
+        &sb,
+        &["exec", "web", "ping", "-4", "-c1", "-W2", "db"],
+    ));
+    ok(&podbag(
+        &sb,
+        &["exec", "db", "ping", "-4", "-c1", "-W2", "web-back"],
+    ));
+    let links = ok(&podbag(&sb, &["exec", "web", "ip", "-o", "link"]));
+    assert!(!links.contains("eth2"), "{links}");
+}
+
+#[test]
+fn failed_live_network_settings_write_restores_interfaces_and_addresses() {
+    let _turn = network_turn();
+    let sb = Sandbox::new();
+    ok(&podbag(&sb, &["network", "create", "back"]));
+    start(&sb, "db", &["--network", "back"], &["sleep", "300"]);
+    start(&sb, "web", &[], &["sleep", "300"]);
+    // Use inspect for the full ID because `ps --quiet` prints a short ID.
+    let web: serde_json::Value =
+        serde_json::from_str(&ok(&podbag(&sb, &["inspect", "web"]))).unwrap();
+    let id = web["id"].as_str().expect("the full container ID");
+    let tmp = sb
+        .data()
+        .join("containers")
+        .join(id)
+        .join(".config.json.tmp");
+    let block_settings_write = |block| {
+        let action = if block { "mkdir" } else { "rmdir" };
+        let mut command = if root_mode() {
+            let mut sudo = std::process::Command::new("sudo");
+            sudo.args(["-n", action]);
+            sudo
+        } else {
+            std::process::Command::new(action)
+        };
+        assert!(command.arg(&tmp).status().unwrap().success());
+    };
+    let attach = ["network", "connect", "--alias", "web-back", "back", "web"];
+    block_settings_write(true);
+    let result = podbag(&sb, &attach);
+    assert!(
+        stderr(&result).contains("cannot save container"),
+        "{}",
+        stderr(&result)
+    );
+    assert!(network_record(&sb, "back")["containers"].get(id).is_none());
+    let links = ok(&podbag(&sb, &["exec", "web", "ip", "-o", "link"]));
+    assert!(!links.contains("eth1"), "{links}");
+    block_settings_write(false);
+    ok(&podbag(&sb, &attach));
+    let membership = network_record(&sb, "back")["containers"][id].clone();
+    assert!(membership.is_object());
+    block_settings_write(true);
+    let result = podbag(&sb, &["network", "disconnect", "back", "web"]);
+    assert!(
+        stderr(&result).contains("cannot save container"),
+        "{}",
+        stderr(&result)
+    );
+    assert_eq!(network_record(&sb, "back")["containers"][id], membership);
+    ok(&podbag(
+        &sb,
+        &["exec", "db", "ping", "-c1", "-W2", "web-back"],
+    ));
+    block_settings_write(false);
+    ok(&podbag(&sb, &["network", "disconnect", "back", "web"]));
+}
+
+#[test]
 fn a_killed_watcher_gives_back_every_network() {
     let _turn = network_turn();
     let sb = Sandbox::new();
     ok(&podbag(&sb, &["network", "create", "front"]));
     ok(&podbag(&sb, &["network", "create", "back"]));
-    start(
-        &sb,
-        "k2",
-        &["--network", "front", "--network", "back"],
-        &["sleep", "30"],
-    );
+    start(&sb, "k2", &["--network", "front"], &["sleep", "30"]);
+    ok(&podbag(&sb, &["network", "connect", "back", "k2"]));
     let members = |network: &str| {
         network_record(&sb, network)["containers"]
             .as_object()

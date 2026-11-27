@@ -7,6 +7,7 @@
 use crate::netlink::{Socket, nft, route};
 use crate::network::{Addresses, Network};
 use crate::{Error, ErrorKind, Result};
+use std::fs::File;
 use std::net::Ipv4Addr;
 use std::os::fd::AsRawFd;
 
@@ -100,7 +101,17 @@ pub fn in_netns<T: Send, E: From<std::io::Error> + Send>(
     pid: u32,
     f: impl FnOnce() -> std::result::Result<T, E> + Send,
 ) -> std::result::Result<T, E> {
-    let ns = std::fs::File::open(format!("/proc/{pid}/ns/net"))?;
+    in_netns_file(&namespace(pid)?, f)
+}
+
+pub(crate) fn namespace(pid: u32) -> std::io::Result<File> {
+    File::open(format!("/proc/{pid}/ns/net"))
+}
+
+pub(crate) fn in_netns_file<T: Send, E: From<std::io::Error> + Send>(
+    ns: &File,
+    f: impl FnOnce() -> std::result::Result<T, E> + Send,
+) -> std::result::Result<T, E> {
     std::thread::scope(|scope| {
         scope
             .spawn(|| {
@@ -126,54 +137,82 @@ pub fn connect(
     addresses: Addresses,
     interface: usize,
 ) -> Result<()> {
-    let fail = |what: &str, e: std::io::Error| net_error(&net.name, what, e);
+    let ns = namespace(pid)
+        .map_err(|e| net_error(&net.name, "open the container's network namespace", e))?;
+    let host_side = veth_name(container_id, interface);
+    let mut socket = Socket::route().map_err(|e| net_error(&net.name, "netlink", e))?;
+    // A former run's namespace may still be going away. Only startup may replace the
+    // old device. A live operation must leave an occupied interface alone.
+    if let Some(index) = socket
+        .link_index(&host_side)
+        .map_err(|e| net_error(&net.name, "find the old veth", e))?
+    {
+        delete_veth(&mut socket, index)
+            .map_err(|e| net_error(&net.name, "remove the old veth", e))?;
+    }
+    connect_peer(net, bridge_index, &host_side, &ns, addresses, interface)
+        .map_err(|e| net_error(&net.name, "set up the veth pair", e))
+}
+
+pub(crate) fn connect_peer(
+    net: &Network,
+    bridge_index: u32,
+    host_side: &str,
+    ns: &File,
+    addresses: Addresses,
+    interface: usize,
+) -> std::io::Result<()> {
     let (_, prefix) = net.cidr();
     let gateway: Ipv4Addr = net.gateway.parse().unwrap_or(Ipv4Addr::UNSPECIFIED);
-    let host_side = veth_name(container_id, interface);
     let inside = format!("eth{interface}");
-    let ns = std::fs::File::open(format!("/proc/{pid}/ns/net"))
-        .map_err(|e| fail("open the container's network namespace", e))?;
-    let mut s = Socket::route().map_err(|e| fail("netlink", e))?;
-    let made = match s.request(route::new_veth(&host_side, &inside, ns.as_raw_fd())) {
-        // Left by this container's last run: the kernel takes a network namespace (and
-        // the veth pair with it) down a moment after its last process. Remove the old
-        // device and make the pair again.
-        Err(e) if e.raw_os_error() == Some(libc::EEXIST) => {
-            if let Ok(Some(old)) = s.link_index(&host_side) {
-                let _ = s.request(route::del_link(old));
+    let mut socket = Socket::route()?;
+    socket.request(route::new_veth(host_side, &inside, ns.as_raw_fd()))?;
+    let configure = |socket: &mut Socket| -> std::io::Result<()> {
+        let index = socket
+            .link_index(host_side)?
+            .ok_or_else(|| std::io::Error::other("the new veth disappeared"))?;
+        socket.request(route::set_master(index, bridge_index))?;
+        socket.request(route::set_up(index))?;
+        in_netns_file(ns, || -> std::io::Result<()> {
+            let mut socket = Socket::route()?;
+            if let Some(lo) = socket.link_index("lo")? {
+                socket.request(route::set_up(lo))?;
             }
-            s.request(route::new_veth(&host_side, &inside, ns.as_raw_fd()))
-        }
-        made => made,
+            let link = socket
+                .link_index(&inside)?
+                .ok_or_else(|| std::io::Error::other(format!("{inside} is missing")))?;
+            socket.request(route::add_address(link, addresses.ipv4.octets(), prefix))?;
+            if let (Some(address), Some(subnet)) = (addresses.ipv6, net.ipv6) {
+                socket.request(route::add_address6(link, address, subnet.prefix))?;
+            }
+            socket.request(route::set_up(link))?;
+            if interface == 0 {
+                socket.request(route::add_default_route(gateway.octets()))?;
+            }
+            Ok(())
+        })
     };
-    made.map_err(|e| fail("create the veth pair", e))?;
-    let index = s
-        .link_index(&host_side)
-        .map_err(|e| fail("find the veth", e))?
-        .ok_or_else(|| fail("find the veth", std::io::Error::other("it vanished")))?;
-    s.request(route::set_master(index, bridge_index))
-        .map_err(|e| fail("attach the veth to the bridge", e))?;
-    s.request(route::set_up(index))
-        .map_err(|e| fail("bring the veth up", e))?;
-    in_netns(pid, || -> std::io::Result<()> {
-        let mut s = Socket::route()?;
-        if let Some(lo) = s.link_index("lo")? {
-            s.request(route::set_up(lo))?;
+    if let Err(error) = configure(&mut socket) {
+        let cleanup = match socket.link_index(host_side) {
+            Ok(Some(index)) => delete_veth(&mut socket, index),
+            Ok(None) => Ok(()),
+            Err(error) => Err(error),
+        };
+        if let Err(cleanup) = cleanup {
+            return Err(std::io::Error::other(format!(
+                "{error}; removing the incomplete veth failed: {cleanup}"
+            )));
         }
-        let link = s
-            .link_index(&inside)?
-            .ok_or_else(|| std::io::Error::other(format!("{inside} is missing")))?;
-        s.request(route::add_address(link, addresses.ipv4.octets(), prefix))?;
-        if let (Some(address), Some(subnet)) = (addresses.ipv6, net.ipv6) {
-            s.request(route::add_address6(link, address, subnet.prefix))?;
-        }
-        s.request(route::set_up(link))?;
-        if interface == 0 {
-            s.request(route::add_default_route(gateway.octets()))?;
-        }
-        Ok(())
-    })
-    .map_err(|e| fail(&format!("set up {inside} in the container"), e))
+        return Err(error);
+    }
+    Ok(())
+}
+
+pub(crate) fn delete_veth(socket: &mut Socket, index: u32) -> std::io::Result<()> {
+    match socket.request(route::del_link(index)) {
+        Err(e) if e.raw_os_error() == Some(libc::ENODEV) => Ok(()),
+        done => done,
+    }
 }
 
 /// Remove a network's bridge device and its NAT chain from the calling thread's network

@@ -117,6 +117,9 @@ base, with the same jars:
 - Without root:
   - each user's containers share a network namespace,
   - `pasta` connects it to the host.
+- A short-lived helper makes live changes to secondary bridge attachments. It holds the
+  container and network locks while changing the Linux interface and saved settings.
+  A failed change rolls back before addresses become available to other containers.
 
 ## On macOS and Windows
 

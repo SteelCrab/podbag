@@ -454,6 +454,7 @@ mod tests {
             cgroup: None,
             oom: None,
             ip: Some("10.78.0.2".into()),
+            network_inode: None,
             ports: vec![port(32768)],
             paused: false,
         };
@@ -588,6 +589,7 @@ mod tests {
             cgroup: None,
             oom: None,
             ip: None,
+            network_inode: None,
             ports: vec![],
             paused: false,
         };

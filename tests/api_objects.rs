@@ -646,22 +646,28 @@ fn connect_and_disconnect_through_the_api() {
             .is_some_and(|a| a.iter().any(|x| x == "w")),
         "{networks}"
     );
-    // A running container keeps its networks until it stops.
     s.ok(&["network", "create", "third"]);
+    let pid = s.inspect("web")["State"]["Pid"].clone();
+    s.ok(&["network", "connect", "--alias", "w3", "third", "web"]);
+    let live = s.inspect("web");
+    assert_eq!(live["State"]["Pid"], pid);
     assert!(
-        s.fails(&["network", "connect", "third", "web"])
-            .contains("stop")
+        live["NetworkSettings"]["Networks"]["third"]["IPAddress"]
+            .as_str()
+            .is_some_and(|ip| !ip.is_empty()),
+        "{live}"
     );
-    assert!(
-        s.fails(&["network", "disconnect", "back", "web"])
-            .contains("stop")
-    );
-    s.ok(&["stop", "-t", "0", "web"]);
+    s.ok(&["exec", "web", "ping", "-c1", "-W2", "w3"]);
     s.ok(&["network", "disconnect", "back", "web"]);
+    assert_eq!(s.inspect("web")["State"]["Pid"], pid);
     assert!(
         s.fails(&["network", "disconnect", "back", "web"])
             .contains("not connected")
     );
+    let links = s.ok(&["exec", "web", "ip", "-o", "link"]);
+    assert!(!links.contains("eth1") && links.contains("eth2"), "{links}");
+    s.ok(&["stop", "-t", "0", "web"]);
+    s.ok(&["network", "disconnect", "third", "web"]);
     // Its primary network stays; the host's network is not one to join.
     s.fails(&["network", "disconnect", "front", "web"]);
     s.fails(&["network", "connect", "host", "web"]);

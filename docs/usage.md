@@ -643,11 +643,13 @@ podbag build -t myapp - < Dockerfile               # only a Dockerfile, no conte
   engine refuses an address already assigned to another running container.
 - A subnet that overlaps another network or a host route is refused.
 - Container names and aliases are written into each container's `/etc/hosts`. podbag
-  updates them as containers start and stop.
+  updates them when containers start, stop or change their network attachments.
 - There is no DNS server. When two containers share an alias, the first one answers.
 - `podbag network connect [--alias NAME] [--ip ADDRESS] [--ip6 ADDRESS] NET CONTAINER` and
-  `podbag network disconnect NET CONTAINER` change the networks of a stopped container,
-  for its next start. A running container is refused.
+  `podbag network disconnect NET CONTAINER` change the container's secondary bridge
+  networks. The change takes effect immediately while the container runs and also
+  applies to later starts. The primary bridge and its default route stay in place.
+  Containers using host, none or a shared network namespace cannot join another bridge.
 
 ### Extra hosts and DNS
 
@@ -776,7 +778,6 @@ podbag system docker restore    # back to the context you had (Docker Desktop, â
   log. It cannot send input.
 - When a client leaves an attached `exec`, the command ends. (Docker keeps it running.)
 - Volumes and networks keep their labels.
-- `network connect` changes stopped containers only.
 
 ### Docker Compose
 

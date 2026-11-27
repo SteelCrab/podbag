@@ -135,6 +135,9 @@ pub struct State {
     /// The container's address on its bridge network.
     #[serde(default)]
     pub ip: Option<String>,
+    /// Identity of the running bridge network namespace, from nsfs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_inode: Option<u64>,
     /// Published ports, with the host ports in use.
     #[serde(default)]
     pub ports: Vec<crate::network::PortMapping>,
@@ -447,6 +450,7 @@ pub fn create(dirs: &Dirs, spec: &ContainerSpec) -> Result<()> {
         cgroup: None,
         oom: None,
         ip: None,
+        network_inode: None,
         ports: Vec::new(),
         paused: false,
     };
@@ -621,6 +625,7 @@ fn settle(dirs: &Dirs, id: &str, seen: State) -> Result<State> {
     let mut state = read_state(dirs, id)?;
     if state.status == Status::Running {
         state.status = Status::Exited;
+        state.network_inode = None;
         state.paused = false;
         state.exit_code = None;
         state.finished = Some(now());
@@ -629,9 +634,8 @@ fn settle(dirs: &Dirs, id: &str, seen: State) -> Result<State> {
         // in the network session); do it now.
         if let Ok(spec) = read_config(dirs, id) {
             let networks = spec.bridge_networks();
-            for network in &networks {
-                let _ = crate::network::release(dirs, network, id);
-                crate::network::refresh_hosts(dirs, network);
+            if !networks.is_empty() {
+                let _ = crate::network::release_container(dirs, id, &[]);
             }
             // SAFETY: geteuid has no preconditions.
             #[cfg(target_os = "linux")]
@@ -677,6 +681,7 @@ mod tests {
             cgroup: None,
             oom: None,
             ip: None,
+            network_inode: None,
             ports: Vec::new(),
             paused: false,
         };
@@ -826,6 +831,7 @@ mod tests {
             cgroup: None,
             oom: None,
             ip: None,
+            network_inode: None,
             ports: Vec::new(),
             paused: false,
         };
@@ -856,6 +862,7 @@ mod tests {
             cgroup: None,
             oom: None,
             ip: None,
+            network_inode: None,
             ports: Vec::new(),
             paused: false,
         };
@@ -866,6 +873,7 @@ mod tests {
             cgroup: None,
             oom: None,
             ip: None,
+            network_inode: None,
             ports: Vec::new(),
             ..seen.clone()
         };
@@ -913,6 +921,7 @@ mod tests {
             cgroup: None,
             oom: None,
             ip: None,
+            network_inode: None,
             ports: Vec::new(),
             paused: false,
         };

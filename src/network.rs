@@ -7,6 +7,11 @@ use crate::{Error, ErrorKind, Result};
 use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
+mod attachment;
+pub(crate) use attachment::AttachmentChange;
+#[cfg(target_os = "linux")]
+pub use attachment::attachment_main;
+
 /// The network a container gets without `--network`.
 pub const DEFAULT: &str = "bridge";
 const DEFAULT_BRIDGE: &str = "podbag0";
@@ -948,9 +953,18 @@ pub(crate) fn allocate(
 /// gateway. Its names there are written down for the hosts files.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn join(dirs: &Dirs, network: &str, id: &str, endpoint: &Endpoint) -> Result<Addresses> {
-    let name = endpoint.name;
     let _lock = lock(dirs)?;
     let mut record = load(dirs, network)?;
+    let (addresses, changed) = join_record(&mut record, id, endpoint)?;
+    if changed {
+        write_record(dirs, &record)?;
+    }
+    Ok(addresses)
+}
+
+fn join_record(record: &mut Record, id: &str, endpoint: &Endpoint) -> Result<(Addresses, bool)> {
+    let network = &record.network.name;
+    let name = endpoint.name;
     record.network.check_addresses(endpoint.fixed)?;
     if let Some(m) = record.containers.get_mut(id) {
         let addresses = m.addresses();
@@ -970,18 +984,19 @@ pub(crate) fn join(dirs: &Dirs, network: &str, id: &str, endpoint: &Endpoint) ->
         // A member from an earlier version's record learns its hostname at its next start;
         // names given since (`network connect`) take effect at the next start too.
         let hostname = Some(endpoint.hostname.to_string());
-        if m.hostname != hostname
+        let changed = m.name != name
+            || m.hostname != hostname
             || m.aliases != endpoint.aliases
             || m.networks != endpoint.networks
-            || m.extra_hosts != endpoint.extra_hosts
-        {
+            || m.extra_hosts != endpoint.extra_hosts;
+        if changed {
+            m.name = name.to_string();
             m.hostname = hostname;
             m.aliases = endpoint.aliases.to_vec();
             m.networks = endpoint.networks.to_vec();
             m.extra_hosts = endpoint.extra_hosts.to_vec();
-            write_record(dirs, &record)?;
         }
-        return Ok(addresses);
+        return Ok((addresses, changed));
     }
     let (addr, prefix) = record.network.cidr();
     let first = u32::from(addr) + 2;
@@ -1057,11 +1072,13 @@ pub(crate) fn join(dirs: &Dirs, network: &str, id: &str, endpoint: &Endpoint) ->
             extra_hosts: endpoint.extra_hosts.to_vec(),
         },
     );
-    write_record(dirs, &record)?;
-    Ok(Addresses {
-        ipv4: ip,
-        ipv6: ip6,
-    })
+    Ok((
+        Addresses {
+            ipv4: ip,
+            ipv6: ip6,
+        },
+        true,
+    ))
 }
 
 /// Give back container `id`'s address. A missing network or entry is not an error.
@@ -1075,6 +1092,23 @@ pub(crate) fn release(dirs: &Dirs, network: &str, id: &str) -> Result<()> {
         write_record(dirs, &record)?;
     }
     Ok(())
+}
+
+/// Return addresses left by a former run, including an interrupted live change.
+/// At startup, retain addresses on the networks in the saved settings.
+pub(crate) fn release_container(dirs: &Dirs, id: &str, retain: &[&str]) -> Result<()> {
+    let _lock = lock(dirs)?;
+    let mut result = Ok(());
+    for mut record in all_records(dirs)? {
+        if !retain.contains(&record.network.name.as_str()) && record.containers.remove(id).is_some()
+        {
+            match write_record(dirs, &record) {
+                Ok(()) => refresh_hosts_locked(dirs, &record.network.name),
+                Err(error) => result = Err(error),
+            }
+        }
+    }
+    result
 }
 
 /// Container `id` has a new name: its entries in the networks it is on (while it runs)
@@ -1217,10 +1251,14 @@ pub(crate) fn hosts_text(dirs: &Dirs, id: &str, networks: &[String]) -> Result<S
 /// at the same moment cannot leave a stale list behind.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn refresh_hosts(dirs: &Dirs, network: &str) {
+    let Ok(_lock) = lock(dirs) else { return };
+    refresh_hosts_locked(dirs, network);
+}
+
+fn refresh_hosts_locked(dirs: &Dirs, network: &str) {
     if network == DEFAULT {
         return;
     }
-    let Ok(_lock) = lock(dirs) else { return };
     let mut loads = Loads::default();
     loads.read(dirs, network);
     // The other networks of its containers: their lines go into those files too.

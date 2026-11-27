@@ -80,6 +80,9 @@ pub(super) fn bridge_addresses(
     extra_hosts: &[HostEntry],
 ) -> Result<Vec<(crate::network::Network, Addresses)>> {
     let networks = spec.bridge_networks();
+    if !networks.is_empty() {
+        crate::network::release_container(dirs, &spec.id, &networks)?;
+    }
     // Written down only for a container on several networks: its hosts file names the
     // containers of each.
     let all: Vec<String> = if networks.len() > 1 {
@@ -234,11 +237,10 @@ pub(super) fn announce(dirs: &Dirs, spec: &ContainerSpec) {
 /// Give back what a container held on its networks: its addresses (the others forget its
 /// names), and its place in the rootless session.
 pub(super) fn detach(dirs: &Dirs, spec: &ContainerSpec, session: bool) {
-    for network in spec.bridge_networks() {
-        if let Err(e) = crate::network::release(dirs, network, &spec.id) {
-            eprintln!("podbag: {e}");
-        }
-        crate::network::refresh_hosts(dirs, network);
+    if !spec.bridge_networks().is_empty()
+        && let Err(e) = crate::network::release_container(dirs, &spec.id, &[])
+    {
+        eprintln!("podbag: {e}");
     }
     if session {
         crate::linux::session::release(dirs, &spec.id);

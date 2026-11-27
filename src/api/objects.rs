@@ -412,8 +412,7 @@ fn inspect_network(ctx: &Ctx, id: &str) -> Reply {
     }
 }
 
-/// `POST /networks/{id}/connect` and `disconnect`: a container that does not run joins or
-/// leaves the network at its next start.
+/// `POST /networks/{id}/connect` and `disconnect`: join or leave a secondary bridge.
 fn connect_network(req: &Request, id: &str, join: bool) -> Reply {
     let body = match req.json() {
         Ok(b) => b,

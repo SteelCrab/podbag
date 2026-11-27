@@ -279,6 +279,12 @@ pub enum Cmd {
     },
     #[command(name = "__store", hide = true)]
     Store { op: String },
+    #[command(name = "__network-attachment", hide = true)]
+    NetworkAttachment {
+        id: String,
+        network: String,
+        change: String,
+    },
     #[command(name = "__session", hide = true)]
     Session,
     /// The init that holds a Kubernetes pod's PID namespace
@@ -352,7 +358,7 @@ pub enum NetworkCmd {
     },
     /// Show a network's details as JSON
     Inspect { name: String },
-    /// Connect a stopped container to a further network (from its next start on)
+    /// Connect a container to a secondary bridge network
     Connect {
         /// A further name of the container on this network (may be repeated)
         #[arg(long = "alias", value_name = "ALIAS")]
@@ -366,7 +372,7 @@ pub enum NetworkCmd {
         network: String,
         container: String,
     },
-    /// Disconnect a stopped container from a further network
+    /// Disconnect a container from a secondary bridge network
     Disconnect { network: String, container: String },
 }
 
