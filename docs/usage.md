@@ -49,6 +49,8 @@ The [README](../README.md) shows how to install podbag. This page shows what it 
 - [Networks](#networks)
   - [Options](#options-1)
   - [Names and addresses](#names-and-addresses)
+  - [Extra hosts and DNS](#extra-hosts-and-dns)
+  - [host-gateway](#host-gateway)
   - [How it works](#how-it-works)
 - [Docker API](#docker-api)
   - [Start it](#start-it)
@@ -621,6 +623,11 @@ podbag build -t myapp - < Dockerfile               # only a Dockerfile, no conte
 | `--network host` | the host's network |
 | `--network none` | loopback only |
 | `-p [IP:][HOST:]CONTAINER[/tcp\|udp]` | publish a port; without a host port, the kernel picks one (see `ps`, `inspect`) |
+| `--add-host NAME:IP` | one more line in `/etc/hosts`; `NAME=IP` and IPv6 (`NAME=[::1]`) work too |
+| `--add-host NAME:host-gateway` | `NAME` leads to the host (see [host-gateway](#host-gateway)) |
+| `--dns IP` | a DNS server; given ones replace the default servers |
+| `--dns-search DOMAIN` | a search domain; given ones replace the host's; `.` means none |
+| `--dns-option OPT` | a resolver option, like `ndots:2`; given ones replace the host's |
 
 ### Names and addresses
 
@@ -632,6 +639,35 @@ podbag build -t myapp - < Dockerfile               # only a Dockerfile, no conte
 - `podbag network connect [--alias NAME] NET CONTAINER` and
   `podbag network disconnect NET CONTAINER` change the networks of a stopped container,
   for its next start. A running container is refused.
+
+### Extra hosts and DNS
+
+- `--add-host` lines come after `localhost` and before the container's own line, as in
+  Docker. They stay when podbag rewrites `/etc/hosts`.
+- Without `--dns`, a bridge container gets the host's servers as root, and pasta's
+  forwarder (`169.254.1.1`) without root. `--dns` replaces them in both modes.
+- With `--network host` or `none`, the container gets the host's `/etc/resolv.conf`.
+  Each `--dns` option replaces its part of that file.
+- The Docker API takes `ExtraHosts`, `Dns`, `DnsSearch` and `DnsOptions`, and `inspect`
+  shows them.
+
+### host-gateway
+
+`--add-host NAME:host-gateway` writes the host's address, found at each start:
+
+| Where | Address |
+|---|---|
+| Linux, as root, bridge network | the network's gateway (the host's side of the bridge) |
+| Linux, `--network host` | `127.0.0.1` |
+| macOS VM | the Mac's address on the VM network; it reaches Mac services that listen on all addresses, not on `127.0.0.1` only |
+| Linux without root, bridge network | refused: pasta keeps the host's addresses away from containers |
+| `--network none` | refused: no network |
+| Windows (WSL) | refused: podbag cannot tell the Windows host's address |
+
+- Where it is refused, the CLI stops with an error. Give the host's address instead:
+  `--add-host NAME:IP`.
+- The Docker API (and so Compose) makes the container without that one entry, and says so
+  in a warning. The other entries and DNS settings still apply.
 
 ### How it works
 
@@ -701,8 +737,8 @@ podbag system docker restore    # back to the context you had (Docker Desktop, â
 
 - Refused, with the reason: devices, `--read-only`, `--pid host`, `--volumes-from`,
   `--link`, port ranges, other network or volume drivers.
-- Accepted with a warning, because ignoring them is safe: `--dns`, `--add-host`, ulimits,
-  log drivers, fixed addresses.
+- Accepted with a warning, because ignoring them is safe: ulimits, log drivers, fixed
+  addresses.
 - Answered with 501 and what to do instead: BuildKit's build API (use buildx with the
   `docker-container` driver), `image history` and plugins.
 - Swarm mode works on one node. See [Swarm mode](#swarm-mode).
