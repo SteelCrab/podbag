@@ -55,10 +55,24 @@ Manage containers, images, volumes and networks on Linux and macOS. Windows supp
 Get the package for your system from the [latest release](https://github.com/SteelCrab/podbag/releases/latest).
 
 - **Linux (x86_64, arm64).** Install the `.deb` on Debian or Ubuntu, or the `.rpm` on Fedora. The package includes the engine.
-- **macOS (Apple silicon, Intel).** Extract `podbag-desktop-aarch64-macos.zip` (Apple silicon) or `podbag-desktop-x86_64-macos.zip` (Intel), move `podbag.app` to the Applications folder, and open it.
+- **macOS (Apple silicon, Intel).** Open `podbag-desktop-aarch64-macos.dmg` (Apple silicon) or `podbag-desktop-x86_64-macos.dmg` (Intel). Drag `podbag` to the Applications folder, then open it from there. The first time, allow it once: [Open it the first time on macOS](#open-it-the-first-time-on-macos).
 - **Windows (x86_64, ARM64, experimental).** Run the `.msi` for your CPU. If the release has no MSI, get it from a successful [CI run](https://github.com/SteelCrab/podbag/actions/workflows/ci.yml?query=branch%3Amain). Enable WSL 2 to run containers.
 
 The app includes the CLI. When the terminal has no `podbag`, the app offers to install the `podbag` command. The command uses the app's CLI, so it is updated with the app.
+
+### Open it the first time on macOS
+
+podbag is not notarized by Apple. So macOS blocks an app or a CLI that a browser downloaded, until you allow it once.
+
+1. Open `podbag` from the Applications folder. macOS says it cannot check podbag for malicious software. Click **Done**.
+2. Open **System Settings > Privacy & Security**. Next to the message about `podbag`, click **Open Anyway**, and confirm with your password.
+
+To skip these steps, install from the terminal. Files that `curl` downloads are not blocked.
+
+```sh
+curl -fsSL https://podbag.dev/install.sh | PODBAG_DESKTOP=1 sh   # Podbag Desktop
+curl -fsSL https://podbag.dev/install.sh | sh                    # the CLI only
+```
 
 ### CLI on Linux (x86_64, arm64) and macOS (Apple silicon, Intel)
 
@@ -71,7 +85,7 @@ The installer checks the release’s SHA-256 checksum and installs the CLI in `/
 
 Linux needs kernel 5.12 or later and cgroup v2. Run `podbag check` to see which prerequisites are missing. For rootless bridge networking, check the `uidmap` and `passt` packages. [Linux requirements](docs/usage.md#requirements-on-linux)
 
-For a manual installation, download the binary for your OS and CPU and verify it against `SHA256SUMS`. [Release downloads](https://github.com/SteelCrab/podbag/releases/latest)
+For a manual installation, download the binary for your OS and CPU and verify it against `SHA256SUMS`. Make it executable with `chmod +x`. On a Mac, also run `xattr -d com.apple.quarantine` on it. [Release downloads](https://github.com/SteelCrab/podbag/releases/latest)
 
 ### CLI on Windows (experimental)
 

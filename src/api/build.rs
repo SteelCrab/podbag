@@ -70,6 +70,14 @@ pub fn build(req: &Request) -> Reply {
         (Ok(a), Ok(l)) => (a, l),
         (Err(r), _) | (_, Err(r)) => return r,
     };
+    let registry_logins = match req
+        .header("X-Registry-Config")
+        .map(crate::image::auth::logins_from_config_header)
+        .transpose()
+    {
+        Ok(logins) => logins.unwrap_or_default(),
+        Err(e) => return reply_error(&e),
+    };
     let dockerfile = q
         .get("dockerfile")
         .filter(|d| !d.is_empty())
@@ -87,7 +95,7 @@ pub fn build(req: &Request) -> Reply {
             .filter(|n| !n.is_empty())
             .map(String::from),
         quiet: q.bool_param("q"),
-        registry_config: req.header("X-Registry-Config").map(String::from),
+        registry_logins,
         ..BuildOptions::default()
     };
     Reply::WithBody(Box::new(move |body| {

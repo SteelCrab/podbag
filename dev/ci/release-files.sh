@@ -36,6 +36,7 @@ for arch in x86_64 aarch64; do
   take "podbag-$arch-linux" podbag "podbag-$arch-linux"
   take "podbag-$arch-macos" "podbag-$arch-macos"
   take "podbag-desktop-$arch-macos" "podbag-desktop-$arch-macos.zip"
+  take "podbag-desktop-$arch-macos" "podbag-desktop-$arch-macos.dmg"
   take "podbag-$arch-windows" podbag.exe "podbag-$arch-windows.exe"
   take "podbag-desktop-$arch-windows" '*.msi' "podbag-desktop-$arch-windows.msi"
 done

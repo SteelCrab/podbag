@@ -184,6 +184,7 @@ pub fn apply(dirs: &Dirs, service: &mut ServiceRecord, tasks: &[&Task]) -> Resul
                     hostname: &name,
                     aliases: &[],
                     networks: &[],
+                    extra_hosts: &[],
                 },
             )?;
             let ip = ip.to_string();

@@ -1,6 +1,7 @@
 mod args;
 #[cfg(unix)]
 mod build;
+mod buildargs;
 mod check;
 #[cfg(unix)]
 mod container;
@@ -293,32 +294,39 @@ fn runs_here(cli: &Cli) -> bool {
     )
 }
 
-/// The login a forwarded command needs, as environment for the engine in the VM or WSL:
+/// The logins a forwarded command needs, as environment for the engine in the VM or WSL:
 /// Docker's config and its credential helpers (the keychain on a Mac) are on this side.
-/// `run` and `create` skip Docker Hub's official images, which need none: a credential
-/// helper would slow every start.
+/// `build` takes one for each registry its Dockerfile pulls from. `run` and `create` skip
+/// Docker Hub's official images, which need none: a credential helper would slow every
+/// start.
 #[cfg(any(target_os = "macos", windows))]
 fn forwarded_logins(cli: &Cli) -> Vec<(String, String)> {
     use podbag::image::{auth, reference::Reference};
-    let image = match &cli.cmd {
-        Cmd::Pull { image } | Cmd::Push { image } => Some(image.as_str()),
-        Cmd::Run(a) | Cmd::Create(a) if a.rootfs.is_none() => a.args.first().map(String::as_str),
-        _ => None,
+    let images = match &cli.cmd {
+        Cmd::Pull { image } | Cmd::Push { image } => vec![image.clone()],
+        Cmd::Run(a) | Cmd::Create(a) if a.rootfs.is_none() => {
+            a.args.first().cloned().into_iter().collect()
+        }
+        Cmd::Build(a) => buildargs::pulled_images(a),
+        _ => Vec::new(),
     };
-    let Some(r) = image.and_then(|i| Reference::parse(i).ok()) else {
-        return Vec::new();
-    };
-    let official = r.registry == "docker.io" && r.repository.starts_with("library/");
-    if official && matches!(cli.cmd, Cmd::Run(_) | Cmd::Create(_)) {
+    let mut logins: Vec<(String, auth::AuthConfig)> = Vec::new();
+    for r in images.iter().filter_map(|i| Reference::parse(i).ok()) {
+        let official = r.registry == "docker.io" && r.repository.starts_with("library/");
+        if official && matches!(cli.cmd, Cmd::Run(_) | Cmd::Create(_)) {
+            continue;
+        }
+        if logins.iter().any(|(registry, _)| *registry == r.registry) {
+            continue;
+        }
+        if let Some(login) = auth::lookup(&r.registry) {
+            logins.push((r.registry, login));
+        }
+    }
+    if logins.is_empty() {
         return Vec::new();
     }
-    match auth::lookup(&r.registry) {
-        Some(login) => vec![(
-            auth::AUTH_ENV.to_string(),
-            auth::encode_map(&[(r.registry, login)]),
-        )],
-        None => Vec::new(),
-    }
+    vec![(auth::AUTH_ENV.to_string(), auth::encode_map(&logins))]
 }
 
 #[cfg(any(target_os = "macos", windows, test))]

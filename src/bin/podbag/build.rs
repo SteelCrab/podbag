@@ -1,31 +1,10 @@
 //! `build`, `commit`, `export` and `diff`.
 
 use crate::args::BuildArgs;
+#[cfg(target_os = "linux")]
+use crate::buildargs::pairs;
 use crate::image::report;
 use podbag::{ContainerHandle, Error, ErrorKind};
-use std::collections::BTreeMap;
-
-/// `NAME=VALUE` pairs; `NAME` alone takes this process's environment (and is left out
-/// when unset), as Docker's `--build-arg` does.
-fn pairs(list: &[String], from_env: bool) -> BTreeMap<String, String> {
-    let mut out = BTreeMap::new();
-    for item in list {
-        match item.split_once('=') {
-            Some((k, v)) => {
-                out.insert(k.to_string(), v.to_string());
-            }
-            None if from_env => {
-                if let Ok(v) = std::env::var(item) {
-                    out.insert(item.clone(), v);
-                }
-            }
-            None => {
-                out.insert(item.clone(), String::new());
-            }
-        }
-    }
-    out
-}
 
 pub fn build(a: BuildArgs) -> i32 {
     #[cfg(target_os = "linux")]
@@ -37,7 +16,7 @@ pub fn build(a: BuildArgs) -> i32 {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (a, pairs);
+        let _ = a;
         crate::unsupported()
     }
 }
@@ -118,7 +97,8 @@ fn run_build(a: BuildArgs) -> podbag::Result<()> {
         labels: pairs(&a.label, false),
         network: a.network,
         quiet: a.quiet,
-        registry_config: None,
+        // Logins come from the front end or Docker's config, as for `pull`.
+        registry_logins: Vec::new(),
     };
     let mut stdout = std::io::stdout();
     let result = engine::build(&opts, &mut |text| {
@@ -203,23 +183,5 @@ pub fn diff(container: &str) -> i32 {
             0
         }
         Err(e) => report(&e),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn build_args_and_labels() {
-        let got = pairs(
-            &["A=1".into(), "B=x=y".into(), "PODBAG_SURELY_UNSET".into()],
-            true,
-        );
-        assert_eq!(got.get("A").map(String::as_str), Some("1"));
-        assert_eq!(got.get("B").map(String::as_str), Some("x=y"));
-        assert!(!got.contains_key("PODBAG_SURELY_UNSET"));
-        let labels = pairs(&["k".into()], false);
-        assert_eq!(labels.get("k").map(String::as_str), Some(""));
     }
 }
