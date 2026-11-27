@@ -2,6 +2,8 @@ mod args;
 #[cfg(unix)]
 mod build;
 mod buildargs;
+#[cfg(target_os = "linux")]
+mod buildkit;
 mod check;
 #[cfg(unix)]
 mod container;
@@ -138,6 +140,10 @@ fn windows_front(args: Vec<String>) -> Option<i32> {
         Some(_) => match parse(&args) {
             Err(e) => e.exit(),
             // Logins stay on Windows: in its config and credential manager.
+            Ok(cli) if matches!(&cli.cmd, Cmd::Build(a) if a.buildkit) => {
+                eprintln!("podbag: managed BuildKit is available on native Linux only");
+                Some(125)
+            }
             Ok(cli) if runs_here(&cli) => None,
             Ok(cli) => Some(match wsl_argv(&cli, args) {
                 Ok(argv) => podbag::windows::forward(&argv, &forwarded_logins(&cli)),
@@ -248,6 +254,10 @@ fn macos_front(args: Vec<String>) -> Option<i32> {
         Some(_) => match parse(&args) {
             Err(e) => e.exit(),
             // Logins stay on this Mac: in its config and keychain.
+            Ok(cli) if matches!(&cli.cmd, Cmd::Build(a) if a.buildkit) => {
+                eprintln!("podbag: managed BuildKit is available on native Linux only");
+                Some(125)
+            }
             Ok(cli) if runs_here(&cli) => None,
             Ok(cli) => Some(podbag::macos::cli::forward(mac_command(&cli, args))),
         },

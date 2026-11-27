@@ -28,7 +28,8 @@ The [README](../README.md) shows how to install podbag. This page shows what it 
   - [Dockerfiles](#dockerfiles)
   - [The cache](#the-cache)
   - [commit, export and diff](#commit-export-and-diff)
-  - [Not supported in builds](#not-supported-in-builds)
+  - [Managed BuildKit](#managed-buildkit)
+  - [Classic builder limits](#classic-builder-limits)
 - [Checks](#checks)
   - [podbag check](#podbag-check)
   - [podbag check-image](#podbag-check-image)
@@ -440,12 +441,45 @@ podbag build -t myapp - < Dockerfile               # only a Dockerfile, no conte
 - `podbag export [-o FILE] CONTAINER`: all its files as a tar, without its volumes.
 - `podbag diff CONTAINER`: the paths it changed: `A` added, `C` changed, `D` deleted.
 
-### Not supported in builds
+### Managed BuildKit
+
+On native Linux, install `buildkitd`, `buildctl`, and `runc` on your `PATH`.
+For rootless builds, also install RootlessKit and pasta. Set up subordinate user
+and group IDs for RootlessKit.
+
+```sh
+podbag build --buildkit -t app .
+podbag build --buildkit --secret id=config,src=/path/to/config --ssh default -t app .
+podbag build --buildkit --platform linux/amd64,linux/arm64 \
+  --output type=oci,dest=app.tar .
+podbag build --buildkit --output type=local,dest=build-result \
+  --cache-from type=local,src=/path/to/cache \
+  --cache-to type=local,dest=/path/to/cache,mode=max .
+```
+
+- Each build runs its own BuildKit worker and uses a private Unix socket. Podbag
+  stops the worker before importing or publishing the result. The classic builder
+  is the default.
+- By default Podbag imports the image for the local platform. Use an OCI archive
+  or local output for other platforms. Running foreign binaries during the build
+  still requires a suitable emulator. Local output uses a new destination directory.
+- `RUN --mount=type=cache` keeps data during the build. Import and export layer
+  cache with `--cache-from` and `--cache-to` using a local directory or registry.
+- Use file or environment secret mounts and an existing Unix SSH agent socket.
+  BuildKit sends the secret and SSH requests through its build session. Keep secret
+  files outside the context or exclude them with `.dockerignore`.
+- The Docker-compatible `POST /build` endpoint uses the classic builder. Use
+  [buildx with the docker-container driver](#buildx) when the Docker client needs
+  the BuildKit session protocol.
+
+<a id="not-supported-in-builds"></a>
+
+### Classic builder limits
 
 - BuildKit features: `RUN --mount`, secrets, SSH, `--output`, cache export and import,
   builds for other platforms, `COPY --parents` and `--exclude`, `ADD --checksum`, `ADD` of a
   Git repository, heredocs in `COPY` and `ADD`. podbag stops with a message; build such
-  Dockerfiles with buildx (see [buildx](#buildx)).
+  Dockerfiles with `podbag build --buildkit` or [buildx](#buildx).
 - `ADD` of bzip2 or xz archives.
 - Image history (`docker history`).
 - Changes that a `RUN` makes in a `VOLUME` path stay in the image (Docker drops them).
