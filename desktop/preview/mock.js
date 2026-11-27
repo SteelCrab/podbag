@@ -410,6 +410,7 @@
       },
       tutorials: () => app.go("tutorials"),
       "settings-vm": () => app.openSettingsSection("vm-settings"),
+      "settings-notifications": () => app.openSettingsSection("notification-settings"),
       "settings-cli": () => app.openSettingsSection("terminal-command"),
       "settings-updates": app.openUpdates,
       "update-source": app.openUpdates,

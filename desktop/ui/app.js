@@ -27,7 +27,7 @@ const S = {
   live: false,
   features: { stats: false, top: false, pause: false, rename: false },
   featuresAsked: false,
-  settings: { language: "system", theme: "system", sidebarWidth: 216, sidebarCollapsed: false },
+  settings: { language: "system", theme: "system", sidebarWidth: 216, sidebarCollapsed: false, statusNotifications: true },
   busy: new Set(),
   logs: { generation: 0, lines: [], follow: true },
   languageNames: null,
@@ -147,10 +147,47 @@ function stateChip(state) {
   return h("span", { class: `chip chip-${s}` }, h("span", { class: "dot", "aria-hidden": "true" }), t(`state.${s}`));
 }
 
+const notifications = [];
+
 function toast(text, error) {
+  notifications.unshift({ text, error, time: new Date() });
+  if (notifications.length > 50) notifications.pop();
+  renderNotificationHistory();
+  if (!error && !S.settings.statusNotifications) return;
   const el = h("div", { class: `toast ${error ? "toast-error" : ""}`, text });
   document.getElementById("toasts").append(el);
   setTimeout(() => el.remove(), error ? 8000 : 4000);
+}
+
+function renderNotificationHistory() {
+  const dialog = document.getElementById("notification-history");
+  if (!dialog?.open) return;
+  const list = dialog.querySelector("ol");
+  const date = new Intl.DateTimeFormat(I18N.lang, { hour: "numeric", minute: "2-digit" });
+  put(list, notifications.map(({ text, error, time }) =>
+    h("li", { class: error ? "notification-error" : "" }, icon(error ? "warning" : "check"),
+      h("p", {}, error ? h("span", { class: "visually-hidden", text: t("notifications.error") + ". " }) : null, text),
+      h("time", { datetime: time.toISOString(), text: date.format(time) }))));
+  list.hidden = !notifications.length;
+  dialog.querySelector(".notification-empty").hidden = !!notifications.length;
+  dialog.querySelector("#notifications-clear").disabled = !notifications.length;
+}
+
+function openNotificationHistory() {
+  const dialog = document.getElementById("notification-history");
+  const close = iconButton("close", t("notifications.close"), () => dialog.close());
+  const clear = button(null, t("notifications.clear"), () => {
+    notifications.length = 0;
+    close.focus();
+    renderNotificationHistory();
+  });
+  clear.id = "notifications-clear";
+  put(dialog, h("div", { class: "notification-heading" },
+    h("h2", { id: "notification-history-title", text: t("notifications.history") }), close),
+    h("p", { class: "notification-empty", text: t("notifications.empty") }),
+    h("ol", { class: "notification-list" }), h("div", { class: "buttons" }, clear));
+  dialog.showModal();
+  renderNotificationHistory();
 }
 
 async function copy(text, btn) {
@@ -1470,6 +1507,27 @@ function startupSettings() {
     h("label", { class: "check" }, toggle, t("settings.launchAtLogin")), status);
 }
 
+function notificationSettings() {
+  const toggle = h("input", { id: "status-notifications", type: "checkbox", checked: S.settings.statusNotifications });
+  toggle.onchange = async () => {
+    const enabled = toggle.checked;
+    toggle.disabled = true;
+    S.settings.statusNotifications = enabled;
+    if (!await saveSettings()) {
+      S.settings.statusNotifications = !enabled;
+      toggle.checked = !enabled;
+    }
+    if (!S.settings.statusNotifications) {
+      document.querySelectorAll("#toasts .toast:not(.toast-error)").forEach(message => message.remove());
+    }
+    toggle.disabled = false;
+  };
+  return settingDetails("notification-settings", "notifications", "bell", null,
+    h("div", { ...searchableSetting("notifications.status", "settings.search.terms.notifications") },
+      h("label", { class: "check" }, toggle, t("notifications.status")),
+      h("p", { class: "hint", text: t("notifications.hint") })));
+}
+
 async function renderSettings(main) {
   if (!S.languageNames) S.languageNames = await I18N.names();
   if (S.view !== "settings") return;
@@ -1514,6 +1572,7 @@ async function renderSettings(main) {
       settingDetails("vm-settings", "vm", "vm"),
       settingDetails("updates", "updates", "update"),
       settingDetails("terminal-command", "terminalCommand", "shell"),
+      notificationSettings(),
       settingDetails("about-settings", "about", "inspect", null, h("p", { text: t("settings.aboutText") }))));
   put(main,
     h("header", { class: "toolbar" }, h("h1", { text: t("settings.title") })),
@@ -2230,12 +2289,17 @@ async function installApp() {
 async function saveSettings() {
   try {
     await API.setSettings(S.settings);
+    return true;
   } catch (e) {
     toast(String(e), true);
+    return false;
   }
 }
 
 function renderAll() {
+  const notificationsButton = document.getElementById("notifications-open");
+  notificationsButton.title = t("notifications.history");
+  notificationsButton.setAttribute("aria-label", t("notifications.history"));
   renderNav();
   renderEngine();
   renderVmCard();
@@ -2329,6 +2393,9 @@ async function init() {
     renderNav();
   }).catch(() => { /* Offline: the installed modules stay. */ });
   setupWindowBar();
+  const notificationsButton = document.getElementById("notifications-open");
+  notificationsButton.append(icon("bell"));
+  notificationsButton.onclick = openNotificationHistory;
   setupKubeNav();
   setupTrainingNav();
   setupSidebar();
