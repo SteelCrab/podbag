@@ -672,6 +672,7 @@ volumes using an external driver are outside this support.
 | `--network-alias NAME` | one more name on the first user network |
 | `--network host` | the host's network |
 | `--network none` | loopback only |
+| `--ip ADDRESS`, `--ip6 ADDRESS` | request a fixed address on the first bridge network |
 | `-p [IP:][HOST:]CONTAINER[/tcp\|udp]` | publish a port; without a host port, the kernel picks one (see `ps`, `inspect`) |
 | `--add-host NAME:IP` | one more line in `/etc/hosts`; `NAME=IP` and IPv6 (`NAME=[::1]`) work too |
 | `--add-host NAME:host-gateway` | `NAME` leads to the host (see [host-gateway](#host-gateway)) |
@@ -682,13 +683,23 @@ volumes using an external driver are outside this support.
 ### Names and addresses
 
 - New networks get `10.78.<n>.0/24`, unless `--subnet` gives another.
+- `podbag network create --ipv6 NAME` adds a local IPv6 subnet to the IPv4 bridge.
+  Specify a subnet with `--subnet6`, or use the default ULA `/64`. For Docker CLI use
+  `docker network create --ipv6 --subnet fd42:1234::/64 NAME`.
+- IPv6 addresses reach peers on the same bridge. External routing and published ports
+  continue to use IPv4.
+- Fixed addresses must be inside their subnet and outside its reserved addresses. The
+  engine refuses an address already assigned to another running container.
 - A subnet that overlaps another network or a host route is refused.
 - Container names and aliases are written into each container's `/etc/hosts`. podbag
-  updates them as containers start and stop.
-- There is no DNS server. When two containers share an alias, the first one answers.
-- `podbag network connect [--alias NAME] NET CONTAINER` and
-  `podbag network disconnect NET CONTAINER` change the networks of a stopped container,
-  for its next start. A running container is refused.
+  updates them when containers start, stop or change their network attachments.
+- By default, when two containers share an alias, the first one found in `/etc/hosts`
+  answers. Enable embedded DNS to receive the addresses of every matching peer.
+- `podbag network connect [--alias NAME] [--ip ADDRESS] [--ip6 ADDRESS] NET CONTAINER` and
+  `podbag network disconnect NET CONTAINER` change the container's secondary bridge
+  networks. The change takes effect immediately while the container runs and also
+  applies to later starts. The primary bridge and its default route stay in place.
+  Containers using host, none or a shared network namespace cannot join another bridge.
 
 ### Extra hosts and DNS
 
@@ -700,6 +711,19 @@ volumes using an external driver are outside this support.
   Each `--dns` option replaces its part of that file.
 - The Docker API takes `ExtraHosts`, `Dns`, `DnsSearch` and `DnsOptions`, and `inspect`
   shows them.
+
+### Embedded DNS
+
+Set `embedded_dns = true` in `config.toml` or run with `PODBAG_EMBEDDED_DNS=1`. This
+applies to bridge containers when they start. Each enabled container gets a private
+resolver at `127.0.0.11` on port 53 over UDP and TCP. It returns IPv4 and IPv6 addresses
+for names and aliases on its attached user bridges. Live attachment changes take effect
+in subsequent DNS queries. The default bridge does not publish container names.
+
+Other names are sent to the usual upstream servers. In rootless mode that is pasta's
+forwarder. An explicit `--dns` server list or a mount over `/etc/resolv.conf` takes
+priority and bypasses the embedded resolver. DNS search domains and resolver options
+still apply. Each enabled container keeps its shim process to serve these requests.
 
 ### host-gateway
 
@@ -817,7 +841,6 @@ podbag system docker restore    # back to the context you had (Docker Desktop, �
   log. It cannot send input.
 - When a client leaves an attached `exec`, the command ends. (Docker keeps it running.)
 - Volumes and networks keep their labels.
-- `network connect` changes stopped containers only.
 
 ### Docker Compose
 
@@ -825,8 +848,9 @@ podbag system docker restore    # back to the context you had (Docker Desktop, �
 - Supports the project's networks and volumes, several networks per service, service and
   container names, `depends_on` with `condition: service_healthy`, restart policies and
   health checks.
-- Names live in each container's `/etc/hosts` (no DNS server). When replicas share a name,
-  the first one answers.
+- By default, names live in each container's `/etc/hosts`. When replicas share a name,
+  the first one answers. The optional embedded DNS resolver returns every matching
+  address for direct DNS queries.
 - `docker compose build` works with the classic builder (see below), or with a buildx
   builder (`--builder`).
 
@@ -1296,6 +1320,24 @@ podbag lab remove container-network
 - Languages: English, 한국어, 日本語, 简体中文, Filipino, Español and Tiếng Việt. The app
   follows the system language. Settings can change it.
 
+#### Local models
+
+Install [Ollama](https://docs.ollama.com/) and make its executable available to Podbag Desktop.
+Open **Models** and select **Start runner**. Podbag starts its own Ollama process on a
+loopback port with cloud features disabled. It uses a separate model folder in Podbag
+Desktop's application data. Startup never downloads models.
+
+Enter a model name from the [Ollama library](https://ollama.com/library), such as
+`smollm2:135m`, and select **Pull model**. The download must fit on disk. Running a
+model needs enough RAM or GPU memory for the model and its working data. The text
+generation form uses local Ollama models such as the library's GGUF text models.
+It sends one prompt per run and generates up to 512 output tokens.
+
+**Unload** frees a model's working memory. **Stop runner** interrupts active work and
+stops the process. Quitting Desktop also stops it. Downloaded models remain available
+the next time you start the runner. The runner is off until you explicitly start it
+in each Desktop session.
+
 #### Engine switch
 
 - Select the browsing engine in **Settings → Engine**. Migration uses its own source and destination.
@@ -1335,6 +1377,8 @@ podbag lab remove container-network
 
 - Settings opens from the sidebar, from the tray (Settings…), with `⌘,` on macOS and
   with `Ctrl+,` elsewhere.
+- Search settings by name or a related term. Use the arrow keys to move through results,
+  Enter to open a setting, and Escape to clear the search.
 - Virtual machine (podbag on macOS): the state, the settings in use, uptime and disk use.
   Start, Stop and Restart. CPUs, memory and the idle power-off time (0 = never). Apply
   saves them with `podbag vm set`.
@@ -1637,15 +1681,37 @@ sudo k3s server --container-runtime-endpoint unix:///run/podbag/cri.sock
 - Commands run in the VM. Their output, exit code, signals and terminal size pass through.
 - Only commands that read input (`-i`, or `load` without `-i FILE`) take the Mac's stdin.
 - `-e NAME` takes the Mac's value of NAME.
-- The Mac's `/Users` is in the VM at the same path, so `-v ./src:/work` works from a folder
-  under `/Users`.
-- Other Mac paths are refused, also for `save -o`, `load -i` and `--rootfs`.
+- By default the VM shares `/Users` at the same path, so `-v ./src:/work` works from
+  a folder under `/Users`. See [File sharing](#file-sharing) to change the folders.
+- Paths outside the active shares are refused for bind mounts, builds, `save -o`,
+  `load -i` and `--rootfs`.
 - Named volumes live in the VM.
 - Images, containers and volumes stay on a 64 GiB sparse disk, `~/.podbag/disk.img`.
 - `podbag vm stop`, or logging out, powers the VM off cleanly.
 - `podbag vm start`, `vm restart` and `vm status` start it, restart it and show its state.
   `vm status` wakes no VM.
 - Containers cannot reach the VM's agent.
+
+### File sharing
+
+In Podbag Desktop, open **Settings → Virtual machine → Shared folders**. Enter an
+absolute path, choose **Add folder**, and apply the changes. Use **Remove** to stop
+sharing a folder. Changes take effect at the next VM start.
+
+In the CLI, repeat `--share` to give the full list. Include `/Users` to keep it shared.
+Use `--no-shares` to remove all shares.
+
+```sh
+podbag vm set --share /Users --share "/Volumes/My Projects"
+podbag vm status --json
+podbag run --rm -v "/Volumes/My Projects:/work" alpine ls /work
+```
+
+Restart a running VM before using a newly shared folder. Shared folders must exist
+when saved and at startup. The list uses the original paths after resolving symlinks.
+Use those paths in container commands. Folders cannot overlap or cover the VM's
+system directories. A removable disk must be attached at VM startup to share its
+folders. Remove the folders from the list when the disk is disconnected.
 
 ### Registry logins
 
@@ -1703,7 +1769,7 @@ docker buildx build --load -t app .
 
 - The socket stays while the VM is off. The standby process waits on it, and the first
   request starts the VM.
-- Bind mounts must come from `/Users`.
+- Bind mounts must come from the [active shared folders](#file-sharing).
 
 ### Ports, disk and memory
 

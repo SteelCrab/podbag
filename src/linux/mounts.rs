@@ -30,29 +30,46 @@ pub(super) fn mount_all(
         Mode::empty(),
     )
     .map_err(|e| fail("/", e.into()))?;
+    let shares = crate::vm::shares::active();
     let mut ordered: Vec<&Mount> = mounts.iter().collect();
     ordered.sort_by_key(|m| m.target.split('/').filter(|p| !p.is_empty()).count());
     for m in ordered {
-        mount_one(root_fd.as_fd(), m, nfs).map_err(|e| {
+        mount_one(root_fd.as_fd(), m, shares.as_deref(), nfs).map_err(|e| {
             super::userns_denial(rootless, Some(&e), None).unwrap_or_else(|| fail(&m.target, e))
         })?;
     }
     Ok(())
 }
 
-fn mount_one(root: BorrowedFd<'_>, m: &Mount, nfs: &NfsMounts) -> std::io::Result<()> {
+fn mount_one(
+    root: BorrowedFd<'_>,
+    m: &Mount,
+    shares: Option<&[std::path::PathBuf]>,
+    nfs: &NfsMounts,
+) -> std::io::Result<()> {
     match &m.source {
         MountSource::Bind {
             path,
             propagation,
             shallow_ro,
         } => {
-            let is_file = !std::fs::metadata(path)?.is_dir();
+            let path = Path::new(path);
+            // Guest paths outside its system directories are Mac binds, including
+            // starts and file copies of containers created before shares changed.
+            let shared_source = shares
+                .filter(|_| crate::vm::shares::valid_target(path))
+                .map(|roots| open_shared_source(path, roots))
+                .transpose()?;
+            let fd_path = shared_source
+                .as_ref()
+                .map(|fd| format!("/proc/self/fd/{}", fd.as_raw_fd()));
+            let source = fd_path.as_deref().map(Path::new).unwrap_or(path);
+            let is_file = !std::fs::metadata(source)?.is_dir();
             let target = open_target(root, &m.target, is_file)?;
             if propagation.is_private() {
-                bind(Path::new(path), target.as_fd(), m.read_only, !shallow_ro)
+                bind(source, target.as_fd(), m.read_only, !shallow_ro)
             } else {
-                bind_propagated(Path::new(path), target.as_fd(), m.read_only, !shallow_ro)
+                bind_propagated(source, target.as_fd(), m.read_only, !shallow_ro)
             }
         }
         MountSource::Volume { path, .. } => {
@@ -139,6 +156,37 @@ fn open_nfs(options: &NfsOptions, read_only: bool) -> std::io::Result<OwnedFd> {
         &fs,
         FsMountFlags::FSMOUNT_CLOEXEC,
         attrs,
+    )?)
+}
+
+fn open_shared_source(path: &Path, roots: &[std::path::PathBuf]) -> std::io::Result<OwnedFd> {
+    let (root, tail) = roots
+        .iter()
+        .find_map(|root| path.strip_prefix(root).ok().map(|tail| (root, tail)))
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!(
+                    "{} is outside the Mac folders shared with the VM",
+                    path.display()
+                ),
+            )
+        })?;
+    let flags = OFlags::PATH | OFlags::CLOEXEC;
+    let root = rustix::fs::open(
+        root,
+        flags | OFlags::DIRECTORY | OFlags::NOFOLLOW,
+        Mode::empty(),
+    )?;
+    if tail.as_os_str().is_empty() {
+        return Ok(root);
+    }
+    Ok(rustix::fs::openat2(
+        root,
+        tail,
+        flags,
+        Mode::empty(),
+        ResolveFlags::BENEATH | ResolveFlags::NO_MAGICLINKS,
     )?)
 }
 

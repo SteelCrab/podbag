@@ -21,6 +21,25 @@
   Compose. Training modules for every podbag feature use it.
 - All modules and their guides: https://podbag.dev/training/.
 
+### Images
+
+- podbag can compress images that no container uses, file by file with zstd. It is off
+  by default. Files that two images share stay shared. In our test the store went from
+  725 MB to 337 MB.
+- `podbag system compression idle` turns it on. Images unused for 7 days (`--after`,
+  `compress_idle_after`) are then compressed a little after `pull`, `load`, `build`,
+  `rmi` and `prune`.
+- `podbag system compress` compresses idle images, or the named images, at once.
+  `podbag system decompress` decompresses them.
+- A container or a build that uses a compressed image decompresses it first. Only that
+  first start is slower (1.4 s for python, 1.8 s for Java, against 30 ms and 55 ms).
+- `podbag system df` has a `Compressed` row. The Docker API adds `PodbagCompression` to
+  `/images/json` with the size on disk and the size before.
+- Podbag Desktop asks once after an install or an update, has a switch in Settings, and
+  shows the size on disk and the space saved in the Images list.
+- On macOS and Windows the setting is kept where the engine runs (the VM or podbag's WSL
+  distribution).
+
 ### Kubernetes
 
 - Show OpenShift Routes in Podbag Desktop, the TUI and `podbag kube`. They appear only

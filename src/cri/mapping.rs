@@ -373,6 +373,7 @@ pub fn container_spec(
         health: None,
         console_size: None,
         extra_networks: Vec::new(),
+        fixed_addresses: Default::default(),
         namespaces,
         devices,
         cri_log: log_file(&pod.log_directory, &config.log_path),
