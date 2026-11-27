@@ -383,7 +383,8 @@
     // practice-tracks: a course session at a module `ui` step. A test sets window.practiceUi to
     // switch the step (window.practiceStage, window.practiceContainers and window.practiceSession
     // change the stage, the containers and the session), and reads window.practiceCalls:
-    // [action, session, name] of each request.
+    // [action, session, name] of each request. An inspect of a name other than the volume's
+    // shows a network.
     practice_volumes: ({ action, session, name, course }) => {
       if (view !== "practice-tracks" || !course) return null;
       const volume = { Name: "data", Driver: "local", Mountpoint: "/var/lib/podbag/volumes/data/_data", CreatedAt: new Date(now * 1000).toISOString() };
@@ -394,7 +395,8 @@
       };
       if (action === "status") return state;
       window.practiceCalls.push([action, session, name]);
-      return { ...state, text: action === "logs" ? "hello from web\n" : null, detail: action === "inspect" ? volume : null };
+      const network = { Name: name, Id: "n1", Driver: "bridge", Scope: "local", IPAM: { Config: [{ Subnet: "10.89.0.0/24", Gateway: "10.89.0.1" }] } };
+      return { ...state, text: action === "logs" ? "hello from web\n" : null, detail: action === "inspect" ? (name === volume.Name ? volume : network) : null };
     },
     volume_tools_lab: ({ action, package: file, id }) => {
       if (action === "install") {

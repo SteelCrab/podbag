@@ -219,15 +219,18 @@ function renderPracticeContainers(main) {
   h("div", { class: "content practice-workspace" }, resources));
   // log: the text of a logs step, { id, stage, text }: shown only under container `id`,
   // and dropped when the step moves on from `stage` or the container is gone.
-  let state, detailId, log = null, busy = false;
+  // inspected: the result of the toolbar's inspect step (a network or a volume), { stage,
+  // detail }: dropped when the step moves on from `stage`.
+  let state, detailId, log = null, inspected = null, busy = false;
   const refresh = watchPractice(resources, practiceResources(containerPractice), next => {
     const id = next?.module || containerPractice.id;
     if (guide.dataset.module !== id) {
       put(guide, trainingGuideButton(id));
       guide.dataset.module = id;
     }
-    if (next?.session !== state?.session) { detailId = null; log = null; }
+    if (next?.session !== state?.session) { detailId = null; log = null; inspected = null; }
     if (next?.text) log = { id: detailId, stage: next.stage, text: next.text };
+    if (inspected && next?.stage !== inspected.stage) inspected = null;
     if (log && (next?.stage !== log.stage || !next.containers.some(row => row.Id === log.id))) log = null;
     state = next;
     render();
@@ -248,17 +251,25 @@ function renderPracticeContainers(main) {
       return canStop(row) && iconButton("stop", t("action.stop"), () => change("stop", row.Id, state.session));
     };
     const session = state.session;
-    const stepButton = practiceStepButton(state, (action, name) => change(action, name, session), state.containers.map(containerName));
+    const stepButton = practiceStepButton(state, async (action, name) => {
+      const result = await change(action, name, session);
+      if (action === "inspect" && result?.detail) {
+        inspected = { stage: result.stage, detail: result.detail };
+        render();
+      }
+    }, state.containers.map(containerName));
+    const shown = inspected && [h("h2", { class: "panel-title", text: inspected.detail.Name }),
+      infoPanel(inspected.detail.Mountpoint ? "volumes" : "networks", inspected.detail)];
     const detail = state.containers.find(row => row.Id === detailId);
     if (detail) {
       put(resources, h("header", { class: "toolbar" },
         iconButton("back", t("action.back"), () => { detailId = null; log = null; render(); }),
-        h("h2", { text: containerName(detail) }), resourceAction(detail)), stepButton, infoPanel("containers", detail),
+        h("h2", { text: containerName(detail) }), resourceAction(detail)), stepButton, shown, infoPanel("containers", detail),
         log?.id === detail.Id ? h("pre", { class: "lab-output", text: log.text }) : null,
         state.web?.container === containerName(detail) ? renderPorts(detail) : null);
       return;
     }
-    put(resources, stepButton, state.containers.length
+    put(resources, stepButton, shown, state.containers.length
       ? resourceTable("containers", state.containers, openContainer,
         row => h("div", { class: "actions" }, resourceAction(row)))
       : h("p", { class: "nothing", text: t("empty.containers.title") }));
