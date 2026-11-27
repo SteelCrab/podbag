@@ -487,6 +487,25 @@ fn tty_output_is_one_stream_in_logs() {
     assert_eq!(stderr(&out), "");
 }
 
+#[test]
+fn tty_console_is_the_container_terminal() {
+    let sb = Sandbox::new();
+    let out = podbag(
+        &sb,
+        &[
+            "run",
+            "--rm",
+            "-t",
+            "--rootfs",
+            &rootfs(),
+            "sh",
+            "-ec",
+            "test -c /dev/console; echo console-output > /dev/console",
+        ],
+    );
+    assert_eq!(ok(&out), "console-output");
+}
+
 // Review fixes.
 
 // A normal desktop user's runtime directory (/run/user/1000/podbag) left no room in the

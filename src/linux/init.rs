@@ -122,19 +122,22 @@ fn setup_and_exec(
     if let Some(sock) = tty_socket {
         // Open the terminal in the container's own /dev/pts, so the command can find it.
         let (master, slave) = super::pty::open(None)?;
+        let fd = std::os::fd::AsRawFd::as_raw_fd(&slave);
+        mount_console(fd)?;
         // Before the command runs: it may ask for the size at once.
         if let Some((rows, cols)) = spec.console_size {
             super::pty::set_size(std::os::fd::AsRawFd::as_raw_fd(&master), rows, cols);
         }
-        super::pty::send_fd(sock, std::os::fd::AsRawFd::as_raw_fd(&master)).map_err(|e| {
-            os_error(
-                "cannot hand over the container terminal",
-                e,
-                "report this bug",
-            )
-        })?;
+        super::pty::send_fd(sock, std::os::fd::AsRawFd::as_raw_fd(&master))
+            .and_then(|()| super::pty::send_fd(sock, fd))
+            .map_err(|e| {
+                os_error(
+                    "cannot hand over the container terminal",
+                    e,
+                    "report this bug",
+                )
+            })?;
         drop(master);
-        let fd = std::os::fd::AsRawFd::as_raw_fd(&slave);
         connect_stdio(super::spawn::ContainerStdio {
             fds: [fd; 3],
             tty: true,
@@ -172,6 +175,27 @@ fn setup_and_exec(
     // SAFETY: writing one byte from a valid buffer to our own descriptor.
     unsafe { libc::write(status_fd, [0u8].as_ptr().cast(), 1) };
     exec(&program, &spec.command, &env)
+}
+
+fn mount_console(terminal: i32) -> Result<()> {
+    let path = Path::new("/dev/console");
+    let mount = || -> std::io::Result<()> {
+        match File::create_new(path) {
+            Ok(_) => {}
+            // A caller may have supplied its own /dev/console mount.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+            Err(e) => return Err(e),
+        }
+        rustix::mount::mount_bind(format!("/proc/self/fd/{terminal}").as_str(), path)
+            .map_err(Into::into)
+    };
+    mount().map_err(|e| {
+        os_error(
+            "cannot mount the container console",
+            e,
+            "check PTY mount support",
+        )
+    })
 }
 
 /// Bring up `lo` in this process's own network namespace (it holds CAP_NET_ADMIN there).
