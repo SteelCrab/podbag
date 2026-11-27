@@ -157,14 +157,15 @@ fn map_create_with(
             c = c.publish(p);
         }
     }
-    let (aliases, extra) = endpoints(
-        &body["NetworkingConfig"]["EndpointsConfig"],
-        &network,
-        &mut warnings,
-    )?;
+    let (aliases, extra, fixed) =
+        endpoints(&body["NetworkingConfig"]["EndpointsConfig"], &network)?;
     crate::spec::check_networks(&network, &aliases, &extra)?;
+    crate::spec::check_address_networks(&network, &extra, &fixed)?;
     c = names(c, host, &|| gateway(&network), &mut warnings)?;
     c = c.network(network);
+    for (name, addresses) in fixed {
+        c = c.fixed_addresses(name, addresses);
+    }
     for alias in aliases {
         c = c.network_alias(alias);
     }
@@ -599,8 +600,11 @@ fn parse_mount(m: &Value) -> Result<(MountRequest, Option<String>)> {
 fn endpoints(
     v: &Value,
     primary: &NetworkMode,
-    warnings: &mut Vec<String>,
-) -> Result<(Vec<String>, Vec<crate::spec::Attachment>)> {
+) -> Result<(
+    Vec<String>,
+    Vec<crate::spec::Attachment>,
+    crate::network::FixedByNetwork,
+)> {
     // The keys the docker CLI and Compose use for the primary network.
     let primary_keys: Vec<&str> = match primary {
         NetworkMode::Bridge { network } if network == crate::network::DEFAULT => {
@@ -612,6 +616,7 @@ fn endpoints(
     };
     let mut aliases = Vec::new();
     let mut extra = Vec::new();
+    let mut fixed = crate::network::FixedByNetwork::new();
     for (key, cfg) in v.as_object().into_iter().flatten() {
         let names = match &cfg["Aliases"] {
             Value::Null => Vec::new(),
@@ -635,25 +640,50 @@ fn endpoints(
                 ));
             }
         };
-        if cfg["IPAMConfig"]["IPv4Address"]
-            .as_str()
-            .is_some_and(|a| !a.is_empty())
-        {
-            warnings.push(format!("a fixed address on {key} is ignored"));
+        let network = if key == "default" {
+            crate::network::DEFAULT
+        } else {
+            key
+        };
+        let addresses = fixed_addresses(cfg)?;
+        if !addresses.is_empty() {
+            fixed.insert(network.to_string(), addresses);
         }
         if primary_keys.contains(&key.as_str()) {
             aliases = names;
         } else {
             extra.push(crate::spec::Attachment {
-                network: match key.as_str() {
-                    "default" => crate::network::DEFAULT.to_string(),
-                    other => other.to_string(),
-                },
+                network: network.to_string(),
                 aliases: names,
             });
         }
     }
-    Ok((aliases, extra))
+    Ok((aliases, extra, fixed))
+}
+
+/// Static addresses from Docker's EndpointSettings or NetworkConnectRequest.
+pub(super) fn fixed_addresses(endpoint: &Value) -> Result<crate::network::FixedAddresses> {
+    fn address<T: std::str::FromStr>(ipam: &Value, key: &str) -> Result<Option<T>> {
+        if ipam[key].is_null() || ipam[key] == "" {
+            return Ok(None);
+        }
+        ipam[key]
+            .as_str()
+            .and_then(|ip| ip.parse().ok())
+            .map(Some)
+            .ok_or_else(|| {
+                invalid(
+                    "invalid network address",
+                    format!("{key} is not a valid address"),
+                    "give an address of the appropriate family without a prefix length",
+                )
+            })
+    }
+    let ipam = &endpoint["IPAMConfig"];
+    Ok(crate::network::FixedAddresses {
+        ipv4: address(ipam, "IPv4Address")?,
+        ipv6: address(ipam, "IPv6Address")?,
+    })
 }
 
 fn network_mode(mode: &str) -> Result<NetworkMode> {
@@ -1033,12 +1063,8 @@ mod tests {
             f["extra_networks"],
             json!([{"network": "back", "aliases": ["w"]}, {"network": "zed"}])
         );
-        let text = warnings.join("\n");
-        assert!(text.contains("fixed address"), "{warnings:?}");
-        assert!(
-            !text.contains("alias") && !text.contains("only the network"),
-            "{warnings:?}"
-        );
+        assert_eq!(f["fixed_addresses"], json!({"back": {"ipv4": "10.9.9.9"}}));
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
 
     #[test]

@@ -192,7 +192,7 @@ pub(super) fn shape(
     let alone = |name| shapes::Attached {
         name,
         network: None,
-        ip: None,
+        addresses: None,
         aliases: &[],
     };
     let networks: Vec<shapes::Attached> = match &spec.network {
@@ -201,15 +201,15 @@ pub(super) fn shape(
             .into_iter()
             .enumerate()
             .map(|(index, name)| {
-                let (network, ip) = match crate::network::with_address_of(&ctx.dirs, name, &info.id)
-                {
-                    Ok((network, ip)) => (Some(network), ip),
-                    Err(_) => (None, None),
-                };
+                let (network, addresses) =
+                    match crate::network::with_addresses_of(&ctx.dirs, name, &info.id) {
+                        Ok((network, ip)) => (Some(network), ip),
+                        Err(_) => (None, None),
+                    };
                 shapes::Attached {
                     name,
                     network,
-                    ip,
+                    addresses,
                     aliases: spec.aliases_on(index),
                 }
             })

@@ -623,6 +623,7 @@ podbag build -t myapp - < Dockerfile               # only a Dockerfile, no conte
 | `--network-alias NAME` | one more name on the first user network |
 | `--network host` | the host's network |
 | `--network none` | loopback only |
+| `--ip ADDRESS`, `--ip6 ADDRESS` | request a fixed address on the first bridge network |
 | `-p [IP:][HOST:]CONTAINER[/tcp\|udp]` | publish a port; without a host port, the kernel picks one (see `ps`, `inspect`) |
 | `--add-host NAME:IP` | one more line in `/etc/hosts`; `NAME=IP` and IPv6 (`NAME=[::1]`) work too |
 | `--add-host NAME:host-gateway` | `NAME` leads to the host (see [host-gateway](#host-gateway)) |
@@ -633,13 +634,23 @@ podbag build -t myapp - < Dockerfile               # only a Dockerfile, no conte
 ### Names and addresses
 
 - New networks get `10.78.<n>.0/24`, unless `--subnet` gives another.
+- `podbag network create --ipv6 NAME` adds a local IPv6 subnet to the IPv4 bridge.
+  Specify a subnet with `--subnet6`, or use the default ULA `/64`. For Docker CLI use
+  `docker network create --ipv6 --subnet fd42:1234::/64 NAME`.
+- IPv6 addresses reach peers on the same bridge. External routing and published ports
+  continue to use IPv4.
+- Fixed addresses must be inside their subnet and outside its reserved addresses. The
+  engine refuses an address already assigned to another running container.
 - A subnet that overlaps another network or a host route is refused.
 - Container names and aliases are written into each container's `/etc/hosts`. podbag
-  updates them as containers start and stop.
-- There is no DNS server. When two containers share an alias, the first one answers.
-- `podbag network connect [--alias NAME] NET CONTAINER` and
-  `podbag network disconnect NET CONTAINER` change the networks of a stopped container,
-  for its next start. A running container is refused.
+  updates them when containers start, stop or change their network attachments.
+- By default, when two containers share an alias, the first one found in `/etc/hosts`
+  answers. Enable embedded DNS to receive the addresses of every matching peer.
+- `podbag network connect [--alias NAME] [--ip ADDRESS] [--ip6 ADDRESS] NET CONTAINER` and
+  `podbag network disconnect NET CONTAINER` change the container's secondary bridge
+  networks. The change takes effect immediately while the container runs and also
+  applies to later starts. The primary bridge and its default route stay in place.
+  Containers using host, none or a shared network namespace cannot join another bridge.
 
 ### Extra hosts and DNS
 
@@ -651,6 +662,19 @@ podbag build -t myapp - < Dockerfile               # only a Dockerfile, no conte
   Each `--dns` option replaces its part of that file.
 - The Docker API takes `ExtraHosts`, `Dns`, `DnsSearch` and `DnsOptions`, and `inspect`
   shows them.
+
+### Embedded DNS
+
+Set `embedded_dns = true` in `config.toml` or run with `PODBAG_EMBEDDED_DNS=1`. This
+applies to bridge containers when they start. Each enabled container gets a private
+resolver at `127.0.0.11` on port 53 over UDP and TCP. It returns IPv4 and IPv6 addresses
+for names and aliases on its attached user bridges. Live attachment changes take effect
+in subsequent DNS queries. The default bridge does not publish container names.
+
+Other names are sent to the usual upstream servers. In rootless mode that is pasta's
+forwarder. An explicit `--dns` server list or a mount over `/etc/resolv.conf` takes
+priority and bypasses the embedded resolver. DNS search domains and resolver options
+still apply. Each enabled container keeps its shim process to serve these requests.
 
 ### host-gateway
 
@@ -768,7 +792,6 @@ podbag system docker restore    # back to the context you had (Docker Desktop, â
   log. It cannot send input.
 - When a client leaves an attached `exec`, the command ends. (Docker keeps it running.)
 - Volumes and networks keep their labels.
-- `network connect` changes stopped containers only.
 
 ### Docker Compose
 
@@ -776,8 +799,9 @@ podbag system docker restore    # back to the context you had (Docker Desktop, â
 - Supports the project's networks and volumes, several networks per service, service and
   container names, `depends_on` with `condition: service_healthy`, restart policies and
   health checks.
-- Names live in each container's `/etc/hosts` (no DNS server). When replicas share a name,
-  the first one answers.
+- By default, names live in each container's `/etc/hosts`. When replicas share a name,
+  the first one answers. The optional embedded DNS resolver returns every matching
+  address for direct DNS queries.
 - `docker compose build` works with the classic builder (see below), or with a buildx
   builder (`--builder`).
 
