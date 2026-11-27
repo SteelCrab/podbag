@@ -1337,6 +1337,45 @@ pub(crate) fn with_addresses_of(
     Ok((record.network, addresses))
 }
 
+/// Find a name only on the caller's active user bridges. Hold the same lock as live
+/// attachment changes so a lookup sees consistent settings and allocations.
+#[cfg(target_os = "linux")]
+pub(crate) fn lookup_peer(dirs: &Dirs, caller: &str, name: &str) -> Result<Vec<std::net::IpAddr>> {
+    let _lock = lock(dirs)?;
+    let spec = crate::state::read_config(dirs, caller)?;
+    let mut addresses = Vec::new();
+    let matches_name = |candidate: &str| candidate.trim_end_matches('.').eq_ignore_ascii_case(name);
+    for network in spec
+        .bridge_networks()
+        .into_iter()
+        .filter(|network| *network != DEFAULT)
+    {
+        let Some(record) = read_record(dirs, network)? else {
+            continue;
+        };
+        if !record.containers.contains_key(caller) {
+            continue;
+        }
+        for (id, member) in &record.containers {
+            if !matches_name(&member.name)
+                && !member.aliases.iter().any(|alias| matches_name(alias))
+            {
+                continue;
+            }
+            // A killed watcher can leave a record behind until its state is reconciled.
+            // Service virtual addresses are not owned by a container watcher.
+            if crate::id::is_valid(id) && !crate::state::shim_running(dirs, id) {
+                continue;
+            }
+            addresses.push(member.ip.into());
+            addresses.extend(member.ip6.map(std::net::IpAddr::from));
+        }
+    }
+    addresses.sort_unstable();
+    addresses.dedup();
+    Ok(addresses)
+}
+
 /// The containers with an address in `network`: (name, address), by address.
 #[cfg(test)]
 pub(crate) fn members(dirs: &Dirs, network: &str) -> Result<Vec<(String, Ipv4Addr)>> {

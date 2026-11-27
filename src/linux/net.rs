@@ -115,15 +115,21 @@ pub(crate) fn in_netns_file<T: Send, E: From<std::io::Error> + Send>(
     std::thread::scope(|scope| {
         scope
             .spawn(|| {
-                // SAFETY: setns on a namespace descriptor we opened; it affects this thread.
-                if unsafe { libc::setns(ns.as_raw_fd(), libc::CLONE_NEWNET) } != 0 {
-                    return Err(std::io::Error::last_os_error().into());
-                }
+                join_netns(ns)?;
                 f()
             })
             .join()
             .unwrap_or_else(|_| Err(std::io::Error::other("network setup thread panicked").into()))
     })
+}
+
+/// Move the calling thread into a network namespace we opened.
+pub(crate) fn join_netns(ns: &File) -> std::io::Result<()> {
+    // SAFETY: the namespace descriptor is open and setns affects only this thread.
+    if unsafe { libc::setns(ns.as_raw_fd(), libc::CLONE_NEWNET) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// Connect process `pid` (a new container, in its own network namespace) to the network:

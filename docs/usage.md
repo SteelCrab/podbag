@@ -644,7 +644,8 @@ podbag build -t myapp - < Dockerfile               # only a Dockerfile, no conte
 - A subnet that overlaps another network or a host route is refused.
 - Container names and aliases are written into each container's `/etc/hosts`. podbag
   updates them when containers start, stop or change their network attachments.
-- There is no DNS server. When two containers share an alias, the first one answers.
+- By default, when two containers share an alias, the first one found in `/etc/hosts`
+  answers. Enable embedded DNS to receive the addresses of every matching peer.
 - `podbag network connect [--alias NAME] [--ip ADDRESS] [--ip6 ADDRESS] NET CONTAINER` and
   `podbag network disconnect NET CONTAINER` change the container's secondary bridge
   networks. The change takes effect immediately while the container runs and also
@@ -661,6 +662,19 @@ podbag build -t myapp - < Dockerfile               # only a Dockerfile, no conte
   Each `--dns` option replaces its part of that file.
 - The Docker API takes `ExtraHosts`, `Dns`, `DnsSearch` and `DnsOptions`, and `inspect`
   shows them.
+
+### Embedded DNS
+
+Set `embedded_dns = true` in `config.toml` or run with `PODBAG_EMBEDDED_DNS=1`. This
+applies to bridge containers when they start. Each enabled container gets a private
+resolver at `127.0.0.11` on port 53 over UDP and TCP. It returns IPv4 and IPv6 addresses
+for names and aliases on its attached user bridges. Live attachment changes take effect
+in subsequent DNS queries. The default bridge does not publish container names.
+
+Other names are sent to the usual upstream servers. In rootless mode that is pasta's
+forwarder. An explicit `--dns` server list or a mount over `/etc/resolv.conf` takes
+priority and bypasses the embedded resolver. DNS search domains and resolver options
+still apply. Each enabled container keeps its shim process to serve these requests.
 
 ### host-gateway
 
@@ -785,8 +799,9 @@ podbag system docker restore    # back to the context you had (Docker Desktop, â
 - Supports the project's networks and volumes, several networks per service, service and
   container names, `depends_on` with `condition: service_healthy`, restart policies and
   health checks.
-- Names live in each container's `/etc/hosts` (no DNS server). When replicas share a name,
-  the first one answers.
+- By default, names live in each container's `/etc/hosts`. When replicas share a name,
+  the first one answers. The optional embedded DNS resolver returns every matching
+  address for direct DNS queries.
 - `docker compose build` works with the classic builder (see below), or with a buildx
   builder (`--builder`).
 

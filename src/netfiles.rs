@@ -447,11 +447,13 @@ fn is_loopback(server: &str) -> bool {
 }
 
 /// The name servers of a resolv.conf.
-fn nameservers(text: &str) -> impl Iterator<Item = &str> {
-    text.lines()
-        .filter_map(|l| l.trim().strip_prefix("nameserver"))
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
+pub(crate) fn nameservers(text: &str) -> impl Iterator<Item = &str> {
+    text.lines().filter_map(|line| {
+        let mut fields = line.split_whitespace();
+        (fields.next()? == "nameserver")
+            .then(|| fields.next())
+            .flatten()
+    })
 }
 
 /// Name servers in a resolv.conf that a container can reach (not loopback).

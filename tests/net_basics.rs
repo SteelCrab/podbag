@@ -1184,6 +1184,196 @@ fn failed_live_network_settings_write_restores_interfaces_and_addresses() {
     ok(&podbag(&sb, &["network", "disconnect", "back", "web"]));
 }
 
+/// Ask the DNS socket directly from inside the container. This bypasses /etc/hosts.
+fn query_embedded_dns(
+    sb: &Sandbox,
+    container: &str,
+    name: &str,
+    record_type: hickory_proto::rr::RecordType,
+    tcp: bool,
+) -> hickory_proto::op::Message {
+    use hickory_proto::op::{Message, MessageType, Query};
+    use hickory_proto::rr::Name;
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let mut request = Message::query();
+    request.metadata.recursion_desired = true;
+    request.add_query(Query::query(Name::from_ascii(name).unwrap(), record_type));
+    let wire = request.to_vec().unwrap();
+    let timeout = if tcp { "8" } else { "3" };
+    let mut args = vec!["exec", "-i", container, "busybox", "nc", "-w", timeout];
+    if !tcp {
+        args.push("-u");
+    }
+    args.extend(["127.0.0.11", "53"]);
+    let mut proc = sb
+        .podbag()
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = proc.stdin.take().unwrap();
+    if tcp {
+        input
+            .write_all(&u16::try_from(wire.len()).unwrap().to_be_bytes())
+            .unwrap();
+    }
+    input.write_all(&wire).unwrap();
+    drop(input);
+    let output = proc.wait_with_output().unwrap();
+    let bytes = output.stdout.as_slice();
+    assert!(
+        !bytes.is_empty(),
+        "{container} DNS {name}: {}",
+        stderr(&output)
+    );
+    let bytes = if tcp {
+        assert!(bytes.len() >= 2, "short TCP DNS frame: {bytes:?}");
+        let size = usize::from(u16::from_be_bytes([bytes[0], bytes[1]]));
+        assert_eq!(size, bytes.len() - 2, "invalid TCP DNS frame: {bytes:?}");
+        &bytes[2..]
+    } else {
+        bytes
+    };
+    let reply = Message::from_vec(bytes).unwrap();
+    assert_eq!(reply.metadata.id, request.metadata.id);
+    assert_eq!(reply.metadata.message_type, MessageType::Response);
+    assert_eq!(reply.queries, request.queries);
+    reply
+}
+
+#[test]
+fn embedded_dns_follows_live_bridge_membership_over_udp_and_tcp() {
+    use hickory_proto::op::ResponseCode;
+    use hickory_proto::rr::RecordType;
+
+    let _turn = network_turn();
+    let sb = Sandbox::with_env("PODBAG_EMBEDDED_DNS", "1");
+    ok(&podbag(
+        &sb,
+        &[
+            "network",
+            "create",
+            "--subnet",
+            "10.231.54.0/24",
+            "--ipv6",
+            "--subnet6",
+            "fdc3:391:104::/64",
+            "app",
+        ],
+    ));
+    ok(&podbag(
+        &sb,
+        &["network", "create", "--subnet", "10.231.55.0/24", "private"],
+    ));
+    start(
+        &sb,
+        "peer",
+        &[
+            "--network",
+            "app",
+            "--network-alias",
+            "shared-name",
+            "--ip",
+            "10.231.54.42",
+            "--ip6",
+            "fdc3:391:104::42",
+        ],
+        &["sleep", "300"],
+    );
+    start(
+        &sb,
+        "private-peer",
+        &[
+            "--network",
+            "private",
+            "--network-alias",
+            "private-name.invalid",
+            "--ip",
+            "10.231.55.42",
+        ],
+        &["sleep", "300"],
+    );
+    start(
+        &sb,
+        "client",
+        &[
+            "--network",
+            "app",
+            "--dns-search",
+            "example.test",
+            "--dns-option",
+            "ndots:2",
+        ],
+        &["sleep", "300"],
+    );
+    let config = ok(&podbag(&sb, &["exec", "client", "cat", "/etc/resolv.conf"]));
+    assert!(config.starts_with("nameserver 127.0.0.11\n"), "{config}");
+    assert!(config.contains("search example.test\n"), "{config}");
+    assert!(config.contains("options ndots:2"), "{config}");
+
+    for (name, record_type, expected) in [
+        ("ShArEd-NaMe.", RecordType::A, "10.231.54.42"),
+        ("peer.", RecordType::AAAA, "fdc3:391:104::42"),
+    ] {
+        for tcp in [false, true] {
+            let answer = query_embedded_dns(&sb, "client", name, record_type, tcp);
+            assert_eq!(answer.metadata.response_code, ResponseCode::NoError);
+            assert_eq!(answer.answers.len(), 1, "{answer:?}");
+            assert_eq!(answer.answers[0].data.to_string(), expected);
+        }
+    }
+    let private = "private-name.invalid.";
+    let cannot_see_private = || {
+        let answer = query_embedded_dns(&sb, "client", private, RecordType::A, true);
+        // The configured upstream can return NXDOMAIN, or be unavailable in offline CI.
+        assert!(
+            matches!(
+                answer.metadata.response_code,
+                ResponseCode::NXDomain | ResponseCode::ServFail
+            ),
+            "{answer:?}",
+        );
+        assert!(answer.answers.is_empty(), "{answer:?}");
+    };
+    cannot_see_private();
+    ok(&podbag(&sb, &["network", "connect", "private", "client"]));
+    let answer = query_embedded_dns(&sb, "client", private, RecordType::A, true);
+    assert_eq!(answer.answers.len(), 1, "{answer:?}");
+    assert_eq!(answer.answers[0].data.to_string(), "10.231.55.42");
+    ok(&podbag(
+        &sb,
+        &["network", "disconnect", "private", "client"],
+    ));
+    cannot_see_private();
+
+    if std::env::var("PODBAG_TEST_NETWORK").as_deref() == Ok("1") {
+        for tcp in [false, true] {
+            let upstream = query_embedded_dns(&sb, "client", "example.com.", RecordType::A, tcp);
+            assert_eq!(upstream.metadata.response_code, ResponseCode::NoError);
+            assert!(!upstream.answers.is_empty(), "{upstream:?}");
+        }
+    }
+}
+
+#[test]
+fn embedded_dns_keeps_explicit_servers_and_resolv_conf_mounts() {
+    let sb = Sandbox::with_env("PODBAG_EMBEDDED_DNS", "1");
+    let seen = ok(&sb.run_with(&["--dns", "192.0.2.53"], &["cat", "/etc/resolv.conf"]));
+    assert!(seen.starts_with("nameserver 192.0.2.53\n"), "{seen}");
+    assert!(!seen.contains("127.0.0.11"), "{seen}");
+
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("resolv.conf");
+    std::fs::write(&file, "nameserver 192.0.2.54\n").unwrap();
+    let volume = format!("{}:/etc/resolv.conf:ro", file.display());
+    let seen = ok(&sb.run_with(&["-v", &volume], &["cat", "/etc/resolv.conf"]));
+    assert_eq!(seen, "nameserver 192.0.2.54");
+}
+
 #[test]
 fn a_killed_watcher_gives_back_every_network() {
     let _turn = network_turn();

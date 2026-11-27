@@ -7,7 +7,7 @@ use crate::paths::Dirs;
 use crate::spec::ContainerSpec;
 use crate::volume::{Mount, MountSource};
 use crate::{Error, Result};
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 /// The files `/etc/hostname`, `/etc/hosts` and `/etc/resolv.conf`, written into the
 /// container directory, as mounts that go before the user's (a user mount on the same
@@ -17,32 +17,54 @@ pub(super) fn files(
     dirs: &Dirs,
     rootless: bool,
     own: Own<'_>,
-) -> Result<Vec<Mount>> {
+    embedded_dns: bool,
+) -> Result<(Vec<Mount>, Option<Vec<SocketAddr>>)> {
     let dir = dirs.container_dir(&spec.id);
     let read = |p: &str| std::fs::read_to_string(p).unwrap_or_default();
-    // `rootless` comes from the caller: after joining the session's user namespace this
-    // process's user ID reads 0.
-    let systemd = std::fs::read_to_string("/run/systemd/resolve/resolv.conf").ok();
-    let wanted = [
-        ("hostname", format!("{}\n", spec.hostname)),
-        ("hosts", netfiles::hosts_file(&own, &read("/etc/hosts"))),
-        (
-            "resolv.conf",
-            netfiles::resolv_conf(
-                &spec.network,
-                rootless,
-                &read("/etc/resolv.conf"),
-                systemd.as_deref(),
-                &spec.dns,
-            ),
-        ),
-    ];
     let covered = |target: &str| {
         spec.mounts.iter().any(|m| {
             target == m.target
                 || target.starts_with(&format!("{}/", m.target.trim_end_matches('/')))
         })
     };
+    // `rootless` comes from the caller: after joining the session's user namespace this
+    // process's user ID reads 0.
+    let systemd = std::fs::read_to_string("/run/systemd/resolve/resolv.conf").ok();
+    let mut resolv = netfiles::resolv_conf(
+        &spec.network,
+        rootless,
+        &read("/etc/resolv.conf"),
+        systemd.as_deref(),
+        &spec.dns,
+    );
+    let mut upstream = None;
+    if embedded_dns
+        && !spec.bridge_networks().is_empty()
+        && spec.own_netns()
+        && spec.dns.servers.is_empty()
+        && !covered("/etc/resolv.conf")
+    {
+        let servers = netfiles::nameservers(&resolv)
+            .filter_map(|server| server.parse::<IpAddr>().ok())
+            .filter(|ip| !ip.is_loopback())
+            .map(|ip| SocketAddr::new(ip, 53))
+            .take(3)
+            .collect();
+        let mut local = format!("nameserver {}\n", super::dns::LISTENER);
+        for line in resolv.lines() {
+            if line.split_whitespace().next() != Some("nameserver") {
+                local.push_str(line);
+                local.push('\n');
+            }
+        }
+        resolv = local;
+        upstream = Some(servers);
+    }
+    let wanted = [
+        ("hostname", format!("{}\n", spec.hostname)),
+        ("hosts", netfiles::hosts_file(&own, &read("/etc/hosts"))),
+        ("resolv.conf", resolv),
+    ];
     let mut mounts = Vec::new();
     for (name, content) in wanted {
         let target = format!("/etc/{name}");
@@ -68,7 +90,7 @@ pub(super) fn files(
             copy_up: false,
         });
     }
-    Ok(mounts)
+    Ok((mounts, upstream))
 }
 
 /// The container's networks and its address on each, its primary network first (none
