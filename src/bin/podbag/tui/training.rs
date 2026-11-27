@@ -4,7 +4,7 @@
 use super::app::{Effect, Lists, Verb};
 use super::preferences::Appearance;
 use podbag::client::Kind;
-use podbag::volume_lesson::course::{self, Attempt, OPEN_WEB, StepDef};
+use podbag::volume_lesson::course::{self, Attempt, Check, OPEN_WEB, StepDef};
 use std::io;
 use std::path::Path;
 
@@ -141,13 +141,23 @@ pub fn hint(look: &Appearance, panel: &Panel, lists: &Lists) -> String {
                 .find(|kind| kind.segment() == name)
                 .unwrap_or(Kind::Containers),
         ),
-        "inspect" => ("inspect", listed_in(lists, &name)),
+        "inspect" => ("inspect", inspected_in(&step.check, lists, &name)),
         // start, stop, restart, pause, resume, remove, logs: a container.
         other => (other, Kind::Containers),
     };
     look.text(&format!("training.do.{key}"))
         .replace("{tab}", &look.text(&format!("nav.{}", tab.segment())))
         .replace("{name}", &name)
+}
+
+/// The list of an inspect step's object: the one its desktop-* check names, else the
+/// first list that has NAME.
+fn inspected_in(check: &Check, lists: &Lists, name: &str) -> Kind {
+    match check {
+        Check::DesktopInspectVolume { .. } => Kind::Volumes,
+        Check::DesktopInspectExited { .. } | Check::DesktopPorts { .. } => Kind::Containers,
+        _ => listed_in(lists, name),
+    }
 }
 
 /// The first list that has NAME (containers, volumes, networks), else Containers.
@@ -331,12 +341,13 @@ mod tests {
     fn hints_find_the_tab_of_the_object() {
         let en = look("en");
         let mut lists = Lists::default();
+        // A step whose check names no resource type: the first list that has the name.
         let inspect = panel(
             vec![ui_step(
                 "inspect",
                 "data",
-                Check::DesktopInspectVolume {
-                    name: "data".into(),
+                Check::OutputContains {
+                    text: "local".into(),
                 },
             )],
             0,
@@ -352,6 +363,31 @@ mod tests {
         });
         assert_eq!(
             hint(&en, &inspect, &lists),
+            "Select data in Volumes and press Enter"
+        );
+        // desktop-inspect-volume names a volume: Volumes, also when a container has the name.
+        lists.containers.push(podbag::client::ContainerSummary {
+            names: vec!["/data".into()],
+            ..Default::default()
+        });
+        let volume = panel(
+            vec![step(
+                "inspectVolume",
+                "Open the volume",
+                None,
+                Check::DesktopInspectVolume {
+                    name: "data".into(),
+                },
+                None,
+            )],
+            0,
+        );
+        assert_eq!(
+            hint(&en, &volume, &lists),
+            "Select data in Volumes and press Enter"
+        );
+        assert_eq!(
+            hint(&en, &volume, &Lists::default()),
             "Select data in Volumes and press Enter"
         );
         let prune = panel(vec![ui_step("prune", "images", image_exists("busybox"))], 0);
