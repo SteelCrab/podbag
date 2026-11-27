@@ -1189,6 +1189,22 @@ podbag lab remove container-network
 - Languages: English, 한국어, 日本語, 简体中文, Filipino, Español and Tiếng Việt. The app
   follows the system language. Settings can change it.
 
+#### Local development cluster
+
+- Install [kind](https://kind.sigs.k8s.io/docs/user/quick-start/) and `kubectl` on the
+  desktop host. Point the Docker CLI at a separate local Docker engine that runs Linux
+  containers. The stock kind Docker provider currently requires bridge network options
+  including IPv6 that Podbag's Docker-compatible engine does not support.
+- Open **Kubernetes → Local cluster**. Enter a Kubernetes release tag supported by your
+  kind version, or keep the kind default. Choose the node count and select **Create
+  cluster**. The first node is the control plane, and the remaining nodes are workers.
+- The API server listens on loopback. The app stores the kubeconfig in its private
+  `local-kubernetes` directory and includes that context in the cluster selector. Your
+  normal kubeconfig and its current context are left alone.
+- **Reset cluster** deletes the Podbag-managed cluster and recreates it with the same
+  settings. **Remove** deletes it and its private kubeconfig. Both erase the local
+  workloads and data. Podbag checks the original Docker engine before deleting anything.
+
 #### Engine switch
 
 - Select the browsing engine in **Settings → Engine**. Migration uses its own source and destination.

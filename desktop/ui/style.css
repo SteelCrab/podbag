@@ -415,6 +415,13 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 .kube-cluster select { min-width: 0; max-width: 75%; }
 .kube-scope { margin: 10px 20px 0; font-size: 12.5px; overflow-wrap: anywhere; }
 .kube-scope:empty { display: none; }
+.local-kube { width: min(420px, calc(100vw - 48px)); padding: 20px 22px 18px; }
+.local-kube > p { margin-top: 8px; }
+.local-kube .buttons { margin-top: 16px; }
+.local-kube .local-kube-form { margin-top: 16px; padding: 0; gap: 14px; }
+.local-kube-form label { display: grid; gap: 5px; }
+.local-kube-form button { justify-self: start; }
+.local-kube-message:empty { display: none; }
 .kube-list { min-width: 510px; }
 .kube-list th:first-child { width: 27%; }
 .kube-inspect { width: min(720px, calc(100vw - 48px)); }

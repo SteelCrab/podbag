@@ -50,6 +50,94 @@ function inspectKubeObject(item, context) {
   dialog.showModal();
 }
 
+function openLocalCluster(onChange) {
+  const section = h("div", { "aria-live": "polite" });
+  const message = h("p", { class: "local-kube-message secondary-text", "aria-live": "polite" });
+  const close = h("button", { type: "button", class: "button", text: t("action.back") });
+  const dialog = h("dialog", { class: "local-kube", "aria-labelledby": "local-kube-title" },
+    h("h2", { id: "local-kube-title", text: t("kube.localTitle") }),
+    h("p", { text: t("kube.localPrerequisites") }),
+    section,
+    message,
+    h("div", { class: "buttons" }, close));
+  let busy = false;
+  close.addEventListener("click", () => dialog.close());
+  dialog.addEventListener("close", () => dialog.remove(), { once: true });
+  dialog.addEventListener("cancel", (event) => {
+    if (busy) event.preventDefault();
+  });
+
+  function show(cluster) {
+    if (cluster) {
+      const reset = button(null, t("kube.localReset"), async () => {
+        if (await confirmDialog(t("kube.localResetConfirm"), t("kube.localReset"))) {
+          await perform(t("kube.localResetting"), API.localKubeReset);
+        }
+      });
+      const remove = button(null, t("action.remove"), async () => {
+        if (await confirmDialog(t("kube.localRemoveConfirm"), t("action.remove"))) {
+          await perform(t("kube.localRemoving"), async () => {
+            await API.localKubeRemove();
+            return null;
+          }, cluster.context);
+        }
+      });
+      section.replaceChildren(h("dl", { class: "fields" },
+        field(t("kube.cluster"), cluster.context, "mono"),
+        field(t("kube.localVersion"), cluster.version || t("kube.localDefault")),
+        field(t("kube.localNodes"), cluster.nodes),
+        field(t("settings.vmState"), t(cluster.ready ? "kube.localProvisioned" : "kube.localIncomplete"))),
+        h("div", { class: "buttons" }, reset, remove));
+      return;
+    }
+    const version = h("input", {
+      id: "local-kube-version", name: "version", type: "text", placeholder: t("kube.localDefault"),
+      pattern: "v1[.][0-9]{1,3}[.][0-9]{1,3}", title: "v1.35.0",
+    });
+    const nodes = h("input", { id: "local-kube-nodes", name: "nodes", type: "number", min: "1", max: "255", step: "1", value: "1", required: true });
+    const form = h("form", { class: "local-kube-form" },
+      h("label", { for: "local-kube-version" }, t("kube.localVersion"), version),
+      h("label", { for: "local-kube-nodes" }, t("kube.localNodes"), nodes),
+      h("button", { type: "submit", class: "button primary", text: t("kube.localCreate") }));
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      perform(t("kube.localCreating"), () => API.localKubeCreate(version.value.trim(), nodes.valueAsNumber));
+    });
+    section.replaceChildren(form);
+    if (dialog.open && !busy) version.focus();
+  }
+
+  async function perform(label, action, removedContext) {
+    if (busy) return;
+    busy = true;
+    close.disabled = true;
+    section.querySelectorAll("button, input").forEach((el) => { el.disabled = true; });
+    message.classList.remove("error-text");
+    message.textContent = label;
+    try {
+      const cluster = await action();
+      show(cluster);
+      message.textContent = "";
+      onChange(cluster, removedContext);
+    } catch (error) {
+      message.classList.add("error-text");
+      message.textContent = String(error);
+      await API.localKubeStatus().then(show).catch(() => {});
+    } finally {
+      busy = false;
+      close.disabled = false;
+      section.querySelectorAll("button, input").forEach((el) => { el.disabled = false; });
+    }
+  }
+
+  document.body.append(dialog);
+  dialog.showModal();
+  API.localKubeStatus().then(show).catch((error) => {
+    message.classList.add("error-text");
+    message.textContent = String(error);
+  });
+}
+
 function renderKubernetes(main) {
   let items = [];
   let context = "";
@@ -77,6 +165,12 @@ function renderKubernetes(main) {
     API.kubeContexts().then(contexts).catch(() => {});
     return load();
   }
+  function localChanged(local, removedContext) {
+    if (local) S.kubeContext = local.context;
+    else if (S.kubeContext === removedContext) S.kubeContext = "";
+    sessionStorage.setItem("kube-context", S.kubeContext);
+    reload();
+  }
   const tabs = KUBE_KINDS.map((kind) => h("button", {
     type: "button", class: "tab", id: `kube-${kind}`, "aria-pressed": String(kind === S.kubeKind),
     onclick: () => go("kubernetes", kind), text: t(`kube.${kind}`),
@@ -84,7 +178,10 @@ function renderKubernetes(main) {
   main.replaceChildren(
     h("header", { class: "toolbar" }, h("h1", { text: t("nav.kubernetes") }),
       h("label", { class: "search-box" }, icon("search"), search),
-      h("div", { class: "tools" }, windowBar ? null : iconButton("refresh", t("action.refresh"), reload))),
+      h("div", { class: "tools" },
+        h("button", { id: "local-kube-open", class: "button", type: "button", text: t("kube.localTitle"),
+          onclick: () => openLocalCluster(localChanged) }),
+        windowBar ? null : iconButton("refresh", t("action.refresh"), reload))),
     h("div", { class: "tabs kube-tabs", role: "group", "aria-label": t("nav.kubernetes") }, tabs,
       h("label", { class: "check" }, all, t("kube.allNamespaces"))),
     h("label", { class: "kube-cluster" }, t("kube.cluster"), cluster), scope, content);

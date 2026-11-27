@@ -175,13 +175,21 @@
   // (another dialog is open when the window first asks for the VM's state).
   const compression = { mode: params.get("compression") === "idle" ? "idle" : "off", after: Number(params.get("after") ?? 604800) };
   const practiceModules = new Map();
+  let localCluster = null;
   const commands = {
     "plugin:autostart|is_enabled": () => launchAtLogin,
     "plugin:autostart|enable": () => { launchAtLogin = true; },
     "plugin:autostart|disable": () => { launchAtLogin = false; },
     connection: () => [token, selected, selected === "podbag"],
     contexts: () => ["desktop-linux", "orbstack"],
-    kube_contexts: () => ["dev", "staging"],
+    kube_contexts: () => ["dev", "staging", ...(localCluster ? [localCluster.context] : [])],
+    local_kube_status: () => localCluster,
+    local_kube_create: ({ version, nodes }) => {
+      localCluster = { context: "kind-podbag-demo123456", version, nodes, ready: true };
+      return localCluster;
+    },
+    local_kube_reset: () => localCluster,
+    local_kube_remove: () => { localCluster = null; },
     migration_sources: () => ["docker", "podman", "kiri", "podbag"],
     kube_counts: ({ allNamespaces }) => Object.fromEntries(Object.entries(kube).map(([kind,items]) =>
       [kind,items.filter(i=>allNamespaces||i.metadata.namespace==="default").length])),
@@ -324,6 +332,10 @@
     await app.ready;
     const scenes = {
       pods: () => app.go("kubernetes"),
+      "local-kube": () => {
+        app.go("kubernetes");
+        document.getElementById("local-kube-open").click();
+      },
       claims: () => app.go("kubernetes", "claims"),
       services: () => app.go("kubernetes", "services"),
       images: () => app.go("images"),
