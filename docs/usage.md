@@ -1598,6 +1598,38 @@ sudo k3s server --container-runtime-endpoint unix:///run/podbag/cri.sock
   `vm status` wakes no VM.
 - Containers cannot reach the VM's agent.
 
+### Synchronized shares
+
+For a macOS project under `/Users`, a synchronized share keeps a copy on the Linux
+VM's disk. Use **Settings → Synchronized shares** while the VM runs, or use the CLI.
+
+```sh
+podbag vm sync add project "$HOME/projects/app"
+podbag run --rm -v podbag-sync-project:/work alpine ls /work
+podbag vm sync list
+podbag vm sync now project
+podbag vm sync remove project
+```
+
+Use the named volume to access the cached files. A bind mount from `/Users` still
+uses VirtioFS directly. A share's source cannot overlap the source of another
+synchronized share. Removing a share stops synchronization and keeps its cache volume.
+
+The guest checks shares about every 15 seconds while it runs. It copies regular files
+and directories in both directions, including renames and deletions. It preserves
+ordinary Unix permission bits. It skips symlinks and special files. Each share's last
+common version is saved on the VM disk so it can resume after a restart.
+
+The share reports a conflict when two sides change a path differently. Both files
+stay where they are. Resolve the conflict by making the affected paths match on
+both sides. The next sync records the resolved version. Access the cache volume
+with a container to inspect or edit its version.
+
+Replaced or deleted regular files are kept in `.podbag-sync-recovery/` at the root
+of the destination tree. Each recovery directory contains the old file and its
+original relative path. A file changed during replacement can also appear there. Remove old recovery copies when you no longer need them.
+The synchronizer ignores its recovery and temporary files.
+
 ### Registry logins
 
 - `login`, `logout` and `search` run on the Mac. Logins stay in the Mac's Docker config

@@ -762,6 +762,21 @@ fn vm_set(app: AppHandle, token: u64, settings: cli::VmSettings) -> Result<Strin
     done
 }
 
+/// List or change synchronized file shares in the macOS VM.
+#[tauri::command(async)]
+fn vm_sync(
+    state: State<'_, AppState>,
+    token: u64,
+    action: String,
+    name: Option<String>,
+    path: Option<String>,
+) -> Result<Value, String> {
+    if state.session(token)?.target.choice != Choice::Podbag || commands::platform() != "macos" {
+        return Err("Synchronized shares require Podbag on macOS".into());
+    }
+    cli::vm_sync(&state.podbag, &action, name.as_deref(), path.as_deref())
+}
+
 /// Switch this window to `podbag` or `docker`; saved for the TUI too.
 #[tauri::command(async)]
 fn set_engine(
@@ -1414,6 +1429,7 @@ fn main() {
             vm,
             vm_status,
             vm_set,
+            vm_sync,
             set_engine,
             updates,
             upgrade,

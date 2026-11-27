@@ -43,6 +43,8 @@ fn run() -> Result<()> {
     let cli = listen(CLI_PORT)?;
     let forwarder = listen(FORWARD_PORT)?;
     let dirs = crate::paths::dirs()?;
+    let sync_dirs = dirs.clone();
+    std::thread::spawn(move || super::sync::watch(sync_dirs));
     let mut ctx = crate::api::router::Ctx::new(dirs);
     // The Mac's paths: the VM sees only its /Users, at the same place.
     ctx.binds_under = Some("/Users".into());
@@ -192,6 +194,19 @@ fn serve_cli(stream: UnixStream) -> std::io::Result<()> {
         125
     } else {
         match first {
+            Some("__vm-sync") => match super::sync::command(&req.argv[1..]) {
+                Ok(data) => {
+                    for part in data.as_bytes().chunks(64 * 1024) {
+                        out.send(Frame::Stdout(part.to_vec()))?;
+                    }
+                    out.send(Frame::Stdout(b"\n".to_vec()))?;
+                    0
+                }
+                Err(error) => {
+                    out.send(Frame::Stderr(format!("podbag: {error}\n").into_bytes()))?;
+                    1
+                }
+            },
             Some("__vm-check") => 0,
             Some("__vm-renew") => match super::dhcp::renew() {
                 Ok(secs) => {

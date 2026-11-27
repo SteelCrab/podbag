@@ -914,6 +914,97 @@ fn mac_paths_outside_users_are_refused_however_written() {
 }
 
 #[test]
+fn synchronized_share_moves_edits_across_the_vm_restart() {
+    if !enabled() {
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let mac = Mac::bare(60);
+    let project = tempfile::tempdir_in(std::env::var("HOME").unwrap()).unwrap();
+    let source = project.path().join("original");
+    std::fs::write(&source, "from host\n").unwrap();
+    std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o750)).unwrap();
+    let name = project.path().canonicalize().unwrap();
+    let name = name.to_str().unwrap();
+    let status = |args: &[&str]| {
+        let text = mac.ok(args);
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(value["lastError"].is_null(), "{value:#}");
+        assert_eq!(
+            value["conflicts"],
+            serde_json::json!([]),
+            "{args:?}: {value:#}"
+        );
+        value
+    };
+    let share = status(&["vm", "sync", "add", "project", name]);
+    assert_eq!(share["volume"], "podbag-sync-project");
+    let alpine = IMAGES[0].0;
+    mac.ok(&["pull", alpine]);
+    let empty = tempfile::tempdir_in(std::env::var("HOME").unwrap()).unwrap();
+    let empty_path = empty.path().canonicalize().unwrap();
+    status(&["vm", "sync", "add", "empty", empty_path.to_str().unwrap()]);
+    mac.ok(&[
+        "run",
+        "--rm",
+        "-v",
+        "podbag-sync-empty:/etc",
+        alpine,
+        "sh",
+        "-ec",
+        "test ! -e /etc/alpine-release",
+    ]);
+    status(&["vm", "sync", "remove", "empty"]);
+    let run = |script| {
+        mac.ok(&[
+            "run",
+            "--rm",
+            "-v",
+            "podbag-sync-project:/work",
+            alpine,
+            "sh",
+            "-ec",
+            script,
+        ])
+    };
+
+    assert_eq!(
+        run("cat /work/original; stat -c %a /work/original"),
+        "from host\n750"
+    );
+    run(
+        "mv /work/original /work/renamed; echo 'from guest' > /work/renamed; chmod 640 /work/renamed",
+    );
+    status(&["vm", "sync", "now", "project"]);
+    assert!(!source.exists());
+    let renamed = project.path().join("renamed");
+    assert_eq!(std::fs::read_to_string(&renamed).unwrap(), "from guest\n");
+    assert_eq!(
+        renamed.metadata().unwrap().permissions().mode() & 0o777,
+        0o640
+    );
+    let old_file = std::fs::read_dir(project.path().join(".podbag-sync-recovery"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path()
+        .join("file");
+    assert_eq!(std::fs::read_to_string(old_file).unwrap(), "from host\n");
+
+    mac.ok(&["vm", "stop"]);
+    std::fs::write(&renamed, "edited while off\n").unwrap();
+    status(&["vm", "sync", "now", "project"]);
+    assert_eq!(run("cat /work/renamed"), "edited while off");
+    std::fs::remove_file(&renamed).unwrap();
+    status(&["vm", "sync", "now", "project"]);
+    run("test ! -e /work/renamed");
+    status(&["vm", "sync", "remove", "project"]);
+    assert_eq!(mac.ok(&["vm", "sync", "list"]), "[]");
+    assert!(mac.ok(&["volume", "ls"]).contains("podbag-sync-project"));
+}
+
+#[test]
 fn a_broken_data_disk_is_an_error_not_a_ram_disk() {
     if !enabled() {
         return;

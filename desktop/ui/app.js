@@ -1498,6 +1498,7 @@ async function renderSettings(main) {
           dockerSettings(),
           compressionSetting()),
         settingDetails("vm-settings", "vm", "vm"),
+        settingDetails("sync-settings", "syncShares", "volumes"),
         settingDetails("updates", "updates", "update"),
         settingDetails("terminal-command", "terminalCommand", "shell"),
         settingDetails("about-settings", "about", "inspect", null, h("p", { text: t("settings.aboutText") })))));
@@ -1513,6 +1514,98 @@ function dockerSettings() {
   return null;
 }
 
+// ---- settings: synchronized shares ----
+
+let syncShares = null;
+let syncLoading = false;
+let syncError = "";
+
+function renderSyncSettings(fresh = false) {
+  const section = document.getElementById("sync-settings");
+  if (!section) return;
+  const vm = S.vm;
+  section.hidden = vm?.platform !== "macos";
+  if (section.hidden) return;
+  const box = section.querySelector(".setting-body");
+  const running = vm.state === "running";
+  if (fresh) {
+    section.ontoggle = () => {
+      if (section.open && S.vm?.state === "running") refreshSyncShares();
+    };
+  }
+  if (!running) {
+    syncShares = null;
+    put(box, h("p", { class: "hint", text: t("settings.syncStartVm") }));
+    return;
+  }
+  if (fresh || !box.querySelector(".sync-share-form")) {
+    const name = h("input", { id: "sync-share-name", type: "text", required: true, maxlength: 64, placeholder: "project" });
+    const path = h("input", { id: "sync-share-path", type: "text", required: true, placeholder: "/Users/me/projects/app" });
+    const add = h("button", { type: "submit", class: "button primary", text: t("settings.syncAdd") });
+    const form = h("form", { class: "sync-share-form", onsubmit: async (event) => {
+      event.preventDefault();
+      if (await refreshSyncShares("add", name.value, path.value)) form.reset();
+    } },
+      h("div", { class: "form-field" }, h("label", { for: name.id, text: t("settings.syncName") }), name),
+      h("div", { class: "form-field" }, h("label", { for: path.id, text: t("settings.syncPath") }), path),
+      h("div", { class: "buttons-row" }, add, button("refresh", t("action.refresh"), () => refreshSyncShares())));
+    put(box,
+      h("p", { class: "hint", text: t("settings.syncHint") }),
+      h("p", { class: "error-text sync-error", role: "status" }),
+      h("ul", { class: "sync-share-list" }),
+      form);
+    if (section.open && syncShares === null && !syncLoading) refreshSyncShares();
+    return renderSyncShareRows(box);
+  }
+}
+
+function renderSyncShareRows(box) {
+  if (!box?.querySelector(".sync-share-list")) return;
+  box.querySelector(".sync-error").textContent = syncError;
+  for (const button of box.querySelectorAll(".sync-share-form button")) button.disabled = syncLoading;
+  const rows = (syncShares || []).map((share) => {
+    const check = button("refresh", t("settings.syncNow"), () => refreshSyncShares("now", share.name));
+    const remove = button("trash", t("settings.syncRemove"), async () => {
+      if (await confirmDialog(t("settings.syncRemoveNote", { name: share.name }), t("settings.syncRemove"))) {
+        await refreshSyncShares("remove", share.name);
+      }
+    });
+    check.disabled = syncLoading;
+    remove.disabled = syncLoading;
+    const conflicts = share.conflicts || [];
+    return h("li", { class: "sync-share" },
+      h("strong", { text: share.name }),
+      h("div", { class: "mono", text: share.source }),
+      h("div", { class: "mono", text: share.volume }),
+      share.lastError ? h("p", { class: "error-text", text: share.lastError }) : null,
+      conflicts.length ? h("details", {},
+        h("summary", { text: t("settings.syncConflictCount", { n: conflicts.length }) }),
+        h("ul", {}, conflicts.map(({ path, reason }) => h("li", {}, h("code", { text: path }), " – ", reason))))
+        : null,
+      h("div", { class: "buttons-row" }, check, remove));
+  });
+  put(box.querySelector(".sync-share-list"), rows);
+}
+
+async function refreshSyncShares(action = "list", name = null, path = null) {
+  if (syncLoading || S.vm?.state !== "running") return false;
+  syncLoading = true;
+  syncError = "";
+  const rows = () => renderSyncShareRows(document.querySelector("#sync-settings .setting-body"));
+  rows();
+  try {
+    if (action !== "list") await API.vmSync(action, name, path);
+    syncShares = await API.vmSync("list");
+    return true;
+  } catch (error) {
+    syncError = String(error);
+    return false;
+  } finally {
+    syncLoading = false;
+    rows();
+  }
+}
+
 // ---- settings: the virtual machine ----
 
 let vmFormDirty = false;
@@ -1520,6 +1613,7 @@ let vmFormDirty = false;
 // The VM's section. `fresh`: build the form again (otherwise only the state changes,
 // so what the user types stays).
 function renderVmSettings(fresh) {
+  renderSyncSettings(fresh);
   const section = document.getElementById("vm-settings");
   if (!section) return;
   const box = section.querySelector(".setting-body");

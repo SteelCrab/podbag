@@ -146,13 +146,17 @@ fn error_since(log: &Path, at: u64) -> String {
     }
 }
 
+const SYNC_USAGE: &str = "usage: podbag vm sync list|add NAME PATH|now NAME|remove NAME";
+
 const VM_USAGE: &str = "usage: podbag vm start|stop|restart [--yes]|status [--json]|logs|resources [CPUS MEMORY_MIB]\n       \
-                        podbag vm set [--cpus N] [--memory SIZE] [--idle TIME] [--restart] [--yes]";
+                        podbag vm set [--cpus N] [--memory SIZE] [--idle TIME] [--restart] [--yes]\n       \
+                        podbag vm sync list|add NAME PATH|now NAME|remove NAME";
 
 /// `podbag vm start|stop|restart|status|set|logs|resources`.
 pub fn vm_command(args: &[String]) -> i32 {
     let rest = args.get(1..).unwrap_or_default();
     let result = match args.first().map(String::as_str) {
+        Some("sync") => return sync_command(rest),
         Some("--help" | "-h" | "help") => {
             println!("{VM_USAGE}");
             Ok(())
@@ -192,6 +196,51 @@ pub fn vm_command(args: &[String]) -> i32 {
             1
         }
     }
+}
+
+fn sync_command(args: &[String]) -> i32 {
+    if matches!(args, [help] if matches!(help.as_str(), "-h" | "--help" | "help")) {
+        println!("{SYNC_USAGE}");
+        return 0;
+    }
+    let mut argv = vec!["__vm-sync".into()];
+    argv.extend_from_slice(args);
+    let paths = match args {
+        [cmd] if cmd == "list" => Vec::new(),
+        [cmd, _] if matches!(cmd.as_str(), "now" | "remove") => Vec::new(),
+        [cmd, _, given] if cmd == "add" => {
+            let result = Path::new(given).canonicalize().and_then(|path| {
+                if !path.is_dir() || path == Path::new("/Users") || !path.starts_with("/Users") {
+                    return Err(std::io::Error::other(
+                        "choose a project folder under /Users",
+                    ));
+                }
+                path.into_os_string()
+                    .into_string()
+                    .map_err(|_| std::io::Error::other("the path is not UTF-8"))
+            });
+            match result {
+                Ok(path) => {
+                    argv[3] = path.clone();
+                    vec![path]
+                }
+                Err(e) => {
+                    eprintln!("podbag: cannot synchronize {given}: {e}");
+                    return 1;
+                }
+            }
+        }
+        _ => {
+            eprintln!("{SYNC_USAGE}");
+            return 1;
+        }
+    };
+    forward(Forward {
+        argv,
+        stdin: false,
+        paths,
+        env: Vec::new(),
+    })
 }
 
 /// A round trip to the VM's agent: the VM is up, and works. Its exit code.
