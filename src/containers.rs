@@ -830,85 +830,28 @@ impl ContainerHandle {
         }
     }
 
-    /// Join bridge network `network` too, with `aliases` there, from the container's next
-    /// start on (`network connect`). A container that runs is refused: stop it first.
+    /// Join a secondary bridge network with optional network aliases.
     pub fn connect(&self, network: &str, aliases: &[String]) -> Result<()> {
-        let dirs = paths::dirs()?;
-        let network = match crate::network::parse_network_arg(network)? {
-            crate::network::NetworkMode::Bridge { network } => network,
-            _ => {
-                return Err(Error::new(
-                    ErrorKind::InvalidInput,
-                    format!(
-                        "cannot connect container {} to network {network}",
-                        self.short()
-                    ),
-                    format!("{network} is a network mode, not a network to join"),
-                    "connect it to a bridge network",
-                ));
-            }
-        };
-        crate::network::get_in(&dirs, &network)?;
-        state::change_settings(&dirs, &self.id, |spec| {
-            if spec.bridge_networks().contains(&network.as_str()) {
-                return Err(Error::new(
-                    ErrorKind::Conflict,
-                    format!(
-                        "cannot connect container {} to network {network}",
-                        self.short()
-                    ),
-                    "it is already connected to that network",
-                    "leave it as it is",
-                ));
-            }
-            spec.extra_networks.push(crate::spec::Attachment {
-                network: network.clone(),
-                aliases: aliases.to_vec(),
-            });
-            Ok(())
-        })
+        self.connect_with_addresses(network, aliases, Default::default())
     }
 
-    /// Leave network `network` from the container's next start on (`network disconnect`).
-    /// Its first network stays; a container that runs is refused.
+    /// Join a secondary bridge network and request fixed network addresses.
+    pub fn connect_with_addresses(
+        &self,
+        network: &str,
+        aliases: &[String],
+        addresses: crate::network::FixedAddresses,
+    ) -> Result<()> {
+        crate::network::AttachmentChange::Connect {
+            aliases: aliases.to_vec(),
+            addresses,
+        }
+        .run(&self.id, network)
+    }
+
+    /// Leave a secondary bridge network. The primary interface stays connected.
     pub fn disconnect(&self, network: &str) -> Result<()> {
-        let dirs = paths::dirs()?;
-        let network = match crate::network::parse_network_arg(network)? {
-            crate::network::NetworkMode::Bridge { network } => network,
-            _ => network.to_string(),
-        };
-        state::change_settings(&dirs, &self.id, |spec| {
-            if let Some(at) = spec
-                .extra_networks
-                .iter()
-                .position(|a| a.network == network)
-            {
-                spec.extra_networks.remove(at);
-                return Ok(());
-            }
-            let what = format!(
-                "cannot disconnect container {} from network {network}",
-                self.short()
-            );
-            if spec.bridge_networks().first() == Some(&network.as_str()) {
-                return Err(Error::new(
-                    ErrorKind::InvalidInput,
-                    what,
-                    "it is the container's first network",
-                    "create the container again with the networks it needs",
-                ));
-            }
-            Err(Error::new(
-                ErrorKind::NotFound,
-                what,
-                "it is not connected to that network",
-                "run `podbag inspect` to see its networks",
-            ))
-        })
-    }
-
-    fn short(&self) -> &str {
-        crate::id::short_id(&self.id)
+        crate::network::AttachmentChange::Disconnect.run(&self.id, network)
     }
 
     /// Delete the container. A running container is refused unless `force`, which kills it.
@@ -1072,6 +1015,7 @@ mod tests {
             cgroup: None,
             oom: None,
             ip: None,
+            network_inode: None,
             ports: Vec::new(),
             paused: false,
         };
