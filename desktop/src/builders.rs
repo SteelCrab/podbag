@@ -525,13 +525,14 @@ mod tests {
     #[test]
     fn filters_all_builder_nodes_to_the_active_endpoint_and_scope() {
         let root = tempfile::tempdir().unwrap();
-        let scope = scope(root.path());
-        instance(
-            &scope,
-            "local",
-            "docker-container",
-            &["scope-a", "unix:///tmp/scope-a.sock"],
-        );
+        let mut scope = scope(root.path());
+        // A local endpoint in the platform's own form: /tmp/… is not an absolute path on
+        // Windows, so a unix:// host there is not local.
+        if cfg!(windows) {
+            scope.host = "npipe:////./pipe/scope-a".into();
+        }
+        let host = scope.host.clone();
+        instance(&scope, "local", "docker-container", &["scope-a", &host]);
         instance(&scope, "different", "docker-container", &["scope-b"]);
         instance(
             &scope,
