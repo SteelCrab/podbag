@@ -282,6 +282,11 @@ impl<'a> Mounts<'a> {
         self.cleanup();
     }
 
+    /// Keep the leases: a later start or `volume rm` releases them.
+    pub(crate) fn keep(mut self) {
+        self.release_on_drop = false;
+    }
+
     fn cleanup(&self) {
         if let Err(e) = release(self.dirs, self.spec) {
             eprintln!("podbag: {e}");
