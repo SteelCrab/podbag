@@ -1,6 +1,7 @@
 //! `--build-arg` and `--label` pairs, and the images a build pulls. Not tied to the
 //! engine: a front end (macOS, Windows) reads the Dockerfile here to send logins.
 
+#[cfg(any(target_os = "macos", windows, test))]
 use crate::args::BuildArgs;
 use std::collections::BTreeMap;
 
