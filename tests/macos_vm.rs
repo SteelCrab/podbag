@@ -1867,28 +1867,118 @@ fn many_connections_leak_nothing() {
     );
 }
 
+/// A UDP echo server on port 9000, for `python3 -c`: each datagram comes back after
+/// `echo:`.
+const UDP_ECHO: &str = "import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.bind(('', 9000))
+while True:
+    d, a = s.recvfrom(65535)
+    s.sendto(b'echo:' + d, a)
+";
+
+/// A UDP socket on the Mac that talks to `to` only.
+fn udp_client(to: &str) -> std::net::UdpSocket {
+    let local = if to.starts_with('[') {
+        "[::1]:0"
+    } else {
+        "127.0.0.1:0"
+    };
+    let s = std::net::UdpSocket::bind(local).unwrap();
+    s.connect(to).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+    s
+}
+
+/// What a datagram on `s` gets back within a second.
+fn udp_ask(s: &std::net::UdpSocket, data: &[u8]) -> std::io::Result<Vec<u8>> {
+    s.send(data)?;
+    let mut buf = vec![0u8; 65536];
+    let n = s.recv(&mut buf)?;
+    Ok(buf[..n].to_vec())
+}
+
+/// Wait (30 s at most) until `s` gets `echo:<data>` back for `data`.
+fn wait_for_echo(s: &std::net::UdpSocket, data: &[u8]) {
+    let want = [b"echo:", data].concat();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while udp_ask(s, data).ok().as_deref() != Some(&want[..]) {
+        assert!(
+            Instant::now() < deadline,
+            "no echo through {:?}",
+            s.peer_addr()
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 #[test]
-fn a_udp_port_is_reported_as_not_forwarded() {
-    if !enabled() || !have_docker() {
+fn published_udp_ports_reach_the_macs_localhost() {
+    if !enabled() {
         return;
     }
     let mac = Mac::new(60);
-    mac.ok(&["ps"]);
-    mac.docker_ok(&[
+    mac.ok(&[
+        "run",
+        "-d",
+        "--name",
+        "echo",
+        "-p",
+        "18085:9000/udp",
+        "python:3.13-alpine",
+        "python3",
+        "-c",
+        UDP_ECHO,
+    ]);
+    let one = udp_client("127.0.0.1:18085");
+    wait_for_echo(&one, b"one");
+    // Each client gets its own replies, on ::1 too.
+    let two = udp_client("[::1]:18085");
+    wait_for_echo(&two, b"two");
+    assert_eq!(udp_ask(&one, b"again").unwrap(), b"echo:again");
+    // A large datagram comes back whole (macOS sends 9216 bytes at most by default).
+    let big = vec![b'x'; 9000];
+    assert_eq!(udp_ask(&one, &big).unwrap(), [b"echo:", &big[..]].concat());
+    // The container goes: so does the Mac's port (a closed port answers "refused").
+    mac.ok(&["rm", "-f", "echo"]);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match udp_ask(&one, b"anyone?") {
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => break,
+            got => assert!(Instant::now() < deadline, "port 18085 stayed open: {got:?}"),
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+#[test]
+fn a_taken_mac_udp_port_is_reported_and_others_work() {
+    if !enabled() {
+        return;
+    }
+    let mac = Mac::new(60);
+    // Another program has the Mac's UDP port 18088.
+    let taken = std::net::UdpSocket::bind("127.0.0.1:18088").unwrap();
+    mac.ok(&[
         "run",
         "-d",
         "-p",
-        "18085:9000/udp",
-        "alpine:3.22",
-        "sleep",
-        "300",
+        "18088:9000/udp",
+        "-p",
+        "18089:9000/udp",
+        "python:3.13-alpine",
+        "python3",
+        "-c",
+        UDP_ECHO,
     ]);
-    // TCP only, for now: the host says so instead of leaving the port silently closed.
+    wait_for_echo(&udp_client("127.0.0.1:18089"), b"still served");
     let deadline = Instant::now() + Duration::from_secs(10);
-    while mac.log_count("18085/udp") == 0 {
-        assert!(Instant::now() < deadline, "the UDP port is not reported");
+    while mac.log_count("port 18088/udp") == 0 {
+        assert!(Instant::now() < deadline, "the taken port is not reported");
         std::thread::sleep(Duration::from_millis(200));
     }
+    assert_eq!(mac.log_count("another program on this Mac uses it"), 1);
+    drop(taken);
 }
 
 #[test]

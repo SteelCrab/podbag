@@ -1658,7 +1658,12 @@ docker buildx build --load -t app .
 
 ### Ports, disk and memory
 
-- Published ports (`-p 8080:80`) answer on the Mac's `localhost:8080`. TCP only for now.
+- Published ports (`-p 8080:80`) answer on the Mac's `localhost:8080`.
+- UDP ports (`-p 5353:53/udp`) work too. Each client gets its own replies.
+- A UDP client that sends nothing and gets nothing for 90 seconds is forgotten, as with
+  Docker. Its next datagram starts again.
+- If another program on the Mac has the port, podbag cannot forward it. It writes why in
+  `~/.podbag/run/host.log`, and tries again every second.
 - Disk space comes back while the VM runs: the Mac gets back what deleted images,
   containers and volumes used, within seconds.
 - Memory comes back when the VM powers off.
