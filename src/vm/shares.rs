@@ -54,6 +54,28 @@ pub(crate) fn valid_target(path: &Path) -> bool {
         && parts.all(|part| matches!(part, Component::Normal(_)))
 }
 
+/// A synchronized share reads its source through the VM's shared folders, so the
+/// source must be a folder inside one of them.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn check_sync_source(roots: &[PathBuf], source: &Path) -> Result<(), String> {
+    let plain = source.is_absolute()
+        && source
+            .components()
+            .skip(1)
+            .all(|part| matches!(part, Component::Normal(_)));
+    match roots.iter().find(|root| source.starts_with(root)) {
+        Some(root) if plain && source != root => Ok(()),
+        Some(root) if plain => Err(format!(
+            "choose a project folder inside {}, not the shared folder itself",
+            root.display()
+        )),
+        _ => Err(format!(
+            "{} is outside the folders shared with the VM. Add it to the shared folders first, and restart the VM if it runs",
+            source.display()
+        )),
+    }
+}
+
 /// Resolve a path as far as it exists. Preserve any remaining components so -v may
 /// still create a new directory below a share.
 pub(crate) fn resolve(path: &Path) -> std::io::Result<PathBuf> {
@@ -77,4 +99,39 @@ pub(crate) fn resolve(path: &Path) -> std::io::Result<PathBuf> {
 pub(crate) fn contains(roots: &[PathBuf], path: &Path) -> bool {
     path.is_absolute()
         && resolve(path).is_ok_and(|real| roots.iter().any(|root| real.starts_with(root)))
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_synchronized_source_is_inside_a_shared_folder() {
+        let roots = [PathBuf::from("/Users"), PathBuf::from("/Volumes/Work")];
+        let ok = |path: &str| check_sync_source(&roots, Path::new(path));
+        assert!(ok("/Users/me/app").is_ok());
+        assert!(ok("/Volumes/Work/app").is_ok());
+        let outside = ok("/Volumes/Other/app").unwrap_err();
+        assert!(outside.contains("/Volumes/Other/app"), "{outside}");
+        assert!(
+            outside.contains("Add it to the shared folders first"),
+            "{outside}"
+        );
+        assert!(ok("/Users").unwrap_err().contains("inside /Users"));
+        for path in [
+            "/Users/me/../../tmp",
+            "Users/me/app",
+            "/Usersx/app",
+            "/opt/app",
+        ] {
+            assert!(ok(path).is_err(), "{path}");
+        }
+        // A folder that is no longer shared cannot be synchronized.
+        assert!(check_sync_source(&[], Path::new("/Users/me/app")).is_err());
+        assert!(
+            check_sync_source(&defaults(), Path::new("/Volumes/Work/app"))
+                .unwrap_err()
+                .contains("/Volumes/Work/app")
+        );
+    }
 }
