@@ -19,6 +19,8 @@ frame.addEventListener("load", async () => {
   const by = id => doc.getElementById(id);
   const check = (v, label) => { if (!v) throw Error(label); };
   const glyph = el => el.querySelector(".migration-resource use")?.getAttribute("href");
+  const registry = el => el.querySelector(".migration-registry use")?.getAttribute("href");
+  const image = name => [...doc.querySelectorAll('.migration-row[data-kind="images"]')].find(row => row.dataset.name === name);
   try {
     await wait(() => doc.documentElement.dataset.ready === "1");
     const real = win.__TAURI__.core.invoke;
@@ -30,12 +32,14 @@ frame.addEventListener("load", async () => {
       args.updates.onmessage("files");
       return new Promise((resolve, reject) => { finish = () => failure ? reject("Destination conflict") : resolve(); });
     };
+    win.eval('P.hosts["gitlab-self"] = "registry.example.com"');
     win.podbag.go("migration");
     const row = () => doc.querySelector('.migration-row[data-kind="volumes"]');
     await wait(() => by("migration-source")?.options.length && !by("migration-source").disabled);
     by("migration-source").value = "docker";
     by("migration-source").dispatchEvent(new win.Event("change"));
     await wait(() => row() && !by("migration-source").disabled);
+    await wait(() => image("registry.gitlab.com/example/api:1.5"));
     const toolbar = by("window-bar");
     check(!toolbar.querySelector("img") && !toolbar.textContent.toLowerCase().includes("podbag"), "Keep the toolbar free of branding");
     check(!by("engine-switch"), "Remove the window engine selector");
@@ -44,6 +48,27 @@ frame.addEventListener("load", async () => {
     for (const item of doc.querySelectorAll(".migration-row")) {
       check(glyph(item) === "#i-" + item.dataset.kind, "Show the icon for each engine resource type");
     }
+    const source = by("migration-source").parentElement;
+    check(source.querySelector("use").getAttribute("href") === "registry-icons.svg#dockerhub", "Show the selected Docker engine");
+    for (const [name, id] of [
+      ["example/api:1.5", "dockerhub"], ["registry.gitlab.com/example/api:1.5", "gitlab"],
+      ["ghcr.io/example/frontend:2.0", "github"], ["quay.io/example/proxy:0.8", "quay"],
+      ["registry.example.com/team/worker:1.4.2", "gitlab-self"],
+    ]) {
+      check(registry(image(name)) === "registry-icons.svg#" + id, "Show the registry for " + name);
+    }
+    check(!registry(image("sha256:8ab61e38dd2ac135")), "Omit the registry for an untagged image");
+    const dlg = () => doc.querySelector(".migration-dialog");
+    image("registry.gitlab.com/example/api:1.5").click();
+    check(registry(dlg()) === "registry-icons.svg#gitlab", "Keep the GitLab icon in confirmation");
+    check(dlg().querySelector('.migration-registry[aria-label="GitLab"]'), "Label the registry for assistive technology");
+    const target = by("migration-target");
+    check(target.parentElement.querySelector('img[src="logo-small.png"]'), "Show the selected Podbag destination");
+    target.value = "podman";
+    target.dispatchEvent(new win.Event("change"));
+    check(target.parentElement.querySelector('use[href="#i-engine"]'), "Update the destination icon for another engine");
+    dlg().querySelector(".buttons button").click();
+    await wait(() => !dlg());
     check([...doc.querySelectorAll(".migration-group")].every(g => g.querySelector(".migration-row")), "Hide empty groups");
     const leaf = by("mnav-volumes");
     check(!leaf.parentElement.hidden && Number(leaf.querySelector(".count").textContent) === doc.querySelectorAll('[data-kind="volumes"]').length, "Show each available resource count");
@@ -54,6 +79,7 @@ frame.addEventListener("load", async () => {
     by("mnav-toggle").click();
     by("mnav-kube").click();
     await wait(() => !by("mnav-claims").parentElement.hidden);
+    check(by("migration-source").parentElement.querySelector('use[href="registry-icons.svg#kubernetes"]'), "Show the selected Kubernetes context");
     for (const item of doc.querySelectorAll(".migration-row")) {
       check(glyph(item) === "#i-kube-" + item.dataset.kind, "Show the icon for each Kubernetes resource type");
     }
@@ -62,7 +88,6 @@ frame.addEventListener("load", async () => {
     by("mnav-engine").click();
     await wait(() => row());
     row().click();
-    const dlg = () => doc.querySelector(".migration-dialog");
     check(dlg().dataset.phase === "confirm" && calls === 0, "Review before writing");
     check(glyph(dlg()) === glyph(row()), "Keep the selected resource icon in confirmation");
     dlg().querySelector(".buttons button").click();

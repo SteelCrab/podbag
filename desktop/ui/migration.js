@@ -11,6 +11,19 @@ function migrationResourceSymbol(cluster, kind) {
   return cluster ? "kube-" + kind : kind;
 }
 
+function migrationEndpointIcon(source, cluster) {
+  if (cluster) return registryIcon("kubernetes");
+  if (source === "docker") return registryIcon("dockerhub");
+  if (source === "podbag") return h("img", { src: "logo-small.png", alt: "", width: 16, height: 16 });
+  return icon(source === "custom" ? "shell" : "engine");
+}
+
+function migrationRegistryIcon(registry) {
+  if (!registry) return null;
+  return h("span", { class: "migration-registry", role: "img", "aria-label": registry.label, title: registry.label },
+    registryIcon(registry.id));
+}
+
 function openMigration(cluster, kind = "") {
   const changed = cluster !== migrationScope.cluster;
   Object.assign(migrationScope, { cluster, kind, expanded: true });
@@ -78,13 +91,15 @@ function renderMigration(main) {
   const engines = tab("migration-engine-tab", "settings.engine", false);
   const clusters = tab("migration-kube-tab", "nav.kubernetes", true);
   const picker = h("select", { id: "migration-source", "aria-label": t("migration.from") });
+  const pickerIcon = h("span", { class: "migration-endpoint-icon", "aria-hidden": "true" });
   const socket = migrationSocket();
   const scope = h("select", { id: "migration-filter", "aria-label": t("kube.namespace"), onchange: () => {
     migrationScope.namespace = scope.value; draw();
   } });
   const resources = h("div", { class: "migration-list" });
   const status = h("div", { role: "status", class: "migration-statusline" });
-  const filters = h("div", { class: "migration-filters" }, picker, socket, scope);
+  const filters = h("div", { class: "migration-filters" },
+    h("div", { class: "migration-endpoint" }, pickerIcon, picker), socket, scope);
   main.replaceChildren(h("header", { class: "toolbar" }, h("h1", { text: t("migration.title") }),
     windowBar ? null : iconButton("refresh", t("action.refresh"), reload)),
     h("div", { class: "tabs migration-tabs", role: "group", "aria-label": t("migration.from") }, engines, clusters),
@@ -95,6 +110,7 @@ function renderMigration(main) {
   const kinds = () => migrationScope.cluster ? KUBE_KINDS : ENGINE_MIGRATION_KINDS;
   const kindLabel = k => t((migrationScope.cluster ? "kube." : "nav.") + k);
   function draw() {
+    put(pickerIcon, migrationEndpointIcon(picker.value, migrationScope.cluster));
     const visible = items.filter(item => !migrationScope.cluster || !migrationScope.namespace || item.namespace === migrationScope.namespace);
     const counts = {};
     for (const row of visible) counts[row.kind] = (counts[row.kind] || 0) + 1;
@@ -110,9 +126,13 @@ function renderMigration(main) {
       return h("section", { class: "migration-group" }, h("h2", {}, icon(symbol),
         h("span", { text: kindLabel(kind) }), h("span", { class: "count", text: rows.length })),
         rows.map(item => h("button", { type: "button", class: "migration-row", "data-kind": kind, "data-name": item.name,
-          title: t("migration.review"), onclick: () => confirmMigration(item, symbol, choices, reload) },
-          h("span", { class: "migration-resource" }, icon(symbol), h("span", { class: "migration-name", text: item.label })),
-          h("span", { class: "migration-origin", text: migrationScope.cluster ? (migrationScope.namespace ? "" : item.namespace) : item.sourceLabel }), icon("forward"))));
+          title: t("migration.review"), onclick: () => confirmMigration(item, symbol, migrationScope.cluster, choices, reload) },
+          h("span", { class: "migration-resource" }, icon(symbol), migrationRegistryIcon(item.registry),
+            h("span", { class: "migration-name", text: item.label })),
+          migrationScope.cluster
+            ? h("span", { class: "migration-origin", text: migrationScope.namespace ? "" : item.namespace })
+            : h("span", { class: "migration-origin migration-endpoint" }, migrationEndpointIcon(item.source, false),
+              h("span", { text: item.sourceLabel })), icon("forward"))));
     }));
     const namespaces = [...new Set(items.map(i => i.namespace).filter(Boolean))].sort();
     scope.replaceChildren(opt(["", t("kube.allNamespaces")]), ...namespaces.map(n => opt([n, n])));
@@ -128,12 +148,15 @@ function renderMigration(main) {
       const { items } = await API.kubeList(kind, true, source);
       return items.filter(({ metadata }) => !metadata.deletionTimestamp && !metadata.ownerReferences?.length).map(({ metadata }) => ({ name: metadata.name, label: metadata.name, uid: metadata.uid, namespace: metadata.namespace }));
     }
-    const rows = await API.migrationList(source, kind);
+    const rows = await API.migrationList(source, kind, Object.entries(P.hosts));
     if (kind === "images") return rows.flatMap(i => {
       const tags = (i.RepoTags || []).filter(tag => tag !== "<none>:<none>");
-      return (tags.length ? tags : [i.Id]).map(name => ({ name, label: name === i.Id ? shortId(name) : name, uid: i.Id }));
+      return (tags.length ? tags : [i.Id]).map(name => ({ name, label: name === i.Id ? shortId(name) : name,
+        uid: i.Id, registry: Object.hasOwn(i.MigrationRegistries || {}, name) ? i.MigrationRegistries[name] : null }));
     });
-    return rows.map(r => kind === "containers" ? { name: r.Id, label: containerName(r) } : { name: r.Name, label: r.Name });
+    return rows.map(r => kind === "containers"
+      ? { name: r.Id, label: containerName(r), registry: r.MigrationRegistry }
+      : { name: r.Name, label: r.Name });
   }
   async function reload() {
     const id = ++revision, cluster = migrationScope.cluster;
@@ -187,7 +210,7 @@ function renderMigration(main) {
   return { reload, draw };
 }
 
-function confirmMigration(item, symbol, choices, reload) {
+function confirmMigration(item, symbol, cluster, choices, reload) {
   const dialog = h("dialog", { class: "migration-dialog", "aria-labelledby": "migration-heading" });
   const mark = h("span", { class: "migration-mark", "aria-hidden": "true" });
   const title = h("h2", { id: "migration-heading", tabindex: "-1" });
@@ -197,16 +220,19 @@ function confirmMigration(item, symbol, choices, reload) {
     sourceNamespace: item.namespace || "", destinationNamespace: "" };
   const target = h("select", { id: "migration-target", "aria-label": t("migration.to") },
     choices.filter(([value]) => value !== item.source).map(([value, text]) => h("option", { value, text })));
+  const targetIcon = h("span", { class: "migration-endpoint-icon", "aria-hidden": "true" });
   const custom = migrationSocket();
   const namespace = h("input", { id: "migration-namespace", type: "text", value: item.namespace, "aria-label": t("migration.namespace") });
-  const destination = h("dd", {}, target, custom);
+  const destination = h("dd", {}, h("div", { class: "migration-endpoint" }, targetIcon, target), custom);
   const destNs = h("dd", {}, namespace);
   const defaults = h("input", { type: "checkbox" });
   const defaultsField = h("label", { class: "check", hidden: item.kind !== "containers" }, defaults, t("migration.defaults"));
   const route = h("dl", { class: "fields" },
     h("dt", { text: t("migration.resource") }),
-    h("dd", { class: "migration-resource" }, icon(symbol), h("span", { text: item.label })),
-    h("dt", { text: t("migration.from") }), h("dd", { text: [item.sourceLabel, item.namespace].filter(Boolean).join(" / ") }),
+    h("dd", { class: "migration-resource" }, icon(symbol), migrationRegistryIcon(item.registry), h("span", { text: item.label })),
+    h("dt", { text: t("migration.from") }),
+    h("dd", { class: "migration-endpoint" }, migrationEndpointIcon(item.source, cluster),
+      h("span", { text: [item.sourceLabel, item.namespace].filter(Boolean).join(" / ") })),
     h("dt", { text: t("migration.to") }), destination,
     item.namespace ? [h("dt", { text: t("migration.namespace") }), destNs] : null);
   const progress = h("div", { class: "migration-track", "aria-hidden": "true" }, h("span"));
@@ -225,7 +251,9 @@ function confirmMigration(item, symbol, choices, reload) {
     request.destinationNamespace = namespace.value.trim();
     request.destinationDefaults = defaults.checked;
     defaultsField.hidden = true;
-    destination.textContent = target.value === "custom" ? request.destination : target.selectedOptions[0].textContent;
+    const label = target.value === "custom" ? request.destination : target.selectedOptions[0].textContent;
+    put(destination, h("div", { class: "migration-endpoint" }, migrationEndpointIcon(target.value, cluster),
+      h("span", { text: label })));
     destNs.textContent = request.destinationNamespace;
     state("running", "refresh", "migration.running");
     actions.replaceChildren();
@@ -246,6 +274,7 @@ function confirmMigration(item, symbol, choices, reload) {
   }, "primary");
   start.id = "migration-start";
   function validate() {
+    put(targetIcon, target.value ? migrationEndpointIcon(target.value, cluster) : null);
     custom.hidden = target.value !== "custom";
     const value = custom.hidden ? target.value : custom.value.trim();
     start.disabled = !value || value === item.source || (!!item.namespace && !namespace.value.trim());

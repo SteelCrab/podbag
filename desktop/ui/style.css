@@ -682,6 +682,7 @@ dialog.import { width: min(520px, calc(100vw - 48px)); }
 
 .app:not(.collapsed):has(#mnav-toggle[aria-expanded="true"]) .migration-tabs { display: none; }
 #nav-migration .kube-subnav .kube-subnav { margin-inline-start: 10px; }
+#nav-migration .kube-subnav .kube-subnav .nav-item { gap: 8px; padding-inline: 7px; }
 .collapsed #nav-migration .kube-subnav .kube-subnav { margin-inline-start: 0; }
 @container (max-width: 170px) {
   .app:not(.collapsed) .nav-item { gap: 4px; padding-inline: 4px; }
@@ -696,7 +697,12 @@ dialog.import { width: min(520px, calc(100vw - 48px)); }
 }
 .migration-content { padding: 16px 20px 24px; }
 .migration-filters { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
-.migration-filters select { max-width: 100%; }
+.migration-filters select { min-width: 0; max-width: 100%; }
+.migration-endpoint { display: flex; align-items: center; min-width: 0; gap: 6px; }
+.migration-filters > .migration-endpoint { max-width: 100%; }
+.migration-endpoint-icon, .migration-registry { display: inline-flex; flex: none; }
+.migration-endpoint :is(.registry-icon, img), .migration-registry .registry-icon { width: 16px; height: 16px; }
+.migration-origin > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .migration-group + .migration-group { margin-top: 20px; }
 .migration-group h2 { display: flex; align-items: center; gap: 8px; font-size: 14px; margin: 0 0 6px; }
 .migration-group h2 .icon { color: var(--ink-2); width: 16px; }
@@ -712,7 +718,7 @@ dialog.import { width: min(520px, calc(100vw - 48px)); }
 .migration-dialog .fields select, .migration-dialog .fields input { width: 100%; min-width: 0; }
 .migration-dialog { width: min(420px, calc(100vw - 48px)); }
 .migration-dialog-body { display: grid; gap: 14px; padding: 22px; }
-.migration-dialog .fields { overflow-wrap: anywhere; }
+.migration-dialog .fields { grid-template-columns: minmax(72px, max-content) minmax(0, 1fr); column-gap: 16px; overflow-wrap: anywhere; }
 .migration-mark { display: grid; width: 36px; height: 36px; place-items: center; border-radius: 10px; background: var(--accent-soft); color: var(--accent-text); }
 .migration-mark .icon { width: 21px; height: 21px; }
 .migration-track { display: none; height: 3px; overflow: hidden; border-radius: 4px; background: var(--line); }
