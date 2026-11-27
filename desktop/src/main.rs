@@ -9,6 +9,7 @@ use podbag::dashboard::cli;
 use podbag::dashboard::cluster_migration;
 mod commands;
 mod dockercmd;
+mod extensions;
 mod images;
 mod kubernetes;
 use podbag::dashboard::lab;
@@ -279,6 +280,19 @@ fn engine(
     };
     update_tray(&app);
     Ok(status)
+}
+
+#[tauri::command(async)]
+fn desktop_extensions(
+    app: AppHandle,
+    request: extensions::Action,
+) -> Result<Vec<extensions::Installed>, extensions::Failure> {
+    let directory = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| extensions::Failure::detail("storage", error))?
+        .join("extensions");
+    extensions::apply(&directory, request)
 }
 
 #[tauri::command(async)]
@@ -1414,6 +1428,7 @@ fn main() {
         .manage(Mutex::new(lab::Lab::default()))
         .invoke_handler(tauri::generate_handler![
             engine,
+            desktop_extensions,
             models,
             tutorial_lab,
             volume_tools_lab,

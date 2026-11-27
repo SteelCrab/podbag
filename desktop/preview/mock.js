@@ -203,6 +203,17 @@
   // (another dialog is open when the window first asks for the VM's state).
   const compression = { mode: params.get("compression") === "idle" ? "idle" : "off", after: Number(params.get("after") ?? 604800) };
   const practiceModules = new Map();
+  const checklist = {
+    apiVersion: 1, id: "example.workspace-checklist", name: "Workspace checklist", version: "1.0.0",
+    description: "Review local resources before changing the workspace.", permissions: ["engineSummary"],
+    content: [
+      { type: "heading", text: "Before you replace a container" },
+      { type: "list", items: ["Check which containers use the image.", "Keep the volumes that contain application data."] },
+      { type: "code", text: "podbag ps" },
+      { type: "engineSummary" },
+    ],
+  };
+  let extensions = view === "extension-view" ? [{ manifest: checklist, enabled: true, engineSummary: true }] : [];
   const synchronized = view === "settings-sync" ? [{ name: "project", source: "/Users/me/projects/app", volume: "podbag-sync-project", conflicts: [], lastError: null }] : [];
   const demoModel = { name: "smollm2:135m", size: 92_078_644, loaded: true };
   const models = view === "models-report" ? [{ ...demoModel }] : [];
@@ -236,6 +247,29 @@
       }
     },
     create_volume: ({ name }) => { volumes.push({ Name: name, Driver: "local" }); },
+    desktop_extensions: ({ request }) => {
+      (window.previewExtensionActions ||= []).push(request);
+      const { action, id } = request;
+      if (action === "install") {
+        let manifest;
+        try { manifest = JSON.parse(request.source); } catch { throw { kind: "manifest" }; }
+        if (extensions.some((item) => item.manifest.id === manifest.id)) throw { kind: "duplicate" };
+        extensions.push({ manifest, enabled: false, engineSummary: false });
+      } else if (action !== "list") {
+        const item = extensions.find((ext) => ext.manifest.id === id);
+        if (!item) throw { kind: "notFound" };
+        if (action === "setEnabled") {
+          item.enabled = request.enabled;
+          if (!item.enabled) item.engineSummary = false;
+        } else if (action === "setEngineSummary") {
+          if (!item.enabled || !item.manifest.permissions.includes("engineSummary")) throw { kind: "permission" };
+          item.engineSummary = request.allow;
+        } else if (action === "remove") {
+          extensions = extensions.filter((ext) => ext.manifest.id !== id);
+        }
+      }
+      return structuredClone(extensions);
+    },
     models: ({ request }) => {
       (window.previewModelActions ||= []).push(request);
       const { action, model } = request;
@@ -445,6 +479,8 @@
         input.focus();
       },
       tutorials: () => app.go("tutorials"),
+      extensions: () => app.go("extensions"),
+      "extension-view": () => app.go("extensions"),
       "settings-vm": () => app.openSettingsSection("vm-settings"),
       "settings-sync": () => app.openSettingsSection("sync-settings"),
       "settings-cli": () => app.openSettingsSection("terminal-command"),
