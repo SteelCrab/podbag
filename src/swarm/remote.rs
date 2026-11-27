@@ -9,6 +9,7 @@ use crate::client::{Client, Endpoint};
 use crate::{Error, ErrorKind, Result};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::Path;
 
@@ -175,6 +176,10 @@ impl Worker {
         self.host.is_some() && self.call::<Host>(cluster, Action::Probe).is_ok()
     }
 
+    fn accepts_assignments(&self, cluster: &Cluster) -> bool {
+        self.host.is_some() && self.call::<()>(cluster, Action::ProbeAssignments).is_ok()
+    }
+
     pub fn check(&self, cluster: &Cluster, service: &ServiceRecord) -> Result<Vec<String>> {
         self.call(
             cluster,
@@ -185,74 +190,161 @@ impl Worker {
     }
 
     pub fn reconcile(&self, cluster: &Cluster, service: &ServiceRecord) -> Result<()> {
-        self.call(
-            cluster,
-            Action::Reconcile {
-                service: Box::new(service.clone()),
-            },
-        )
+        let record = Box::new(service.clone());
+        let action = if service.worker_slots.is_empty() {
+            Action::Reconcile { service: record }
+        } else {
+            Action::ReconcileAssigned { service: record }
+        };
+        self.call(cluster, action)
     }
 
     pub fn tasks(&self, cluster: &Cluster) -> Result<Vec<TaskEntry>> {
         self.call(cluster, Action::Tasks)
     }
 
-    pub fn remove_service(&self, cluster: &Cluster, id: &str) -> Result<()> {
-        self.call(cluster, Action::Remove { id: id.to_owned() })
+    pub fn remove_service(&self, cluster: &Cluster, service: &ServiceRecord) -> Result<()> {
+        let id = service.id.clone();
+        let action = if service.worker_slots.is_empty() {
+            Action::Remove { id }
+        } else {
+            Action::RemoveAssigned { id }
+        };
+        self.call(cluster, action)
     }
 }
 
-/// Explicit placement keeps existing services on the manager. The worker ID is stable.
-pub fn assignment(service: &ServiceRecord, cluster: &Cluster) -> Result<Option<String>> {
-    let placement = &service.spec["TaskTemplate"]["Placement"];
-    let list = placement["Constraints"]
+/// Unconstrained services keep using the manager. Only an explicit worker role
+/// constraint opts in to scheduling replicas across enrolled workers.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Placement<'a> {
+    Local,
+    Pinned(&'a str),
+    Workers,
+}
+
+pub fn placement<'a>(service: &'a ServiceRecord, cluster: &Cluster) -> Result<Placement<'a>> {
+    let list = service.spec["TaskTemplate"]["Placement"]["Constraints"]
         .as_array()
         .map(Vec::as_slice)
         .unwrap_or_default();
     if list.is_empty() {
-        return Ok(None);
+        return Ok(Placement::Local);
     }
-    let [rule] = list else {
-        return Err(invalid(
-            "unsupported Swarm placement",
-            "use one node.id==ID constraint",
-        ));
-    };
-    let id = rule
-        .as_str()
-        .and_then(|s| s.split_once("=="))
-        .filter(|(key, _)| key.trim() == "node.id")
-        .map(|(_, id)| id.trim())
-        .filter(|id| plan::is_object_id(id))
-        .ok_or_else(|| {
-            invalid(
-                "unsupported Swarm placement",
-                "use node.id==ID with the full ID",
-            )
-        })?;
-    Ok((id != cluster.node_id).then(|| id.to_string()))
+    if let [rule] = list
+        && let Some((key, value)) = rule.as_str().and_then(|rule| rule.split_once("=="))
+    {
+        match (key.trim(), value.trim()) {
+            ("node.id", id) if plan::is_object_id(id) => {
+                return Ok(if id == cluster.node_id {
+                    Placement::Local
+                } else {
+                    Placement::Pinned(id)
+                });
+            }
+            ("node.role", "worker")
+                if matches!(
+                    plan::mode_of(&service.spec),
+                    Some(plan::Mode::Replicated(_))
+                ) =>
+            {
+                return Ok(Placement::Workers);
+            }
+            _ => {}
+        }
+    }
+    Err(invalid(
+        "unsupported Swarm placement",
+        "use node.id==ID with the full ID, or node.role==worker for a replicated service",
+    ))
 }
 
-pub fn worker_for(
-    engine: &Engine,
-    cluster: &Cluster,
-    service: &ServiceRecord,
-) -> Result<Option<Worker>> {
-    let Some(id) = assignment(service, cluster)? else {
-        return Ok(None);
-    };
+pub fn enrolled(engine: &Engine, id: &str) -> Result<Worker> {
     engine
         .store
         .workers()?
         .into_iter()
         .find(|worker| worker.id == id && worker.host.is_some())
-        .map(Some)
         .ok_or_else(|| {
             invalid(
                 "unknown Swarm worker",
                 format!("worker {id} is not enrolled"),
             )
         })
+}
+
+/// All owners get the requested replica count, even if all of their slots were
+/// scaled down. Keep the owner of each slot until the service is removed.
+pub fn assigned_workers(engine: &Engine, service: &ServiceRecord) -> Result<Vec<Worker>> {
+    let owners: BTreeSet<&str> = service.worker_slots.values().map(String::as_str).collect();
+    Ok(engine
+        .store
+        .workers()?
+        .into_iter()
+        .filter(|worker| owners.contains(worker.id.as_str()))
+        .collect())
+}
+
+/// Keep each existing owner. For a new slot, prefer the eligible worker that owns the
+/// fewest slots of this service, breaking ties by the stable name and ID.
+fn fill_slots(
+    slots: &mut BTreeMap<u64, String>,
+    workers: &[Worker],
+    replicas: u64,
+) -> BTreeSet<String> {
+    let mut load: Vec<_> = workers
+        .iter()
+        .map(|worker| {
+            let count = slots.values().filter(|owner| *owner == &worker.id).count();
+            (count, worker.name.as_str(), worker.id.as_str())
+        })
+        .collect();
+    let mut added = BTreeSet::new();
+    for slot in 1..=replicas {
+        if slots.contains_key(&slot) {
+            continue;
+        }
+        let Some((count, _, id)) = load.iter_mut().min_by_key(|worker| **worker) else {
+            break;
+        };
+        *count += 1;
+        slots.insert(slot, (*id).to_owned());
+        added.insert((*id).to_owned());
+    }
+    added
+}
+
+pub fn prepare_assignments(
+    engine: &Engine,
+    cluster: &Cluster,
+    service: &mut ServiceRecord,
+    create: bool,
+) -> Result<Vec<String>> {
+    check_remote(service)?;
+    let Some(plan::Mode::Replicated(replicas)) = plan::mode_of(&service.spec) else {
+        return Err(invalid("cannot place the service", "use replicated mode"));
+    };
+    if !create && (1..=replicas).all(|slot| service.worker_slots.contains_key(&slot)) {
+        return Ok(Vec::new());
+    }
+    let mut candidates = engine.store.workers()?;
+    candidates.retain(|worker| worker.accepts_assignments(cluster));
+    if candidates.is_empty() {
+        return Err(held(
+            "no enrolled worker can accept new replica assignments",
+        ));
+    }
+    let added = fill_slots(&mut service.worker_slots, &candidates, replicas);
+    let mut warnings = BTreeSet::new();
+    for worker in &candidates {
+        if added.contains(&worker.id) {
+            warnings.extend(worker.check(cluster, service)?);
+        }
+    }
+    if create && replicas == 0 {
+        warnings.extend(candidates[0].check(cluster, service)?);
+    }
+    Ok(warnings.into_iter().collect())
 }
 
 pub fn check_remote(service: &ServiceRecord) -> Result<()> {
@@ -362,7 +454,12 @@ pub fn remove(engine: &Engine, key: &str) -> Result<()> {
         )
     })?;
     for service in engine.store.services()? {
-        if assignment(&service, &cluster)?.as_deref() == Some(worker.id.as_str()) {
+        if placement(&service, &cluster)? == Placement::Pinned(&worker.id)
+            || service
+                .worker_slots
+                .values()
+                .any(|owner| *owner == worker.id)
+        {
             return Err(held(format!("service {} uses this worker", service.name())));
         }
     }
@@ -382,10 +479,15 @@ enum Action {
     Preflight,
     Join,
     Probe,
+    ProbeAssignments,
     Check { service: Box<ServiceRecord> },
     Reconcile { service: Box<ServiceRecord> },
+    // A separate action lets an older worker reject this request instead of
+    // ignoring the slot map and starting all replicas.
+    ReconcileAssigned { service: Box<ServiceRecord> },
     Tasks,
     Remove { id: String },
+    RemoveAssigned { id: String },
     Leave,
 }
 
@@ -432,15 +534,39 @@ pub fn handle(engine: &Engine, request: Wire) -> Result<Value> {
         return Err(held("this Podbag engine is not an enrolled worker"));
     };
     let cluster = enrolled.cluster();
+    let assigned_request = matches!(action, Action::ReconcileAssigned { .. });
+    if let Action::RemoveAssigned { id } = &action {
+        engine.store.retire_service(id)?;
+    }
     match action {
         Action::Preflight | Action::Join => unreachable!("enrollment was handled"),
         Action::Probe => Ok(json!(host())),
+        Action::ProbeAssignments => Ok(Value::Null),
         Action::Check { service } => {
             check_remote(&service)?;
             let warnings = engine.check_local(&cluster, &service)?;
             Ok(json!(warnings))
         }
-        Action::Reconcile { mut service } => {
+        Action::Reconcile { mut service } | Action::ReconcileAssigned { mut service } => {
+            let valid_placement = match placement(&service, &cluster)? {
+                Placement::Workers => {
+                    assigned_request
+                        && service
+                            .worker_slots
+                            .values()
+                            .any(|node| *node == cluster.node_id)
+                }
+                Placement::Local => !assigned_request && service.worker_slots.is_empty(),
+                Placement::Pinned(_) => false,
+            };
+            if !valid_placement {
+                return Err(held(
+                    "the service has no matching replica assignments for this worker",
+                ));
+            }
+            if assigned_request && engine.store.service_retired(&service.id)? {
+                return Err(held("the worker already removed this service"));
+            }
             check_remote(&service)?;
             let previous = engine
                 .store
@@ -449,7 +575,9 @@ pub fn handle(engine: &Engine, request: Wire) -> Result<Value> {
                 .find(|s| s.id == service.id);
             if let Some(previous) = &previous {
                 if previous.version > service.version
-                    || (previous.version == service.version && previous.spec != service.spec)
+                    || (previous.version == service.version
+                        && (previous.spec != service.spec
+                            || previous.worker_slots != service.worker_slots))
                 {
                     return Err(held("the worker already has a newer service specification"));
                 }
@@ -464,7 +592,7 @@ pub fn handle(engine: &Engine, request: Wire) -> Result<Value> {
             Ok(Value::Null)
         }
         Action::Tasks => Ok(json!(engine.local_task_list(&cluster)?)),
-        Action::Remove { id } => {
+        Action::Remove { id } | Action::RemoveAssigned { id } => {
             let Some(service) = engine.store.services()?.into_iter().find(|s| s.id == id) else {
                 return Ok(Value::Null);
             };
@@ -540,6 +668,90 @@ mod tests {
         for invalid in ["-o", "ssh://user@host", "a@b@c", "a;whoami", "a b", "a\n"] {
             assert!(!destination_ok(invalid), "{invalid:?}");
         }
+    }
+
+    #[test]
+    fn new_slots_balance_and_an_unreachable_owner_keeps_its_slots() {
+        let worker = |name: &str| Worker {
+            id: name.into(),
+            name: name.into(),
+            destination: "test-host".into(),
+            ssh_config: None,
+            created: String::new(),
+            host: None,
+        };
+        let alpha = worker("alpha");
+        let beta = worker("beta");
+        let mut slots = BTreeMap::new();
+        assert_eq!(
+            fill_slots(&mut slots, &[beta.clone(), alpha], 4),
+            BTreeSet::from(["alpha".into(), "beta".into()])
+        );
+        assert_eq!(
+            slots,
+            BTreeMap::from([
+                (1, "alpha".into()),
+                (2, "beta".into()),
+                (3, "alpha".into()),
+                (4, "beta".into()),
+            ])
+        );
+        assert_eq!(
+            fill_slots(&mut slots, &[beta.clone()], 6),
+            BTreeSet::from(["beta".into()])
+        );
+        assert!(fill_slots(&mut slots, &[beta], 1).is_empty());
+        assert_eq!(slots[&1], "alpha");
+        assert_eq!(slots[&3], "alpha");
+        assert_eq!(slots[&5], "beta");
+        assert_eq!(slots[&6], "beta");
+    }
+
+    #[test]
+    fn a_retired_assignment_rejects_delayed_reconciliation() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(&crate::paths::Dirs {
+            data: temp.path().join("data"),
+            runtime: temp.path().join("run"),
+            config: temp.path().join("config"),
+        });
+        let member = membership();
+        engine.store.write_membership(&member).unwrap();
+        let send = |action| {
+            handle(
+                &engine,
+                Wire {
+                    member: member.clone(),
+                    action,
+                },
+            )
+        };
+        let id = "s".repeat(plan::ID_LEN);
+        send(Action::RemoveAssigned { id: id.clone() }).unwrap();
+        let service = ServiceRecord {
+            id,
+            version: 1,
+            created: String::new(),
+            updated: String::new(),
+            spec: json!({
+                "Name": "pool",
+                "TaskTemplate": {"Placement": {"Constraints": ["node.role==worker"]}},
+                "Mode": {"Replicated": {"Replicas": 1}},
+            }),
+            previous_spec: None,
+            update_status: None,
+            ports: Vec::new(),
+            vips: BTreeMap::new(),
+            worker_slots: BTreeMap::from([(1, member.node_id.clone())]),
+            removing: false,
+        };
+        let error = send(Action::ReconcileAssigned {
+            service: Box::new(service),
+        })
+        .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Conflict);
+        assert!(error.why.contains("already removed"));
+        assert!(engine.store.services().unwrap().is_empty());
     }
 
     #[test]

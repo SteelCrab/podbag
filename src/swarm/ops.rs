@@ -387,12 +387,38 @@ impl Engine {
     /// Check a spec before a service takes it: the mode, the image (pulled now), the
     /// networks, secrets and configs, and the container a task would get. Returns the
     /// mapping's warnings.
-    fn check(&self, cluster: &Cluster, service: &ServiceRecord) -> Result<Vec<String>> {
-        if let Some(worker) = remote::worker_for(self, cluster, service)? {
-            remote::check_remote(service)?;
-            return worker.check(cluster, service);
+    fn prepare_service(
+        &self,
+        cluster: &Cluster,
+        service: &mut ServiceRecord,
+        create: bool,
+    ) -> Result<Vec<String>> {
+        match remote::placement(service, cluster)? {
+            remote::Placement::Local => self.check_local(cluster, service),
+            remote::Placement::Pinned(id) => {
+                remote::check_remote(service)?;
+                remote::enrolled(self, id)?.check(cluster, service)
+            }
+            remote::Placement::Workers => {
+                remote::prepare_assignments(self, cluster, service, create)
+            }
         }
-        self.check_local(cluster, service)
+    }
+
+    fn apply_service(
+        &self,
+        cluster: &Cluster,
+        service: &mut ServiceRecord,
+        warnings: &mut Vec<String>,
+    ) -> Result<()> {
+        let all = tasks::list(&self.dirs, &cluster.node_id);
+        if let Err(error) = self.reconcile_service(cluster, service, &all) {
+            if remote::placement(service, cluster)? != remote::Placement::Workers {
+                return Err(error);
+            }
+            warnings.push(error.to_string());
+        }
+        Ok(())
     }
 
     pub(super) fn check_local(
@@ -499,13 +525,14 @@ impl Engine {
             update_status: None,
             ports,
             vips: Default::default(),
+            worker_slots: Default::default(),
+            removing: false,
         };
-        let warnings = self.check(&cluster, &service)?;
+        let mut warnings = self.prepare_service(&cluster, &mut service, true)?;
         service.version = cluster.next_index();
         self.store.write_cluster(&cluster)?;
         self.store.write_service(&service)?;
-        let all = tasks::list(&self.dirs, &cluster.node_id);
-        self.reconcile_service(&cluster, &mut service, &all)?;
+        self.apply_service(&cluster, &mut service, &mut warnings)?;
         Ok((id, warnings))
     }
 
@@ -521,8 +548,16 @@ impl Engine {
     ) -> Result<Vec<String>> {
         let _lock = self.store.lock()?;
         let mut cluster = self.require()?;
-        let mut service = self.find_service(key)?;
+        let service = self.find_service(key)?;
         Engine::check_version(version, service.version)?;
+        if service.removing {
+            return Err(Error::new(
+                ErrorKind::Conflict,
+                "cannot update a service during removal",
+                "at least one assigned worker still needs to finish cleanup",
+                "retry docker service rm when the workers are reachable",
+            ));
+        }
         let old = service.spec.clone();
         let new = if rollback {
             service.previous_spec.clone().ok_or_else(|| {
@@ -556,18 +591,18 @@ impl Engine {
         let mut candidate = service.clone();
         candidate.spec = new.clone();
         candidate.ports = ports.clone();
-        let old_worker = remote::assignment(&service, &cluster)?;
-        let new_worker = remote::assignment(&candidate, &cluster)?;
-        if old_worker != new_worker {
+        let old_placement = remote::placement(&service, &cluster)?;
+        let new_placement = remote::placement(&candidate, &cluster)?;
+        if old_placement != new_placement {
             return Err(invalid(
                 "cannot move the service to another node",
                 "placement cannot be changed on an existing service",
-                "create a service with the requested node constraint",
+                "create a new service with the requested placement",
             ));
         }
         let tasks_change = new["TaskTemplate"] != old["TaskTemplate"]
             || new["EndpointSpec"] != old["EndpointSpec"];
-        if tasks_change && old_worker.is_some() {
+        if tasks_change && old_placement != remote::Placement::Local {
             return Err(Error::new(
                 ErrorKind::Unsupported,
                 "cannot update worker tasks",
@@ -575,10 +610,9 @@ impl Engine {
                 "scale the service or create a new one with the required task settings",
             ));
         }
-        let warnings = self.check(&cluster, &candidate)?;
+        let mut warnings = self.prepare_service(&cluster, &mut candidate, false)?;
+        let mut service = candidate;
         service.previous_spec = Some(old);
-        service.spec = new;
-        service.ports = ports;
         service.version = cluster.next_index();
         service.updated = now();
         if tasks_change {
@@ -589,8 +623,7 @@ impl Engine {
         if tasks_change {
             update::spawn(self.clone(), service.id.clone(), rollback);
         } else {
-            let all = tasks::list(&self.dirs, &cluster.node_id);
-            self.reconcile_service(&cluster, &mut service, &all)?;
+            self.apply_service(&cluster, &mut service, &mut warnings)?;
         }
         Ok(warnings)
     }
@@ -599,11 +632,25 @@ impl Engine {
     pub fn remove_service(&self, key: &str) -> Result<()> {
         let _lock = self.store.lock()?;
         let cluster = self.require()?;
-        let service = self.find_service(key)?;
-        if let Some(worker) = remote::worker_for(self, &cluster, &service)? {
-            worker.remove_service(&cluster, &service.id)?;
-            self.store.remove_service(&service.id)?;
-            return Ok(());
+        let mut service = self.find_service(key)?;
+        let workers = match remote::placement(&service, &cluster)? {
+            remote::Placement::Local => None,
+            remote::Placement::Pinned(id) => Some(vec![remote::enrolled(self, id)?]),
+            remote::Placement::Workers => {
+                service.removing = true;
+                self.store.write_service(&service)?;
+                Some(remote::assigned_workers(self, &service)?)
+            }
+        };
+        if let Some(workers) = workers {
+            let mut result = Ok(());
+            for worker in workers {
+                if let Err(error) = worker.remove_service(&cluster, &service) {
+                    result = Err(error);
+                }
+            }
+            result?;
+            return self.store.remove_service(&service.id);
         }
         update::forget(&service.id);
         self.store.remove_service(&service.id)?;
@@ -719,10 +766,24 @@ impl Engine {
         service: &mut ServiceRecord,
         all: &[Task],
     ) -> Result<()> {
-        if let Some(worker) = remote::worker_for(self, cluster, service)? {
-            return worker.reconcile(cluster, service);
+        if service.removing {
+            return Ok(());
         }
-        self.reconcile_local(cluster, service, all)
+        match remote::placement(service, cluster)? {
+            remote::Placement::Local => self.reconcile_local(cluster, service, all),
+            remote::Placement::Pinned(id) => {
+                remote::enrolled(self, id)?.reconcile(cluster, service)
+            }
+            remote::Placement::Workers => {
+                let mut result = Ok(());
+                for worker in remote::assigned_workers(self, service)? {
+                    if let Err(error) = worker.reconcile(cluster, service) {
+                        result = Err(error);
+                    }
+                }
+                result
+            }
+        }
     }
 
     pub(super) fn reconcile_local(
@@ -733,7 +794,19 @@ impl Engine {
     ) -> Result<()> {
         let mode = plan::mode_of(&service.spec).unwrap_or(plan::Mode::Replicated(0));
         let mine: Vec<&Task> = all.iter().filter(|t| t.service_id == service.id).collect();
-        let plan = plan::reconcile(mode, cluster.active(), &self.live(service, &mine));
+        let live = self.live(service, &mine);
+        let plan = match mode {
+            plan::Mode::Replicated(replicas) if !service.worker_slots.is_empty() => {
+                let wanted: Vec<_> = service
+                    .worker_slots
+                    .range(..=replicas)
+                    .filter(|(_, owner)| **owner == cluster.node_id && cluster.active())
+                    .map(|(slot, _)| Slot::Replica(*slot))
+                    .collect();
+                plan::reconcile_slots(&wanted, &live)
+            }
+            _ => plan::reconcile(mode, cluster.active(), &live),
+        };
         let gone: Vec<&Task> = mine
             .iter()
             .copied()

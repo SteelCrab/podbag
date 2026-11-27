@@ -428,6 +428,8 @@ mod tests {
                 mode: "ingress".into(),
             }],
             vips: BTreeMap::new(),
+            worker_slots: Default::default(),
+            removing: false,
         }
     }
 

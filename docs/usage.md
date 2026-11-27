@@ -70,6 +70,8 @@ The [README](../README.md) shows how to install podbag. This page shows what it 
   - [Build the desktop app](#build-the-desktop-app)
   - [What is hidden](#what-is-hidden)
 - [Swarm mode](#swarm-mode)
+  - [Enroll a worker](#enroll-a-worker)
+  - [Distribute replicas across workers](#distribute-replicas-across-workers)
   - [What it is](#what-it-is)
   - [How it runs without a daemon](#how-it-runs-without-a-daemon)
   - [Networks and ports](#networks-and-ports)
@@ -742,7 +744,7 @@ podbag system docker restore    # back to the context you had (Docker Desktop, â
   addresses.
 - Answered with 501 and what to do instead: BuildKit's build API (use buildx with the
   `docker-container` driver), `image history` and plugins.
-- Swarm mode supports one manager and explicitly assigned SSH workers. See [Swarm mode](#swarm-mode).
+- Swarm mode supports one manager and enrolled SSH workers. See [Swarm mode](#swarm-mode).
 
 ### cp, save and load
 
@@ -1440,8 +1442,9 @@ open target/release/podbag.app
 
 - `docker swarm init`, `docker service`, `docker stack deploy`, `docker secret`,
   `docker config` and `docker node ls` work through `podbag system service`.
-- The manager runs services locally by default. A service can also select one enrolled
-  Podbag worker. Each worker runs its own Linux Podbag engine.
+- The manager runs services locally by default. A service can select one enrolled
+  Podbag worker or distribute replicas across enrolled workers. Each worker runs its
+  own Linux Podbag engine.
 
 ```sh
 docker swarm init
@@ -1480,6 +1483,29 @@ docker node rm "$worker_id"
   to their services.
 - Remove the services assigned to a worker before removing it. Remove the workers before
   leaving the manager's swarm.
+
+### Distribute replicas across workers
+
+Enroll workers, then set the worker-role constraint on a replicated service. Use the new
+Podbag version on the manager and each worker in the pool.
+
+```sh
+docker service create --name jobs --replicas 4 --constraint 'node.role==worker' alpine sleep 3600
+docker service ps jobs
+docker service scale jobs=6
+```
+
+- New replica slots go to reachable workers. The manager prefers the worker that owns
+  the fewest slots of that service. Worker name and ID break ties.
+- Each slot keeps its assigned worker through manager restarts and changes to the
+  replica count. Enrolling a worker gives new slots another destination.
+- A disconnected worker may still be running its tasks. The manager reserves those
+  slots on that worker. Run `docker service ps` or `docker service ls` after the worker
+  reconnects to reconcile its tasks. The task list shows tasks from reachable nodes.
+- Remove the service before removing any worker that owns one of its slots. All
+  assigned workers must be reachable to complete service removal. If a worker is
+  disconnected, retry the removal when it reconnects. The manager stops starting tasks
+  for the service while removal is pending.
 
 ### How it runs without a daemon
 
@@ -1522,7 +1548,7 @@ docker node rm "$worker_id"
 
 ### What does not work
 
-- Jobs (`replicated-job`, `global-job`), automatic placement and failover, multiple
+- Jobs (`replicated-job`, `global-job`), worker failover, multiple
   managers, `--autolock`, secret drivers and templating.
 - Worker services use node-local networking. Cross-host overlay networking, ingress
   publishing, custom networks, mounts, secrets, configs, streaming logs and rolling

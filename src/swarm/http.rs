@@ -361,7 +361,7 @@ fn services(req: &Request, ctx: &Ctx) -> Reply {
                     .iter()
                     .map(|(t, ..)| t)
                     .filter(|t| t.service_id == s.id);
-                let local = remote::assignment(s, &c).ok().flatten().is_none();
+                let local = remote::placement(s, &c).ok() == Some(remote::Placement::Local);
                 let desired = match super::plan::mode_of(&s.spec) {
                     _ if local && !c.active() => 0,
                     Some(super::plan::Mode::Replicated(n)) => n,
@@ -513,7 +513,7 @@ fn logs(req: &Request, ctx: &Ctx, of: Of) -> Reply {
     let (service_id, only_task, tty) = match &of {
         Of::Service(key) => {
             let s = ok_or_reply!(engine.find_service(key));
-            if ok_or_reply!(remote::assignment(&s, &c)).is_some() {
+            if ok_or_reply!(remote::placement(&s, &c)) != remote::Placement::Local {
                 return not_supported(
                     "streaming logs from SSH workers",
                     "read logs on that worker",

@@ -103,6 +103,12 @@ pub struct ServiceRecord {
     /// The service's virtual address on each of its networks (root mode).
     #[serde(default)]
     pub vips: BTreeMap<String, String>,
+    /// Owners of replica slots, including slots reserved after a scale-down.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub worker_slots: BTreeMap<u64, String>,
+    /// A distributed service stays stopped while a disconnected worker is cleaned up.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub removing: bool,
 }
 
 impl ServiceRecord {
@@ -349,7 +355,13 @@ impl Store {
     }
 
     pub fn remove_membership(&self) -> Result<()> {
-        Store::remove(&self.dir.join("membership.json"))
+        Store::remove(&self.dir.join("membership.json"))?;
+        let retired = self.dir.join("retired-services");
+        match std::fs::remove_dir_all(&retired) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(fail(&retired, error)),
+        }
     }
 
     pub fn services(&self) -> Result<Vec<ServiceRecord>> {
@@ -362,6 +374,15 @@ impl Store {
 
     pub fn remove_service(&self, id: &str) -> Result<()> {
         Store::remove(&self.object_path("services", id, "json")?)
+    }
+
+    /// Remember the removal so a delayed reconciliation cannot recreate its tasks.
+    pub fn retire_service(&self, id: &str) -> Result<()> {
+        Store::write(&self.object_path("retired-services", id, "json")?, &true)
+    }
+
+    pub fn service_retired(&self, id: &str) -> Result<bool> {
+        Ok(Store::read(&self.object_path("retired-services", id, "json")?)?.unwrap_or(false))
     }
 
     pub fn objects(&self, kind: Kind) -> Result<Vec<FileObject>> {
@@ -497,6 +518,8 @@ mod tests {
             update_status: None,
             ports: vec![],
             vips: BTreeMap::new(),
+            worker_slots: BTreeMap::from([(1, id('b')), (3, id('c'))]),
+            removing: false,
         };
         s.write_service(&service).unwrap();
         assert_eq!(s.services().unwrap(), std::slice::from_ref(&service));
