@@ -700,11 +700,12 @@ fn network_settings(
     state: State<'_, AppState>,
     token: u64,
     values: Option<podbag::network::NetworkPreferences>,
+    expected_revision: Option<String>,
 ) -> Result<Value, String> {
     if state.session(token)?.target.choice != Choice::Podbag {
         return Err("Network settings require the local podbag engine".into());
     }
-    cli::network_settings(&state.podbag, values)
+    cli::network_settings(&state.podbag, values, expected_revision.as_deref())
 }
 
 #[derive(serde::Deserialize)]

@@ -3,6 +3,7 @@
 use crate::cgroup::{Budget, parse_budget};
 use crate::paths::Dirs;
 use crate::{Error, ErrorKind, Result};
+use std::fs::File;
 
 /// The default image store limit.
 pub const DEFAULT_STORE_LIMIT: u64 = 10 << 30;
@@ -193,11 +194,33 @@ pub fn load(dirs: &Dirs) -> Result<Config> {
 /// end; every other line stays as it is. A value [`parse`] refuses changes nothing. The
 /// file is replaced at once: a reader sees the old text or the new one.
 pub fn set_value(dirs: &Dirs, key: &str, value: &str) -> Result<()> {
-    set_values(dirs, &[(key, value)])
+    let _lock = lock_config(dirs)?;
+    set_values_locked(dirs, &[(key, value)])
 }
 
-/// Replace related settings in a single write and serialize writers of the configuration.
-pub(crate) fn set_values(dirs: &Dirs, values: &[(&str, &str)]) -> Result<()> {
+pub(crate) fn lock_config(dirs: &Dirs) -> Result<File> {
+    let result = || -> std::io::Result<File> {
+        std::fs::create_dir_all(&dirs.config)?;
+        let file = File::options()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(dirs.config.join("config.lock"))?;
+        file.lock()?;
+        Ok(file)
+    };
+    result().map_err(|e| {
+        Error::io(
+            "cannot lock the engine configuration",
+            &e,
+            "check the configuration directory permissions",
+        )
+    })
+}
+
+/// Replace related settings in a single write while the caller holds config.lock.
+pub(crate) fn set_values_locked(dirs: &Dirs, values: &[(&str, &str)]) -> Result<()> {
     if values.is_empty() {
         return Ok(());
     }
@@ -217,23 +240,6 @@ pub(crate) fn set_values(dirs: &Dirs, values: &[(&str, &str)]) -> Result<()> {
         })
         .collect::<Result<_>>()?;
     let path = dirs.config.join("config.toml");
-    let locked = || -> std::io::Result<std::fs::File> {
-        std::fs::create_dir_all(&dirs.config)?;
-        let lock = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(dirs.config.join("config.lock"))?;
-        lock.lock()?;
-        Ok(lock)
-    };
-    let _lock = locked().map_err(|e| {
-        Error::io(
-            format!("cannot lock {}", path.display()),
-            &e,
-            "check the folder's permissions",
-        )
-    })?;
     let old = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),

@@ -384,6 +384,7 @@
   "networkSettings.loading": "네트워크 설정을 불러오는 중…",
   "networkSettings.saving": "네트워크 설정을 저장하는 중…",
   "networkSettings.saved": "네트워크 설정을 저장했습니다.",
+  "networkSettings.reloadSaved": "저장된 설정 다시 불러오기",
   "networkSettings.failed": "네트워크 설정을 불러오거나 저장할 수 없습니다. {error}",
   "settings.vm": "가상 머신",
   "settings.vmState": "상태",

@@ -1594,14 +1594,14 @@ function networkSettings() {
     fields.disabled = submit.disabled = true;
     put(status, h("p", { class: "hint", text: setting(values ? "saving" : "loading") }));
     try {
-      const result = await API.networkSettings(values);
+      const result = await API.networkSettings(values, values && saved?.revision);
       if (!form.isConnected) return;
       fill(result);
       put(status, values && h("p", { class: "hint", text: setting("saved") }));
     } catch (error) {
       if (!form.isConnected) return;
       put(status, h("p", { class: "error-text", text: t("networkSettings.failed", { error: String(error) }) }),
-        !saved && button(null, t("action.retry"), () => apply()));
+        button(null, saved ? setting("reloadSaved") : t("action.retry"), () => apply()));
     } finally {
       busy = false;
       fields.disabled = submit.disabled = !saved;

@@ -384,6 +384,7 @@
   "networkSettings.loading": "Nilo-load ang mga setting ng network…",
   "networkSettings.saving": "Sine-save ang mga setting ng network…",
   "networkSettings.saved": "Na-save ang mga setting ng network.",
+  "networkSettings.reloadSaved": "I-load muli ang mga na-save na setting",
   "networkSettings.failed": "Hindi ma-load o ma-save ang mga setting ng network. {error}",
   "settings.vm": "Virtual machine",
   "settings.vmState": "Estado",

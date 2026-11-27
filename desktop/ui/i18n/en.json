@@ -384,6 +384,7 @@
   "networkSettings.loading": "Loading network settings…",
   "networkSettings.saving": "Saving network settings…",
   "networkSettings.saved": "Network settings saved.",
+  "networkSettings.reloadSaved": "Reload saved settings",
   "networkSettings.failed": "Could not load or save network settings. {error}",
   "settings.vm": "Virtual machine",
   "settings.vmState": "State",

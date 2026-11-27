@@ -170,12 +170,16 @@ pub fn compression(podbag: &Path, mode: Option<&str>) -> Result<Value, String> {
 pub fn network_settings(
     podbag: &Path,
     values: Option<crate::network::NetworkPreferences>,
+    expected_revision: Option<&str>,
 ) -> Result<Value, String> {
     let mut args = vec!["system", "network-settings"];
     let json;
     if let Some(values) = values {
         json = serde_json::to_string(&values).map_err(|e| e.to_string())?;
-        args.extend(["--set", &json]);
+        let revision = expected_revision
+            .filter(|revision| !revision.is_empty())
+            .ok_or("Reload Network settings before saving changes")?;
+        args.extend(["--set", &json, "--expect-revision", revision]);
     }
     let out = run_ok(podbag, &args)?;
     serde_json::from_str(out.trim()).map_err(|e| format!("podbag system network-settings: {e}"))

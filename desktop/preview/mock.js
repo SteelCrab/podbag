@@ -198,6 +198,7 @@
   }
   let launchAtLogin = false;
   const networkSettings = {
+    revision: "0",
     preferences: {
       defaultSubnet: "10.77.0.0/16",
       defaultIpv6Subnet: "fd77:706f:6462::/64",
@@ -322,14 +323,20 @@
       if (!mode) window.previewCompressionReads = (window.previewCompressionReads || 0) + 1;
       return params.get("compression") === "broken" ? null : { ...compression };
     },
-    network_settings: ({ values }) => {
+    network_settings: ({ values, expectedRevision }) => {
       if (selected !== "podbag") throw "Network settings require the local podbag engine";
       if (!values && params.has("network-settings-error")) {
         params.delete("network-settings-error");
         throw "Cannot read the network configuration.";
       }
       if (values?.defaultSubnet === "10.79.4.1/24") throw "The IPv4 subnet has host bits set.";
-      if (values) networkSettings.preferences = values;
+      if (values) {
+        if (expectedRevision !== networkSettings.revision) {
+          throw "Network settings changed after they were opened.";
+        }
+        networkSettings.preferences = values;
+        networkSettings.revision = String(Number(networkSettings.revision) + 1);
+      }
       return structuredClone(networkSettings);
     },
     vm_set: ({ settings }) => {

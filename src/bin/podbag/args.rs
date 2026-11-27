@@ -510,6 +510,9 @@ pub enum SystemCmd {
         /// Save the supplied network preferences
         #[arg(long, value_name = "JSON")]
         set: Option<String>,
+        /// Save only if the network settings still match this revision
+        #[arg(long, value_name = "REVISION", requires = "set")]
+        expect_revision: Option<String>,
     },
     /// Serve the Docker Engine API on a Unix socket, for the docker CLI
     ///

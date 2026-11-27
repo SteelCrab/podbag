@@ -384,6 +384,7 @@
   "networkSettings.loading": "Đang tải cài đặt mạng…",
   "networkSettings.saving": "Đang lưu cài đặt mạng…",
   "networkSettings.saved": "Đã lưu cài đặt mạng.",
+  "networkSettings.reloadSaved": "Tải lại cài đặt đã lưu",
   "networkSettings.failed": "Không thể tải hoặc lưu cài đặt mạng. {error}",
   "settings.vm": "Máy ảo",
   "settings.vmState": "Trạng thái",

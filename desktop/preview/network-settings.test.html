@@ -76,10 +76,32 @@ async function test() {
   check(doc.querySelector("#default-ip-mode").value === "ipv4", "Persist the IPv4-only default");
   check(doc.querySelector("#embedded-dns").checked && doc.querySelector("#dns-filter").value === "ipv6",
     "Persist the DNS filter");
+
+  const invoke = win.__TAURI__.core.invoke;
+  const [token] = await invoke("connection");
+  const previous = await invoke("network_settings", { token });
+  const competing = await invoke("network_settings", {
+    token, expectedRevision: previous.revision, values: { ...previous.preferences, dnsFilter: "ipv4" },
+  });
+  const currentInput = doc.querySelector("#default-ipv4-subnet");
+  const currentSection = doc.querySelector("#network-settings");
+  const currentStatus = currentSection.querySelector('[role="status"]');
+  currentInput.value = "10.79.5.0/24";
+  currentSection.querySelector('button[type="submit"]').click();
+  await until(() => currentStatus.textContent.includes("Network settings changed after they were opened."),
+    "a conflict with the competing save");
+  check(currentInput.value === "10.79.5.0/24", "Keep the draft after a revision conflict");
+  check(doc.querySelector("#dns-filter").value === "ipv6", "Keep the other draft fields");
+  check((await invoke("network_settings", { token })).revision === competing.revision,
+    "Leave the competing save in place");
+
+  currentStatus.querySelector("button").click();
+  await until(() => doc.querySelector("#dns-filter").value === "ipv4", "reloading the saved settings");
+  check(currentInput.value === "10.79.4.0/24", "Reload only when explicitly requested");
 }
 
 frame.addEventListener("load", () => test().then(
-  () => { result.textContent = "PASS: Search, read, retry, validate, and save network settings"; },
+  () => { result.textContent = "PASS: Search, read, save, and keep the draft on conflict"; },
   error => { result.textContent = "FAIL: " + error.message; },
 ), { once: true });
 </script>

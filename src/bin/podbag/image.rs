@@ -244,7 +244,10 @@ pub fn system(cmd: SystemCmd) -> i32 {
                 Err(e) => report(&e),
             }
         }
-        SystemCmd::NetworkSettings { set } => match network_settings(set.as_deref()) {
+        SystemCmd::NetworkSettings {
+            set,
+            expect_revision,
+        } => match network_settings(set.as_deref(), expect_revision.as_deref()) {
             Ok(settings) => {
                 println!("{}", serde_json::json!(settings));
                 0
@@ -265,7 +268,10 @@ pub fn system(cmd: SystemCmd) -> i32 {
     }
 }
 
-fn network_settings(set: Option<&str>) -> podbag::Result<podbag::network::NetworkSettings> {
+fn network_settings(
+    set: Option<&str>,
+    expected_revision: Option<&str>,
+) -> podbag::Result<podbag::network::NetworkSettings> {
     let dirs = podbag::paths::dirs()?;
     let Some(set) = set else {
         return podbag::network::settings(&dirs);
@@ -278,7 +284,7 @@ fn network_settings(set: Option<&str>) -> podbag::Result<podbag::network::Networ
             "pass the network preferences as a JSON object",
         )
     })?;
-    podbag::network::save_settings(&dirs, requested)
+    podbag::network::save_settings(&dirs, requested, expected_revision)
 }
 
 /// Save what `system compression` was given, then the settings in effect (environment

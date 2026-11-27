@@ -384,6 +384,7 @@
   "networkSettings.loading": "正在加载网络设置…",
   "networkSettings.saving": "正在保存网络设置…",
   "networkSettings.saved": "网络设置已保存。",
+  "networkSettings.reloadSaved": "重新加载已保存的设置",
   "networkSettings.failed": "无法加载或保存网络设置。{error}",
   "settings.vm": "虚拟机",
   "settings.vmState": "状态",

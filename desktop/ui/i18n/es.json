@@ -384,6 +384,7 @@
   "networkSettings.loading": "Cargando la configuración de red…",
   "networkSettings.saving": "Guardando la configuración de red…",
   "networkSettings.saved": "Configuración de red guardada.",
+  "networkSettings.reloadSaved": "Volver a cargar la configuración guardada",
   "networkSettings.failed": "No se pudo cargar o guardar la configuración de red. {error}",
   "settings.vm": "Máquina virtual",
   "settings.vmState": "Estado",

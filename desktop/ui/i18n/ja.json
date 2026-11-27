@@ -384,6 +384,7 @@
   "networkSettings.loading": "ネットワーク設定を読み込んでいます…",
   "networkSettings.saving": "ネットワーク設定を保存しています…",
   "networkSettings.saved": "ネットワーク設定を保存しました。",
+  "networkSettings.reloadSaved": "保存済みの設定を再読み込み",
   "networkSettings.failed": "ネットワーク設定を読み込みまたは保存できませんでした。{error}",
   "settings.vm": "仮想マシン",
   "settings.vmState": "状態",
