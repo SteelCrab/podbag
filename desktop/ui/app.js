@@ -27,7 +27,7 @@ const S = {
   live: false,
   features: { stats: false, top: false, pause: false, rename: false },
   featuresAsked: false,
-  settings: { language: "system", theme: "system", sidebarWidth: 216, sidebarCollapsed: false },
+  settings: { language: "system", theme: "system", sidebarWidth: 216, sidebarCollapsed: false, statusNotifications: true },
   busy: new Set(),
   logs: { generation: 0, lines: [], follow: true },
   languageNames: null,
@@ -147,10 +147,47 @@ function stateChip(state) {
   return h("span", { class: `chip chip-${s}` }, h("span", { class: "dot", "aria-hidden": "true" }), t(`state.${s}`));
 }
 
+const notifications = [];
+
 function toast(text, error) {
+  notifications.unshift({ text, error, time: new Date() });
+  if (notifications.length > 50) notifications.pop();
+  renderNotificationHistory();
+  if (!error && !S.settings.statusNotifications) return;
   const el = h("div", { class: `toast ${error ? "toast-error" : ""}`, text });
   document.getElementById("toasts").append(el);
   setTimeout(() => el.remove(), error ? 8000 : 4000);
+}
+
+function renderNotificationHistory() {
+  const dialog = document.getElementById("notification-history");
+  if (!dialog?.open) return;
+  const list = dialog.querySelector("ol");
+  const date = new Intl.DateTimeFormat(I18N.lang, { hour: "numeric", minute: "2-digit" });
+  put(list, notifications.map(({ text, error, time }) =>
+    h("li", { class: error ? "notification-error" : "" }, icon(error ? "warning" : "check"),
+      h("p", {}, error ? h("span", { class: "visually-hidden", text: t("notifications.error") + ". " }) : null, text),
+      h("time", { datetime: time.toISOString(), text: date.format(time) }))));
+  list.hidden = !notifications.length;
+  dialog.querySelector(".notification-empty").hidden = !!notifications.length;
+  dialog.querySelector("#notifications-clear").disabled = !notifications.length;
+}
+
+function openNotificationHistory() {
+  const dialog = document.getElementById("notification-history");
+  const close = iconButton("close", t("notifications.close"), () => dialog.close());
+  const clear = button(null, t("notifications.clear"), () => {
+    notifications.length = 0;
+    close.focus();
+    renderNotificationHistory();
+  });
+  clear.id = "notifications-clear";
+  put(dialog, h("div", { class: "notification-heading" },
+    h("h2", { id: "notification-history-title", text: t("notifications.history") }), close),
+    h("p", { class: "notification-empty", text: t("notifications.empty") }),
+    h("ol", { class: "notification-list" }), h("div", { class: "buttons" }, clear));
+  dialog.showModal();
+  renderNotificationHistory();
 }
 
 async function copy(text, btn) {
@@ -661,6 +698,7 @@ function renderNav() {
     ...(S.practiceContainers ? [item("lab-containers", t("training.containers"), null, "containers")] : []),
     ...(S.practiceInstalled ? [item("lab-volumes", t("practice.volumes"), null, "volumes")] : []));
   updateKubeNav();
+  document.getElementById("nav-extensions").replaceChildren(item("extensions", t("nav.extensions"), null, "kube-deployments"));
   if (windowBar) {
     const [reload, settings] = document.getElementById("topbar-tools").children;
     for (const [button, label] of [[reload, t("action.refresh")], [settings, t("nav.settings")]]) {
@@ -994,6 +1032,13 @@ function renderMain(fresh) {
   if (S.view === "migration") {
     if (fresh || shownView !== S.view) migrationPanel = renderMigration(main);
     shownView = S.view;
+    return;
+  }
+  if (S.view === "extensions") {
+    const redraw = fresh || shownView !== S.view;
+    shownView = S.view;
+    if (redraw) openExtensions(main);
+    else refreshExtensionSummary(main);
     return;
   }
   if (S.view === "lab-containers") {
@@ -1440,6 +1485,87 @@ function settingDetails(id, key, symbol, value, ...body) {
     h("div", { class: "setting-body" }, body));
 }
 
+function registryProxySetting() {
+  if (!isPodbag() || !["linux", "macos"].includes(S.engine?.platform)) return null;
+  const key = name => t(`settings.registryProxy${name}`);
+  const modes = { inherited: "Inherited", direct: "Direct", manual: "Manual" };
+  const mode = h("select", { id: "registry-proxy-mode" },
+    Object.entries(modes).map(([value, label]) => h("option", { value, text: key(label) })));
+  const url = h("input", {
+    id: "registry-proxy-url", type: "url", placeholder: "http://proxy.example.com:3128",
+    autocomplete: "off", spellcheck: "false", maxlength: 2048, required: true,
+    "aria-describedby": "registry-proxy-url-hint",
+  });
+  const bypass = h("input", {
+    id: "registry-proxy-bypass", type: "text", placeholder: "localhost, .example.com",
+    autocomplete: "off", spellcheck: "false", maxlength: 4096, "aria-describedby": "registry-proxy-bypass-hint",
+  });
+  const status = h("p", { class: "hint", role: "status" });
+  const row = (id, label, control, hint) => h("label", { for: id },
+    h("span", { text: key(label) }), control, hint);
+  const manual = h("div", { class: "registry-proxy-fields", hidden: true },
+    row(url.id, "Url", url, h("small", { id: "registry-proxy-url-hint", text: key("UrlHint") })),
+    row(bypass.id, "Bypass", bypass, h("small", { id: "registry-proxy-bypass-hint", text: key("BypassHint") })));
+  const save = h("button", { id: "registry-proxy-submit", type: "submit", class: "button primary", text: t("action.save") });
+  const form = h("form", { class: "registry-proxy-form", onsubmit: submit },
+    h("fieldset", { disabled: true },
+      row(mode.id, "Mode", mode), manual,
+      h("div", { class: "registry-proxy-actions" }, save)),
+    status);
+  const section = settingDetails("registry-proxy-settings", "registryProxy", "globe", null,
+    h("p", { class: "hint", text: key("Description") }), form);
+  let reading = false, loaded = false;
+  const controls = form.querySelector("fieldset");
+  const showStatus = (text, error = false) => {
+    status.classList.toggle("error-text", error);
+    status.textContent = text;
+  };
+  function showMode() {
+    manual.hidden = url.disabled = bypass.disabled = mode.value !== "manual";
+  }
+  function show(values) {
+    mode.value = values.mode;
+    url.value = values.url;
+    bypass.value = values.bypass;
+    section.querySelector(".setting-value").textContent = key(modes[values.mode]);
+    showMode();
+  }
+  mode.addEventListener("change", showMode);
+  showMode();
+  section.addEventListener("toggle", async () => {
+    if (!section.open || loaded || reading) return;
+    reading = true;
+    showStatus("");
+    try {
+      show(await API.registryProxy());
+      loaded = true;
+      controls.disabled = false;
+    } catch {
+      showStatus(key("LoadError"), true);
+    } finally {
+      reading = false;
+    }
+  });
+  async function submit(event) {
+    event.preventDefault();
+    if (!loaded || controls.disabled) return;
+    const values = mode.value === "manual"
+      ? { mode: mode.value, url: url.value, bypass: bypass.value }
+      : { mode: mode.value, url: "", bypass: "" };
+    controls.disabled = true;
+    showStatus("");
+    try {
+      show(await API.registryProxy(values));
+      showStatus(key("Saved"));
+    } catch {
+      showStatus(key("SaveError"), true);
+    } finally {
+      controls.disabled = false;
+    }
+  }
+  return section;
+}
+
 // Settings can be reopened while the operating system is updating its login entry.
 let startupWrite = Promise.resolve();
 
@@ -1468,6 +1594,27 @@ function startupSettings() {
   return h("div", { class: "preference", ...searchableSetting("settings.launchAtLogin", "settings.startup settings.search.terms.startup") },
     settingTitle("startup", "power"),
     h("label", { class: "check" }, toggle, t("settings.launchAtLogin")), status);
+}
+
+function notificationSettings() {
+  const toggle = h("input", { id: "status-notifications", type: "checkbox", checked: S.settings.statusNotifications });
+  toggle.onchange = async () => {
+    const enabled = toggle.checked;
+    toggle.disabled = true;
+    S.settings.statusNotifications = enabled;
+    if (!await saveSettings()) {
+      S.settings.statusNotifications = !enabled;
+      toggle.checked = !enabled;
+    }
+    if (!S.settings.statusNotifications) {
+      document.querySelectorAll("#toasts .toast:not(.toast-error)").forEach(message => message.remove());
+    }
+    toggle.disabled = false;
+  };
+  return settingDetails("notification-settings", "notifications", "bell", null,
+    h("div", { ...searchableSetting("notifications.status", "settings.search.terms.notifications") },
+      h("label", { class: "check" }, toggle, t("notifications.status")),
+      h("p", { class: "hint", text: t("notifications.hint") })));
 }
 
 async function renderSettings(main) {
@@ -1511,11 +1658,13 @@ async function renderSettings(main) {
           field(t("settings.socket"), e.endpoint, "mono"), field(t("settings.version"), e.version)),
         dockerSettings(),
         compressionSetting()),
+      registryProxySetting(),
       settingDetails("vm-settings", "vm", "vm"),
       settingDetails("sync-settings", "syncShares", "volumes"),
       isPodbag() && networkSettings(),
       settingDetails("updates", "updates", "update"),
       settingDetails("terminal-command", "terminalCommand", "shell"),
+      notificationSettings(),
       settingDetails("about-settings", "about", "inspect", null, h("p", { text: t("settings.aboutText") }))));
   put(main,
     h("header", { class: "toolbar" }, h("h1", { text: t("settings.title") })),
@@ -2422,12 +2571,17 @@ async function installApp() {
 async function saveSettings() {
   try {
     await API.setSettings(S.settings);
+    return true;
   } catch (e) {
     toast(String(e), true);
+    return false;
   }
 }
 
 function renderAll() {
+  const notificationsButton = document.getElementById("notifications-open");
+  notificationsButton.title = t("notifications.history");
+  notificationsButton.setAttribute("aria-label", t("notifications.history"));
   renderNav();
   renderEngine();
   renderVmCard();
@@ -2497,7 +2651,7 @@ function extraKeys() {}
 async function init() {
   S.connection = await API.connection();
   const view = sessionStorage.getItem("engine-view");
-  if ([...KINDS, "settings", "kubernetes", "migration", "models"].includes(view)) S.view = view;
+  if ([...KINDS, "settings", "kubernetes", "migration", "models", "extensions"].includes(view)) S.view = view;
   const kind = sessionStorage.getItem("engine-resource");
   if (KUBE_KINDS.includes(kind)) S.kubeKind = kind;
   S.kubeExpanded = S.view === "kubernetes";
@@ -2521,6 +2675,9 @@ async function init() {
     renderNav();
   }).catch(() => { /* Offline: the installed modules stay. */ });
   setupWindowBar();
+  const notificationsButton = document.getElementById("notifications-open");
+  notificationsButton.append(icon("bell"));
+  notificationsButton.onclick = openNotificationHistory;
   setupKubeNav();
   setupTrainingNav();
   setupSidebar();

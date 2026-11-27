@@ -114,6 +114,12 @@ pub struct ContainerSpec {
     /// Device nodes of the host the container may use.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub devices: Vec<Device>,
+    /// Where to forward a copy of container output.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::log_driver::LogConfig::is_default"
+    )]
+    pub log_config: crate::log_driver::LogConfig,
     /// Write the output to this file in the Kubernetes log format, not to `log.json`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cri_log: Option<String>,
@@ -367,6 +373,7 @@ pub fn parse_security_opt(s: &str) -> Result<SecurityOpt> {
 
 impl ContainerSpec {
     pub fn validate(&self) -> Result<()> {
+        self.log_config.validate()?;
         let invalid = |why: &str, next: &str| {
             Err(Error::new(
                 ErrorKind::InvalidInput,
@@ -544,6 +551,7 @@ pub(crate) fn spec_fixture() -> ContainerSpec {
         fixed_addresses: Default::default(),
         namespaces: Default::default(),
         devices: Vec::new(),
+        log_config: Default::default(),
         cri_log: None,
         stdin_fifo: None,
     }

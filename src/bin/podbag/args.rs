@@ -505,6 +505,12 @@ pub enum SystemCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Read or update the local engine's registry proxy settings as JSON
+    RegistryProxy {
+        /// Read new settings as JSON from standard input
+        #[arg(long)]
+        set: bool,
+    },
     /// Read or save default bridge and embedded DNS settings as JSON
     NetworkSettings {
         /// Save the supplied network preferences
@@ -664,6 +670,12 @@ pub struct RunArgs {
     /// cgroup (inside the user namespace when rootless)
     #[arg(long)]
     pub privileged: bool,
+    /// Logging driver (json-file, syslog, journald)
+    #[arg(long)]
+    pub log_driver: Option<String>,
+    /// Logging driver option, repeatable
+    #[arg(long, value_name = "KEY=VALUE")]
+    pub log_opt: Vec<String>,
     /// Start it again after it ends: no, always, unless-stopped, on-failure[:max]
     #[arg(long, value_name = "POLICY")]
     pub restart: Option<String>,

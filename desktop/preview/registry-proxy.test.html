@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Registry proxy settings test</title>
+<iframe id="podbag" src="preview.html?view=settings&amp;lang=en" width="900" height="640" title="Local Podbag settings"></iframe>
+<iframe id="docker" src="preview.html?view=settings&amp;engine=docker&amp;lang=en" width="900" height="640" title="Docker settings"></iframe>
+<iframe id="windows" src="preview.html?view=settings&amp;platform=windows&amp;lang=en" width="900" height="640" title="Windows settings"></iframe>
+<pre id="result">Running</pre>
+<script>
+"use strict";
+
+const check = (condition, message) => { if (!condition) throw Error(message); };
+async function until(predicate, message) {
+  const deadline = performance.now() + 5000;
+  while (!predicate()) {
+    check(performance.now() < deadline, message);
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+}
+
+async function test() {
+  const frames = ["podbag", "docker", "windows"].map(id => document.getElementById(id));
+  await Promise.all(frames.map(frame => until(
+    () => frame.contentDocument.documentElement.dataset.ready === "1" &&
+      frame.contentDocument.querySelector("#settings-search"),
+    `Settings did not load for ${frame.id}`,
+  )));
+  const [local, docker, windows] = frames.map(frame => frame.contentDocument);
+  check(!docker.querySelector("#registry-proxy-settings"), "Docker does not have Podbag proxy controls");
+  check(!windows.querySelector("#registry-proxy-settings"), "Windows does not have a registry proxy form");
+
+  const win = frames[0].contentWindow;
+  const search = local.getElementById("settings-search");
+  search.value = "NO_PROXY";
+  search.dispatchEvent(new win.Event("input", { bubbles: true }));
+  const hit = local.querySelector('[data-setting-result="settings.registryProxy"]');
+  check(hit?.textContent.includes("Registry proxies"), "Registry proxies are searchable by NO_PROXY");
+  hit.click();
+  check(local.getElementById("registry-proxy-settings").open, "Search opens the proxy settings");
+
+  const mode = local.getElementById("registry-proxy-mode");
+  const url = local.getElementById("registry-proxy-url");
+  const bypass = local.getElementById("registry-proxy-bypass");
+  const submit = local.getElementById("registry-proxy-submit");
+  const fieldset = mode.closest("fieldset");
+  await until(() => !fieldset.disabled, "Initial proxy settings did not load");
+  check(mode.value === "inherited" && url.disabled, "Inherited is the default mode");
+
+  function select(value) {
+    mode.value = value;
+    mode.dispatchEvent(new win.Event("change", { bubbles: true }));
+  }
+  select("manual");
+  check(!url.disabled && !url.closest("[hidden]"), "Manual mode reveals its fields");
+  url.value = "http://proxy.example.com:3128";
+  bypass.value = "localhost, .example.com";
+  submit.click();
+  await until(() => win.previewRegistryProxyWrites?.length === 1 && !fieldset.disabled, "Manual settings did not save");
+  const sent = win.previewRegistryProxyWrites[0];
+  check(sent.mode === "manual" && sent.url === url.value && sent.bypass === bypass.value, "Save sends the manual settings");
+  check(local.querySelector(".registry-proxy-form [role=status]").textContent.includes("saved"), "Save reports success");
+
+  select("direct");
+  check(url.disabled && !!url.closest("[hidden]"), "Direct mode hides manual fields");
+  submit.click();
+  await until(() => win.previewRegistryProxyWrites?.length === 2 && !fieldset.disabled, "Direct mode did not save");
+  check(win.previewRegistryProxyWrites[1].mode === "direct", "Save sends direct mode");
+  select("manual");
+  check(url.value === "" && bypass.value === "", "Switching away from manual clears saved manual values");
+  select("inherited");
+  submit.click();
+  await until(() => win.previewRegistryProxyWrites?.length === 3 && !fieldset.disabled, "Inherited mode did not save");
+  check(win.previewRegistryProxyWrites[2].mode === "inherited", "Save can restore environment proxy behavior");
+}
+
+const result = document.getElementById("result");
+test().then(() => { result.textContent = "PASS"; },
+  (error) => { result.textContent = "FAIL: " + error.message; });
+</script>
+</html>

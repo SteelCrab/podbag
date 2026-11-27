@@ -1,3 +1,8 @@
+#[cfg(target_os = "linux")]
+mod forward;
+#[cfg(target_os = "linux")]
+pub(crate) use forward::delivery_status;
+
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
@@ -43,6 +48,8 @@ pub struct LogWriter {
     partial: [Vec<u8>; 2],
     /// The kubelet's file, and the inode the writer has open.
     cri: Option<(PathBuf, u64)>,
+    #[cfg(target_os = "linux")]
+    forward: Option<forward::Forwarder>,
 }
 
 impl LogWriter {
@@ -56,6 +63,8 @@ impl LogWriter {
             size,
             limit,
             partial: [Vec::new(), Vec::new()],
+            #[cfg(target_os = "linux")]
+            forward: None,
             cri: None,
         })
     }
@@ -74,6 +83,8 @@ impl LogWriter {
             size: 0,
             limit: u64::MAX,
             partial: [Vec::new(), Vec::new()],
+            #[cfg(target_os = "linux")]
+            forward: None,
             cri: Some((path.to_path_buf(), ino)),
         })
     }
@@ -85,7 +96,16 @@ impl LogWriter {
     ) -> Result<LogWriter> {
         match &spec.cri_log {
             Some(path) => LogWriter::open_cri(Path::new(path)),
-            None => LogWriter::open(&dirs.container_dir(&spec.id), LOG_FILE_LIMIT),
+            None => {
+                let dir = dirs.container_dir(&spec.id);
+                let writer = LogWriter::open(&dir, LOG_FILE_LIMIT)?;
+                #[cfg(target_os = "linux")]
+                let writer = Self {
+                    forward: forward::Forwarder::for_container(&dir, spec)?,
+                    ..writer
+                };
+                Ok(writer)
+            }
         }
     }
 
@@ -130,6 +150,10 @@ impl LogWriter {
             if !line.is_empty() {
                 self.emit_last(stream, &line)?;
             }
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(forward) = &mut self.forward {
+            forward.flush_status();
         }
         Ok(())
     }
@@ -186,6 +210,10 @@ impl LogWriter {
             .write_all(json.as_bytes())
             .map_err(|e| log_error(&path, e))?;
         self.size += json.len() as u64;
+        #[cfg(target_os = "linux")]
+        if let Some(forward) = &mut self.forward {
+            forward.send(&entry);
+        }
         Ok(())
     }
 
