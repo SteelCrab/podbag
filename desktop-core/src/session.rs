@@ -328,6 +328,15 @@ impl Session {
         vm::resources(&self.podbag, values)
     }
 
+    /// `podbag system compression [idle|off] --json`: `{"mode", "after"}`. With no mode it
+    /// only reads. On macOS the command runs in the VM (it starts the VM when none runs).
+    pub fn compression(&self, mode: Option<&str>) -> Result<Value, String> {
+        if !self.uses_podbag() {
+            return Err("Image compression requires the podbag engine".into());
+        }
+        podbag::dashboard::cli::compression(&self.podbag, mode)
+    }
+
     /// `podbag vm status --json`: null when the engine is not podbag, or on Linux (no VM).
     pub fn vm_status_json(&self) -> Result<Value, String> {
         if !self.uses_podbag() || engine::platform() == "linux" {

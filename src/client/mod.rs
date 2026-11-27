@@ -180,6 +180,17 @@ pub struct ImageSummary {
     pub created: i64,
     pub size: i64,
     pub containers: i64,
+    /// podbag's own field, only for an image with compressed files.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub podbag_compression: Option<CompressionSizes>,
+}
+
+/// An image's size on disk with its compressed files (`size`), and its plain size.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase", default)]
+pub struct CompressionSizes {
+    pub size: u64,
+    pub original_size: u64,
 }
 
 impl ImageSummary {

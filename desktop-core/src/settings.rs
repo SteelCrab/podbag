@@ -1,5 +1,5 @@
-//! The app's settings: language, theme and the sidebar, in `settings.json` in the app's
-//! config folder.
+//! The app's settings: language, theme, the sidebar and the answers to its questions, in
+//! `settings.json` in the app's config folder.
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -33,6 +33,9 @@ pub struct Settings {
     /// The app version for which the user answered "Not now" to updating the terminal's
     /// separate `podbag`.
     pub cli_update_dismissed: Option<String>,
+    /// The user answered the question about image compression (or it was already on),
+    /// so it is not asked again. False after an update from a version without it.
+    pub compression_prompt_seen: bool,
 }
 
 impl Default for Settings {
@@ -44,6 +47,7 @@ impl Default for Settings {
             sidebar_collapsed: false,
             cli_notice_dismissed: false,
             cli_update_dismissed: None,
+            compression_prompt_seen: false,
         }
     }
 }
@@ -139,6 +143,26 @@ mod tests {
         assert_eq!(json["cliNoticeDismissed"], true);
         assert_eq!(json["cliUpdateDismissed"], "0.3.1");
         assert_eq!(Settings::load(&file), answered);
+    }
+
+    #[test]
+    fn the_answer_to_the_compression_question_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("settings.json");
+        // Settings from before the question: an update asks it once.
+        std::fs::write(&file, r#"{"language":"ko","cliNoticeDismissed":true}"#).unwrap();
+        let old = Settings::load(&file);
+        assert!(!old.compression_prompt_seen);
+        let answered = Settings {
+            compression_prompt_seen: true,
+            ..old
+        };
+        answered.save(&file).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(json["compressionPromptSeen"], true);
+        assert_eq!(Settings::load(&file), answered);
+        assert!(!Settings::default().compression_prompt_seen);
     }
 
     #[test]

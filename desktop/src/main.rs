@@ -307,6 +307,17 @@ fn vm_resources(
     state.core.session(token)?.vm_resources(values)
 }
 
+/// `podbag system compression [idle|off] --json`: `{"mode", "after"}`. With no mode it
+/// only reads. On macOS the command runs in the VM (it starts the VM when none runs).
+#[tauri::command(async)]
+fn compression(
+    state: State<'_, AppState>,
+    token: u64,
+    mode: Option<String>,
+) -> Result<Value, String> {
+    state.core.session(token)?.compression(mode.as_deref())
+}
+
 /// A terminal window: `plain`, or `upgrade` (`sudo podbag upgrade`, where the user types
 /// the password). The error is the command to run by hand.
 #[tauri::command(async)]
@@ -713,6 +724,7 @@ fn main() {
             docker_images,
             import_images,
             vm_resources,
+            compression,
             take_star_prompt,
             terminal_command,
             install_terminal_command,

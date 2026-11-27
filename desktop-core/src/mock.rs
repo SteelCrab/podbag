@@ -291,6 +291,7 @@ fn sample_images(now: i64) -> Vec<ImageSummary> {
         created: now - 86400 * days,
         size,
         containers,
+        podbag_compression: None,
     };
     vec![
         i("sha256:9d1f6a0c3e2b44aa", "nginx:alpine", 12, 52_400_000, 1),
@@ -1032,6 +1033,7 @@ impl Api for Mock {
                     created: self.now - 86400,
                     size: 31_400_000,
                     containers: 0,
+                    podbag_compression: None,
                 });
             }
         }

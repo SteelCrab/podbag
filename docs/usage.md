@@ -17,6 +17,7 @@ The [README](../README.md) shows how to install podbag. This page shows what it 
   - [File times and links](#file-times-and-links)
   - [Damaged files](#damaged-files)
   - [Choose the method](#choose-the-method)
+  - [Compression](#compression)
 - [Registries](#registries)
   - [Log in and out](#log-in-and-out)
   - [Pull and push](#pull-and-push)
@@ -132,6 +133,9 @@ podbag export -o web.tar web                 # all its files as a tar
 podbag run --rm --privileged alpine mount -t tmpfs none /mnt
 podbag system df | podbag system prune -f
 podbag system verify                         # check every stored file (exit code 1 if one is damaged)
+podbag system compression idle               # turn on image compression (see Compression)
+podbag system compress                       # compress images idle for 7 days (default; see Compression)
+podbag system decompress myapp:1             # decompress an image now
 podbag run --rootfs ./rootfs sh              # a plain folder instead of an image
 podbag check                                 # is this system ready? (exit code 1 if not)
 podbag check-image myapp:1                   # programs that cannot run in the image
@@ -249,6 +253,74 @@ podbag upgrade                               # install the latest release
   `PODBAG_IMAGE_MOUNT=hardlink`.
 - When the method changes, an image gets what it needs the first time a container uses it.
 - Removing an image unmounts it.
+
+### Compression
+
+- podbag can compress images that no container uses. It is off by default.
+- It compresses each stored file with zstd (fastest level), file by file:
+  - files that two images share stay shared,
+  - files smaller than 4096 bytes are not compressed: they would not use fewer disk blocks.
+- Example: two python images, two Java images and alpine (725 MB in the store) took
+  337 MB after compression.
+- Turn it on with `podbag system compression idle`. It works on Linux, macOS and Windows:
+
+```sh
+podbag system compression                 # show the setting
+podbag system compression idle            # turn it on
+podbag system compression idle --after 3d # and compress images unused for 3 days
+podbag system compression off             # turn it off
+podbag system compression --json          # {"mode":"idle","after":604800}
+```
+
+- The command saves `image_compression` and `compress_idle_after` in the engine's
+  `config.toml`. Other lines of the file stay as they are.
+- On macOS and Windows the setting is kept where the engine runs: in the VM
+  (`/var/lib/podbag/config/config.toml`) or in podbag's WSL distribution. A
+  `config.toml` on the Mac or in Windows has no effect. Use `podbag system compression`
+  or Podbag Desktop (**Settings → Engine → Compress idle images**).
+- On Linux you can also edit `config.toml` (`image_compression = "idle"`).
+- On Linux and macOS, `PODBAG_IMAGE_COMPRESSION=idle` (or `off`) sets it for one
+  command. The environment variable wins over the saved setting.
+- An image is idle when no container (also a stopped one) uses it, and it was not used
+  for `compress_idle_after`:
+  - the default is `"7d"`; other forms are `"36h"`, `"90m"`, `"45s"` and `"0"`,
+  - change it with `podbag system compression --after AGE`, `compress_idle_after` in
+    `config.toml`, or `PODBAG_COMPRESS_IDLE_AFTER`,
+  - the image that a command has just pulled is skipped by that command.
+- With `idle`, podbag compresses after `pull`, `load`, `build`, `rmi` and `prune`:
+  - one command does at most 256 MiB or 2 seconds of work; the next command goes on,
+  - files larger than 32 MiB are left as they are: only `podbag system compress`
+    compresses them,
+  - when the store is over `store_limit`, podbag compresses before it removes images.
+- Compress or decompress at once, whatever the setting:
+
+```sh
+podbag system compress                # all idle images
+podbag system compress myapp:1 nginx  # these images, whatever their age
+podbag system decompress myapp:1      # decompress now: the next container starts at once
+```
+
+- `system compress` also compresses files larger than 32 MiB. While it compresses such
+  a file, container starts and pulls wait until it is done.
+- `system compress` never compresses an image that a container uses:
+  - with image names, it prints a message for each such image,
+  - without names, it leaves such images out without a message.
+- A compressed image is decompressed when a container is created from it, or when a
+  build reads it:
+  - the first start is slower by the time to decompress the files,
+  - measured in a VM on a laptop (4 CPUs, python 146 MB, Java 310 MB): the first
+    `podbag run` took 1.4 s for the python image and 1.8 s for the Java image; without
+    compression, the same start took 30 ms and 55 ms,
+  - the next starts are as fast as before.
+- Images that are not compressed start as fast as with the feature off (alpine: the
+  same time within 1 ms).
+- `podbag system df` has a `Compressed` row: the count of compressed files, and
+  `<compressed size> (<size before>)`.
+- All sizes (`store_limit`, `system df`, freed bytes of a prune) are bytes on disk, so a
+  compressed image counts less.
+- `save`, `push` and `podbag system verify` work on compressed images. They read the
+  files without decompressing them on disk.
+- `dev/bench/compress.sh` measures all of this.
 
 ## Registries
 
@@ -1120,6 +1192,10 @@ podbag lab remove container-network
 #### Engine switch
 
 - Select the browsing engine in **Settings → Engine**. Migration uses its own source and destination.
+- **Settings → Engine → Compress idle images** (podbag only) turns
+  [image compression](#compression) on or off with `podbag system compression`. On macOS
+  it saves the setting in the VM. The app also asks once, after an install or an update,
+  whether to turn it on.
 - The choice is saved in `ui.json`. `podbag tui` uses the same choice.
 - Switching reloads the lists. The app never starts Docker. When Docker does not answer,
   it says so: "Docker is not running. Start Docker Desktop."
