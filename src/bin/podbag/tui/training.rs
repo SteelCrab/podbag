@@ -30,7 +30,7 @@ impl Panel {
         })
     }
 
-    fn step(&self) -> Option<&StepDef> {
+    pub fn step(&self) -> Option<&StepDef> {
         self.steps.get(self.current)
     }
 

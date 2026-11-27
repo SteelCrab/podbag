@@ -20,6 +20,7 @@ use podbag::client::{
     ApiError, Choice, Client, Closer, DockerTarget, Endpoint, Kind, Location, Target,
     podbag_program,
 };
+use podbag::volume_lesson::course::UiReport;
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
@@ -274,8 +275,8 @@ type Login = Arc<dyn Fn(&Location) -> Option<String> + Send + Sync>;
 /// The login header for a pull of this image. A secret: never shown or logged.
 type Auth = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
-/// Sends a UI action to the course engine: (practice root, action, name).
-type Reporter = Arc<dyn Fn(&Path, &str, &str) -> Result<(), String> + Send + Sync>;
+/// Sends a UI action to the course engine: (practice root, what the UI did).
+type Reporter = Arc<dyn Fn(&Path, &UiReport) -> Result<(), String> + Send + Sync>;
 
 /// How the TUI finds, saves and looks at engines (tests give fakes).
 struct Engines {
@@ -413,8 +414,8 @@ impl Runtime {
             asked_features: false,
             pending_search: None,
             training: None,
-            report: Arc::new(|root, action, name| {
-                podbag::volume_lesson::course::ui_action(root, action, name)
+            report: Arc::new(|root, done| {
+                podbag::volume_lesson::course::ui_report(root, done)
                     .map(drop)
                     .map_err(|e| e.to_string())
             }),
@@ -635,9 +636,10 @@ impl Runtime {
     /// run it (it could make a later step impossible). logs and inspect change nothing: on
     /// another name they run as usual, and are not reported.
     fn step_report(&self, effect: &Effect) -> Result<Option<StepReport>, String> {
-        let (Some(root), Some(panel), Some((action, name))) = (
+        let (Some(root), Some(panel), Some(step), Some((action, name))) = (
             self.training.clone(),
             self.app.training.as_ref(),
+            self.app.training.as_ref().and_then(|panel| panel.step()),
             training::ui_report(effect),
         ) else {
             return Ok(None);
@@ -656,8 +658,11 @@ impl Runtime {
         }
         Ok(Some(StepReport {
             root,
-            action,
-            name,
+            done: UiReport {
+                step: step.key.clone(),
+                action: action.to_owned(),
+                name,
+            },
             report: self.report.clone(),
         }))
     }
@@ -1099,15 +1104,14 @@ impl Runtime {
 /// A UI action of the current step, for the course engine.
 struct StepReport {
     root: PathBuf,
-    action: &'static str,
-    name: String,
+    done: UiReport,
     report: Reporter,
 }
 
 /// Tells the course engine of STEP (when there is one) and sends what it said.
 fn report(step: Option<StepReport>, tx: &Tx) {
     if let Some(s) = step {
-        tx.send(Msg::Step((s.report)(&s.root, s.action, &s.name)));
+        tx.send(Msg::Step((s.report)(&s.root, &s.done)));
     }
 }
 
@@ -1528,6 +1532,56 @@ mod tests {
         assert_eq!(rt.target.choice, Choice::Podbag);
     }
 
+    /// web-basics as a v2 module whose steps are STEPS, then finish.
+    fn module_of(steps: serde_json::Value) -> String {
+        let mut module: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/training/web-basics.podbag"
+        ))
+        .unwrap();
+        let finish = module["steps"].as_array().unwrap().last().unwrap().clone();
+        let mut steps = steps.as_array().unwrap().clone();
+        steps.push(finish);
+        module["format"] = "podbag-course-v2".into();
+        module["steps"] = steps.into();
+        module.to_string()
+    }
+
+    #[test]
+    fn a_second_inspect_report_does_not_do_the_next_step() {
+        // Two inspects of web before the first report: the first does inspectOne; the second
+        // was for inspectOne too, so inspectTwo waits for its own inspect.
+        let inspect_step = |key: &str| {
+            serde_json::json!({
+                "key": key, "names": {"en": key},
+                "command": "podbag inspect web",
+                "ui": {"action": "inspect", "name": "web"},
+                "check": {"kind": "output-contains", "text": "nginx:alpine"},
+            })
+        };
+        let module = module_of(serde_json::json!([
+            inspect_step("inspectOne"),
+            inspect_step("inspectTwo")
+        ]));
+        let engine = FakeEngine::start(small_engine);
+        let (dir, mut rt) = training_of(&engine, &module, "inspectOne");
+        let inspect = || Effect::Inspect {
+            kind: Kind::Containers,
+            id: "a1b2c3d4e5f6a7b8".into(),
+            name: "web".into(),
+            running: false,
+        };
+        rt.apply(inspect());
+        rt.apply(inspect());
+        for _ in 0..2 {
+            let msg = wait_for(&mut rt, |m| matches!(m, Msg::Step(_)));
+            assert!(matches!(msg, Msg::Step(Ok(()))), "{msg:?}");
+        }
+        assert_eq!(
+            Attempt::read(dir.path()).unwrap().step().unwrap().key,
+            "inspectTwo"
+        );
+    }
+
     #[test]
     fn a_refused_pull_clears_its_busy_text() {
         // The pull form says "Pulling …" before the effect; a refused pull starts no worker.
@@ -1570,7 +1624,7 @@ mod tests {
         let engine = FakeEngine::start(small_engine);
         let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let counted = calls.clone();
-        let counter: Reporter = Arc::new(move |_: &Path, _: &str, _: &str| {
+        let counter: Reporter = Arc::new(move |_: &Path, _: &UiReport| {
             counted.fetch_add(1, Ordering::SeqCst);
             Ok(())
         });
@@ -1614,7 +1668,7 @@ mod tests {
         let (dir, mut rt) = training(&engine, "remove");
         let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
         let counted = calls.clone();
-        let counter: Reporter = Arc::new(move |_: &Path, _: &str, _: &str| {
+        let counter: Reporter = Arc::new(move |_: &Path, _: &UiReport| {
             counted.fetch_add(1, Ordering::SeqCst);
             Ok(())
         });

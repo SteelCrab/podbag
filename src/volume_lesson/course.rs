@@ -1344,19 +1344,50 @@ fn ui_step(root: &Path, attempt: &mut Attempt, action: &str, name: &str) -> io::
     Ok(shown)
 }
 
-/// A UI did ACTION on NAME (the TUI): under the course lock, check and advance.
+/// A UI did ACTION on NAME: under the course lock, check and advance.
 pub fn ui_action(root: &Path, action: &str, name: &str) -> io::Result<Snapshot> {
+    locked_ui_step(root, None, action, name)?
+        .ok_or_else(|| io::Error::other("Invalid Training step."))
+}
+
+/// A UI action the TUI reports once it has worked: ACTION on NAME, done for the step
+/// with key STEP.
+#[derive(Clone, Debug)]
+pub struct UiReport {
+    pub step: String,
+    pub action: String,
+    pub name: String,
+}
+
+/// As `ui_action`, while the attempt is still at REPORT's step. Ok(None): another report
+/// for that step has advanced it (two inspects before the first report), and nothing changes.
+pub fn ui_report(root: &Path, report: &UiReport) -> io::Result<Option<Snapshot>> {
+    locked_ui_step(root, Some(&report.step), &report.action, &report.name)
+}
+
+/// Under the course lock: `ui_step` when the attempt is at step STEP (any step for None).
+fn locked_ui_step(
+    root: &Path,
+    step: Option<&str>,
+    action: &str,
+    name: &str,
+) -> io::Result<Option<Snapshot>> {
     if !Attempt::active(root) || root.join("run/closing").exists() {
         return Err(io::Error::other("The practice session has ended."));
     }
     let _lock = Attempt::lock(root)?;
     let mut attempt = Attempt::read(root)?;
+    if let Some(key) = step
+        && attempt.step()?.key != key
+    {
+        return Ok(None);
+    }
     let shown = ui_step(root, &mut attempt, action, name)?;
     let session = root
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
-    snapshot(root, session, &attempt, shown)
+    snapshot(root, session, &attempt, shown).map(Some)
 }
 
 #[cfg(test)]
