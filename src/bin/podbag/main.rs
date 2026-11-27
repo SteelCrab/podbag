@@ -492,8 +492,9 @@ fn dispatch(cmd: Cmd) -> i32 {
                     socket,
                     timeout,
                     print_units,
+                    buildkit,
                 },
-        } => service::service(socket, timeout, print_units),
+        } => service::service(socket, timeout, print_units, buildkit),
         Cmd::System {
             cmd: args::SystemCmd::DialStdio { socket },
         } => service::dial_stdio(socket),

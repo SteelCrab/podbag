@@ -65,6 +65,9 @@ prost = { version = "0.14", default-features = false, features = ["derive", "std
 miniz_oxide = "0.9"
 
 [target.'cfg(target_os = "linux")'.dependencies]
+bytes = "1"
+h2 = "0.4"
+tokio = { version = "1", features = ["rt", "net", "io-util", "macros"] }
 rustix = { version = "1", features = ["fs", "mount", "pipe", "process", "system", "thread"] }
 
 # The macOS front end: Virtualization.framework for the Linux VM.

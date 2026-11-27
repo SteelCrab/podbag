@@ -1,11 +1,13 @@
 //! The Docker Engine API service: `podbag system service`.
 //!
-//! One thread per connection, no async runtime. The service keeps nothing of its own:
-//! every request is a library call on state files and locks, so the CLI and the API can be
-//! used together. It ends after a quiet spell without connections, and can be started by
-//! systemd socket activation, so nothing runs at rest.
+//! Each API connection runs on a thread. Requests use the same state files and locks as
+//! the CLI. The optional BuildKit upgrades relay streams to a private worker using an
+//! async runtime for each tunnel. The service can exit when idle and start on demand
+//! through systemd socket activation.
 
 pub mod build;
+#[cfg(target_os = "linux")]
+mod buildkit;
 pub mod containers;
 pub mod create;
 pub mod docker;
@@ -40,6 +42,8 @@ pub struct ServeOptions {
     pub timeout: Option<Duration>,
     /// The listening socket from systemd socket activation.
     pub activated: Option<OwnedFd>,
+    /// Run a private BuildKit worker for the optional Buildx Engine driver.
+    pub managed_buildkit: bool,
 }
 
 /// `<runtime>/docker.sock`: `$XDG_RUNTIME_DIR/podbag/docker.sock` rootless,
@@ -133,6 +137,20 @@ const REPLACED_GRACE: Duration = Duration::from_secs(2);
 /// the new program.
 pub fn serve(opts: ServeOptions) -> Result<()> {
     let dirs = crate::paths::dirs()?;
+    #[cfg(not(target_os = "linux"))]
+    if opts.managed_buildkit {
+        return Err(Error::unsupported_os());
+    }
+    #[cfg(target_os = "linux")]
+    let shutdown = opts
+        .managed_buildkit
+        .then(BuildkitShutdown::install)
+        .transpose()?;
+    #[cfg(target_os = "linux")]
+    let worker = opts
+        .managed_buildkit
+        .then(|| buildkit::Owner::start(dirs.data.clone()))
+        .transpose()?;
     let on_demand = opts.timeout.is_some() || opts.activated.is_some();
     let program = on_demand.then(crate::upgrade::ProgramWatch::new).flatten();
     let (listener, owned_path) = match opts.activated {
@@ -142,12 +160,26 @@ pub fn serve(opts: ServeOptions) -> Result<()> {
     listener
         .set_nonblocking(true)
         .map_err(|e| Error::io("cannot set up the API socket", &e, "report this bug"))?;
-    let ctx = Arc::new(Ctx::new(dirs));
+    let ctx = Ctx::new(dirs);
+    #[cfg(target_os = "linux")]
+    let ctx = {
+        let mut ctx = ctx;
+        ctx.buildkit = worker.as_ref().map(buildkit::Owner::client);
+        ctx
+    };
+    let ctx = Arc::new(ctx);
     let activity = Arc::new(Activity(Mutex::new((0, Instant::now()))));
     // Containers this service starts must not get a Ctrl+C or hangup meant for it.
     crate::helper::helpers_in_own_group();
     crate::helper::raise_descriptor_limit();
     loop {
+        #[cfg(target_os = "linux")]
+        if shutdown
+            .as_ref()
+            .is_some_and(|shutdown| wait_readable(shutdown.read.as_raw_fd(), 0))
+        {
+            break;
+        }
         if wait_readable(listener.as_raw_fd(), 250) {
             match listener.accept() {
                 Ok((stream, _)) => {
@@ -204,6 +236,41 @@ pub fn serve(opts: ServeOptions) -> Result<()> {
         let _ = std::fs::remove_file(path);
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+struct BuildkitShutdown {
+    read: OwnedFd,
+    _write: OwnedFd,
+}
+
+#[cfg(target_os = "linux")]
+impl BuildkitShutdown {
+    const SIGNALS: [i32; 3] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP];
+
+    fn install() -> Result<Self> {
+        use rustix::pipe::{PipeFlags, pipe_with};
+        let (read, write) =
+            pipe_with(PipeFlags::CLOEXEC | PipeFlags::NONBLOCK).map_err(|error| {
+                Error::io(
+                    "cannot monitor BuildKit service shutdown",
+                    &error.into(),
+                    "check the process descriptor limit",
+                )
+            })?;
+        crate::signals::notify_pipe(write.as_raw_fd(), &Self::SIGNALS);
+        Ok(Self {
+            read,
+            _write: write,
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for BuildkitShutdown {
+    fn drop(&mut self) {
+        crate::signals::restore_default(&Self::SIGNALS);
+    }
 }
 
 fn wait_readable(fd: i32, millis: i32) -> bool {

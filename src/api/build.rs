@@ -54,7 +54,7 @@ pub fn build(req: &Request) -> Reply {
     if q.get("version") == Some("2") || q.get("outputs").is_some_and(|o| !o.is_empty()) {
         return super::router::not_supported(
             "BuildKit builds",
-            "use the classic builder (DOCKER_BUILDKIT=0), or buildx with the docker-container driver",
+            "use DOCKER_BUILDKIT=0 or run docker buildx with an enabled BuildKit driver",
         );
     }
     let other_platform = q

@@ -54,10 +54,18 @@ pub struct Upgrade {
 
 impl Upgrade {
     pub fn send(&self, w: &mut impl std::io::Write) -> std::io::Result<()> {
+        self.send_protocol(w, "tcp")
+    }
+
+    pub(super) fn send_protocol(
+        &self,
+        w: &mut impl std::io::Write,
+        protocol: &str,
+    ) -> std::io::Result<()> {
         let mut extra = vec![("Content-Type", self.content_type.to_string())];
         if self.upgrade {
             extra.push(("Connection", "Upgrade".to_string()));
-            extra.push(("Upgrade", "tcp".to_string()));
+            extra.push(("Upgrade", protocol.to_owned()));
         }
         super::http::write_head(w, if self.upgrade { 101 } else { 200 }, &extra)
     }
@@ -67,6 +75,8 @@ impl Upgrade {
 pub struct Ctx {
     pub dirs: Dirs,
     volume_lesson: bool,
+    #[cfg(target_os = "linux")]
+    pub(super) buildkit: Option<super::buildkit::Client>,
     /// Clients attached to containers that wait for a start, and how starts ended.
     pub attachments: std::sync::Arc<super::stream::Attachments>,
     /// Commands made by `POST /containers/{id}/exec`.
@@ -81,6 +91,8 @@ impl Ctx {
         Ctx {
             dirs,
             volume_lesson: std::env::var_os(crate::volume_lesson::SCOPE).is_some(),
+            #[cfg(target_os = "linux")]
+            buildkit: None,
             attachments: Default::default(),
             execs: Default::default(),
             binds_under: None,
@@ -169,6 +181,11 @@ pub fn route(req: &Request, ctx: &Ctx) -> Reply {
     }
     let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
     match (req.method.as_str(), segments.as_slice()) {
+        #[cfg(target_os = "linux")]
+        ("POST", [endpoint @ ("grpc" | "session")]) => match &ctx.buildkit {
+            Some(worker) => super::buildkit::upgrade(req, worker, *endpoint == "session"),
+            None => message(404, "page not found"),
+        },
         // Builder-Version 1: the classic builder (`POST /build`), not BuildKit.
         ("GET" | "HEAD", ["_ping"]) => Reply::Headed(
             vec![("Builder-Version", "1".to_string())],

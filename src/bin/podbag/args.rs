@@ -501,6 +501,9 @@ pub enum SystemCmd {
         /// Print systemd units that start the service on the first connection
         #[arg(long)]
         print_units: bool,
+        /// Enable the private BuildKit worker for Docker Buildx on Linux
+        #[arg(long, conflicts_with = "print_units")]
+        buildkit: bool,
     },
     /// Connect stdin and stdout to the Docker API socket
     ///

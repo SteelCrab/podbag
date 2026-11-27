@@ -1,5 +1,4 @@
-//! Image builds from a Dockerfile, without BuildKit and without a daemon: `build`,
-//! `commit`, and a container's changes (`diff`, `export`).
+//! Dockerfile builds, container commits, and container filesystem changes.
 
 pub mod cache;
 pub mod commit;
@@ -9,6 +8,9 @@ pub mod engine;
 pub mod ignore;
 #[cfg(target_os = "linux")]
 pub mod layer;
+#[cfg(target_os = "linux")]
+#[doc(hidden)]
+pub mod managed_worker;
 pub mod plan;
 pub mod shell;
 pub mod steps;

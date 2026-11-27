@@ -468,9 +468,9 @@ podbag build --buildkit --output type=local,dest=build-result \
 - Use file or environment secret mounts and an existing Unix SSH agent socket.
   BuildKit sends the secret and SSH requests through its build session. Keep secret
   files outside the context or exclude them with `.dockerignore`.
-- The Docker-compatible `POST /build` endpoint uses the classic builder. Use
-  [buildx with the docker-container driver](#buildx) when the Docker client needs
-  the BuildKit session protocol.
+- The Docker-compatible `POST /build` endpoint uses the classic builder. To use
+  BuildKit from Docker Buildx, enable the [Buildx Engine driver](#buildx-engine-driver)
+  on the Linux API service.
 
 <a id="not-supported-in-builds"></a>
 
@@ -774,8 +774,9 @@ podbag system docker restore    # back to the context you had (Docker Desktop, â
   `--link`, port ranges, other network or volume drivers.
 - Accepted with a warning, because ignoring them is safe: ulimits, log drivers, fixed
   addresses.
-- Answered with 501 and what to do instead: BuildKit's build API (use buildx with the
-  `docker-container` driver), `image history` and plugins.
+- Answered with 501 and what to do instead: `POST /build?version=2`,
+  `image history` and plugins. For BuildKit builds, use the [Buildx Engine driver](#buildx-engine-driver)
+  or the `docker-container` driver.
 - Swarm mode works on one node. See [Swarm mode](#swarm-mode).
 
 ### cp, save and load
@@ -832,8 +833,8 @@ docker compose build
   `Builder-Version: 1`.
 - A docker CLI with the buildx plugin still sends `docker build` to buildx, whatever the
   server says. `DOCKER_BUILDKIT=0` makes it use the classic builder.
-- Without `DOCKER_BUILDKIT=0`, buildx starts its own BuildKit in a podbag container, and
-  keeps the result in its cache (add `--load` to get the image).
+- Use the [Buildx Engine driver](#buildx-engine-driver) or select the `docker-container`
+  driver for `docker buildx build`.
 - The build works as `podbag build` does: see [Builds](#builds).
 
 ### buildx
@@ -849,7 +850,32 @@ docker compose build --builder podbag
 
 - The builder keeps running after the service stops: it is an ordinary container.
 - Its cache stays in its volume until `docker buildx rm`.
-- The default `docker` driver (the daemon's own BuildKit) is not available.
+### Buildx Engine driver
+
+On Linux, start the Unix socket service with `--buildkit`. Install `buildkitd` and
+`runc` on the service's `PATH`. For a rootless service, also install RootlessKit
+and pasta. Use another terminal for the Docker commands.
+
+```sh
+podbag system service --buildkit --socket "$XDG_RUNTIME_DIR/podbag-buildkit.sock"
+```
+
+```sh
+export DOCKER_HOST=unix://$XDG_RUNTIME_DIR/podbag-buildkit.sock
+docker buildx inspect default
+docker buildx build --builder default --secret id=config,src=/path/to/config \
+  --output type=local,dest=build-result .
+docker buildx build --builder default -t myapp --output type=docker,dest=myapp.tar .
+docker load -i myapp.tar
+```
+
+- Buildx sends its build context, secret mounts and SSH mounts through the session.
+  The worker starts on the first Buildx request and uses a private Unix socket.
+  Podbag removes it after 15 seconds without a Buildx connection or when the service
+  stops. Use an explicit cache exporter to retain cache between workers.
+- Use an explicit output. For an image in Podbag, export a Docker archive and load it.
+  The Docker driver's implicit image output and `--load` require Docker's Moby
+  image exporter. The classic `POST /build` path remains available with `DOCKER_BUILDKIT=0`.
 
 ## TUI and GUI
 

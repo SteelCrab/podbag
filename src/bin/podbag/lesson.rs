@@ -415,6 +415,7 @@ pub fn scoped(root: &Path, cmd: crate::args::Cmd) -> i32 {
                     socket: Some(path),
                     timeout: 0,
                     print_units: false,
+                    buildkit: false,
                 },
         } if path == socket => {
             // The supervising terminal owns the pipe. Its disappearance also stops the engine.
@@ -422,7 +423,7 @@ pub fn scoped(root: &Path, cmd: crate::args::Cmd) -> i32 {
                 let _ = io::copy(&mut io::stdin(), &mut io::sink());
                 std::process::exit(0);
             });
-            crate::service::service(Some(socket), 0, false)
+            crate::service::service(Some(socket), 0, false, false)
         }
         Cmd::Volume { cmd } => {
             let check = matches!(cmd, VolumeCmd::Ls { .. });
