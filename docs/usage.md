@@ -1327,6 +1327,35 @@ podbag lab remove container-network
 - Languages: English, 한국어, 日本語, 简体中文, Filipino, Español and Tiếng Việt. The app
   follows the system language. Settings can change it.
 
+#### Image security analysis
+
+Open an image's **Security** tab and select **Scan image** to see installed packages and
+known vulnerabilities by severity. Install [Trivy](https://trivy.dev/docs/latest/getting-started/installation/)
+and make its executable available to Podbag Desktop.
+
+Podbag exports the selected image by its full ID to a temporary archive and gives the archive
+to local Trivy. The scan uses the image already on the selected engine and uses no registry
+credentials. Podbag removes the temporary archive and report after the scan. If the engine
+sends no data for 2 minutes during the export, the scan stops with an error.
+
+Trivy keeps its databases in a `trivy` folder in Podbag Desktop's cache folder:
+`~/Library/Caches/io.github.steelcrab.podbag/trivy` on macOS,
+`~/.cache/io.github.steelcrab.podbag/trivy` on Linux (or under `$XDG_CACHE_HOME`) and
+`%LOCALAPPDATA%\io.github.steelcrab.podbag\trivy` on Windows. Podbag does not pass your
+Trivy environment variables or settings, so Trivy uses only this folder.
+
+- The first scan downloads the vulnerability database, so it needs network access.
+- Each database has a next-update time, at most a day after it was built. After that time,
+  the next scan downloads the database again. Before that time, a scan works without
+  network access.
+- An image with Java archives also needs the Java database. Trivy downloads it on the first
+  such scan and keeps it for 3 days.
+- Desktop runs Trivy with `--offline-scan`. This only stops online lookups of dependencies.
+  It does not stop the database downloads.
+- If a needed database is missing or out of date and Trivy cannot download it, the scan
+  fails and shows no results. Desktop shows "Trivy could not scan this image." Connect to
+  the network and scan again.
+
 #### Desktop extensions
 
 Open **Extensions** and select **Install manifest** to install a local UTF-8 JSON file.

@@ -37,6 +37,10 @@
     { Name: "host", Id: "6a3e2d0c4b8f1a9e", Driver: "host", Scope: "local", IPAM: { Config: [] } },
     { Name: "none", Id: "7b4f3e1d5c9a2b0f", Driver: "null", Scope: "local", IPAM: { Config: [] } },
   ];
+  if (view.startsWith("analysis")) {
+    images[0].Id = `sha256:${"1".repeat(64)}`;
+    images[1].Id = `sha256:${"2".repeat(64)}`;
+  }
   const lists = { containers, images, volumes, networks };
   if (view === "empty") { lists.containers = []; lists.volumes = []; }
 
@@ -310,6 +314,28 @@
     remove: () => null,
     prune: () => ({ count: 2, bytes: 61_000_000 }),
     rename: () => null,
+    analyze_image: ({ id, token: requestToken }) => {
+      (window.previewScans ||= []).push({ id, token: requestToken });
+      if (requestToken !== token) throw "engineChanged";
+      if (!images.some((image) => image.Id === id)) throw "imageUnavailable";
+      const mode = params.get("scan");
+      if (mode === "missing") throw "scannerMissing";
+      const target = "Alpine Linux 3.22";
+      return {
+        imageId: id,
+        packages: mode === "empty" ? [] : [
+          { target, name: "busybox", version: "1.37.0-r18" },
+          { target, name: "libssl3", version: "3.5.1-r0" },
+          { target, name: "musl", version: "1.2.5-r10" },
+          { target, name: "zlib", version: "1.3.1-r2" },
+        ],
+        findings: mode === "empty" ? [] : [
+          { target, severity: "high", advisory: "DEMO-2026-0001", package: "libssl3", installed: "3.5.1-r0", fixed: "3.5.2-r0" },
+          { target, severity: "medium", advisory: "DEMO-2026-0002", package: "zlib", installed: "1.3.1-r2", fixed: "" },
+          { target, severity: "low", advisory: "DEMO-2026-0003", package: "busybox", installed: "1.37.0-r18", fixed: "1.37.0-r19" },
+        ],
+      };
+    },
     container_json: () => { throw "not supported"; },
     features: () => ({ stats: false, top: false, pause: false, rename: false }),
     pull: () => new Promise(() => {}),
@@ -499,6 +525,15 @@
       "update-source": app.openUpdates,
       "update-admin": async () => { await app.openUpdates(); await app.runUpgrade(); },
       "docker-settings": () => app.openSettingsSection("engine-settings"),
+      analysis: async () => {
+        await app.go("images");
+        app.openDetail("images", images[0].Id, "analysis");
+      },
+      "analysis-report": async () => {
+        await app.go("images");
+        app.openDetail("images", images[0].Id, "analysis");
+        document.querySelector(".image-analysis .primary").click();
+      },
       detail: () => app.openDetail("containers", containers[0].Id, "info"),
       logs: () => app.openDetail("containers", containers[0].Id, "logs"),
       inspect: () => app.openDetail("containers", containers[0].Id, "inspect"),

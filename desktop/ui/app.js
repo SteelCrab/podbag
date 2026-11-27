@@ -1337,7 +1337,8 @@ function renderDetail(main, fresh) {
     return;
   }
   const name = objectName(d.kind, o);
-  const tabs = d.kind === "containers" ? ["info", "logs", "inspect"] : ["info", "inspect"];
+  const tabs = d.kind === "containers" ? ["info", "logs", "inspect"]
+    : d.kind === "images" ? ["info", "inspect", "analysis"] : ["info", "inspect"];
   const actions = d.kind === "containers" ? [
     ...[...rowActions(d.kind, o).children].filter((b) => b.getAttribute("aria-label") !== t("action.logs")),
     S.features.rename ? iconButton("rename", t("action.rename"), () => rename(o)) : null,
@@ -1361,6 +1362,7 @@ function renderDetail(main, fresh) {
   let panel;
   if (d.tab === "info") panel = infoPanel(d.kind, o);
   else if (d.tab === "logs") panel = logsPanel(o);
+  else if (d.tab === "analysis") panel = imageAnalysisPanel(d, o);
   else panel = inspectPanel(d.kind, d.id);
   main.replaceChildren(header, tablist, panel);
 }

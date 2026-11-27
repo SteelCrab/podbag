@@ -10,6 +10,7 @@ use podbag::dashboard::cluster_migration;
 mod commands;
 mod dockercmd;
 mod extensions;
+mod image_analysis;
 mod images;
 mod kubernetes;
 use podbag::dashboard::lab;
@@ -64,6 +65,7 @@ struct TrayItems {
 
 struct AppState {
     migration: Mutex<()>,
+    image_analysis: Mutex<()>,
     models: model_runner::ModelRunner,
     /// The engine this window uses, and its client.
     session: Mutex<Arc<Session>>,
@@ -119,6 +121,7 @@ impl AppState {
         });
         AppState {
             migration: Mutex::new(()),
+            image_analysis: Mutex::new(()),
             models: model_runner::ModelRunner::default(),
             session: Mutex::new(Arc::new(Session::new(1, target))),
             podbag,
@@ -334,6 +337,22 @@ fn inspect(
 ) -> Result<Value, String> {
     let session = state.session(token)?;
     commands::inspect(&session.client, &kind, &id)
+}
+
+#[tauri::command(async)]
+fn analyze_image(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    token: u64,
+    id: String,
+) -> Result<image_analysis::Report, image_analysis::Failure> {
+    use image_analysis::Failure;
+    let session = state.session(token).map_err(|_| Failure::EngineChanged)?;
+    let _running = state.image_analysis.try_lock().map_err(|_| Failure::Busy)?;
+    let cache = app.path().app_cache_dir().map_err(|_| Failure::Workspace)?;
+    let result = image_analysis::analyze(&session.client, &id, &cache.join("trivy"));
+    state.session(token).map_err(|_| Failure::EngineChanged)?;
+    result
 }
 
 #[tauri::command(async)]
@@ -1468,6 +1487,7 @@ fn main() {
             contexts,
             create_volume,
             inspect,
+            analyze_image,
             act,
             remove,
             prune,
