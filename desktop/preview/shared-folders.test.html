@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>macOS shared folders test</title>
+<iframe src="preview.html?view=settings-vm&amp;lang=en" width="900" height="680" title="Desktop preview"></iframe>
+<pre id="result">Running</pre>
+<script>
+"use strict";
+const frame = document.querySelector("iframe");
+const result = document.querySelector("#result");
+async function until(read) {
+  for (let i = 0; i < 100; i++) {
+    const value = read();
+    if (value) return value;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  throw Error("Timed out waiting for the shared folders settings");
+}
+function check(condition, message) {
+  if (!condition) throw Error(message);
+}
+async function test() {
+  const doc = frame.contentDocument;
+  const win = frame.contentWindow;
+  const input = await until(() => doc.querySelector("#vm-share-path"));
+  const list = await until(() => doc.querySelector(".shared-folders"));
+  const names = () => [...list.children].map(row => row.dataset.sharedPath).join();
+  check(names() === "/Users", "Show the default share");
+  input.value = "relative";
+  input.nextElementSibling.click();
+  check(input.validationMessage === "Enter an absolute folder path.", "Reject a relative path");
+  const folder = "/private/tmp/Shared Project";
+  input.value = folder;
+  input.dispatchEvent(new Event("input"));
+  input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+  check(names() === "/Users," + folder, "Add an absolute path with spaces");
+  list.firstElementChild.querySelector("button").click();
+  check(names() === folder, "Remove the default share");
+  doc.querySelector("#vm-settings button[type=submit]").click();
+  (await until(() => doc.querySelector('dialog[open] button[value="later"]'))).click();
+  const shares = win.podbag.state.vm.sharedPaths;
+  await until(() => shares.next.join() === folder);
+  check(shares.inUse.join() === "/Users", "Keep active shares until restart");
+}
+frame.addEventListener("load", () => test().then(
+  () => { result.textContent = "PASS: Add, remove, validate, and save macOS shared folders"; },
+  error => { result.textContent = "FAIL: " + error.message; },
+), { once: true });
+</script>

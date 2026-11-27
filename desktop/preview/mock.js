@@ -104,6 +104,7 @@
     platform: "macos", state: "stopped", resourcesEditable: true, inUse: null,
     next: { cpus: 4, memoryMiB: 4096, idleSeconds: 300 }, saved: { cpus: 4, memoryMiB: 4096, idleSeconds: null },
     overriddenBy: [], pending: false,
+    sharedPaths: { inUse: null, next: ["/Users"] },
     limits: { cpusMin: 1, cpusMax: 10, memoryMinMiB: 1024, memoryMaxMiB: 20480, macMemoryMiB: 24576 },
     uptimeSeconds: null, containers: null, cpuPercent: null, memoryUsedMiB: null, memoryTotalMiB: null,
     disk: { path: "/Users/me/.podbag/vm/disk.img", allocatedBytes: 3_400_000_000, sizeBytes: 68_719_476_736 },
@@ -112,6 +113,7 @@
     inUse: { cpus: 4, memoryMiB: 4096, idleSeconds: 300 },
     next: { cpus: 4, memoryMiB: 6144, idleSeconds: 300 }, saved: { cpus: null, memoryMiB: 6144, idleSeconds: null },
     overriddenBy: view === "settings-vm" ? ["PODBAG_VM_CPUS"] : [], pending: true,
+    sharedPaths: { inUse: ["/Users"], next: ["/Users"] },
     limits: { cpusMin: 1, cpusMax: 10, memoryMinMiB: 1024, memoryMaxMiB: 20480, macMemoryMiB: 24576 },
     uptimeSeconds: 7560, containers: 3, cpuPercent: 12.5, memoryUsedMiB: 1350, memoryTotalMiB: 3900,
     disk: { path: "/Users/me/.podbag/vm/disk.img", allocatedBytes: 5_800_000_000, sizeBytes: 68_719_476_736 },
@@ -286,7 +288,11 @@
       if (!mode) window.previewCompressionReads = (window.previewCompressionReads || 0) + 1;
       return params.get("compression") === "broken" ? null : { ...compression };
     },
-    vm_set: () => "Saved.",
+    vm_set: ({ settings }) => {
+      if (settings.sharedPaths) vmStatus.sharedPaths.next = settings.sharedPaths;
+      if (settings.restart) vmStatus.sharedPaths.inUse = vmStatus.sharedPaths.next;
+      return "Saved.";
+    },
     set_engine: ({ engine }) => {
       sessionStorage.setItem("preview-engine", engine);
       sessionStorage.setItem("preview-token", String(token + 1));

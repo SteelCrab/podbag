@@ -1632,15 +1632,37 @@ sudo k3s server --container-runtime-endpoint unix:///run/podbag/cri.sock
 - Commands run in the VM. Their output, exit code, signals and terminal size pass through.
 - Only commands that read input (`-i`, or `load` without `-i FILE`) take the Mac's stdin.
 - `-e NAME` takes the Mac's value of NAME.
-- The Mac's `/Users` is in the VM at the same path, so `-v ./src:/work` works from a folder
-  under `/Users`.
-- Other Mac paths are refused, also for `save -o`, `load -i` and `--rootfs`.
+- By default the VM shares `/Users` at the same path, so `-v ./src:/work` works from
+  a folder under `/Users`. See [File sharing](#file-sharing) to change the folders.
+- Paths outside the active shares are refused for bind mounts, builds, `save -o`,
+  `load -i` and `--rootfs`.
 - Named volumes live in the VM.
 - Images, containers and volumes stay on a 64 GiB sparse disk, `~/.podbag/disk.img`.
 - `podbag vm stop`, or logging out, powers the VM off cleanly.
 - `podbag vm start`, `vm restart` and `vm status` start it, restart it and show its state.
   `vm status` wakes no VM.
 - Containers cannot reach the VM's agent.
+
+### File sharing
+
+In Podbag Desktop, open **Settings → Virtual machine → Shared folders**. Enter an
+absolute path, choose **Add folder**, and apply the changes. Use **Remove** to stop
+sharing a folder. Changes take effect at the next VM start.
+
+In the CLI, repeat `--share` to give the full list. Include `/Users` to keep it shared.
+Use `--no-shares` to remove all shares.
+
+```sh
+podbag vm set --share /Users --share "/Volumes/My Projects"
+podbag vm status --json
+podbag run --rm -v "/Volumes/My Projects:/work" alpine ls /work
+```
+
+Restart a running VM before using a newly shared folder. Shared folders must exist
+when saved and at startup. The list uses the original paths after resolving symlinks.
+Use those paths in container commands. Folders cannot overlap or cover the VM's
+system directories. A removable disk must be attached at VM startup to share its
+folders. Remove the folders from the list when the disk is disconnected.
 
 ### Registry logins
 
@@ -1698,7 +1720,7 @@ docker buildx build --load -t app .
 
 - The socket stays while the VM is off. The standby process waits on it, and the first
   request starts the VM.
-- Bind mounts must come from `/Users`.
+- Bind mounts must come from the [active shared folders](#file-sharing).
 
 ### Ports, disk and memory
 

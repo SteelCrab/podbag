@@ -865,13 +865,28 @@ mod linux_launch {
         } else {
             std::env::current_dir().map_err(fail)?.join(path)
         };
+        let shares = crate::vm::shares::active().filter(|_| crate::vm::shares::valid_target(&path));
+        let check = |path: &std::path::Path| {
+            if shares
+                .as_ref()
+                .is_some_and(|roots| !crate::vm::shares::contains(roots, path))
+            {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("cannot use {source} as a volume"),
+                    "the path is outside the Mac folders shared with the VM",
+                    "share the folder or use a named volume",
+                ));
+            }
+            Ok(())
+        };
+        check(&path)?;
         if !path.exists() {
             std::fs::create_dir_all(&path).map_err(fail)?;
         }
-        Ok(std::fs::canonicalize(&path)
-            .map_err(fail)?
-            .to_string_lossy()
-            .into_owned())
+        let real = std::fs::canonicalize(&path).map_err(fail)?;
+        check(&real)?;
+        Ok(real.to_string_lossy().into_owned())
     }
 
     /// Save the settings and start the shim. Returns after the command started.

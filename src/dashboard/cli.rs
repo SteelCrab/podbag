@@ -81,6 +81,8 @@ pub struct VmSettings {
     pub memory_mib: Option<u64>,
     /// 0: never power off.
     pub idle_seconds: Option<u64>,
+    /// The full list of macOS folders shared with the guest.
+    pub shared_paths: Option<Vec<String>>,
     /// Restart the VM now (running containers stop: the window asked first).
     pub restart: bool,
 }
@@ -97,6 +99,14 @@ pub fn vm_set_args(s: &VmSettings) -> Result<Vec<String>, String> {
     if let Some(i) = s.idle_seconds {
         let idle = if i == 0 { "0".into() } else { format!("{i}s") };
         args.extend(["--idle".into(), idle]);
+    }
+    if let Some(paths) = &s.shared_paths {
+        if paths.is_empty() {
+            args.push("--no-shares".into());
+        }
+        for path in paths {
+            args.extend(["--share".into(), path.to_string()]);
+        }
     }
     if args.len() == 2 {
         return Err("nothing to set".into());
@@ -408,7 +418,7 @@ mod tests {
             cpus: Some(6),
             memory_mib: Some(8192),
             idle_seconds: Some(0),
-            restart: false,
+            ..VmSettings::default()
         };
         assert_eq!(
             vm_set(&fake.bin, &s).unwrap(),
@@ -429,6 +439,33 @@ mod tests {
         );
         assert!(vm_set(&fake.bin, &VmSettings::default()).is_err());
         assert_eq!(fake.calls().len(), 2, "nothing to set runs nothing");
+    }
+
+    #[test]
+    fn vm_set_distinguishes_missing_shares_from_an_empty_list() {
+        let settings = |paths| VmSettings {
+            shared_paths: Some(paths),
+            ..VmSettings::default()
+        };
+        assert_eq!(
+            vm_set_args(&settings(vec![])).unwrap(),
+            ["vm", "set", "--no-shares"]
+        );
+        assert_eq!(
+            vm_set_args(&settings(vec![
+                "/Users".into(),
+                "/Volumes/my projects".into()
+            ]))
+            .unwrap(),
+            [
+                "vm",
+                "set",
+                "--share",
+                "/Users",
+                "--share",
+                "/Volumes/my projects"
+            ]
+        );
     }
 
     #[test]
