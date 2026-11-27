@@ -4,6 +4,7 @@ use crate::cgroup::{Budget, parse_budget};
 use crate::paths::Dirs;
 use crate::{Error, ErrorKind, Result};
 use std::fs::File;
+use std::path::Path;
 
 /// The default image store limit.
 pub const DEFAULT_STORE_LIMIT: u64 = 10 << 30;
@@ -171,22 +172,27 @@ fn parse_age(text: &str) -> std::result::Result<u64, String> {
 /// override it.
 pub fn load(dirs: &Dirs) -> Result<Config> {
     let path = dirs.config.join("config.toml");
-    let mut config = match std::fs::read_to_string(&path) {
-        Ok(text) => parse(&text).map_err(|mut e| {
+    let mut config = match read_text(&path)? {
+        Some(text) => parse(&text).map_err(|mut e| {
             e.what = format!("invalid settings in {}", path.display());
             e
         })?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config::default(),
-        Err(e) => {
-            return Err(Error::io(
-                format!("cannot read {}", path.display()),
-                &e,
-                "check the file permissions",
-            ));
-        }
+        None => Config::default(),
     };
     apply_overrides(&mut config, |k| std::env::var(k).ok())?;
     Ok(config)
+}
+
+fn read_text(path: &Path) -> Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(Error::io(
+            format!("cannot read {}", path.display()),
+            &e,
+            "check the file permissions",
+        )),
+    }
 }
 
 /// Set `key = "value"` in `<config>/config.toml`, which is made when missing. The line that
@@ -240,17 +246,7 @@ pub(crate) fn set_values_locked(dirs: &Dirs, values: &[(&str, &str)]) -> Result<
         })
         .collect::<Result<_>>()?;
     let path = dirs.config.join("config.toml");
-    let old = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => {
-            return Err(Error::io(
-                format!("cannot read {}", path.display()),
-                &e,
-                "check the file permissions",
-            ));
-        }
-    };
+    let old = read_text(&path)?.unwrap_or_default();
     let mut text = String::new();
     for line in old.lines() {
         let key = strip_comment(line).split_once('=').map(|(k, _)| k.trim());
@@ -272,17 +268,31 @@ pub(crate) fn set_values_locked(dirs: &Dirs, values: &[(&str, &str)]) -> Result<
         e.what = format!("invalid settings in {}", path.display());
         e
     })?;
+    write_text(&path, &text)
+}
+
+fn write_text(path: &Path, text: &str) -> Result<()> {
     let write = || -> std::io::Result<()> {
+        let resolved = if path
+            .symlink_metadata()
+            .is_ok_and(|metadata| metadata.is_symlink())
+        {
+            Some(path.canonicalize()?)
+        } else {
+            None
+        };
+        let path = resolved.as_deref().unwrap_or(path);
+        let dir = path.parent().expect("a config file has a directory");
         // A new file gets the mode any new file gets (the umask applies), not 0600.
         #[cfg(unix)]
         let mut tmp = tempfile::Builder::new()
             .permissions(std::os::unix::fs::PermissionsExt::from_mode(0o666))
-            .tempfile_in(&dirs.config)?;
+            .tempfile_in(dir)?;
         #[cfg(not(unix))]
-        let mut tmp = tempfile::NamedTempFile::new_in(&dirs.config)?;
+        let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
         std::io::Write::write_all(&mut tmp, text.as_bytes())?;
         // The file keeps the mode it had: this replaces the user's whole file.
-        match std::fs::metadata(&path) {
+        match std::fs::metadata(path) {
             Ok(old) => tmp.as_file().set_permissions(old.permissions())?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e),
@@ -290,7 +300,7 @@ pub(crate) fn set_values_locked(dirs: &Dirs, values: &[(&str, &str)]) -> Result<
         // On disk before it takes the old file's place: after a crash an empty file would
         // read as all defaults, and every other setting would be lost without an error.
         tmp.as_file().sync_all()?;
-        tmp.persist(&path)?;
+        tmp.persist(path)?;
         Ok(())
     };
     write().map_err(|e| {
