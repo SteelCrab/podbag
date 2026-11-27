@@ -9,6 +9,7 @@ use podbag::dashboard::cli;
 use podbag::dashboard::cluster_migration;
 mod commands;
 mod dockercmd;
+mod extensions;
 mod images;
 mod kubernetes;
 use podbag::dashboard::lab;
@@ -279,6 +280,19 @@ fn engine(
     };
     update_tray(&app);
     Ok(status)
+}
+
+#[tauri::command(async)]
+fn desktop_extensions(
+    app: AppHandle,
+    request: extensions::Action,
+) -> Result<Vec<extensions::Installed>, extensions::Failure> {
+    let directory = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| extensions::Failure::detail("storage", error))?
+        .join("extensions");
+    extensions::apply(&directory, request)
 }
 
 #[tauri::command(async)]
@@ -695,6 +709,20 @@ fn compression(
     cli::compression(&state.podbag, mode.as_deref())
 }
 
+#[tauri::command(async)]
+fn registry_proxy(
+    state: State<'_, AppState>,
+    token: u64,
+    values: Option<podbag::image::proxy::Settings>,
+) -> Result<podbag::image::proxy::Settings, String> {
+    if !cfg!(any(target_os = "linux", target_os = "macos"))
+        || state.session(token)?.target.choice != Choice::Podbag
+    {
+        return Err("Registry proxy settings require the local Podbag engine".into());
+    }
+    cli::registry_proxy(&state.podbag, values)
+}
+
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct VmResources {
@@ -965,17 +993,25 @@ fn set_settings(
     settings: Settings,
 ) -> Result<(), String> {
     let settings = settings.checked();
-    if settings.theme != lock(&state.settings).theme {
+    let mut active = lock(&state.settings);
+    let theme_changed = settings.theme != active.theme;
+    if theme_changed {
         window
             .set_theme(settings.theme.native())
             .map_err(|e| e.to_string())?;
     }
-    *lock(&state.settings) = settings.clone();
-    update_tray(window.app_handle());
-    match lock(&state.settings_file).as_ref() {
-        Some(file) => settings.save(file),
-        None => Ok(()),
+    if let Some(file) = lock(&state.settings_file).as_ref()
+        && let Err(error) = settings.save(file)
+    {
+        if theme_changed {
+            let _ = window.set_theme(active.theme.native());
+        }
+        return Err(error);
     }
+    *active = settings;
+    drop(active);
+    update_tray(window.app_handle());
+    Ok(())
 }
 
 // The tray.
@@ -1426,6 +1462,7 @@ fn main() {
         .manage(Mutex::new(lab::Lab::default()))
         .invoke_handler(tauri::generate_handler![
             engine,
+            desktop_extensions,
             models,
             tutorial_lab,
             volume_tools_lab,
@@ -1474,6 +1511,7 @@ fn main() {
             import_images,
             vm_resources,
             compression,
+            registry_proxy,
             take_star_prompt,
             terminal_command,
             install_terminal_command,

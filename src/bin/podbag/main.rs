@@ -361,6 +361,9 @@ fn mac_command(cli: &Cli, argv: Vec<String>) -> podbag::macos::cli::Forward {
             f.paths.extend(a.file.clone());
         }
         Cmd::System {
+            cmd: args::SystemCmd::RegistryProxy { set },
+        } => f.stdin = *set,
+        Cmd::System {
             cmd: args::SystemCmd::Service {
                 socket: Some(p), ..
             },
