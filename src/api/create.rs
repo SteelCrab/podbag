@@ -60,6 +60,21 @@ fn map_create_with(
     refuse_unsupported(host)?;
     let mut warnings = Vec::new();
     let mut c = Container::from_image(image);
+    let log_config = &host["LogConfig"];
+    if let Some(driver @ ("syslog" | "journald")) = log_config["Type"].as_str() {
+        let options = if log_config["Config"].is_null() {
+            Default::default()
+        } else {
+            serde_json::from_value(log_config["Config"].clone()).map_err(|_| {
+                invalid(
+                    "invalid LogConfig.Config",
+                    "expected an object with string values",
+                    "give logging options as strings",
+                )
+            })?
+        };
+        c = c.logging(crate::log_driver::LogConfig::parse(driver, options)?);
+    }
     if let Some(n) = name {
         c = c.name(n.trim_start_matches('/'));
     }
@@ -399,7 +414,7 @@ fn ignored(body: &Value) -> Vec<String> {
         }
     }
     let driver = host["LogConfig"]["Type"].as_str().unwrap_or("");
-    if !matches!(driver, "" | "json-file") {
+    if !matches!(driver, "" | "json-file" | "syslog" | "journald") {
         note(format!(
             "log driver {driver} is ignored: podbag writes logs as json-file"
         ));
@@ -1210,6 +1225,31 @@ mod tests {
     }
 
     #[test]
+    fn create_validates_logging_options() {
+        for (driver, config) in [
+            ("syslog", json!({"syslog-address": 5514})),
+            ("syslog", json!({"syslog-address": "tcp://127.0.0.1:0"})),
+            ("syslog", json!({"syslog-facility": "24"})),
+            (
+                "journald",
+                json!({"syslog-address": "udp://127.0.0.1:5514"}),
+            ),
+            ("journald", json!({"tag": "{{.Unknown}}"})),
+        ] {
+            let body = json!({"HostConfig": {"LogConfig": {"Type": driver, "Config": config}}});
+            let error = map_create(&body, None, &image()).unwrap_err();
+            assert_eq!(error.kind, ErrorKind::InvalidInput, "{body}");
+        }
+        let body = json!({"HostConfig": {"LogConfig": {"Type": "journald"}}});
+        let (container, warnings) = map_create(&body, None, &image()).unwrap();
+        assert_eq!(
+            fields(&container)["log_config"],
+            json!({"Type": "journald", "Config": {}})
+        );
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
     fn create_warns_about_ignored_fields() {
         let body = json!({
             "Image": "alpine",
@@ -1221,7 +1261,7 @@ mod tests {
                 "DnsSearch": ["lan"],
                 "DnsOptions": ["ndots:2"],
                 "ExtraHosts": ["a:1.2.3.4"],
-                "LogConfig": {"Type": "syslog"},
+                "LogConfig": {"Type": "fluentd"},
                 "Init": true,
                 "ShmSize": 1000,
                 "Ulimits": [{"Name": "nofile", "Soft": 1, "Hard": 2}],

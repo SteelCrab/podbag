@@ -6,6 +6,7 @@ The [README](../README.md) shows how to install podbag. This page shows what it 
 
 - [Commands](#commands)
 - [How containers run](#how-containers-run)
+  - [Forward container logs](#forward-container-logs)
   - [No daemon](#no-daemon)
   - [The keeper](#the-keeper)
   - [Isolation](#isolation)
@@ -153,6 +154,41 @@ podbag upgrade                               # install the latest release
 ```
 
 ## How containers run
+
+### Forward container logs
+
+Podbag's Linux engine keeps a rotating local log. Both `podbag logs` and `docker logs`
+read that copy. Set `--log-driver` on `run` or `create` to forward new lines as well.
+The engine connects to the destination from its own host or VM.
+
+```sh
+podbag run --log-driver=syslog --log-opt syslog-address=udp://127.0.0.1:5514 \
+  --log-opt syslog-facility=local0 --log-opt syslog-format=rfc5424 \
+  --log-opt 'tag={{.Name}}' --name web alpine echo hello
+
+docker run --log-driver=journald --log-opt 'tag={{.Name}}' --name worker alpine echo hello
+journalctl SYSLOG_IDENTIFIER=worker
+```
+
+- `json-file` is the default driver.
+- `syslog` accepts `syslog-address` over UDP, TCP, Unix stream or Unix datagram.
+  Use IPv4, bracketed IPv6 or `localhost` for UDP and TCP. The default port is `514`.
+  With a Unix socket, use an absolute path. The default socket is `/dev/log`.
+  `syslog-facility` accepts names such as `daemon` (the default) and `local0`, or a number
+  from `0` to `23`. `syslog-format` accepts `rfc3164`, `rfc5424` and `rfc5424micro`.
+- `journald` sends to `/run/systemd/journal/socket`. Use the engine's Linux host or VM
+  to read entries with `journalctl`. Entries include the container ID, name, image,
+  tag, original timestamp and priority.
+- Both drivers accept a literal `tag` or a tag with `{{.ID}}`, `{{.FullID}}`,
+  `{{.Name}}`, `{{.ImageName}}`, `{{.ImageID}}` and `{{.ImageFullID}}`.
+  The default tag is the short container ID.
+
+The engine preserves the local log if the destination is busy, missing or inaccessible.
+It counts lines it could not send and waits a second before attempting the next delivery.
+UDP delivery remains best effort after the kernel accepts a datagram. The raw Engine API
+inspect response includes `PodbagLogDelivery.Dropped` and `PodbagLogDelivery.LastError`
+once a delivery error occurs. You can read the same values from `log-delivery.json`
+beside the container's local log. The counter includes dropped lines across restarts.
 
 ### No daemon
 
@@ -343,6 +379,26 @@ podbag logout ghcr.io
   `0600`), but the password is not encrypted.
 - When the registry gives a token for the login (an identity token), podbag keeps the
   token, not the password.
+
+### Registry proxies
+
+Open **Settings → Registry proxies** in Podbag Desktop on Linux or macOS with the local
+Podbag engine selected. The saved choice applies to new engine registry requests,
+including pulls, pushes, search, and registry authentication. The engine reads it from
+`registry-proxy.json` in its configuration directory.
+
+- **Use engine environment** is the default. It uses the engine's proxy environment
+  variables, including `ALL_PROXY`, `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY`.
+- **Connect directly** opens registry connections without a proxy.
+- **Manual proxy** uses an HTTP or HTTPS proxy URL, such as
+  `http://proxy.example.com:3128`. The URL must omit credentials. Enter bypass rules
+  separated by commas. Use exact hosts or IP addresses, `.example.com` or
+  `*.example.com` for subdomains, and `*` for every host.
+
+On macOS this configures the Linux VM's engine. Opening the form can start a stopped VM.
+The proxy address must be reachable from that VM. Inherited mode uses the engine
+environment inside the VM. Docker contexts, container applications, and BuildKit use
+their own proxy settings.
 
 ### Pull and push
 
@@ -811,7 +867,7 @@ podbag system docker restore    # back to the context you had (Docker Desktop, �
 
 - Refused, with the reason: devices, `--read-only`, `--pid host`, `--volumes-from`,
   `--link`, port ranges, other network or volume drivers.
-- Accepted with a warning, because ignoring them is safe: ulimits, log drivers, fixed
+- Accepted with a warning, because ignoring them is safe: ulimits, unsupported log drivers, fixed
   addresses.
 - Answered with 501 and what to do instead: BuildKit's build API (use buildx with the
   `docker-container` driver), `image history` and plugins.
@@ -1319,6 +1375,45 @@ podbag lab remove container-network
 - Light and dark themes follow the system. Settings can change the theme.
 - Languages: English, 한국어, 日本語, 简体中文, Filipino, Español and Tiếng Việt. The app
   follows the system language. Settings can change it.
+
+#### Desktop extensions
+
+Open **Extensions** and select **Install manifest** to install a local UTF-8 JSON file.
+New extensions are disabled. Use **Enable** to show a view, **Disable** to hide it, or
+**Remove** to delete the installed copy. The original file stays in place.
+
+Podbag supports its own manifest version 1. Save this example as a JSON file and install it.
+
+```json
+{
+  "apiVersion": 1,
+  "id": "example.workspace-checklist",
+  "name": "Workspace checklist",
+  "version": "1.0.0",
+  "description": "Review local resources before changing the workspace.",
+  "permissions": ["engineSummary"],
+  "content": [
+    { "type": "heading", "text": "Before you change a workspace" },
+    { "type": "text", "text": "Review your current containers and volumes." },
+    { "type": "list", "items": ["Stop the containers you intend to replace.", "Check which volumes contain data to keep."] },
+    { "type": "code", "text": "podbag ps" },
+    { "type": "engineSummary" }
+  ]
+}
+```
+
+- The ID starts with a lowercase letter and uses up to 64 lowercase letters, digits,
+  periods or hyphens. IDs are unique. Remove an installed manifest before replacing it.
+- The name fits in 120 characters, the version in 40, and the description in 2,000.
+  Files can be up to 128 KiB and contain 1 to 40 blocks. The app keeps up to 64 extensions.
+- Heading blocks accept up to 120 characters. Text and code blocks accept up to 8,000.
+  List blocks have 1 to 40 items of up to 1,000 characters each.
+- The optional `engineSummary` permission authorizes a single matching block. After
+  enabling an extension, explicitly allow summary access to display only the current
+  counts of containers, images, volumes and networks. Disabling clears that grant.
+- The host renders text, code, lists and counted summaries directly. Extending the app
+  with scripts, HTML, external links, files, commands or network requests is unsupported.
+  Docker Desktop extension bundles and manifests use a different format.
 
 #### Local models
 

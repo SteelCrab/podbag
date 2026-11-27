@@ -661,6 +661,7 @@ function renderNav() {
     ...(S.practiceContainers ? [item("lab-containers", t("training.containers"), null, "containers")] : []),
     ...(S.practiceInstalled ? [item("lab-volumes", t("practice.volumes"), null, "volumes")] : []));
   updateKubeNav();
+  document.getElementById("nav-extensions").replaceChildren(item("extensions", t("nav.extensions"), null, "kube-deployments"));
   if (windowBar) {
     const [reload, settings] = document.getElementById("topbar-tools").children;
     for (const [button, label] of [[reload, t("action.refresh")], [settings, t("nav.settings")]]) {
@@ -994,6 +995,13 @@ function renderMain(fresh) {
   if (S.view === "migration") {
     if (fresh || shownView !== S.view) migrationPanel = renderMigration(main);
     shownView = S.view;
+    return;
+  }
+  if (S.view === "extensions") {
+    const redraw = fresh || shownView !== S.view;
+    shownView = S.view;
+    if (redraw) openExtensions(main);
+    else refreshExtensionSummary(main);
     return;
   }
   if (S.view === "lab-containers") {
@@ -1440,6 +1448,87 @@ function settingDetails(id, key, symbol, value, ...body) {
     h("div", { class: "setting-body" }, body));
 }
 
+function registryProxySetting() {
+  if (!isPodbag() || !["linux", "macos"].includes(S.engine?.platform)) return null;
+  const key = name => t(`settings.registryProxy${name}`);
+  const modes = { inherited: "Inherited", direct: "Direct", manual: "Manual" };
+  const mode = h("select", { id: "registry-proxy-mode" },
+    Object.entries(modes).map(([value, label]) => h("option", { value, text: key(label) })));
+  const url = h("input", {
+    id: "registry-proxy-url", type: "url", placeholder: "http://proxy.example.com:3128",
+    autocomplete: "off", spellcheck: "false", maxlength: 2048, required: true,
+    "aria-describedby": "registry-proxy-url-hint",
+  });
+  const bypass = h("input", {
+    id: "registry-proxy-bypass", type: "text", placeholder: "localhost, .example.com",
+    autocomplete: "off", spellcheck: "false", maxlength: 4096, "aria-describedby": "registry-proxy-bypass-hint",
+  });
+  const status = h("p", { class: "hint", role: "status" });
+  const row = (id, label, control, hint) => h("label", { for: id },
+    h("span", { text: key(label) }), control, hint);
+  const manual = h("div", { class: "registry-proxy-fields", hidden: true },
+    row(url.id, "Url", url, h("small", { id: "registry-proxy-url-hint", text: key("UrlHint") })),
+    row(bypass.id, "Bypass", bypass, h("small", { id: "registry-proxy-bypass-hint", text: key("BypassHint") })));
+  const save = h("button", { id: "registry-proxy-submit", type: "submit", class: "button primary", text: t("action.save") });
+  const form = h("form", { class: "registry-proxy-form", onsubmit: submit },
+    h("fieldset", { disabled: true },
+      row(mode.id, "Mode", mode), manual,
+      h("div", { class: "registry-proxy-actions" }, save)),
+    status);
+  const section = settingDetails("registry-proxy-settings", "registryProxy", "globe", null,
+    h("p", { class: "hint", text: key("Description") }), form);
+  let reading = false, loaded = false;
+  const controls = form.querySelector("fieldset");
+  const showStatus = (text, error = false) => {
+    status.classList.toggle("error-text", error);
+    status.textContent = text;
+  };
+  function showMode() {
+    manual.hidden = url.disabled = bypass.disabled = mode.value !== "manual";
+  }
+  function show(values) {
+    mode.value = values.mode;
+    url.value = values.url;
+    bypass.value = values.bypass;
+    section.querySelector(".setting-value").textContent = key(modes[values.mode]);
+    showMode();
+  }
+  mode.addEventListener("change", showMode);
+  showMode();
+  section.addEventListener("toggle", async () => {
+    if (!section.open || loaded || reading) return;
+    reading = true;
+    showStatus("");
+    try {
+      show(await API.registryProxy());
+      loaded = true;
+      controls.disabled = false;
+    } catch {
+      showStatus(key("LoadError"), true);
+    } finally {
+      reading = false;
+    }
+  });
+  async function submit(event) {
+    event.preventDefault();
+    if (!loaded || controls.disabled) return;
+    const values = mode.value === "manual"
+      ? { mode: mode.value, url: url.value, bypass: bypass.value }
+      : { mode: mode.value, url: "", bypass: "" };
+    controls.disabled = true;
+    showStatus("");
+    try {
+      show(await API.registryProxy(values));
+      showStatus(key("Saved"));
+    } catch {
+      showStatus(key("SaveError"), true);
+    } finally {
+      controls.disabled = false;
+    }
+  }
+  return section;
+}
+
 // Settings can be reopened while the operating system is updating its login entry.
 let startupWrite = Promise.resolve();
 
@@ -1511,6 +1600,7 @@ async function renderSettings(main) {
           field(t("settings.socket"), e.endpoint, "mono"), field(t("settings.version"), e.version)),
         dockerSettings(),
         compressionSetting()),
+      registryProxySetting(),
       settingDetails("vm-settings", "vm", "vm"),
       settingDetails("sync-settings", "syncShares", "volumes"),
       settingDetails("updates", "updates", "update"),
@@ -2399,7 +2489,7 @@ function extraKeys() {}
 async function init() {
   S.connection = await API.connection();
   const view = sessionStorage.getItem("engine-view");
-  if ([...KINDS, "settings", "kubernetes", "migration", "models"].includes(view)) S.view = view;
+  if ([...KINDS, "settings", "kubernetes", "migration", "models", "extensions"].includes(view)) S.view = view;
   const kind = sessionStorage.getItem("engine-resource");
   if (KUBE_KINDS.includes(kind)) S.kubeKind = kind;
   S.kubeExpanded = S.view === "kubernetes";
