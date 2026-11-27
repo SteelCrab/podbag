@@ -8,25 +8,30 @@
 //! stopped VM; `vm_set` keeps the values; image compression, like the engine, starts a
 //! stopped VM. `run_container` pulls an image it lacks (three lines of progress; a name
 //! with `notfound` fails), then adds a running container. Of the Kubernetes contexts `dev`, `staging` and `ocp`, only
-//! `ocp` is OpenShift: it alone has Routes.
+//! `ocp` is OpenShift: it alone has Routes. Migrate lists four more images, from other
+//! registries. The local model runner starts off and empty; a pull adds the model and a
+//! run answers "Blue.". The VM shares `/Users`; synchronized shares are kept in memory.
 
 use crate::backend::Api;
 use crate::compression::{Compression, Mode};
 use crate::desktop::Connection;
 use crate::dockercmd::DockerCommand;
-use crate::engine::{EngineStatus, List, engine_kind};
+use crate::engine::{EngineStatus, engine_kind};
 use crate::events::{Event, Events};
 use crate::images::{self, ImportImage, LocationInfo, Search};
 use crate::kubernetes::{Resource, Snapshot, route_url};
 use crate::lock;
-use crate::migration::Request;
+use crate::migration::{self, Listing, Request};
+use crate::model_runner::{self, Failure, Generation, Model, Reply};
 use crate::run::pull_reference;
 use crate::settings::Settings;
 use crate::strings;
 use crate::terminal_cli;
 use crate::tray::{EngineState, TrayInput, TrayModel};
 use crate::updates::{Check, Updates, Upgraded};
-use crate::vm::{VmDisk, VmLimits, VmSettings, VmStatus, VmValues};
+use crate::vm::{
+    SharedPaths, SyncAction, SyncShare, VmDisk, VmLimits, VmSettings, VmStatus, VmValues,
+};
 use podbag::client::{
     Choice, CompressionSizes, ContainerSummary, Features, ImageSummary, Ipam, IpamConfig, Kind,
     NetworkSummary, Port, Pruned, RunSpec, SearchResult, VolumeSummary,
@@ -34,7 +39,7 @@ use podbag::client::{
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
 
 /// Which preview view to start from.
@@ -85,13 +90,53 @@ pub struct Options {
     /// version without it.
     pub compression_prompt: bool,
     pub compression: CompressionOptions,
+    pub models: ModelOptions,
+    /// The platform instead of macOS: `linux` (no VM) or `windows` (a WSL VM whose
+    /// resources the app does not set).
+    pub platform: Option<&'static str>,
+    /// The VM has a synchronized share at start.
+    pub sync_share: bool,
     /// Where the mock notes the calls a test checks.
     pub calls: Calls,
 }
 
+/// The local model runner's cases.
+#[derive(Clone, Debug, Default)]
+pub struct ModelOptions {
+    /// Ollama is not installed: Start fails.
+    pub missing: bool,
+    /// The runner runs at start, with a loaded model.
+    pub running: bool,
+    /// A run waits until this gate opens.
+    pub gate: Gate,
+}
+
+/// Holds work until it opens; open at first. Clones share it.
+#[derive(Clone, Debug, Default)]
+pub struct Gate(Arc<(Mutex<bool>, Condvar)>);
+
+impl Gate {
+    pub fn close(&self) {
+        *lock(&self.0.0) = true;
+    }
+
+    pub fn open(&self) {
+        *lock(&self.0.0) = false;
+        self.0.1.notify_all();
+    }
+
+    fn pass(&self) {
+        let mut closed = lock(&self.0.0);
+        while *closed {
+            closed = self.0.1.wait(closed).unwrap_or_else(|p| p.into_inner());
+        }
+    }
+}
+
 /// The calls a test checks, in order: `run_container <spec as JSON>`,
-/// `kube_list <kind> <context>` and `kube_open_route <context> <namespace> <name>
-/// <address>`. Clones share the list.
+/// `kube_list <kind> <context>`, `kube_open_route <context> <namespace> <name>
+/// <address>`, `models <action>`, `vm_set <shared paths>` and `vm_sync <action>
+/// [name]`. Clones share the list.
 #[derive(Clone, Debug, Default)]
 pub struct Calls(Arc<Mutex<Vec<String>>>);
 
@@ -148,12 +193,26 @@ impl Default for CompressionOptions {
 impl Options {
     /// From the environment: PODBAG_MOCK_SCENARIO (default, empty, vm, offline, docker),
     /// PODBAG_MOCK_ROWS=N, PODBAG_MOCK_FEATURES=all, PODBAG_MOCK_LANG (en, ko, …, system),
-    /// PODBAG_MOCK_COMPRESSION (`on`, `ask` or both, comma-separated).
+    /// PODBAG_MOCK_COMPRESSION (`on`, `ask` or both, comma-separated),
+    /// PODBAG_MOCK_MODELS (`running` or `missing`), PODBAG_MOCK_PLATFORM (`linux`,
+    /// `windows`), PODBAG_MOCK_SYNC=1 (a synchronized share).
     pub fn from_env() -> Options {
         let var = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
         let compression = var("PODBAG_MOCK_COMPRESSION").unwrap_or_default();
         let has = |word: &str| compression.split(',').any(|w| w.trim() == word);
+        let models = var("PODBAG_MOCK_MODELS").unwrap_or_default();
         Options {
+            models: ModelOptions {
+                missing: models == "missing",
+                running: models == "running",
+                ..ModelOptions::default()
+            },
+            platform: match var("PODBAG_MOCK_PLATFORM").as_deref() {
+                Some("linux") => Some("linux"),
+                Some("windows") => Some("windows"),
+                _ => None,
+            },
+            sync_share: var("PODBAG_MOCK_SYNC").is_some_and(|v| v != "0"),
             compression_prompt: has("ask"),
             compression: CompressionOptions {
                 on: has("on"),
@@ -188,6 +247,10 @@ struct State {
     logs_following: bool,
     update_found: bool,
     compression: Compression,
+    /// The local model runner runs, and the models it has.
+    model_runner: bool,
+    models: Vec<Model>,
+    sync: Vec<SyncShare>,
 }
 
 /// The mocked backend. Use it through [`crate::Backend::mock`].
@@ -513,7 +576,51 @@ fn running_vm() -> VmStatus {
             allocated_bytes: 5_800_000_000,
             size_bytes: 68_719_476_736,
         }),
+        shared_paths: Some(SharedPaths {
+            in_use: Some(vec!["/Users".into()]),
+            next: vec!["/Users".into()],
+        }),
     }
+}
+
+/// A WSL VM: Windows reports only its state.
+fn windows_vm() -> VmStatus {
+    VmStatus {
+        platform: "windows".into(),
+        state: "running".into(),
+        resources_editable: false,
+        ..VmStatus::default()
+    }
+}
+
+/// The model the runner's samples have.
+const DEMO_MODEL: (&str, u64) = ("smollm2:135m", 92_078_644);
+
+fn sample_share(name: &str, source: &str) -> SyncShare {
+    SyncShare {
+        name: name.into(),
+        source: source.into(),
+        volume: format!("podbag-sync-{name}"),
+        conflicts: Vec::new(),
+        last_error: None,
+    }
+}
+
+/// Images that only Migrate lists: tags of several registries, and one without a tag.
+fn migration_images(now: i64) -> Value {
+    let image = |id: &str, tags: &[&str]| {
+        json!({"Id": id, "RepoTags": tags, "Created": now - 86_400 * 5, "Size": 48_000_000,
+               "Containers": 0})
+    };
+    json!([
+        image(
+            "sha256:103afa055a409b34",
+            &["example/api:1.5", "registry.gitlab.com/example/api:1.5"]
+        ),
+        image("sha256:158bb8104d657e3f", &["ghcr.io/example/frontend:2.0"]),
+        image("sha256:498bdb036ad35429", &["quay.io/example/proxy:0.8"]),
+        image("sha256:8ab61e38dd2ac135", &["<none>:<none>"]),
+    ])
 }
 
 fn stopped_vm() -> VmStatus {
@@ -533,12 +640,16 @@ fn stopped_vm() -> VmStatus {
             allocated_bytes: 3_400_000_000,
             size_bytes: 68_719_476_736,
         }),
+        shared_paths: Some(SharedPaths {
+            in_use: None,
+            next: vec!["/Users".into()],
+        }),
         ..running_vm()
     }
 }
 
-/// The engine's state for a scenario and the engine chosen.
-fn engine_info(scenario: Scenario, selected: &str) -> EngineStatus {
+/// The engine's state for a scenario, a platform other than macOS and the engine chosen.
+fn engine_info(scenario: Scenario, platform: Option<&'static str>, selected: &str) -> EngineStatus {
     let docker = scenario == Scenario::Docker;
     let mut e = EngineStatus {
         platform: "macos",
@@ -563,10 +674,14 @@ fn engine_info(scenario: Scenario, selected: &str) -> EngineStatus {
         e.vm = None;
         e.version = Some("Docker Desktop 4.50.0 29.0.1 (API 1.52)".into());
     }
-    if scenario == Scenario::Offline {
+    if scenario == Scenario::Offline || platform == Some("linux") {
         e.platform = "linux";
         e.vm = None;
         e.endpoint = "unix:///run/user/1000/podbag/docker.sock".into();
+    }
+    if platform == Some("windows") {
+        e.platform = "windows";
+        e.endpoint = "npipe:////./pipe/podbag".into();
     }
     if let Some(choice) = Choice::parse(selected)
         && engine_kind(&choice) != e.engine
@@ -669,7 +784,7 @@ impl Mock {
             containers.clear();
             volumes.clear();
         }
-        let engine = engine_info(scenario, "");
+        let engine = engine_info(scenario, opts.platform, "");
         let state = State {
             containers,
             images: sample_images(now),
@@ -678,7 +793,9 @@ impl Mock {
             kube: sample_kube(),
             selected: engine.engine.to_string(),
             engine,
-            vm: if scenario == Scenario::VmStopped {
+            vm: if opts.platform == Some("windows") {
+                windows_vm()
+            } else if scenario == Scenario::VmStopped {
                 stopped_vm()
             } else {
                 running_vm()
@@ -708,6 +825,21 @@ impl Mock {
                     Mode::Off
                 }),
                 after: Some(opts.compression.after),
+            },
+            model_runner: opts.models.running,
+            models: if opts.models.running {
+                vec![Model {
+                    name: DEMO_MODEL.0.into(),
+                    size: DEMO_MODEL.1,
+                    loaded: true,
+                }]
+            } else {
+                Vec::new()
+            },
+            sync: if opts.sync_share {
+                vec![sample_share("project", "/Users/me/projects/app")]
+            } else {
+                Vec::new()
             },
         };
         Mock {
@@ -767,7 +899,12 @@ impl Mock {
         s.engine.vm = Some(if on { "running" } else { "stopped" }.into());
         s.engine.reachable = on;
         s.engine.error = (!on).then(|| "vm-stopped".into());
+        if s.vm.platform == "windows" {
+            s.vm.state = if on { "running" } else { "stopped" }.into();
+            return;
+        }
         let (next, saved, overridden) = (s.vm.next, s.vm.saved, s.vm.overridden_by.clone());
+        let shares = s.vm.shared_paths.clone().unwrap_or_default().next;
         s.vm = if on {
             VmStatus {
                 in_use: next,
@@ -784,6 +921,10 @@ impl Mock {
         };
         s.vm.saved = saved;
         s.vm.overridden_by = overridden;
+        s.vm.shared_paths = Some(SharedPaths {
+            in_use: on.then(|| shares.clone()),
+            next: shares,
+        });
     }
 
     /// The objects of `kind` in `context` (None or empty: `dev`). Only `ocp` has Routes;
@@ -857,7 +998,7 @@ impl Api for Mock {
             let mut s = self.st();
             s.selected = name.to_string();
             s.token += 1;
-            s.engine = engine_info(self.opts.scenario, name);
+            s.engine = engine_info(self.opts.scenario, self.opts.platform, name);
         }
         self.events.send(Event::StatusChanged);
         Ok(())
@@ -1409,8 +1550,18 @@ impl Api for Mock {
         let l = s.vm.limits.unwrap_or(LIMITS);
         let mut next = s.vm.next.unwrap_or_default();
         let mut saved = s.vm.saved.unwrap_or_default();
-        if change.cpus.is_none() && change.memory_mib.is_none() && change.idle_seconds.is_none() {
+        if change.cpus.is_none()
+            && change.memory_mib.is_none()
+            && change.idle_seconds.is_none()
+            && change.shared_paths.is_none()
+        {
             return Err("nothing to set".into());
+        }
+        if let Some(paths) = &change.shared_paths {
+            self.opts.calls.push(format!("vm_set {}", paths.join(",")));
+            if let Some(p) = paths.iter().find(|p| !p.starts_with('/')) {
+                return Err(format!("{p} is not an absolute path"));
+            }
         }
         if let Some(c) = change.cpus {
             if c < l.cpus_min || c > l.cpus_max {
@@ -1439,12 +1590,58 @@ impl Api for Mock {
         s.vm.next = Some(next);
         s.vm.saved = Some(saved);
         let running = s.vm.state == "running";
+        let mut shares = s.vm.shared_paths.clone().unwrap_or_default();
+        if let Some(paths) = &change.shared_paths {
+            shares.next = paths.clone();
+        }
         if running && change.restart {
             s.vm.in_use = Some(next);
             s.vm.uptime_seconds = Some(0);
+            shares.in_use = Some(shares.next.clone());
         }
-        s.vm.pending = running && s.vm.in_use != Some(next);
+        let shares_pending = running && shares.in_use.as_ref() != Some(&shares.next);
+        if s.vm.shared_paths.is_some() {
+            s.vm.shared_paths = Some(shares);
+        }
+        s.vm.pending = running && (s.vm.in_use != Some(next) || shares_pending);
         Ok("Saved.".into())
+    }
+
+    /// `add` fails for a name in use, `now` and `remove` for a name not in use.
+    fn vm_sync(&self, action: &SyncAction) -> Result<Vec<SyncShare>, String> {
+        let (what, name, _) = action.args();
+        self.opts.calls.push(
+            format!("vm_sync {what} {}", name.unwrap_or_default())
+                .trim_end()
+                .to_string(),
+        );
+        let mut s = self.st();
+        if s.selected != "podbag" || s.vm.platform != "macos" {
+            return Err("Synchronized shares require Podbag on macOS".into());
+        }
+        let at = name.and_then(|n| s.sync.iter().position(|share| share.name == n));
+        match action {
+            SyncAction::List => {}
+            SyncAction::Add { name, path } => {
+                if at.is_some() {
+                    return Err("Share already exists".into());
+                }
+                s.sync.push(sample_share(name, path));
+            }
+            SyncAction::Now(_) | SyncAction::Remove(_) => {
+                let Some(at) = at else {
+                    return Err("Share not found".into());
+                };
+                if matches!(action, SyncAction::Remove(_)) {
+                    s.sync.remove(at);
+                }
+            }
+        }
+        drop(s);
+        if !matches!(action, SyncAction::List) {
+            self.wait(300);
+        }
+        Ok(self.st().sync.clone())
     }
 
     fn refresh(&self, _asked: bool) {}
@@ -1522,8 +1719,26 @@ impl Api for Mock {
             .into()
     }
 
-    fn migration_list(&self, _source: &str, kind: Kind) -> Result<List, String> {
-        self.list(kind)
+    fn migration_list(
+        &self,
+        _source: &str,
+        kind: Kind,
+        hosts: &[(String, String)],
+    ) -> Result<Listing, String> {
+        let list = self.list(kind)?;
+        if !matches!(kind, Kind::Images | Kind::Containers) {
+            return Ok(Listing {
+                list,
+                registries: BTreeMap::new(),
+            });
+        }
+        let mut rows = serde_json::to_value(&list).map_err(|e| e.to_string())?;
+        if let (Some(rows), Value::Array(more)) = (rows.as_array_mut(), migration_images(self.now))
+            && kind == Kind::Images
+        {
+            rows.extend(more);
+        }
+        migration::listing(kind, rows, hosts)
     }
 
     /// `prepare`, `image` or `files`, `verify`: 180 ms apart.
@@ -1538,6 +1753,77 @@ impl Api for Mock {
             self.wait(180);
         }
         Ok(())
+    }
+
+    /// Start fails when Ollama is `missing`; a run waits for the gate.
+    fn models(&self, action: model_runner::Action) -> Result<Reply, Failure> {
+        use model_runner::Action;
+        self.opts.calls.push(format!("models {}", action.name()));
+        let mut s = self.st();
+        match &action {
+            Action::Status => {}
+            Action::Start => {
+                if self.opts.models.missing {
+                    return Err(Failure::new("missing"));
+                }
+                s.model_runner = true;
+            }
+            Action::Stop => {
+                s.model_runner = false;
+                s.models.iter_mut().for_each(|m| m.loaded = false);
+            }
+            _ if !s.model_runner => return Err(Failure::new("stopped")),
+            Action::Pull { model } => {
+                model_runner::registry_model(model)?;
+                let name = model.trim();
+                if !s.models.iter().any(|m| m.name == name) {
+                    s.models.push(Model {
+                        name: name.into(),
+                        size: DEMO_MODEL.1,
+                        loaded: false,
+                    });
+                }
+            }
+            Action::Run { model, prompt } => {
+                model_runner::check_prompt(prompt)?;
+                if !s.models.iter().any(|m| m.name == *model) {
+                    return Err(Failure::new("notInstalled"));
+                }
+                drop(s);
+                self.opts.models.gate.pass();
+                let mut s = self.st();
+                if !s.model_runner {
+                    return Err(Failure::new("stopped"));
+                }
+                if let Some(m) = s.models.iter_mut().find(|m| m.name == *model) {
+                    m.loaded = true;
+                }
+                return Ok(Reply::Generation(Generation {
+                    response: "Blue.".into(),
+                    done: true,
+                }));
+            }
+            Action::Unload { model } => {
+                let Some(m) = s.models.iter_mut().find(|m| m.name == *model) else {
+                    return Err(Failure::new("notInstalled"));
+                };
+                m.loaded = false;
+            }
+        }
+        let running = s.model_runner;
+        Ok(Reply::Status(model_runner::Status {
+            running,
+            version: if running {
+                "0.40.17".into()
+            } else {
+                String::new()
+            },
+            models: if running {
+                s.models.clone()
+            } else {
+                Vec::new()
+            },
+        }))
     }
 
     fn settings(&self) -> Settings {
@@ -1656,7 +1942,12 @@ impl Api for Mock {
         self.vm(if running { "stop" } else { "start" })
     }
 
-    fn shutdown(&self) {}
+    /// The model runner stops, as the real one does.
+    fn shutdown(&self) {
+        let mut s = self.st();
+        s.model_runner = false;
+        s.models.iter_mut().for_each(|m| m.loaded = false);
+    }
 
     fn training_modules(
         &self,

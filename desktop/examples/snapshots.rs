@@ -26,6 +26,52 @@ struct Shot {
 /// run form and OpenShift Routes (`views-<name>-<lang>-<theme>.png`).
 const VIEW_SHOTS: &[(&str, &[&str], f32)] = &[
     ("migrate", &["nav migrate"], 1200.),
+    (
+        "migrate-images",
+        &[
+            "registry-host gitlab-self registry.example.com",
+            "nav migrate",
+            "migrate-source docker",
+            "migrate engine images",
+        ],
+        1200.,
+    ),
+    (
+        "migrate-confirm",
+        &[
+            "registry-host gitlab-self registry.example.com",
+            "nav migrate",
+            "migrate-source docker",
+            "migrate engine images",
+            "migration 14",
+        ],
+        1200.,
+    ),
+    ("models", &["nav models"], 1200.),
+    (
+        "models-report",
+        &[
+            "nav models",
+            "models start",
+            "models pull smollm2:135m",
+            "models run Name the color of a clear daytime sky.",
+        ],
+        1200.,
+    ),
+    ("settings-search", &["search Virtual machine"], 1200.),
+    // The same in Korean.
+    ("settings-search-vm", &["search 가상 머신"], 1200.),
+    ("settings-search-none", &["search does not exist"], 1200.),
+    ("settings-shares", &["nav settings", "section vm"], 1200.),
+    (
+        "settings-sync",
+        &[
+            "nav settings",
+            "section syncShares",
+            "sync add project /Users/me/projects/app",
+        ],
+        1200.,
+    ),
     ("migrate-kube", &["nav migrate", "migrate kube"], 1200.),
     ("migration", &["nav migrate", "migration 0"], 1200.),
     (
@@ -330,15 +376,24 @@ fn main() {
     }
 }
 
-/// The views of VIEW_SHOTS, each in a new window so that no state carries over.
+/// The views of VIEW_SHOTS, each in a new window so that no state carries over. In
+/// English and Korean, or in the languages of `PODBAG_SNAPSHOT_LANGS` (`fil,vi`); as
+/// tall as `PODBAG_SNAPSHOT_HEIGHT` (800) and, with `PODBAG_SNAPSHOT_WIDTH`, that wide.
 fn views(out: &Path, filter: &str, scale: f32) {
     let filter = filter.strip_prefix("views").unwrap_or(filter);
-    for (lang, theme) in [
-        ("en", "light"),
-        ("en", "dark"),
-        ("ko", "light"),
-        ("ko", "dark"),
-    ] {
+    let langs = std::env::var("PODBAG_SNAPSHOT_LANGS").unwrap_or_else(|_| "en,ko".into());
+    let height: f32 = std::env::var("PODBAG_SNAPSHOT_HEIGHT")
+        .ok()
+        .and_then(|h| h.parse().ok())
+        .unwrap_or(800.);
+    let wide: Option<f32> = std::env::var("PODBAG_SNAPSHOT_WIDTH")
+        .ok()
+        .and_then(|w| w.parse().ok());
+    let pairs: Vec<(&str, &str)> = langs
+        .split(',')
+        .flat_map(|l| [(l.trim(), "light"), (l.trim(), "dark")])
+        .collect();
+    for (lang, theme) in pairs {
         for (shot, commands, width) in VIEW_SHOTS {
             let name = format!("views-{shot}-{lang}-{theme}");
             if !name.contains(filter) {
@@ -358,7 +413,8 @@ fn views(out: &Path, filter: &str, scale: f32) {
             };
             let (backend, events) = Backend::mock(opts, || {});
             let app = Desktop::new(backend, events, Options::inline());
-            let mut h = Harness::with_fonts(UiView::new(app), *width, 800., load_fonts());
+            let width = wide.unwrap_or(*width);
+            let mut h = Harness::with_fonts(UiView::new(app), width, height, load_fonts());
             for c in [format!("theme {theme}"), format!("lang {lang}")] {
                 h.view_mut().app.command(&c);
             }
@@ -385,7 +441,7 @@ fn views(out: &Path, filter: &str, scale: f32) {
 }
 
 fn real(out: &Path, scale: f32) {
-    let (backend, events) = Backend::real(env!("CARGO_PKG_VERSION"), None, None, || {});
+    let (backend, events) = Backend::real(env!("CARGO_PKG_VERSION"), None, None, None, || {});
     let app = Desktop::new(backend, events, Options::inline());
     let mut h = Harness::with_fonts(UiView::new(app), 1200., 800., load_fonts());
     for page in ["containers", "images"] {

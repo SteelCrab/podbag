@@ -20,6 +20,7 @@ pub mod migration;
 pub mod mock;
 #[cfg(feature = "mock")]
 mod mock_training;
+pub mod model_runner;
 pub mod run;
 pub mod session;
 pub mod settings;

@@ -39,6 +39,21 @@ fn config_dir() -> Option<PathBuf> {
     base.map(|b| b.join(ID))
 }
 
+/// The app's data folder, where the local models are kept (in `models`). The same as
+/// the earlier, WebView-based app's, so its models stay.
+fn data_dir() -> Option<PathBuf> {
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+            .map(|d| d.join(ID))
+    }
+    #[cfg(any(target_os = "macos", windows))]
+    config_dir()
+}
+
 /// Where the earlier, WebView-based app (up to 0.3) kept its page's data. It marks an
 /// update from that app, which does not get the first-launch star prompt.
 fn webview_data() -> Option<PathBuf> {
@@ -83,6 +98,7 @@ fn main() {
         Backend::real(
             env!("CARGO_PKG_VERSION"),
             config_dir().as_deref(),
+            data_dir().as_deref(),
             webview_data().as_deref(),
             waker.clone(),
         )

@@ -214,7 +214,7 @@ fn sidebar_items(d: &mut Desktop, ui: &mut Ui, side: Rect) -> f32 {
         *y += h + 2.;
         r
     };
-    // Migration (with its sources and kinds), the four lists, Training.
+    // Migration (with its sources and kinds), the four lists, Models, Training.
     views::migrate::nav(d, ui, inner, &mut y, collapsed);
     y += 4.;
     for (kind, icon) in [
@@ -240,6 +240,21 @@ fn sidebar_items(d: &mut Desktop, ui: &mut Ui, side: Rect) -> f32 {
         ) {
             d.go(page);
         }
+    }
+    // The local models.
+    let r = item(&mut y, item_h);
+    let label = d.t("nav.models");
+    if nav_item(
+        ui,
+        r,
+        nav_id(Page::Models),
+        Icon::Vm,
+        &label,
+        None,
+        d.page == Page::Models,
+        collapsed,
+    ) {
+        d.go(Page::Models);
     }
     y += 4.;
     views::training::nav(d, ui, inner, &mut y, collapsed);

@@ -8,12 +8,15 @@ pub mod import;
 pub mod kubernetes;
 pub mod login;
 pub mod migrate;
+pub mod models;
 pub mod notices;
 pub mod practice;
 pub mod pull;
 pub mod resources;
 pub mod run;
 pub mod settings;
+pub mod settings_search;
+pub mod sync_shares;
 pub mod training;
 pub mod updates;
 
@@ -33,6 +36,7 @@ pub fn paint_main(d: &mut Desktop, ui: &mut Ui, r: Rect) {
         Page::Training => training::paint(d, ui, r),
         Page::LabContainers | Page::LabVolumes => practice::paint(d, ui, r),
         Page::Migrate => migrate::paint(d, ui, r),
+        Page::Models => models::paint(d, ui, r),
         page => {
             let Some(kind) = page.kind() else { return };
             if d.engine.as_ref().is_some_and(|e| !e.reachable) {
@@ -51,13 +55,14 @@ pub fn paint_main(d: &mut Desktop, ui: &mut Ui, r: Rect) {
 
 pub const TOOLBAR_H: f32 = 62.;
 
-/// A page was (re)entered: Training, Migrate, the practice pages and Settings read what
-/// they show.
+/// A page was (re)entered: Training, Migrate, the practice pages, Models and Settings
+/// read what they show.
 pub fn entered(d: &mut Desktop) {
     match d.page {
         Page::Training => training::entered(d),
         Page::LabContainers | Page::LabVolumes => practice::entered(d),
         Page::Migrate => migrate::reload(d),
+        Page::Models => models::entered(d),
         Page::Settings => compression::read(d),
         _ => {}
     }
@@ -80,7 +85,10 @@ pub fn next_due(d: &Desktop) -> Option<std::time::Instant> {
 /// `lab start|advance <id>` (the mock's terminal), `labs <action>` (the JSON lab),
 /// `migrate engine|kube [kind]`, `migration <n>` (its dialog), `check updates`,
 /// `upgrade`, `login <location>`, `import`, `run [image]` (the run form), `run-fill` (the
-/// form filled in, with its options open), `notice cli|update`, `star`.
+/// form filled in, with its options open), `notice cli|update`, `star`, `models
+/// start|stop|status`, `models pull <name>`, `models run <prompt>`, `search <text>` (in
+/// Settings), `sync add <name> <path>`, `migrate-source <engine>`, `registry-host <location>
+/// <host>` (a registry host the user gave).
 pub fn command(d: &mut Desktop, line: &str) {
     let words: Vec<&str> = line.split_whitespace().collect();
     match words.as_slice() {
@@ -135,6 +143,14 @@ pub fn command(d: &mut Desktop, line: &str) {
         ["migrate", group, rest @ ..] => {
             migrate::open(d, *group == "kube", rest.first().copied().unwrap_or(""));
         }
+        ["migrate-source", engine] => {
+            d.migrate.engine = engine.to_string();
+            migrate::reload(d);
+        }
+        ["registry-host", id, host] => {
+            d.pull_hosts.retain(|(i, _)| i != id);
+            d.pull_hosts.push((id.to_string(), host.to_string()));
+        }
         ["migration", "start"] => migrate::start_shown(d),
         ["migration", n] => migrate::confirm_nth(d, n.parse().unwrap_or(0)),
         ["check", "updates"] => updates::load(d, podbag_desktop_core::updates::Check::Now),
@@ -156,6 +172,49 @@ pub fn command(d: &mut Desktop, line: &str) {
             }
         }
         ["star"] => d.open_dialog(crate::dialogs::Dialog::Star),
+        ["models", action, rest @ ..] => {
+            use podbag_desktop_core::model_runner::Action;
+            let text = rest.join(" ");
+            let action = match *action {
+                "start" => Action::Start,
+                "stop" => Action::Stop,
+                "pull" => Action::Pull { model: text },
+                "run" => {
+                    d.models.prompt.set_content(&text);
+                    let model = d
+                        .models
+                        .status
+                        .as_ref()
+                        .and_then(|s| s.models.first())
+                        .map_or(String::new(), |m| m.name.clone());
+                    d.models.selected = model.clone();
+                    Action::Run {
+                        model,
+                        prompt: text,
+                    }
+                }
+                _ => Action::Status,
+            };
+            if d.page != crate::app::Page::Models {
+                d.go(crate::app::Page::Models);
+                d.pump();
+            }
+            models::act(d, action);
+        }
+        ["search", rest @ ..] => {
+            if d.page != crate::app::Page::Settings {
+                d.go(crate::app::Page::Settings);
+            }
+            d.settings_search.input.set_content(&rest.join(" "));
+            d.focus_next = Some(settings_search::SEARCH);
+        }
+        ["sync", "add", name, path @ ..] => sync_shares::act(
+            d,
+            podbag_desktop_core::vm::SyncAction::Add {
+                name: name.to_string(),
+                path: path.join(" "),
+            },
+        ),
         _ => {}
     }
 }

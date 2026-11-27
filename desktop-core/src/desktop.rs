@@ -6,6 +6,7 @@ use crate::events::{Event, Events};
 use crate::images::{self, ImportImage};
 use crate::lock;
 use crate::migration;
+use crate::model_runner::{self, ModelRunner};
 use crate::session::Session;
 use crate::settings::{self, Settings};
 use crate::shell;
@@ -13,7 +14,7 @@ use crate::strings;
 use crate::terminal_cli;
 use crate::tray::{EngineState, TrayInput, TrayModel};
 use crate::updates::{self, Check, Updates, Upgraded};
-use crate::vm::VmSettings;
+use crate::vm::{self, SyncAction, SyncShare, VmSettings};
 use podbag::client::{Choice, Client, Endpoint, Target, podbag_program};
 use podbag::dashboard::app_update::{self, Installer};
 use podbag::dashboard::{cli, lab};
@@ -52,6 +53,9 @@ pub struct Desktop {
     /// The window is shown: the tray may ask the engine's API.
     visible: AtomicBool,
     lab: Mutex<lab::Lab>,
+    /// The local model runner, and where it keeps the models.
+    models: ModelRunner,
+    data_dir: Mutex<Option<PathBuf>>,
 }
 
 /// podbag's own socket (where `docker` goes after "Use podbag for docker").
@@ -104,6 +108,8 @@ impl Desktop {
             settings_file: Mutex::new(None),
             visible: AtomicBool::new(true),
             lab: Mutex::new(lab::Lab::default()),
+            models: ModelRunner::default(),
+            data_dir: Mutex::new(None),
         }
     }
 
@@ -118,6 +124,11 @@ impl Desktop {
         let file = dir.join("settings.json");
         *lock(&self.settings) = Settings::load(&file);
         *lock(&self.settings_file) = Some(file);
+    }
+
+    /// Keep the app's data (the local models) in `dir`.
+    pub fn set_data_dir(&self, dir: &Path) {
+        *lock(&self.data_dir) = Some(dir.to_path_buf());
     }
 
     pub fn events(&self) -> &Events {
@@ -234,6 +245,36 @@ impl Desktop {
         done
     }
 
+    /// `podbag vm sync`: the synchronized shares after `action` (podbag on macOS).
+    pub fn vm_sync(
+        &self,
+        session: &Session,
+        action: &SyncAction,
+    ) -> Result<Vec<SyncShare>, String> {
+        if !session.uses_podbag() || crate::engine::platform() != "macos" {
+            return Err("Synchronized shares require Podbag on macOS".into());
+        }
+        vm::sync(&self.podbag, action)
+    }
+
+    // Local models.
+
+    /// The local model runner; the models are kept in the data folder's `models`.
+    pub fn models(
+        &self,
+        action: model_runner::Action,
+    ) -> Result<model_runner::Reply, model_runner::Failure> {
+        let store = lock(&self.data_dir).as_ref().map(|d| d.join("models"));
+        match store {
+            Some(store) => self.models.action(action, &store),
+            None if action == model_runner::Action::Start => Err(
+                model_runner::Failure::with_detail("start", "This app has no folder for its data."),
+            ),
+            // Only a start uses the folder.
+            None => self.models.action(action, Path::new("")),
+        }
+    }
+
     // The `docker` command.
 
     /// Where the `docker` command goes. It reads files only.
@@ -272,12 +313,7 @@ impl Desktop {
         if client.ping().is_err() {
             return Err(podbag::client::choice::docker_down().into());
         }
-        let configured: Vec<_> = hosts
-            .iter()
-            .filter(|(id, host)| id != "custom" && !host.is_empty())
-            .filter_map(|(id, host)| images::location(id, host).ok())
-            .filter(|location| location.needs_host())
-            .collect();
+        let configured = images::configured_locations(hosts);
         let images = client.images().map_err(|e| e.message)?;
         Ok(images
             .into_iter()
@@ -538,9 +574,11 @@ impl Desktop {
         })
     }
 
-    /// The app ends: streams stop and the tutorial lab is cleaned up.
+    /// The app ends: streams stop, the model runner stops and the tutorial lab is
+    /// cleaned up.
     pub fn shutdown(&self) {
         self.current().stop_streams();
+        self.models.stop();
         self.end_lab();
     }
 

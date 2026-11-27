@@ -1,12 +1,13 @@
 //! Migrate: what the local engines or a Kubernetes cluster have, by kind,
 //! to copy elsewhere; the dialog that copies one and follows its steps; and the
-//! sidebar's sub-navigation with the counts. It is the start page.
+//! sidebar's sub-navigation with the counts. It is the start page. Each row shows its
+//! kind's icon, the registry of its image, and the engine it comes from.
 
 use std::collections::BTreeMap;
 
 use podbag_desktop_core::List;
 use podbag_desktop_core::kubernetes::Resource;
-use podbag_desktop_core::migration::Request;
+use podbag_desktop_core::migration::{Listing, Registry, Request};
 use podbag_ui::focus::FocusKind;
 use podbag_ui::ui::Ui;
 use podbag_ui::widgets::button::{self, IconKind, Kind as ButtonKind};
@@ -17,7 +18,7 @@ use podbag_ui::widgets::select::{Item as SelectItem, select};
 use podbag_ui::widgets::tabs::tabs;
 use podbag_ui::widgets::text_field::text_field;
 use podbag_ui::winit::keyboard::NamedKey;
-use podbag_ui::{CursorIcon, Id, Rect, TextInput, icons};
+use podbag_ui::{Color, CursorIcon, Id, Rect, TextInput, icons};
 
 use crate::app::{Desktop, Page};
 use crate::dialogs::{self, Dialog};
@@ -63,6 +64,38 @@ pub struct Item {
     pub namespace: String,
     pub source: String,
     pub source_label: String,
+    /// Where an image or a container's image comes from.
+    pub registry: Option<Registry>,
+}
+
+/// What stands for an engine or a cluster: a registry's mark, the logo or an icon.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Endpoint {
+    Registry(&'static str),
+    Logo,
+    Icon(Icon),
+}
+
+/// The mark of the engine `source` (a setting name), or of a cluster.
+pub fn endpoint(source: &str, cluster: bool) -> Endpoint {
+    if cluster {
+        return Endpoint::Registry("kubernetes");
+    }
+    match source {
+        "docker" => Endpoint::Registry("dockerhub"),
+        "podbag" => Endpoint::Logo,
+        "custom" => Endpoint::Icon(Icon::Shell),
+        _ => Endpoint::Icon(Icon::Engine),
+    }
+}
+
+fn draw_endpoint(ui: &mut Ui, source: &str, cluster: bool, r: Rect, ink: Color) {
+    let mark_ink = ui.theme.ink;
+    match endpoint(source, cluster) {
+        Endpoint::Registry(id) => crate::images::draw_registry_icon(ui, id, r, mark_ink),
+        Endpoint::Logo => crate::images::draw_logo(ui, r),
+        Endpoint::Icon(icon) => ui.p.icon(icon.id(), r, ink),
+    }
 }
 
 pub struct MigrateState {
@@ -155,7 +188,7 @@ fn kind_label(d: &Desktop, cluster: bool, kind: &str) -> String {
     d.t(&format!("{}{kind}", if cluster { "kube." } else { "nav." }))
 }
 
-fn kind_icon(cluster: bool, kind: &str) -> Icon {
+pub fn kind_icon(cluster: bool, kind: &str) -> Icon {
     match (cluster, kind) {
         (true, "pods") => Icon::KubePods,
         (true, "services") => Icon::KubeServices,
@@ -176,8 +209,13 @@ fn resource(kind: &str) -> Resource {
     }
 }
 
+/// A row read from a source: name, label, uid, namespace and registry.
+type Row = (String, String, String, String, Option<Registry>);
+
 /// The rows of a list read from `source`, as Migrate shows them.
-fn rows(list: List) -> Vec<(String, String, String)> {
+fn rows(listing: Listing) -> Vec<Row> {
+    let Listing { list, registries } = listing;
+    let registry = |key: &str| registries.get(key).cloned();
     match list {
         List::Images(images) => images
             .into_iter()
@@ -201,22 +239,32 @@ fn rows(list: List) -> Vec<(String, String, String)> {
                         } else {
                             name.clone()
                         };
-                        (name, label, i.id.clone())
+                        let registry = registry(&name);
+                        (name, label, i.id.clone(), String::new(), registry)
                     })
                     .collect::<Vec<_>>()
             })
             .collect(),
         List::Containers(cs) => cs
             .iter()
-            .map(|c| (c.id.clone(), container_name(c), String::new()))
+            .map(|c| {
+                let registry = registry(&c.id);
+                (
+                    c.id.clone(),
+                    container_name(c),
+                    String::new(),
+                    String::new(),
+                    registry,
+                )
+            })
             .collect(),
         List::Volumes(vs) => vs
             .into_iter()
-            .map(|v| (v.name.clone(), v.name, String::new()))
+            .map(|v| (v.name.clone(), v.name, String::new(), String::new(), None))
             .collect(),
         List::Networks(ns) => ns
             .into_iter()
-            .map(|n| (n.name.clone(), n.name, String::new()))
+            .map(|n| (n.name.clone(), n.name, String::new(), String::new(), None))
             .collect(),
     }
 }
@@ -338,9 +386,10 @@ pub fn reload(d: &mut Desktop) {
 /// One kind of one source.
 fn read(d: &mut Desktop, revision: u64, cluster: bool, source: String, kind: &'static str) {
     let src = source.clone();
+    let hosts = d.pull_hosts.clone();
     spawn(
         d,
-        move |api| -> Result<Vec<(String, String, String, String)>, String> {
+        move |api| -> Result<Vec<Row>, String> {
             if cluster {
                 let snap = api.kube_list(resource(kind), true, Some(&src))?;
                 return Ok(snap
@@ -359,16 +408,13 @@ fn read(d: &mut Desktop, revision: u64, cluster: bool, source: String, kind: &'s
                             name,
                             m["uid"].as_str().unwrap_or_default().to_string(),
                             m["namespace"].as_str().unwrap_or_default().to_string(),
+                            None,
                         )
                     })
                     .collect());
             }
             let kind = podbag_desktop_core::parse_kind(kind)?;
-            let list = api.migration_list(&src, kind)?;
-            Ok(rows(list)
-                .into_iter()
-                .map(|(n, l, u)| (n, l, u, String::new()))
-                .collect())
+            Ok(rows(api.migration_list(&src, kind, &hosts)?))
         },
         move |d, r| {
             if d.migrate.revision != revision {
@@ -382,15 +428,18 @@ fn read(d: &mut Desktop, revision: u64, cluster: bool, source: String, kind: &'s
                 .map_or(source.clone(), |(_, l)| l.clone());
             match r {
                 Ok(rows) => {
-                    let items = rows.into_iter().map(|(name, label_, uid, namespace)| Item {
-                        kind: kind.to_string(),
-                        name,
-                        label: label_,
-                        uid,
-                        namespace,
-                        source: source.clone(),
-                        source_label: label.clone(),
-                    });
+                    let items = rows
+                        .into_iter()
+                        .map(|(name, label_, uid, namespace, registry)| Item {
+                            kind: kind.to_string(),
+                            name,
+                            label: label_,
+                            uid,
+                            namespace,
+                            source: source.clone(),
+                            source_label: label.clone(),
+                            registry,
+                        });
                     d.migrate.items.extend(items);
                 }
                 Err(e) => {
@@ -469,8 +518,12 @@ fn filters(d: &mut Desktop, ui: &mut Ui, x: f32, y: f32, w: f32) -> f32 {
         .iter()
         .map(|(_, l)| SelectItem::Option(l.as_str()))
         .collect();
-    let mut x0 = x;
-    let sw = 220f32.min(w);
+    // The mark of the engine or cluster chosen, then the picker.
+    let chosen = values.get(sel).map_or("", |(v, _)| v.as_str());
+    let ink2 = ui.theme.ink2;
+    draw_endpoint(ui, chosen, cluster, Rect::new(x, y + 9., 16., 16.), ink2);
+    let mut x0 = x + 22.;
+    let sw = 220f32.min(w - 22.);
     let enabled = m.picker_ready && !values.is_empty();
     let picked = select(ui, SOURCE, Rect::new(x0, y, sw, 34.), &items, sel, enabled);
     ui.tooltip(
@@ -590,16 +643,33 @@ fn groups(d: &mut Desktop, ui: &mut Ui, x: f32, y0: f32, w: f32) -> f32 {
             } else {
                 item.source_label.clone()
             };
+            // The origin at the right: the engine's mark and name, or the namespace.
             let os = ui.style().with_size(12.);
             let ol = ui.p.layout(&origin, os, Some((w * 0.26).max(40.)));
-            ui.p.draw_text(
-                &ol,
-                r.right() - 36. - ol.width,
-                r.y + (r.h - ol.height) / 2.,
+            let ox = r.right() - 36. - ol.width;
+            ui.p.draw_text(&ol, ox, r.y + (r.h - ol.height) / 2., t.ink2);
+            let mut origin_w = ol.width;
+            if !cluster {
+                let mark = Rect::new(ox - 22., r.y + 11., 16., 16.);
+                draw_endpoint(ui, &item.source, false, mark, t.ink2);
+                origin_w += 22.;
+            }
+            // The kind's icon, the registry's mark, the name.
+            let mut nx = r.x + 12.;
+            ui.p.icon(
+                kind_icon(cluster, kind).id(),
+                Rect::new(nx, r.y + 12., 14., 14.),
                 t.ink2,
             );
+            nx += 22.;
+            if let Some(reg) = &item.registry {
+                let mark = Rect::new(nx, r.y + 11., 16., 16.);
+                crate::images::draw_registry_icon(ui, reg.id, mark, t.ink);
+                ui.tooltip(id.with("registry"), mark, &reg.label);
+                nx += 24.;
+            }
             ui.label(
-                Rect::new(r.x + 12., r.y, r.w - 60. - ol.width, r.h),
+                Rect::new(nx, r.y, (r.right() - 48. - origin_w - nx).max(20.), r.h),
                 &item.label,
                 ui.style(),
                 t.ink,
@@ -796,8 +866,9 @@ pub struct MigrationDialog {
     pub defaults: bool,
     pub phase: Phase,
     pub status: String,
-    /// What the route shows once the copy started.
+    /// What the route shows once the copy started: the label and the value.
     pub destination: String,
+    pub destination_value: String,
 }
 
 /// The dialog for the `n`th resource shown (previews).
@@ -834,6 +905,7 @@ fn confirm(d: &mut Desktop, item: Item) {
         phase: Phase::Confirm,
         status: d.t("migration.preserve"),
         destination: String::new(),
+        destination_value: String::new(),
         item,
     };
     d.focus_next = Some(dialogs::CANCEL);
@@ -903,6 +975,10 @@ fn start(d: &mut Desktop, m: &mut MigrationDialog) {
         Some((_, label)) => label.clone(),
         None => String::new(),
     };
+    m.destination_value = m
+        .targets
+        .get(m.target)
+        .map_or(String::new(), |(v, _)| v.clone());
     m.phase = Phase::Running;
     m.status = d.t("migration.prepare");
     d.jobs.migrate(request);
@@ -956,19 +1032,41 @@ pub fn paint_dialog(d: &mut Desktop, ui: &mut Ui, m: &mut MigrationDialog) -> bo
         .min(r.w * 0.4);
         let vx = r.x + lw + 16.;
         let vw = r.w - lw - 16.;
-        let row = |ui: &mut Ui, y: &mut f32, key: &str, value: &str| {
+        let cluster = KUBE_KINDS.contains(&m.item.kind.as_str());
+        // A row: the label, then marks (each 16 px, `indent` wide in all) and the value.
+        let row = |ui: &mut Ui, y: &mut f32, key: &str, value: &str, indent: f32| {
             ui.p.label(Rect::new(r.x, *y, lw, 20.), &tr.t(key), label_style, t.ink2);
-            let h = ui.paragraph(vx, *y, vw, value, ui.style(), t.ink);
+            let h = ui.paragraph(vx + indent, *y, vw - indent, value, ui.style(), t.ink);
             *y += h.max(20.) + 10.;
         };
-        row(ui, &mut y, "migration.resource", &m.item.label);
+        // The resource: its kind's icon and its registry's mark.
+        ui.p.icon(
+            kind_icon(cluster, &m.item.kind).id(),
+            Rect::new(vx, y + 3., 14., 14.),
+            t.ink2,
+        );
+        let mut indent = 22.;
+        if let Some(reg) = &m.item.registry {
+            let mark = Rect::new(vx + indent, y + 2., 16., 16.);
+            crate::images::draw_registry_icon(ui, reg.id, mark, t.ink);
+            ui.tooltip(Id::of("migration-registry"), mark, &reg.label);
+            indent += 24.;
+        }
+        row(ui, &mut y, "migration.resource", &m.item.label, indent);
         let from = [m.item.source_label.as_str(), m.item.namespace.as_str()]
             .iter()
             .filter(|s| !s.is_empty())
             .cloned()
             .collect::<Vec<_>>()
             .join(" / ");
-        row(ui, &mut y, "migration.from", &from);
+        draw_endpoint(
+            ui,
+            &m.item.source,
+            cluster,
+            Rect::new(vx, y + 2., 16., 16.),
+            t.ink2,
+        );
+        row(ui, &mut y, "migration.from", &from, 22.);
         if m.phase == Phase::Confirm {
             ui.p.label(
                 Rect::new(r.x, y + 7., lw, 20.),
@@ -981,10 +1079,13 @@ pub fn paint_dialog(d: &mut Desktop, ui: &mut Ui, m: &mut MigrationDialog) -> bo
                 .iter()
                 .map(|(_, l)| SelectItem::Option(l.as_str()))
                 .collect();
+            if let Some((value, _)) = m.targets.get(m.target) {
+                draw_endpoint(ui, value, cluster, Rect::new(vx, y + 9., 16., 16.), t.ink2);
+            }
             if let Some(i) = select(
                 ui,
                 TARGET,
-                Rect::new(vx, y, vw, 34.),
+                Rect::new(vx + 22., y, vw - 22., 34.),
                 &items,
                 m.target,
                 !items.is_empty(),
@@ -1020,10 +1121,12 @@ pub fn paint_dialog(d: &mut Desktop, ui: &mut Ui, m: &mut MigrationDialog) -> bo
                 y += 32.;
             }
         } else {
-            row(ui, &mut y, "migration.to", &m.destination.clone());
+            let value = m.destination_value.clone();
+            draw_endpoint(ui, &value, cluster, Rect::new(vx, y + 2., 16., 16.), t.ink2);
+            row(ui, &mut y, "migration.to", &m.destination.clone(), 22.);
             if !m.item.namespace.is_empty() {
                 let ns = m.namespace.content().trim().to_string();
-                row(ui, &mut y, "migration.namespace", &ns);
+                row(ui, &mut y, "migration.namespace", &ns, 0.);
             }
         }
         // The track moves while the copy runs.

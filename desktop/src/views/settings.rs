@@ -1,5 +1,6 @@
-//! The settings page: startup, language and theme; then the engine (with the docker
-//! command), the VM, updates and about, as sections that open and close.
+//! The settings page: a search, then startup, language and theme; then the engine
+//! (with the docker command), the VM (with the shared folders on a Mac), the
+//! synchronized shares, updates and about, as sections that open and close.
 
 use podbag_desktop_core::ThemePreference;
 use podbag_desktop_core::vm::{VmSettings, VmStatus};
@@ -12,6 +13,7 @@ use podbag_ui::widgets::scroll::scroll_view;
 use podbag_ui::widgets::select::{Item, select};
 use podbag_ui::widgets::slider::slider;
 use podbag_ui::widgets::text_field::text_field;
+use podbag_ui::winit::keyboard::NamedKey;
 use podbag_ui::{CursorIcon, Id, Rect, icons, rgb};
 
 use crate::app::Desktop;
@@ -29,6 +31,12 @@ pub const THEME: Id = Id(0x0073_6574_7402);
 pub const LAUNCH: Id = Id(0x0073_6574_7403);
 pub const ENGINE: Id = Id(0x0073_6574_7404);
 pub const APPLY: Id = Id(0x0073_6574_7405);
+pub const ADD_SHARE: Id = Id(0x0073_6574_7406);
+
+/// The Remove button of a shared folder.
+pub fn remove_share_id(path: &str) -> Id {
+    Id::of(("vm-share-remove", path))
+}
 
 pub fn section_id(key: &str) -> Id {
     Id::of(("section", key))
@@ -44,6 +52,11 @@ pub fn paint(d: &mut Desktop, ui: &mut Ui, r: Rect) {
         let w = (area.w - 40.).min(780.);
         let x = area.x + 20.;
         let mut y = area.y + 20.;
+        y += crate::views::settings_search::paint(d, ui, x, y, w) + 18.;
+        // While the search has text, its results show instead of the settings.
+        if d.settings_search.searching() {
+            return y + 6. - area.y;
+        }
         y += card(ui, 1, x, y, w, |ui, x, y, w| first_card(d, ui, x, y, w)) + 18.;
         y += card(ui, 2, x, y, w, |ui, x, y, w| second_card(d, ui, x, y, w)) + 24.;
         y - area.y
@@ -268,6 +281,17 @@ fn second_card(d: &mut Desktop, ui: &mut Ui, x: f32, y0: f32, w: f32) -> f32 {
             y += vm_body(d, ui, bx, y, bw, &vm) + 18.;
         }
     }
+    // Synchronized shares, for podbag's VM on a Mac.
+    if crate::views::sync_shares::shown(d) {
+        separator(ui, x, y, w);
+        let (h, open) = section(d, ui, x, y, w, "syncShares", Icon::Volumes, "");
+        y += h;
+        if open {
+            y += crate::views::sync_shares::body(d, ui, bx, y, bw) + 18.;
+        } else {
+            crate::views::sync_shares::closed(d);
+        }
+    }
     // Updates: the versions, a check, and Update.
     separator(ui, x, y, w);
     let value = crate::views::updates::value(d);
@@ -477,6 +501,11 @@ pub fn fill_vm_form(d: &mut Desktop) {
     let Some(vm) = &d.vm else { return };
     let next = vm.next.or(vm.in_use).unwrap_or_default();
     let f = &mut d.vm_form;
+    f.shares = vm
+        .shared_paths
+        .as_ref()
+        .map(|s| s.next.clone())
+        .unwrap_or_default();
     f.cpus
         .set_content(&next.cpus.map(|c| c.to_string()).unwrap_or_default());
     f.memory.set_content(
@@ -705,6 +734,9 @@ fn vm_body(d: &mut Desktop, ui: &mut Ui, x: f32, y0: f32, w: f32, vm: &VmStatus)
         col_h = col_h.max(cy - y);
     }
     y += col_h + 8.;
+    if vm.shared_paths.is_some() {
+        y += 6. + shared_folders(d, ui, x, y + 6., w) + 8.;
+    }
     if vm.pending {
         y += ui.paragraph(x, y, w, &d.t("settings.vmPending"), hint_style, t.muted) + 6.;
     }
@@ -727,6 +759,105 @@ fn vm_body(d: &mut Desktop, ui: &mut Ui, x: f32, y0: f32, w: f32, vm: &VmStatus)
         apply_vm(d, vm, (cpus_min, cpus_max), (mem_min, mem_max));
     }
     y + 32. - y0
+}
+
+/// The macOS folders the VM shares: a field to add one, the list with Remove, and a
+/// hint. Returns the height.
+fn shared_folders(d: &mut Desktop, ui: &mut Ui, x: f32, y0: f32, w: f32) -> f32 {
+    let t = ui.theme;
+    let mut y = y0;
+    let label_style = ui.style().with_size(13.).weight(600);
+    y += ui.paragraph(x, y, w, &d.t("settings.sharedFolders"), label_style, t.ink) + 5.;
+    let add_label = d.t("settings.addSharedFolder");
+    let bw = button::width(ui, &add_label, None, false);
+    let fw = (w - bw - 8.).max(80.);
+    if text_field(
+        ui,
+        &mut d.vm_form.share,
+        Rect::new(x, y, fw, 34.),
+        None,
+        true,
+    ) {
+        d.vm_form.share_error.clear();
+    }
+    let share_id = d.vm_form.share.id;
+    let enter = ui.key_for(share_id, NamedKey::Enter);
+    if button::button(
+        ui,
+        ADD_SHARE,
+        Rect::new(x + fw + 8., y + 1., bw, 32.),
+        &add_label,
+        None,
+        ButtonKind::Normal,
+        true,
+    ) || enter
+    {
+        add_share(d);
+    }
+    y += 34.;
+    if !d.vm_form.share_error.is_empty() {
+        let e = d.vm_form.share_error.clone();
+        y += 4. + ui.paragraph(x, y + 4., w, &e, ui.style().with_size(12.5), t.red);
+    }
+    y += 5.;
+    // The folders, each with Remove.
+    let remove = d.t("settings.removeSharedFolder");
+    let rw = button::width(ui, &remove, None, false);
+    let mono = podbag_ui::TextStyle::new(12.5).mono().line_height(18.);
+    let mut removed = None;
+    for (i, path) in d.vm_form.shares.clone().iter().enumerate() {
+        let pw = (w - rw - 8.).max(40.);
+        let ph = ui.p.layout_wrapped(path, mono, pw).height;
+        let h = ph.max(32.);
+        ui.paragraph(x, y + (h - ph) / 2., pw, path, mono, t.ink);
+        let id = remove_share_id(path);
+        let br = Rect::new(x + w - rw, y + (h - 32.) / 2., rw, 32.);
+        if button::button(ui, id, br, &remove, None, ButtonKind::Normal, true) {
+            removed = Some(i);
+        }
+        let name = d.tv("settings.removeSharedFolderName", &[("path", path)]);
+        ui.tooltip(id.with("tip"), br, &name);
+        y += h + 5.;
+    }
+    if let Some(i) = removed {
+        let f = &mut d.vm_form;
+        f.shares.remove(i);
+        f.dirty = true;
+        // The focus goes to the next row's Remove, the one before, or the field.
+        let next = f
+            .shares
+            .get(i)
+            .or(i.checked_sub(1).and_then(|j| f.shares.get(j)));
+        d.focus_next = Some(next.map_or(f.share.id, |p| remove_share_id(p)));
+        ui.repaint();
+    }
+    y += ui.paragraph(
+        x,
+        y,
+        w,
+        &d.t("settings.sharedFoldersHint"),
+        ui.style().with_size(12.5),
+        t.muted,
+    );
+    y - y0
+}
+
+/// Add the folder in the field: an absolute path, once.
+fn add_share(d: &mut Desktop) {
+    let path = d.vm_form.share.content().to_string();
+    if !path.starts_with('/') {
+        d.vm_form.share_error = d.t("settings.sharedFolderAbsolute");
+        d.focus_next = Some(d.vm_form.share.id);
+        return;
+    }
+    let f = &mut d.vm_form;
+    if !f.shares.contains(&path) {
+        f.shares.push(path);
+    }
+    f.dirty = true;
+    f.share.set_content("");
+    f.share_error.clear();
+    d.focus_next = Some(f.share.id);
 }
 
 /// Check the form, then save (asking first when the VM runs).
@@ -787,8 +918,24 @@ fn apply_vm(d: &mut Desktop, vm: &VmStatus, cpus: (u32, u32), mem: (u64, u64)) {
     if Some(idle_seconds) != next.idle_seconds {
         change.idle_seconds = Some(idle_seconds);
     }
-    let none =
-        change.cpus.is_none() && change.memory_mib.is_none() && change.idle_seconds.is_none();
+    // The shared folders, compared in order of name.
+    let sorted = |paths: &[String]| {
+        let mut paths = paths.to_vec();
+        paths.sort();
+        paths
+    };
+    let shares = vm.shared_paths.as_ref().map(|s| {
+        let paths = sorted(&d.vm_form.shares);
+        let in_use = s.in_use.as_deref().map(sorted).unwrap_or_default();
+        (paths.clone(), paths != sorted(&s.next), paths != in_use)
+    });
+    if let Some((paths, true, _)) = &shares {
+        change.shared_paths = Some(paths.clone());
+    }
+    let none = change.cpus.is_none()
+        && change.memory_mib.is_none()
+        && change.idle_seconds.is_none()
+        && change.shared_paths.is_none();
     if none && !vm.pending {
         let text = d.t("settings.vmSame");
         d.toasts.push(text, false);
@@ -800,7 +947,8 @@ fn apply_vm(d: &mut Desktop, vm: &VmStatus, cpus: (u32, u32), mem: (u64, u64)) {
     let in_use = vm.in_use.unwrap_or_default();
     let differs = in_use.cpus != Some(cpus)
         || in_use.memory_mib != Some(memory_mib)
-        || in_use.idle_seconds != Some(idle_seconds);
+        || in_use.idle_seconds != Some(idle_seconds)
+        || shares.is_some_and(|(_, _, other)| other);
     if vm.state == "running" && differs {
         let n = vm.containers.unwrap_or(0) as usize;
         let mut text = d.t("settings.vmApplyText");

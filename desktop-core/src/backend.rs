@@ -15,13 +15,14 @@ use crate::engine::{EngineStatus, List};
 use crate::events::{Event, Events};
 use crate::images::{self, ImportImage, LocationInfo, Search};
 use crate::kubernetes::{self, Resource, Snapshot};
-use crate::migration::{self, Request};
+use crate::migration::{self, Listing, Request};
+use crate::model_runner;
 use crate::settings::Settings;
 use crate::terminal_cli;
 use crate::training;
 use crate::tray::TrayModel;
 use crate::updates::{self, Check, Updates, Upgraded};
-use crate::vm::{VmSettings, VmStatus};
+use crate::vm::{SyncAction, SyncShare, VmSettings, VmStatus};
 use podbag::client::{
     ContainerSummary, Features, ImageSummary, Kind, NetworkSummary, Pruned, RunSpec, VolumeSummary,
 };
@@ -122,6 +123,9 @@ pub trait Api: Send + Sync {
     /// None for an engine without a VM (Docker, Linux).
     fn vm_status(&self) -> Result<Option<VmStatus>, String>;
     fn vm_set(&self, settings: &VmSettings) -> Result<String, String>;
+    /// The synchronized shares of the macOS VM after `action` (podbag only). Slow: a
+    /// sync copies files.
+    fn vm_sync(&self, action: &SyncAction) -> Result<Vec<SyncShare>, String>;
     /// Image compression (podbag only): read it (None) or set it. On a Mac or Windows
     /// it runs in the VM, which it starts when it is stopped. Slow.
     fn compression(&self, mode: Option<compression::Mode>) -> Result<Compression, String>;
@@ -149,9 +153,24 @@ pub trait Api: Send + Sync {
 
     // Migration.
     fn migration_sources(&self) -> Vec<String>;
-    fn migration_list(&self, source: &str, kind: Kind) -> Result<List, String>;
+    /// A list of `source`, with the registries of its images. `hosts`: the registry
+    /// hosts the user gave, by location id.
+    fn migration_list(
+        &self,
+        source: &str,
+        kind: Kind,
+        hosts: &[(String, String)],
+    ) -> Result<Listing, String>;
     /// Copy; `progress` gets each step. Slow: see [`Backend::start_migration`].
     fn migrate(&self, request: &Request, progress: &dyn Fn(&str)) -> Result<(), String>;
+
+    // Local models.
+    /// The local model runner (Ollama): its state after `action`. Only `Start` starts
+    /// it, and only `Pull` downloads. Slow.
+    fn models(
+        &self,
+        action: model_runner::Action,
+    ) -> Result<model_runner::Reply, model_runner::Failure>;
 
     // Settings and the app.
     fn settings(&self) -> Settings;
@@ -181,6 +200,8 @@ pub trait Api: Send + Sync {
     /// The tray's VM item: start the VM when it is stopped, else stop it. Slow.
     fn toggle_vm(&self) -> Result<(), String>;
     /// The app ends: streams stop and the tutorial lab is cleaned up.
+    /// The app ends: streams stop, the model runner stops and the tutorial lab is
+    /// cleaned up.
     fn shutdown(&self);
 
     // Training.
@@ -360,6 +381,10 @@ impl Api for Desktop {
         Desktop::vm_set(self, &self.current(), settings)
     }
 
+    fn vm_sync(&self, action: &SyncAction) -> Result<Vec<SyncShare>, String> {
+        Desktop::vm_sync(self, &self.current(), action)
+    }
+
     fn compression(&self, mode: Option<compression::Mode>) -> Result<Compression, String> {
         let reply = self
             .current()
@@ -404,12 +429,24 @@ impl Api for Desktop {
         migration::sources(self.podbag())
     }
 
-    fn migration_list(&self, source: &str, kind: Kind) -> Result<List, String> {
-        migration::list(self.podbag(), source, kind.segment())
+    fn migration_list(
+        &self,
+        source: &str,
+        kind: Kind,
+        hosts: &[(String, String)],
+    ) -> Result<Listing, String> {
+        migration::list(self.podbag(), source, kind.segment(), hosts)
     }
 
     fn migrate(&self, request: &Request, progress: &dyn Fn(&str)) -> Result<(), String> {
         Desktop::migrate(self, request, progress)
+    }
+
+    fn models(
+        &self,
+        action: model_runner::Action,
+    ) -> Result<model_runner::Reply, model_runner::Failure> {
+        Desktop::models(self, action)
     }
 
     fn settings(&self) -> Settings {
@@ -540,12 +577,13 @@ impl Backend {
     }
 
     /// The real engine, for an app of version `app_version` whose settings are in
-    /// `config_dir`. `webview_data`: where an older app kept its web page's data (see
-    /// [`Desktop::load_config`]). `waker` runs after each event (ask the UI for a redraw
-    /// there).
+    /// `config_dir` and whose data (the local models) is in `data_dir`. `webview_data`:
+    /// where an older app kept its web page's data (see [`Desktop::load_config`]).
+    /// `waker` runs after each event (ask the UI for a redraw there).
     pub fn real(
         app_version: &'static str,
         config_dir: Option<&Path>,
+        data_dir: Option<&Path>,
         webview_data: Option<&Path>,
         waker: impl Fn() + Send + Sync + 'static,
     ) -> (Backend, Receiver<Event>) {
@@ -553,6 +591,9 @@ impl Backend {
         let desktop = Desktop::new(app_version, events);
         if let Some(dir) = config_dir {
             desktop.load_config(dir, webview_data);
+        }
+        if let Some(dir) = data_dir {
+            desktop.set_data_dir(dir);
         }
         (Backend::new(desktop), rx)
     }

@@ -68,6 +68,18 @@ pub struct VmStatus {
     #[serde(rename = "memoryTotalMiB")]
     pub memory_total_mib: Option<u64>,
     pub disk: Option<VmDisk>,
+    /// macOS: the folders shared with the VM.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shared_paths: Option<SharedPaths>,
+}
+
+/// The macOS folders the VM shares: those of the running VM, and those of the next
+/// start.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SharedPaths {
+    pub in_use: Option<Vec<String>>,
+    pub next: Vec<String>,
 }
 
 impl VmStatus {
@@ -80,6 +92,63 @@ impl VmStatus {
             .map(Some)
             .map_err(|e| format!("podbag vm status --json: {e}"))
     }
+}
+
+/// A synchronized share of the macOS VM (`podbag vm sync list`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SyncShare {
+    pub name: String,
+    /// The Mac folder.
+    pub source: String,
+    /// The named volume that holds the guest's copy.
+    pub volume: String,
+    pub conflicts: Vec<SyncConflict>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SyncConflict {
+    pub path: String,
+    pub reason: String,
+}
+
+/// A change to the synchronized shares.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SyncAction {
+    List,
+    Add {
+        name: String,
+        path: String,
+    },
+    /// Synchronize now.
+    Now(String),
+    /// Stop synchronizing; the cache volume stays.
+    Remove(String),
+}
+
+impl SyncAction {
+    /// The action, the name and the path, as `podbag vm sync` takes them.
+    pub fn args(&self) -> (&'static str, Option<&str>, Option<&str>) {
+        match self {
+            SyncAction::List => ("list", None, None),
+            SyncAction::Add { name, path } => ("add", Some(name), Some(path)),
+            SyncAction::Now(name) => ("now", Some(name), None),
+            SyncAction::Remove(name) => ("remove", Some(name), None),
+        }
+    }
+}
+
+/// `podbag vm sync <action>`, then `podbag vm sync list`: the shares after it.
+pub fn sync(podbag: &Path, action: &SyncAction) -> Result<Vec<SyncShare>, String> {
+    use podbag::dashboard::cli;
+    if *action != SyncAction::List {
+        let (what, name, path) = action.args();
+        cli::vm_sync(podbag, what, name, path)?;
+    }
+    serde_json::from_value(cli::vm_sync(podbag, "list", None, None)?)
+        .map_err(|e| format!("podbag vm sync list: {e}"))
 }
 
 /// New resources for `podbag vm resources`.
@@ -132,6 +201,41 @@ mod tests {
         assert_eq!(s.memory_used_mib, Some(1350));
         assert_eq!(s.disk.as_ref().unwrap().size_bytes, 6);
         assert_eq!(serde_json::to_value(&s).unwrap(), json);
+    }
+
+    #[test]
+    fn the_shared_folders_of_a_mac_vm_are_read() {
+        let json = serde_json::json!({"platform": "macos", "state": "stopped",
+            "sharedPaths": {"next": ["/Users", "/Volumes/Projects"], "inUse": null}});
+        let s = VmStatus::from_json(json.clone()).unwrap().unwrap();
+        let shares = s.shared_paths.clone().unwrap();
+        assert_eq!(shares.next, ["/Users", "/Volumes/Projects"]);
+        assert_eq!(shares.in_use, None);
+        assert_eq!(
+            serde_json::to_value(&s).unwrap()["sharedPaths"],
+            json["sharedPaths"]
+        );
+    }
+
+    #[test]
+    fn synchronized_shares_are_read_as_the_cli_prints_them() {
+        let list: Vec<SyncShare> = serde_json::from_value(serde_json::json!([{
+            "name": "project", "source": "/Users/me/projects/app",
+            "volume": "podbag-sync-project", "conflicts": [{"path": "a.txt", "reason": "both changed"}],
+            "lastError": null, "checked": 1764300000
+        }]))
+        .unwrap();
+        assert_eq!(list[0].volume, "podbag-sync-project");
+        assert_eq!(list[0].conflicts[0].reason, "both changed");
+        assert_eq!(
+            SyncAction::Add {
+                name: "second".into(),
+                path: "/Users/me/Second Project".into()
+            }
+            .args(),
+            ("add", Some("second"), Some("/Users/me/Second Project"))
+        );
+        assert_eq!(SyncAction::Now("x".into()).args(), ("now", Some("x"), None));
     }
 
     #[test]

@@ -46,6 +46,8 @@ pub enum Page {
     Images,
     Volumes,
     Networks,
+    /// The local model runner.
+    Models,
     Training,
     /// The practice session's containers and volumes (Training).
     LabContainers,
@@ -55,12 +57,13 @@ pub enum Page {
 }
 
 impl Page {
-    pub const ALL: [Page; 10] = [
+    pub const ALL: [Page; 11] = [
         Page::Migrate,
         Page::Containers,
         Page::Images,
         Page::Volumes,
         Page::Networks,
+        Page::Models,
         Page::Training,
         Page::LabContainers,
         Page::LabVolumes,
@@ -94,6 +97,7 @@ impl Page {
             Page::Images => "images",
             Page::Volumes => "volumes",
             Page::Networks => "networks",
+            Page::Models => "models",
             Page::Training => "training",
             Page::LabContainers => "lab-containers",
             Page::LabVolumes => "lab-volumes",
@@ -242,6 +246,10 @@ pub struct VmForm {
     pub cpus: TextInput,
     pub memory: TextInput,
     pub idle: TextInput,
+    /// macOS: the folders to share, and the field to add one.
+    pub shares: Vec<String>,
+    pub share: TextInput,
+    pub share_error: String,
     pub dirty: bool,
     pub error: String,
     pub applying: bool,
@@ -327,6 +335,9 @@ pub struct Desktop {
     pub notices: views::notices::Notices,
     pub compression: views::compression::CompressionState,
     pub run: views::run::RunState,
+    pub models: views::models::ModelsState,
+    pub settings_search: views::settings_search::SettingsSearch,
+    pub sync: views::sync_shares::SyncState,
 }
 
 fn input(id: Id, placeholder: &str) -> TextInput {
@@ -391,6 +402,9 @@ impl Desktop {
                 cpus: input(Id::of(("vm", "cpus")), ""),
                 memory: input(Id::of(("vm", "memory")), ""),
                 idle: input(Id::of(("vm", "idle")), ""),
+                shares: Vec::new(),
+                share: input(Id::of(("vm", "share")), "/Volumes/Projects"),
+                share_error: String::new(),
                 dirty: false,
                 error: String::new(),
                 applying: false,
@@ -433,6 +447,9 @@ impl Desktop {
             notices: views::notices::Notices::default(),
             compression: views::compression::CompressionState::default(),
             run: views::run::RunState::default(),
+            models: views::models::ModelsState::default(),
+            settings_search: views::settings_search::SettingsSearch::default(),
+            sync: views::sync_shares::SyncState::default(),
             api,
             settings,
         };
@@ -1078,6 +1095,9 @@ impl Desktop {
         }
         let fresh = self.page != page;
         self.page = page;
+        if fresh && page == Page::Settings {
+            self.settings_search.input.set_content("");
+        }
         if page == Page::Kubernetes {
             self.kube_expanded = true;
             if fresh {
@@ -1299,6 +1319,7 @@ impl Desktop {
         if self.page != Page::Settings || self.detail.is_some() {
             self.go(Page::Settings);
         }
+        self.settings_search.input.set_content("");
         self.open_sections.insert(key);
     }
 
@@ -1772,7 +1793,8 @@ impl Desktop {
     // ---- preview commands ----
 
     /// `nav <page>`, `kube <kind>`, `kube-context [name]`, `detail <kind> <n> [tab]`, `theme <t>`, `lang <l>`,
-    /// `section <key>`, `pull [text]`, `remove <kind> <n>`, `rename <n>`, `quit`.
+    /// `section <key>`, `pull [text]`, `remove <kind> <n>`, `rename <n>`, `quit`, and the
+    /// pages' commands (see `views::command`).
     pub fn command(&mut self, line: &str) {
         let mut words = line.split_whitespace();
         let (cmd, a, b, c) = (words.next(), words.next(), words.next(), words.next());
@@ -1820,7 +1842,14 @@ impl Desktop {
             }
             Some("lang") => self.set_language(a.unwrap_or("system")),
             Some("section") => {
-                for key in ["engine", "vm", "updates", "terminalCommand", "about"] {
+                for key in [
+                    "engine",
+                    "vm",
+                    "syncShares",
+                    "updates",
+                    "terminalCommand",
+                    "about",
+                ] {
                     if Some(key) == a {
                         self.open_section(key);
                     }

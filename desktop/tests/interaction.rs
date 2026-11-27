@@ -76,6 +76,7 @@ fn every_view_is_reached_from_the_sidebar_and_history_goes_back() {
         Page::Images,
         Page::Volumes,
         Page::Networks,
+        Page::Models,
         Page::Training,
         Page::Migrate,
         Page::Kubernetes,
