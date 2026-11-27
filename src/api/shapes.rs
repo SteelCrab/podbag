@@ -77,7 +77,7 @@ pub struct Attached<'a> {
     /// The bridge network: None for `host` and `none`, or when it is gone.
     pub network: Option<crate::network::Network>,
     /// The container's address there, while it runs.
-    pub ip: Option<std::net::Ipv4Addr>,
+    pub addresses: Option<crate::network::Addresses>,
     /// Its further names there.
     pub aliases: &'a [String],
 }
@@ -265,8 +265,12 @@ fn prefix_len(subnet: &str) -> u32 {
 fn networks(f: &Facts) -> Value {
     let mut out = serde_json::Map::new();
     for a in f.networks {
+        let fixed = f.spec.fixed_addresses.get(a.name);
         let mut endpoint = json!({
-            "IPAMConfig": null,
+            "IPAMConfig": fixed.map(|fixed| json!({
+                "IPv4Address": fixed.ipv4.map(|a| a.to_string()).unwrap_or_default(),
+                "IPv6Address": fixed.ipv6.map(|a| a.to_string()).unwrap_or_default(),
+            })),
             "Links": null,
             "Aliases": null,
             "MacAddress": "",
@@ -291,10 +295,15 @@ fn networks(f: &Facts) -> Value {
                 names.push(crate::id::short_id(&f.spec.id));
                 endpoint["DNSNames"] = json!(names);
             }
-            if let Some(ip) = a.ip {
-                endpoint["IPAddress"] = json!(ip.to_string());
+            if let Some(addresses) = a.addresses {
+                endpoint["IPAddress"] = json!(addresses.ipv4.to_string());
                 endpoint["Gateway"] = json!(n.gateway);
                 endpoint["IPPrefixLen"] = json!(prefix_len(&n.subnet));
+                if let Some((address, subnet)) = addresses.ipv6.zip(n.ipv6) {
+                    endpoint["IPv6Gateway"] = json!(subnet.gateway().to_string());
+                    endpoint["GlobalIPv6Address"] = json!(address.to_string());
+                    endpoint["GlobalIPv6PrefixLen"] = json!(subnet.prefix);
+                }
             }
         }
         out.insert(a.name.to_string(), endpoint);
@@ -453,6 +462,7 @@ mod tests {
             id: "abcdef123456".into(),
             subnet: "10.78.0.0/24".into(),
             gateway: "10.78.0.1".into(),
+            ipv6: None,
             bridge: "op0".into(),
             created: 1,
             labels: Default::default(),
@@ -460,7 +470,10 @@ mod tests {
         let attached = [Attached {
             name: "bridge",
             network: Some(net.clone()),
-            ip: Some("10.78.0.2".parse().unwrap()),
+            addresses: Some(crate::network::Addresses {
+                ipv4: "10.78.0.2".parse().unwrap(),
+                ipv6: None,
+            }),
             aliases: &[],
         }];
         let mounts = vec![

@@ -9,7 +9,6 @@ use crate::network::{Labels, Network, docker_id_of};
 use crate::volume::Volume;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use std::net::Ipv4Addr;
 
 type Filters = BTreeMap<String, Vec<String>>;
 
@@ -73,19 +72,32 @@ fn prefix_len(subnet: &str) -> u32 {
 }
 
 /// A bridge network as Docker shows it, with its containers: (ID, name, address).
-pub fn network_json(n: &Network, endpoints: &[(String, String, Ipv4Addr)]) -> Value {
+pub fn network_json(
+    n: &Network,
+    endpoints: &[(String, String, crate::network::Addresses)],
+) -> Value {
     let prefix = prefix_len(&n.subnet);
+    let mut ipam = vec![json!({"Subnet": n.subnet, "Gateway": n.gateway})];
+    if let Some(subnet) = n.ipv6 {
+        ipam.push(json!({"Subnet": subnet.to_string(), "Gateway": subnet.gateway().to_string()}));
+    }
     let containers: serde_json::Map<String, Value> = endpoints
         .iter()
-        .map(|(id, name, ip)| {
+        .map(|(id, name, addresses)| {
+            let ipv6 = addresses
+                .ipv6
+                .zip(n.ipv6)
+                .map_or_else(String::new, |(address, subnet)| {
+                    format!("{address}/{}", subnet.prefix)
+                });
             (
                 id.clone(),
                 json!({
                     "Name": name,
                     "EndpointID": "",
                     "MacAddress": "",
-                    "IPv4Address": format!("{ip}/{prefix}"),
-                    "IPv6Address": "",
+                    "IPv4Address": format!("{}/{prefix}", addresses.ipv4),
+                    "IPv6Address": ipv6,
                 }),
             )
         })
@@ -97,11 +109,11 @@ pub fn network_json(n: &Network, endpoints: &[(String, String, Ipv4Addr)]) -> Va
         "Scope": "local",
         "Driver": "bridge",
         "EnableIPv4": true,
-        "EnableIPv6": false,
+        "EnableIPv6": n.ipv6.is_some(),
         "IPAM": {
             "Driver": "default",
             "Options": null,
-            "Config": [{"Subnet": n.subnet, "Gateway": n.gateway}],
+            "Config": ipam,
         },
         "Internal": false,
         "Attachable": false,
@@ -426,12 +438,10 @@ fn connect_network(req: &Request, id: &str, join: bool) -> Reply {
     };
     let done = if join {
         let endpoint = &body["EndpointConfig"];
-        if endpoint["IPAMConfig"]["IPv4Address"]
-            .as_str()
-            .is_some_and(|a| !a.is_empty())
-        {
-            return message(400, "fixed addresses are not supported by podbag");
-        }
+        let addresses = match super::create::fixed_addresses(endpoint) {
+            Ok(addresses) => addresses,
+            Err(e) => return reply_error(&e),
+        };
         let aliases: Vec<String> = match &endpoint["Aliases"] {
             Value::Null => Vec::new(),
             Value::Array(list) => match list
@@ -444,7 +454,7 @@ fn connect_network(req: &Request, id: &str, join: bool) -> Reply {
             },
             _ => return message(400, "Aliases must be a list of strings"),
         };
-        handle.connect(&name, &aliases)
+        handle.connect_with_addresses(&name, &aliases, addresses)
     } else {
         handle.disconnect(&name)
     };
@@ -482,8 +492,14 @@ fn create_network(req: &Request) -> Reply {
             format!("network driver {driver} is not supported (podbag makes bridge networks)"),
         );
     }
-    if body["EnableIPv6"].as_bool().unwrap_or(false) || body["Ingress"].as_bool().unwrap_or(false) {
-        return message(400, "IPv6 and ingress networks are not supported");
+    if body["Ingress"].as_bool().unwrap_or(false) {
+        return message(400, "ingress networks are not supported");
+    }
+    if body["EnableIPv4"].as_bool() == Some(false) {
+        return message(
+            400,
+            "only IPv4 and dual-stack bridge networks are supported",
+        );
     }
     let ipam_driver = body["IPAM"]["Driver"].as_str().unwrap_or("");
     if !matches!(ipam_driver, "" | "default") {
@@ -493,13 +509,27 @@ fn create_network(req: &Request) -> Reply {
         .as_array()
         .cloned()
         .unwrap_or_default();
-    let subnet = configs
-        .first()
-        .and_then(|c| c["Subnet"].as_str())
-        .filter(|s| !s.is_empty());
     let mut warnings = Vec::new();
-    if configs.len() > 1 {
-        warnings.push("only the first IPAM config is used".to_string());
+    let mut ipv4 = None;
+    let mut ipv6 = None;
+    for config in &configs {
+        let Some(subnet) = config["Subnet"].as_str().filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        if subnet.contains(':') {
+            if ipv6.is_some() {
+                return message(400, "only one IPv6 subnet is supported");
+            }
+            let parsed = match subnet.parse() {
+                Ok(subnet) => subnet,
+                Err(e) => return reply_error(&e),
+            };
+            ipv6 = Some((parsed, config));
+        } else if ipv4.is_some() {
+            warnings.push("only the first IPv4 IPAM config is used".to_string());
+        } else {
+            ipv4 = Some((subnet, config));
+        }
     }
     if body["Internal"].as_bool().unwrap_or(false) {
         warnings.push("internal networks are not supported: this one reaches outside".to_string());
@@ -511,23 +541,35 @@ fn create_network(req: &Request) -> Reply {
         Ok(l) => l,
         Err(reply) => return reply,
     };
-    let network = match Network::create_with(name, subnet, labels) {
+    let subnet = ipv4.map(|(subnet, _)| subnet);
+    let dual_stack = ipv6.is_some() || body["EnableIPv6"].as_bool().unwrap_or(false);
+    let created = if dual_stack {
+        Network::create_dual_stack(name, subnet, ipv6.map(|(subnet, _)| subnet), labels)
+    } else {
+        Network::create_with(name, subnet, labels)
+    };
+    let network = match created {
         Ok(n) => n,
         Err(e) => return reply_error(&e),
     };
-    if let Some(gw) = configs.first().and_then(|c| c["Gateway"].as_str()) {
-        if !gw.is_empty() && gw != network.gateway {
-            warnings.push(format!(
-                "gateway {gw} is ignored: the gateway is {}",
-                network.gateway
-            ));
+    let configured = ipv4
+        .map(|(_, config)| (config, network.gateway.clone()))
+        .into_iter()
+        .chain(
+            ipv6.zip(network.ipv6)
+                .map(|((_, config), subnet)| (config, subnet.gateway().to_string())),
+        );
+    for (config, gateway) in configured {
+        if let Some(gw) = config["Gateway"]
+            .as_str()
+            .filter(|gw| !gw.is_empty() && *gw != gateway)
+        {
+            warnings.push(format!("gateway {gw} is ignored: the gateway is {gateway}",));
         }
-    }
-    if configs
-        .first()
-        .is_some_and(|c| c["IPRange"].as_str().is_some_and(|r| !r.is_empty()))
-    {
-        warnings.push("IP ranges are ignored: addresses come from the whole subnet".to_string());
+        if config["IPRange"].as_str().is_some_and(|r| !r.is_empty()) {
+            warnings
+                .push("IP ranges are ignored: addresses come from the whole subnet".to_string());
+        }
     }
     let id = network.docker_id();
     publish(
@@ -647,6 +689,7 @@ mod tests {
             id: "abcdef123456".into(),
             subnet: "10.78.1.0/24".into(),
             gateway: "10.78.1.1".into(),
+            ipv6: Some("fd7f:1::/64".parse().unwrap()),
             bridge: "pbg-1".into(),
             created: 1_700_000_000,
             labels: [("a".to_string(), "b".to_string())].into_iter().collect(),
@@ -654,7 +697,14 @@ mod tests {
         let c = "c".repeat(64);
         let j = network_json(
             &n,
-            &[(c.clone(), "web".into(), "10.78.1.2".parse().unwrap())],
+            &[(
+                c.clone(),
+                "web".into(),
+                crate::network::Addresses {
+                    ipv4: "10.78.1.2".parse().unwrap(),
+                    ipv6: Some("fd7f:1::2".parse().unwrap()),
+                },
+            )],
         );
         assert_eq!(j["Name"], "app");
         assert_eq!(j["Id"], n.docker_id());
@@ -662,10 +712,12 @@ mod tests {
         assert_eq!(j["Scope"], "local");
         assert_eq!(
             j["IPAM"]["Config"],
-            json!([{"Subnet": "10.78.1.0/24", "Gateway": "10.78.1.1"}])
+            json!([{"Subnet": "10.78.1.0/24", "Gateway": "10.78.1.1"}, {"Subnet": "fd7f:1::/64", "Gateway": "fd7f:1::1"}])
         );
         assert_eq!(j["Containers"][&c]["Name"], "web");
         assert_eq!(j["Containers"][&c]["IPv4Address"], "10.78.1.2/24");
+        assert_eq!(j["EnableIPv6"], true);
+        assert_eq!(j["Containers"][&c]["IPv6Address"], "fd7f:1::2/64");
         assert_eq!(j["Labels"], json!({"a": "b"}));
         let host = special_network_json("host");
         assert_eq!(host["Driver"], "host");

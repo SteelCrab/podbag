@@ -5,7 +5,7 @@
 //! that joins the container's network namespace (`setns` works per thread).
 
 use crate::netlink::{Socket, nft, route};
-use crate::network::Network;
+use crate::network::{Addresses, Network};
 use crate::{Error, ErrorKind, Result};
 use std::net::Ipv4Addr;
 use std::os::fd::AsRawFd;
@@ -50,6 +50,10 @@ pub fn prepare_bridge(net: &Network) -> Result<u32> {
     };
     tolerate_exists(s.request(route::add_address(index, gateway.octets(), prefix)))
         .map_err(|e| fail("give the bridge its address", e))?;
+    if let Some(subnet) = net.ipv6 {
+        tolerate_exists(s.request(route::add_address6(index, subnet.gateway(), subnet.prefix)))
+            .map_err(|e| fail("give the bridge its IPv6 address", e))?;
+    }
     s.request(route::set_up(index))
         .map_err(|e| fail("bring the bridge up", e))?;
     let forward = "/proc/sys/net/ipv4/ip_forward";
@@ -119,7 +123,7 @@ pub fn connect(
     bridge_index: u32,
     container_id: &str,
     pid: u32,
-    ip: Ipv4Addr,
+    addresses: Addresses,
     interface: usize,
 ) -> Result<()> {
     let fail = |what: &str, e: std::io::Error| net_error(&net.name, what, e);
@@ -159,7 +163,10 @@ pub fn connect(
         let link = s
             .link_index(&inside)?
             .ok_or_else(|| std::io::Error::other(format!("{inside} is missing")))?;
-        s.request(route::add_address(link, ip.octets(), prefix))?;
+        s.request(route::add_address(link, addresses.ipv4.octets(), prefix))?;
+        if let (Some(address), Some(subnet)) = (addresses.ipv6, net.ipv6) {
+            s.request(route::add_address6(link, address, subnet.prefix))?;
+        }
         s.request(route::set_up(link))?;
         if interface == 0 {
             s.request(route::add_default_route(gateway.octets()))?;

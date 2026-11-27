@@ -623,6 +623,7 @@ podbag build -t myapp - < Dockerfile               # only a Dockerfile, no conte
 | `--network-alias NAME` | one more name on the first user network |
 | `--network host` | the host's network |
 | `--network none` | loopback only |
+| `--ip ADDRESS`, `--ip6 ADDRESS` | request a fixed address on the first bridge network |
 | `-p [IP:][HOST:]CONTAINER[/tcp\|udp]` | publish a port; without a host port, the kernel picks one (see `ps`, `inspect`) |
 | `--add-host NAME:IP` | one more line in `/etc/hosts`; `NAME=IP` and IPv6 (`NAME=[::1]`) work too |
 | `--add-host NAME:host-gateway` | `NAME` leads to the host (see [host-gateway](#host-gateway)) |
@@ -633,11 +634,18 @@ podbag build -t myapp - < Dockerfile               # only a Dockerfile, no conte
 ### Names and addresses
 
 - New networks get `10.78.<n>.0/24`, unless `--subnet` gives another.
+- `podbag network create --ipv6 NAME` adds a local IPv6 subnet to the IPv4 bridge.
+  Specify a subnet with `--subnet6`, or use the default ULA `/64`. For Docker CLI use
+  `docker network create --ipv6 --subnet fd42:1234::/64 NAME`.
+- IPv6 addresses reach peers on the same bridge. External routing and published ports
+  continue to use IPv4.
+- Fixed addresses must be inside their subnet and outside its reserved addresses. The
+  engine refuses an address already assigned to another running container.
 - A subnet that overlaps another network or a host route is refused.
 - Container names and aliases are written into each container's `/etc/hosts`. podbag
   updates them as containers start and stop.
 - There is no DNS server. When two containers share an alias, the first one answers.
-- `podbag network connect [--alias NAME] NET CONTAINER` and
+- `podbag network connect [--alias NAME] [--ip ADDRESS] [--ip6 ADDRESS] NET CONTAINER` and
   `podbag network disconnect NET CONTAINER` change the networks of a stopped container,
   for its next start. A running container is refused.
 

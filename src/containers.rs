@@ -833,6 +833,16 @@ impl ContainerHandle {
     /// Join bridge network `network` too, with `aliases` there, from the container's next
     /// start on (`network connect`). A container that runs is refused: stop it first.
     pub fn connect(&self, network: &str, aliases: &[String]) -> Result<()> {
+        self.connect_with_addresses(network, aliases, Default::default())
+    }
+
+    /// Join a bridge at the next start and request fixed network addresses.
+    pub fn connect_with_addresses(
+        &self,
+        network: &str,
+        aliases: &[String],
+        addresses: crate::network::FixedAddresses,
+    ) -> Result<()> {
         let dirs = paths::dirs()?;
         let network = match crate::network::parse_network_arg(network)? {
             crate::network::NetworkMode::Bridge { network } => network,
@@ -848,7 +858,7 @@ impl ContainerHandle {
                 ));
             }
         };
-        crate::network::get_in(&dirs, &network)?;
+        crate::network::get_in(&dirs, &network)?.check_addresses(addresses)?;
         state::change_settings(&dirs, &self.id, |spec| {
             if spec.bridge_networks().contains(&network.as_str()) {
                 return Err(Error::new(
@@ -865,6 +875,9 @@ impl ContainerHandle {
                 network: network.clone(),
                 aliases: aliases.to_vec(),
             });
+            if !addresses.is_empty() {
+                spec.fixed_addresses.insert(network, addresses);
+            }
             Ok(())
         })
     }
@@ -884,6 +897,7 @@ impl ContainerHandle {
                 .position(|a| a.network == network)
             {
                 spec.extra_networks.remove(at);
+                spec.fixed_addresses.remove(&network);
                 return Ok(());
             }
             let what = format!(

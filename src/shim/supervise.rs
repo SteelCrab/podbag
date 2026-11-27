@@ -543,7 +543,7 @@ pub(super) fn run(
             .as_ref()
             .map(|g| g.path().to_string_lossy().into_owned()),
         oom: None,
-        ip: addresses.first().map(|(_, ip)| ip.to_string()),
+        ip: addresses.first().map(|(_, ip)| ip.ipv4.to_string()),
         ports: published.iter().map(|(m, _)| *m).collect(),
         paused: false,
     };
@@ -579,7 +579,7 @@ pub(super) fn run(
     }
     let relays = addresses
         .first()
-        .map(|(_, ip)| super::proxy::serve(published, *ip, session));
+        .map(|(_, ip)| super::proxy::serve(published, ip.ipv4, session));
 
     let echo = io
         .outputs

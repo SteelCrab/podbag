@@ -2,7 +2,7 @@
 //! its address, link and published ports.
 
 use crate::netfiles::{self, HostEntry, HostGateway, Own};
-use crate::network::NetworkMode;
+use crate::network::{Addresses, NetworkMode};
 use crate::paths::Dirs;
 use crate::spec::ContainerSpec;
 use crate::volume::{Mount, MountSource};
@@ -78,7 +78,7 @@ pub(super) fn bridge_addresses(
     dirs: &Dirs,
     spec: &ContainerSpec,
     extra_hosts: &[HostEntry],
-) -> Result<Vec<(crate::network::Network, std::net::Ipv4Addr)>> {
+) -> Result<Vec<(crate::network::Network, Addresses)>> {
     let networks = spec.bridge_networks();
     // Written down only for a container on several networks: its hosts file names the
     // containers of each.
@@ -100,6 +100,11 @@ pub(super) fn bridge_addresses(
                 aliases: spec.aliases_on(index),
                 networks: &all,
                 extra_hosts,
+                fixed: spec
+                    .fixed_addresses
+                    .get(*network)
+                    .copied()
+                    .unwrap_or_default(),
             },
         )?;
         out.push((net, ip));
@@ -148,7 +153,7 @@ pub(super) fn extra_hosts(
 pub(super) fn own<'a>(
     dirs: &Dirs,
     spec: &'a ContainerSpec,
-    addresses: &[(crate::network::Network, std::net::Ipv4Addr)],
+    addresses: &[(crate::network::Network, Addresses)],
     extra_hosts: &'a [HostEntry],
 ) -> Result<Own<'a>> {
     if addresses.is_empty() {
@@ -190,7 +195,7 @@ pub(super) fn join_session(dirs: &Dirs, spec: &ContainerSpec) -> Result<u32> {
 /// the bridges live in the session's network namespace.
 pub(super) fn attach(
     spec: &ContainerSpec,
-    addresses: &[(crate::network::Network, std::net::Ipv4Addr)],
+    addresses: &[(crate::network::Network, Addresses)],
     session: Option<u32>,
     pid: u32,
 ) -> Result<()> {
