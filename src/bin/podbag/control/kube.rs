@@ -21,6 +21,9 @@ enum Kind {
     Deployment,
     #[value(alias = "pvc", alias = "claims", alias = "persistentvolumeclaim")]
     Claim,
+    /// OpenShift only
+    #[value(alias = "routes")]
+    Route,
 }
 
 impl From<Kind> for Resource {
@@ -30,6 +33,7 @@ impl From<Kind> for Resource {
             Kind::Service => Self::Services,
             Kind::Deployment => Self::Deployments,
             Kind::Claim => Self::Claims,
+            Kind::Route => Self::Routes,
         }
     }
 }
@@ -48,7 +52,7 @@ struct Selection {
 enum Cmd {
     /// List kubeconfig contexts as JSON
     Contexts,
-    /// Count the four resource types as JSON
+    /// Count each resource type as JSON. Routes are counted only on OpenShift
     Counts {
         #[arg(long)]
         context: Option<String>,
@@ -148,5 +152,49 @@ pub fn run(args: Args) -> Result {
                 "context": to, "namespace": to_namespace
             }))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct Cli {
+        #[command(flatten)]
+        args: Args,
+    }
+
+    fn parse(args: &[&str]) -> Cmd {
+        Cli::try_parse_from(std::iter::once("kube").chain(args.iter().copied()))
+            .unwrap()
+            .args
+            .cmd
+    }
+
+    #[test]
+    fn route_is_a_resource_kind() {
+        for word in ["route", "routes"] {
+            let Cmd::List { kind, .. } = parse(&["list", word]) else {
+                panic!("not list");
+            };
+            assert_eq!(Resource::from(kind).key(), "routes");
+        }
+        let Cmd::Inspect { kind, name, scope } = parse(&["inspect", "route", "web", "-n", "shop"])
+        else {
+            panic!("not inspect");
+        };
+        assert_eq!(Resource::from(kind).key(), "routes");
+        assert_eq!(
+            (name.as_str(), scope.namespace.as_deref()),
+            ("web", Some("shop"))
+        );
+        let Cmd::Migrate { kind, .. } =
+            parse(&["migrate", "route", "web", "--from", "a", "--to", "b"])
+        else {
+            panic!("not migrate");
+        };
+        assert_eq!(Resource::from(kind).key(), "routes");
     }
 }

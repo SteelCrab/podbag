@@ -3,6 +3,7 @@
 //! a pull) holds its own connection while it is read.
 
 pub mod choice;
+mod create;
 pub mod dockercli;
 mod endpoint;
 #[cfg(unix)]
@@ -16,6 +17,7 @@ pub mod time;
 mod wire;
 
 pub use choice::{Choice, Target, find_docker_cli, ui_dir};
+pub use create::{PublishedPort, RESTART_POLICIES, RunSpec, VolumeMount};
 pub use dockercli::{DockerTarget, PODBAG_CONTEXT, previous_context, switch_back, use_podbag};
 pub use endpoint::{
     Closer, Endpoint, REQUEST_TIMEOUT, podbag_on_path, podbag_program, terminal_podbag,

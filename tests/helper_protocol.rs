@@ -87,6 +87,8 @@ fn shim_reports_unsupported_and_removes_the_container_directory() {
         network: podbag::network::NetworkMode::Host,
         publish: Vec::new(),
         aliases: Vec::new(),
+        extra_hosts: Vec::new(),
+        dns: Default::default(),
         stop_timeout: None,
         restart: Default::default(),
         health: None,

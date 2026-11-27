@@ -55,10 +55,24 @@
 从[最新版本](https://github.com/SteelCrab/podbag/releases/latest)下载适合当前系统的安装包。
 
 - **Linux（x86_64、arm64）。** Debian 和 Ubuntu 使用 `.deb`，Fedora 使用 `.rpm`。安装包内含引擎。
-- **macOS（Apple 芯片、Intel）。** 解压 `podbag-desktop-aarch64-macos.zip`（Apple 芯片）或 `podbag-desktop-x86_64-macos.zip`（Intel），将 `podbag.app` 移到“应用程序”文件夹，然后打开。
+- **macOS（Apple 芯片、Intel）。** 打开 `podbag-desktop-aarch64-macos.dmg`（Apple 芯片）或 `podbag-desktop-x86_64-macos.dmg`（Intel）。将 `podbag` 拖到“应用程序”文件夹，然后从那里打开。首次打开时需要允许一次：[在 macOS 上首次打开](#在-macos-上首次打开)。
 - **Windows（x86_64、ARM64，实验性支持）。** 运行与 CPU 架构匹配的 `.msi`。如果发行版没有提供 MSI，可从成功的 [CI 运行记录](https://github.com/SteelCrab/podbag/actions/workflows/ci.yml?query=branch%3Amain)下载。运行容器前请启用 WSL 2。
 
 应用内含 CLI。如果终端中没有 `podbag`，应用会提示安装 `podbag` 命令。该命令使用应用自带的 CLI，因此会随应用一起更新。
+
+### 在 macOS 上首次打开
+
+podbag 未经过 Apple 公证。因此，用浏览器下载的应用或 CLI 会被 macOS 阻止，直到你允许一次。
+
+1. 从“应用程序”文件夹打开 `podbag`。macOS 会提示无法检查 podbag 是否包含恶意软件。点按**完成**。
+2. 打开**系统设置 > 隐私与安全性**。在关于 `podbag` 的信息旁点按**仍要打开**，然后输入密码确认。
+
+若想跳过这些步骤，请在终端中安装。用 `curl` 下载的文件不会被阻止。
+
+```sh
+curl -fsSL https://podbag.dev/install.sh | PODBAG_DESKTOP=1 sh   # Podbag Desktop
+curl -fsSL https://podbag.dev/install.sh | sh                    # 仅 CLI
+```
 
 ### Linux（x86_64、arm64）和 macOS（Apple 芯片、Intel）的 CLI
 
@@ -71,7 +85,7 @@ podbag --version
 
 Linux 需要 5.12 或更高版本的内核以及 cgroup v2。运行 `podbag check` 可检查缺少的依赖。普通用户使用桥接网络时，请检查 `uidmap` 和 `passt` 软件包。[Linux 运行要求](docs/usage.md#requirements-on-linux)
 
-手动安装时，请下载适合当前操作系统和 CPU 的文件，并用 `SHA256SUMS` 校验。[下载发行文件](https://github.com/SteelCrab/podbag/releases/latest)
+手动安装时，请下载适合当前操作系统和 CPU 的文件，并用 `SHA256SUMS` 校验。用 `chmod +x` 赋予执行权限。在 Mac 上还需运行 `xattr -d com.apple.quarantine`。[下载发行文件](https://github.com/SteelCrab/podbag/releases/latest)
 
 ### Windows 的 CLI（实验性支持）
 
