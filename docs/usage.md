@@ -1247,6 +1247,45 @@ podbag lab remove container-network
 - Languages: English, 한국어, 日本語, 简体中文, Filipino, Español and Tiếng Việt. The app
   follows the system language. Settings can change it.
 
+#### Desktop extensions
+
+Open **Extensions** and select **Install manifest** to install a local UTF-8 JSON file.
+New extensions are disabled. Use **Enable** to show a view, **Disable** to hide it, or
+**Remove** to delete the installed copy. The original file stays in place.
+
+Podbag supports its own manifest version 1. Save this example as a JSON file and install it.
+
+```json
+{
+  "apiVersion": 1,
+  "id": "example.workspace-checklist",
+  "name": "Workspace checklist",
+  "version": "1.0.0",
+  "description": "Review local resources before changing the workspace.",
+  "permissions": ["engineSummary"],
+  "content": [
+    { "type": "heading", "text": "Before you change a workspace" },
+    { "type": "text", "text": "Review your current containers and volumes." },
+    { "type": "list", "items": ["Stop the containers you intend to replace.", "Check which volumes contain data to keep."] },
+    { "type": "code", "text": "podbag ps" },
+    { "type": "engineSummary" }
+  ]
+}
+```
+
+- The ID starts with a lowercase letter and uses up to 64 lowercase letters, digits,
+  periods or hyphens. IDs are unique. Remove an installed manifest before replacing it.
+- The name fits in 120 characters, the version in 40, and the description in 2,000.
+  Files can be up to 128 KiB and contain 1 to 40 blocks. The app keeps up to 64 extensions.
+- Heading blocks accept up to 120 characters. Text and code blocks accept up to 8,000.
+  List blocks have 1 to 40 items of up to 1,000 characters each.
+- The optional `engineSummary` permission authorizes a single matching block. After
+  enabling an extension, explicitly allow summary access to display only the current
+  counts of containers, images, volumes and networks. Disabling clears that grant.
+- The host renders text, code, lists and counted summaries directly. Extending the app
+  with scripts, HTML, external links, files, commands or network requests is unsupported.
+  Docker Desktop extension bundles and manifests use a different format.
+
 #### Engine switch
 
 - Select the browsing engine in **Settings → Engine**. Migration uses its own source and destination.

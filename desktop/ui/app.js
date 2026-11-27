@@ -660,6 +660,7 @@ function renderNav() {
     ...(S.practiceContainers ? [item("lab-containers", t("training.containers"), null, "containers")] : []),
     ...(S.practiceInstalled ? [item("lab-volumes", t("practice.volumes"), null, "volumes")] : []));
   updateKubeNav();
+  document.getElementById("nav-extensions").replaceChildren(item("extensions", t("nav.extensions"), null, "kube-deployments"));
   if (windowBar) {
     const [reload, settings] = document.getElementById("topbar-tools").children;
     for (const [button, label] of [[reload, t("action.refresh")], [settings, t("nav.settings")]]) {
@@ -993,6 +994,13 @@ function renderMain(fresh) {
   if (S.view === "migration") {
     if (fresh || shownView !== S.view) migrationPanel = renderMigration(main);
     shownView = S.view;
+    return;
+  }
+  if (S.view === "extensions") {
+    const redraw = fresh || shownView !== S.view;
+    shownView = S.view;
+    if (redraw) openExtensions(main);
+    else refreshExtensionSummary(main);
     return;
   }
   if (S.view === "lab-containers") {
@@ -2226,6 +2234,7 @@ async function init() {
   S.connection = await API.connection();
   const view = sessionStorage.getItem("engine-view");
   if ([...KINDS, "settings", "kubernetes", "migration"].includes(view)) S.view = view;
+  if (view === "extensions") S.view = view;
   const kind = sessionStorage.getItem("engine-resource");
   if (KUBE_KINDS.includes(kind)) S.kubeKind = kind;
   S.kubeExpanded = S.view === "kubernetes";

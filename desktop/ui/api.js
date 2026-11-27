@@ -33,6 +33,7 @@ const API = (() => {
     kubeOpenRoute: (context, namespace, name) => invoke("kube_open_route", { context, namespace, name }),
     createVolume: (name) => scoped("create_volume", { name }),
     engine: (start) => scoped("engine", { start: !!start }),
+    extensions: (request) => invoke("desktop_extensions", { request }),
     list: (kind) => scoped("list", { kind }),
     kubeList: (kind, allNamespaces, context) => invoke("kube_list", { kind, allNamespaces, context: context || null }),
     inspect: (kind, id) => scoped("inspect", { kind, id }),
