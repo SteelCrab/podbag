@@ -1602,7 +1602,7 @@ function vmSharedFolders() {
     event.preventDefault();
     add();
   };
-  return h("div", { class: "vm-shares form-field" },
+  return h("div", { class: "vm-shares form-field", "data-setting-search": "settings.sharedFolders" },
     h("label", { for: input.id, text: t("settings.sharedFolders") }),
     h("div", { class: "shared-folder" }, input, button(null, t("settings.addSharedFolder"), add)),
     list,
