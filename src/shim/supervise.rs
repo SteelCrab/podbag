@@ -443,14 +443,21 @@ pub(super) fn run(
         super::net::detach(dirs, spec, session.is_some());
     };
     // A bridge container's addresses, then its /etc files (first among its mounts).
-    let addresses = match super::net::bridge_addresses(dirs, spec) {
+    let extra_hosts = match super::net::extra_hosts(dirs, spec, rootless) {
+        Ok(e) => e,
+        Err(e) => {
+            undo(group);
+            return failed(status, e);
+        }
+    };
+    let addresses = match super::net::bridge_addresses(dirs, spec, &extra_hosts) {
         Ok(a) => a,
         Err(e) => {
             undo(group);
             return failed(status, e);
         }
     };
-    let own = match super::net::own(dirs, spec, &addresses) {
+    let own = match super::net::own(dirs, spec, &addresses, &extra_hosts) {
         Ok(own) => own,
         Err(e) => {
             undo(group);

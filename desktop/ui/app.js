@@ -10,6 +10,7 @@ const S = {
   view: "migration", // an engine resource, "kubernetes" or "settings"
   kubeKind: "pods",
   kubeCounts: {},
+  kubeOpenShift: false, // the selected context serves Routes
   kubeAllNamespaces: false,
   kubeContext: sessionStorage.getItem("kube-context") || "",
   connection: null,
@@ -372,7 +373,8 @@ async function prune(kind) {
   refreshSoon();
 }
 
-// Pull progress goes here while a pull runs; images.js opens the pull panel.
+// Pull progress goes here while a pull runs (the pull panel, the run form); images.js
+// opens the pull panel.
 let pullLine = null;
 function pull() {}
 
@@ -471,7 +473,7 @@ function travel(step) {
   S.view = entry.view.startsWith("training:")
     && !trainingEntries().some(module => trainingView(module.id) === entry.view) ? "tutorials" : entry.view;
   if (S.view === "tutorials" || S.view.startsWith("training:")) S.trainingExpanded = true;
-  if (entry.kubeKind) { S.kubeKind = entry.kubeKind; S.kubeExpanded = true; }
+  if (entry.kubeKind) { S.kubeKind = kubeKinds().includes(entry.kubeKind) ? entry.kubeKind : "pods"; S.kubeExpanded = true; }
   S.detail = entry.detail ? { ...entry.detail, json: null, extra: null } : null;
   renderNav();
   renderMain(true);
@@ -525,15 +527,34 @@ function setupKubeNav() {
     onclick: () => { S.kubeExpanded = !S.kubeExpanded; updateKubeNav(); if (S.kubeExpanded) refreshKubeCounts(); },
   }, icon("back"));
   const children = h("ul", { class: "nav kube-subnav", id: "nav-kube-children", "aria-label": t("kube.resources") },
-    KUBE_KINDS.map((kind) => {
-      const label = t(`kube.${kind}`);
-      return h("li", {}, h("button", {
-        type: "button", class: "nav-item", id: `nav-kube-${kind}`, "aria-label": label, title: label,
-        onclick: () => go("kubernetes", kind),
-      }, icon(`kube-${kind}`), h("span", { class: "label", text: label }), h("span", { class: "count" })));
-    }));
+    KUBE_KINDS.map(kubeNavItem));
   document.getElementById("nav-kubernetes").replaceChildren(
     h("li", {}, h("div", { class: "kube-nav-header" }, open, toggle), children));
+}
+
+function kubeNavItem(kind) {
+  const label = t(`kube.${kind}`);
+  return h("li", {}, h("button", {
+    type: "button", class: "nav-item", id: `nav-kube-${kind}`, "aria-label": label, title: label,
+    onclick: () => go("kubernetes", kind),
+  }, icon(`kube-${kind}`), h("span", { class: "label", text: label }), h("span", { class: "count" })));
+}
+
+// Routes appear only for an OpenShift context. Off one, the Routes page falls back to Pods.
+let kubeOpenShiftRequest = 0;
+async function refreshKubeOpenShift() {
+  const generation = ++kubeOpenShiftRequest;
+  let openshift = false;
+  try { openshift = await API.kubeOpenShift(S.kubeContext); }
+  catch { /* An unreachable cluster shows the plain kinds. */ }
+  if (generation !== kubeOpenShiftRequest) return;
+  S.kubeOpenShift = openshift;
+  if (!openshift && S.kubeKind === "routes") {
+    if (S.view === "kubernetes") go("kubernetes", "pods");
+    else S.kubeKind = "pods";
+  }
+  updateKubeNav();
+  kubePanel?.showKinds();
 }
 
 let kubeCountRequest = 0;
@@ -549,19 +570,25 @@ async function refreshKubeCounts() {
 
 function updateKubeNav() {
   const active = S.view === "kubernetes";
+  const children = document.getElementById("nav-kube-children");
+  const routes = document.getElementById("nav-kube-routes");
+  if (S.kubeOpenShift && !routes) children.append(kubeNavItem("routes"));
+  if (!S.kubeOpenShift && routes) routes.parentElement.remove();
+  const kinds = kubeKinds();
+  // The parent's total stays the four kinds every cluster has.
   const counts = KUBE_KINDS.map(kind => S.kubeCounts[kind]);
   const total = counts.every(Number.isInteger) ? counts.reduce((sum, n) => sum + n, 0) : null;
-  for (const [id, count] of [["open", total], ...KUBE_KINDS.map(kind => [kind, S.kubeCounts[kind]])]) {
+  for (const [id, count] of [["open", total], ...kinds.map(kind => [kind, S.kubeCounts[kind]])]) {
     const button = document.getElementById(`nav-kube-${id}`);
     const badge = button.querySelector(".count");
     badge.textContent = count ?? "";
     button.title = count == null ? button.getAttribute("aria-label") : `${button.getAttribute("aria-label")} (${count})`;
   }
   document.getElementById("nav-kube-toggle").setAttribute("aria-expanded", String(S.kubeExpanded));
-  document.getElementById("nav-kube-children").hidden = !S.kubeExpanded;
+  children.hidden = !S.kubeExpanded;
   for (const [id, current] of [
     ["nav-kube-open", active && !S.kubeExpanded],
-    ...KUBE_KINDS.map((kind) => [`nav-kube-${kind}`, active && S.kubeExpanded && S.kubeKind === kind]),
+    ...kinds.map((kind) => [`nav-kube-${kind}`, active && S.kubeExpanded && S.kubeKind === kind]),
   ]) {
     const button = document.getElementById(id);
     if (current) button.setAttribute("aria-current", "page");
@@ -1026,6 +1053,7 @@ function toolbar(kind) {
         h("span", { class: "dot", "aria-hidden": "true" }), h("span", { class: "live-text", text: S.live ? t("live.on") : "" })),
       kind === "images" && isPodbag() && S.docker && S.docker.installed ? button(registryIcon("dockerhub"), t("import.button"), importFromDocker) : null,
       kind === "images" ? button("pull", t("action.pull"), pull, "primary") : null,
+      kind === "containers" ? button("start", t("run.button"), () => openRunDialog(), "primary") : null,
       kind === "volumes" ? button(null, t("volume.create"), createVolume, "primary") : null,
       button("prune", t("action.prune"), () => prune(kind)),
       windowBar ? null : iconButton("refresh", t("action.refresh"), refresh)));
@@ -1100,6 +1128,7 @@ function rowActions(kind, o) {
     out.push(iconButton("logs", t("action.logs"), () => openDetail(kind, o.Id, "logs")));
     if (st === "running") out.push(iconButton("shell", t("action.shell"), () => shell(o)));
   }
+  if (kind === "images") out.push(iconButton("start", t("action.run"), () => openRunDialog(imageName(o)), "accent"));
   if (!(kind === "networks" && builtinNetwork(o))) {
     out.push(iconButton("remove", t("action.remove"), () => remove(kind, o), "danger"));
   }
@@ -1176,9 +1205,11 @@ function emptyState(kind) {
     volumes: `${cmd} volume create data`,
     networks: `${cmd} network create app`,
   };
+  const run = kind === "containers";
   return h("div", { class: "empty" },
     h("div", { class: "empty-icon" }, icon(kind)),
     h("h2", { text: t(`empty.${kind}.title`) }),
+    run ? [h("p", { text: t("empty.containers.run") }), button("start", t("run.button"), () => openRunDialog(), "primary empty-run")] : null,
     isPodbag() || S.engine?.engine === "docker" || kind === "images" ? h("p", { text: t(`empty.${kind}.text`) }) : null,
     (isPodbag() || S.engine?.engine === "docker") && commands[kind] ? codeLine(commands[kind]) : null,
     kind === "images" ? button("pull", t("action.pull"), pull, "primary") : null);
@@ -2223,6 +2254,7 @@ async function init() {
   setupSidebar();
   renderAll();
   refreshKubeCounts();
+  refreshKubeOpenShift();
   remember();
   API.on("changed", refreshSoon);
   API.on("live", (v) => { S.live = !!v; renderLive(); });
@@ -2274,7 +2306,7 @@ async function init() {
 
 // For the preview page (desktop/preview), which shows each view with a mocked API.
 window.podbag = {
-  ready, go, openDetail, remove: (kind, i) => remove(kind, S.lists[kind][i]), pull, prune, state: S,
+  ready, go, openDetail, run: (image) => openRunDialog(image), remove: (kind, i) => remove(kind, S.lists[kind][i]), pull, prune, state: S,
   toggleSidebar, openSettingsSection, openUpdates, switchEngine, applyVm: () => applyVm(document.querySelector(".vm-form")), runUpgrade,
 };
 

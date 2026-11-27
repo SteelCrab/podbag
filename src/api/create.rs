@@ -40,6 +40,23 @@ pub fn map_create(
     name: Option<&str>,
     image: &Image,
 ) -> Result<(Container, Vec<String>)> {
+    map_create_with(body, name, image, &|mode| {
+        // SAFETY: geteuid has no preconditions.
+        let rootless = unsafe { libc::geteuid() } != 0;
+        crate::netfiles::host_gateway(mode, rootless, crate::netfiles::Place::detect())
+    })
+}
+
+/// Where `host-gateway` leads for a network mode, or why it cannot be found here.
+type GatewayRule<'a> = &'a dyn Fn(&NetworkMode) -> Result<crate::netfiles::HostGateway>;
+
+/// [`map_create`] with the `host-gateway` rule given.
+fn map_create_with(
+    body: &Value,
+    name: Option<&str>,
+    image: &Image,
+    gateway: GatewayRule<'_>,
+) -> Result<(Container, Vec<String>)> {
     let host = &body["HostConfig"];
     refuse_unsupported(host)?;
     let mut warnings = Vec::new();
@@ -147,6 +164,7 @@ pub fn map_create(
         &mut warnings,
     )?;
     crate::spec::check_networks(&network, &aliases, &extra)?;
+    c = names(c, host, &|| gateway(&network), &mut warnings)?;
     c = c.network(network);
     for alias in aliases {
         c = c.network_alias(alias);
@@ -250,6 +268,51 @@ pub fn map_create(
     Ok((c, warnings))
 }
 
+/// `ExtraHosts` and the DNS settings (`Dns`, `DnsSearch`, `DnsOptions`). An entry with
+/// `host-gateway` that cannot be found here (`gateway`) is left out with a warning:
+/// Compose files often have one, and the container works without it.
+fn names(
+    mut c: Container,
+    host: &Value,
+    gateway: &dyn Fn() -> Result<crate::netfiles::HostGateway>,
+    warnings: &mut Vec<String>,
+) -> Result<Container> {
+    use crate::netfiles::{ExtraHost, HOST_GATEWAY, HostAddress};
+    let entries = strings(&host["ExtraHosts"])
+        .iter()
+        .map(|e| ExtraHost::parse(e))
+        .collect::<Result<Vec<_>>>()?;
+    // Asked only when an entry needs it.
+    let refused = entries
+        .iter()
+        .any(|e| e.address == HostAddress::HostGateway)
+        .then(gateway)
+        .and_then(Result::err);
+    for entry in entries {
+        if let (HostAddress::HostGateway, Some(e)) = (entry.address, &refused) {
+            warnings.push(format!(
+                "{HOST_GATEWAY} is not available here ({}): extra host {} was not added; \
+                 give the host's address as NAME:IP",
+                e.why, entry.name
+            ));
+            continue;
+        }
+        c = c.add_host(entry);
+    }
+    for server in strings(&host["Dns"]) {
+        c = c.dns_server(crate::netfiles::parse_dns_server(&server)?);
+    }
+    for domain in strings(&host["DnsSearch"]) {
+        crate::netfiles::check_dns_search(&domain)?;
+        c = c.dns_search(domain);
+    }
+    for option in strings(&host["DnsOptions"]) {
+        crate::netfiles::check_dns_option(&option)?;
+        c = c.dns_option(option);
+    }
+    Ok(c)
+}
+
 /// Settings podbag cannot honor: an error now beats a container that is not what was
 /// asked for.
 fn refuse_unsupported(host: &Value) -> Result<()> {
@@ -306,10 +369,6 @@ fn ignored(body: &Value) -> Vec<String> {
         Value::Object(o) => !o.is_empty(),
     };
     for (key, what) in [
-        ("Dns", "dns servers"),
-        ("DnsSearch", "dns search domains"),
-        ("DnsOptions", "dns options"),
-        ("ExtraHosts", "extra hosts"),
         ("Ulimits", "ulimits"),
         ("ShmSize", "shm size"),
         ("Init", "init"),
@@ -709,11 +768,20 @@ mod tests {
         serde_json::to_value(c).unwrap()
     }
 
+    /// A create with `host_config`, where `host-gateway` can be found.
     fn create(host_config: Value) -> Result<(Container, Vec<String>)> {
-        map_create(
+        create_where(host_config, &|_| Ok(crate::netfiles::HostGateway::Bridge))
+    }
+
+    fn create_where(
+        host_config: Value,
+        gateway: GatewayRule<'_>,
+    ) -> Result<(Container, Vec<String>)> {
+        map_create_with(
             &json!({"Image": "alpine", "HostConfig": host_config}),
             None,
             &image(),
+            gateway,
         )
     }
 
@@ -1074,6 +1142,8 @@ mod tests {
             "HostConfig": {
                 "RestartPolicy": {"Name": "always"},
                 "Dns": ["1.1.1.1"],
+                "DnsSearch": ["lan"],
+                "DnsOptions": ["ndots:2"],
                 "ExtraHosts": ["a:1.2.3.4"],
                 "LogConfig": {"Type": "syslog"},
                 "Init": true,
@@ -1087,8 +1157,6 @@ mod tests {
         let (c, warnings) = map_create(&body, None, &image()).unwrap();
         let text = warnings.join("\n").to_lowercase();
         for word in [
-            "dns",
-            "extra hosts",
             "log driver",
             "init",
             "shm size",
@@ -1109,5 +1177,108 @@ mod tests {
         assert_eq!(fields(&c)["health"]["test"], json!(["CMD", "true"]));
         assert!(!text.contains("health"), "{warnings:?}");
         assert!(!text.contains("restart"), "{warnings:?}");
+        assert!(!text.contains("dns"), "{warnings:?}");
+        assert!(!text.contains("extra hosts"), "{warnings:?}");
+    }
+
+    #[test]
+    fn extra_hosts_and_dns_are_applied() {
+        let (c, warnings) = create(json!({
+            "ExtraHosts": ["db:10.1.2.3", "v6=[fd00::1]", "host.docker.internal:host-gateway"],
+            "Dns": ["9.9.9.9", "2620:fe::fe"],
+            "DnsSearch": ["corp.example", "."],
+            "DnsOptions": ["ndots:2", "edns0"]
+        }))
+        .unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let f = fields(&c);
+        assert_eq!(
+            f["extra_hosts"],
+            json!([
+                {"name": "db", "address": {"ip": "10.1.2.3"}},
+                {"name": "v6", "address": {"ip": "fd00::1"}},
+                {"name": "host.docker.internal", "address": "host_gateway"}
+            ])
+        );
+        assert_eq!(
+            f["dns"],
+            json!({
+                "servers": ["9.9.9.9", "2620:fe::fe"],
+                "search": ["corp.example", "."],
+                "options": ["ndots:2", "edns0"]
+            })
+        );
+    }
+
+    #[test]
+    fn an_unknown_host_gateway_is_left_out_with_a_warning() {
+        use crate::netfiles::{Place, host_gateway};
+        // A rootless bridge has no address for the host: only that entry goes.
+        let rootless = |mode: &NetworkMode| host_gateway(mode, true, Place::Linux);
+        let (c, warnings) = create_where(
+            json!({
+                "ExtraHosts": ["host.docker.internal:host-gateway", "db:10.1.2.3"],
+                "Dns": ["9.9.9.9"]
+            }),
+            &rootless,
+        )
+        .unwrap();
+        let f = fields(&c);
+        assert_eq!(
+            f["extra_hosts"],
+            json!([{"name": "db", "address": {"ip": "10.1.2.3"}}])
+        );
+        assert_eq!(f["dns"]["servers"], json!(["9.9.9.9"]));
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        let text = &warnings[0];
+        for part in [
+            "host-gateway",
+            "rootless",
+            "host.docker.internal",
+            "NAME:IP",
+        ] {
+            assert!(text.contains(part), "no {part} in {text}");
+        }
+        // The same with no network, and on WSL.
+        let (c, warnings) = create_where(
+            json!({"NetworkMode": "none", "ExtraHosts": ["gw:host-gateway"]}),
+            &|mode| host_gateway(mode, false, Place::Linux),
+        )
+        .unwrap();
+        assert_eq!(fields(&c)["extra_hosts"], json!([]));
+        assert!(warnings[0].contains("no network"), "{warnings:?}");
+        let (_, warnings) = create_where(json!({"ExtraHosts": ["gw:host-gateway"]}), &|mode| {
+            host_gateway(mode, false, Place::Wsl)
+        })
+        .unwrap();
+        assert!(warnings[0].contains("WSL"), "{warnings:?}");
+        // Where it can be found, it stays, and the rule is not asked without one.
+        let (c, warnings) = create_where(json!({"ExtraHosts": ["gw:host-gateway"]}), &|mode| {
+            host_gateway(mode, false, Place::Linux)
+        })
+        .unwrap();
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(fields(&c)["extra_hosts"][0]["address"], "host_gateway");
+        create_where(json!({"ExtraHosts": ["db:10.0.0.1"]}), &|_| {
+            panic!("not needed")
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn bad_extra_hosts_and_dns_are_refused() {
+        for host_config in [
+            json!({"ExtraHosts": ["db"]}),
+            json!({"ExtraHosts": [":10.0.0.1"]}),
+            json!({"ExtraHosts": ["db:999.0.0.1"]}),
+            json!({"Dns": ["dns.example"]}),
+            json!({"DnsSearch": ["bad domain"]}),
+            json!({"DnsOptions": ["ndots:2 edns0"]}),
+        ] {
+            match create(host_config.clone()) {
+                Err(e) => assert_eq!(e.kind, ErrorKind::InvalidInput, "{host_config}: {e}"),
+                Ok(_) => panic!("{host_config} was accepted"),
+            }
+        }
     }
 }

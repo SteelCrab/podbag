@@ -156,6 +156,20 @@ fn build(args: RunArgs) -> podbag::Result<Container> {
     for p in &args.publish {
         c = c.publish(podbag::network::parse_publish_arg(p)?);
     }
+    for entry in &args.add_host {
+        c = c.add_host(podbag::netfiles::ExtraHost::parse(entry)?);
+    }
+    for server in &args.dns {
+        c = c.dns_server(podbag::netfiles::parse_dns_server(server)?);
+    }
+    for domain in &args.dns_search {
+        podbag::netfiles::check_dns_search(domain)?;
+        c = c.dns_search(domain.clone());
+    }
+    for option in &args.dns_option {
+        podbag::netfiles::check_dns_option(option)?;
+        c = c.dns_option(option.clone());
+    }
     for v in &args.volume {
         c = c.mount(podbag::volume::parse_volume_arg(v)?);
     }

@@ -11,6 +11,8 @@ pub enum Resource {
     Services,
     Deployments,
     Claims,
+    /// OpenShift only: the public address of a Service.
+    Routes,
 }
 
 impl Resource {
@@ -20,6 +22,7 @@ impl Resource {
             Self::Services => "services",
             Self::Deployments => "deployments",
             Self::Claims => "claims",
+            Self::Routes => "routes",
         }
     }
 
@@ -27,6 +30,7 @@ impl Resource {
         match self {
             Self::Deployments => "deployments.apps",
             Self::Claims => "persistentvolumeclaims",
+            Self::Routes => "routes.route.openshift.io",
             _ => self.key(),
         }
     }
@@ -83,6 +87,47 @@ pub fn kube_contexts() -> Result<Vec<String>, String> {
         .lines()
         .map(str::to_owned)
         .collect())
+}
+
+/// Whether the context's API serves OpenShift Routes.
+pub fn kube_openshift(context: Option<&str>) -> Result<bool, String> {
+    openshift(context, kubectl)
+}
+
+fn openshift(
+    context: Option<&str>,
+    run: impl Fn(&[&str]) -> Result<Vec<u8>, String>,
+) -> Result<bool, String> {
+    // `api-versions` lists every API group, so "not OpenShift" (a missing group) and
+    // "cluster unreachable" (an error) stay apart. kubectl skips its discovery cache here.
+    let mut args = vec!["api-versions", "--request-timeout=10s"];
+    if let Some(context) = context {
+        args.extend(["--context", context]);
+    }
+    let versions = run(&args)?;
+    Ok(String::from_utf8_lossy(&versions)
+        .lines()
+        .any(|line| line.trim() == "route.openshift.io/v1"))
+}
+
+/// The address a Route publishes: https when it has TLS settings, http otherwise.
+pub fn route_url(route: &Value) -> Result<String, String> {
+    let spec = &route["spec"];
+    let host = spec["host"]
+        .as_str()
+        .filter(|host| super::cluster_migration::dns_name(host))
+        .ok_or("The Route has no valid host")?;
+    let path = spec["path"].as_str().unwrap_or("");
+    if !path.is_empty() && (!path.starts_with('/') || path.bytes().any(|b| b <= b' ' || b == 0x7f))
+    {
+        return Err("The Route has an invalid path".into());
+    }
+    let scheme = if spec["tls"].is_object() {
+        "https"
+    } else {
+        "http"
+    };
+    Ok(format!("{scheme}://{host}{path}"))
 }
 
 pub fn kube_list(
@@ -217,6 +262,63 @@ fn list_in(
     })
 }
 
+pub fn kube_counts(
+    context: Option<String>,
+    all_namespaces: bool,
+) -> Result<std::collections::BTreeMap<String, usize>, String> {
+    counts(context.as_deref(), all_namespaces, kubectl)
+}
+
+/// Counts per kind. `routes` is present only on OpenShift: other clusters reject that type.
+fn counts(
+    context: Option<&str>,
+    all_namespaces: bool,
+    run: impl Fn(&[&str]) -> Result<Vec<u8>, String>,
+) -> Result<std::collections::BTreeMap<String, usize>, String> {
+    let openshift = openshift(context, &run)?;
+    let resources = if openshift {
+        "pods,services,deployments.apps,persistentvolumeclaims,routes.route.openshift.io"
+    } else {
+        "pods,services,deployments.apps,persistentvolumeclaims"
+    };
+    let mut args = vec![
+        "get",
+        resources,
+        "--request-timeout=10s",
+        "--no-headers",
+        "-o",
+        "custom-columns=KIND:.kind",
+    ];
+    if let Some(c) = context {
+        args.extend(["--context", c]);
+    }
+    if all_namespaces {
+        args.push("--all-namespaces");
+    }
+    let bytes = run(&args)?;
+    let mut counts = std::collections::BTreeMap::from([
+        ("pods".into(), 0),
+        ("services".into(), 0),
+        ("deployments".into(), 0),
+        ("claims".into(), 0),
+    ]);
+    if openshift {
+        counts.insert("routes".into(), 0);
+    }
+    for line in String::from_utf8_lossy(&bytes).lines() {
+        let key = match line.trim() {
+            "Pod" => "pods",
+            "Service" => "services",
+            "Deployment" => "deployments",
+            "PersistentVolumeClaim" => "claims",
+            "Route" if openshift => "routes",
+            _ => continue,
+        };
+        *counts.get_mut(key).unwrap() += 1;
+    }
+    Ok(counts)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,18 +413,145 @@ mod tests {
     fn reads_a_configured_cluster() {
         let context = std::env::var("PODBAG_TEST_KUBE_CONTEXT").unwrap();
         assert!(kube_contexts().unwrap().contains(&context));
-        for kind in [
+        let mut kinds = vec![
             Resource::Pods,
             Resource::Services,
             Resource::Deployments,
             Resource::Claims,
-        ] {
+        ];
+        let openshift = kube_openshift(Some(&context)).unwrap();
+        if openshift {
+            kinds.push(Resource::Routes);
+        }
+        let counts = kube_counts(Some(context.clone()), false).unwrap();
+        assert_eq!(counts.contains_key("routes"), openshift);
+        for kind in kinds {
             assert_eq!(
                 kube_list(kind, false, Some(context.clone()))
                     .unwrap()
                     .context,
                 context
             );
+        }
+    }
+
+    #[test]
+    fn detects_openshift_by_the_route_api_group() {
+        for (output, expected) in [
+            ("apps/v1\nroute.openshift.io/v1\nv1\n", true),
+            ("apps/v1\nnetworking.k8s.io/v1\nv1\n", false),
+            ("route.openshift.io/v1beta1\n", false),
+        ] {
+            let openshift = openshift(Some("dev"), |args| {
+                assert_eq!(
+                    args,
+                    ["api-versions", "--request-timeout=10s", "--context", "dev"]
+                );
+                Ok(output.as_bytes().to_vec())
+            });
+            assert_eq!(openshift, Ok(expected));
+        }
+        let current = openshift(None, |args| {
+            assert_eq!(args, ["api-versions", "--request-timeout=10s"]);
+            Err("kubectl (exit status: 1): Unable to connect to the server".into())
+        });
+        assert!(current.unwrap_err().contains("Unable to connect"));
+    }
+
+    #[test]
+    fn lists_routes_by_their_full_api_name() {
+        let snapshot = list(Resource::Routes, false, Some("ocp"), |args| {
+            if args[0] == "config" {
+                return Ok(br#"{"name":"ocp","context":{"namespace":"shop"}}"#.to_vec());
+            }
+            assert_eq!(
+                args,
+                [
+                    "get",
+                    "routes.route.openshift.io",
+                    "--context",
+                    "ocp",
+                    "--request-timeout=10s",
+                    "-o",
+                    "json",
+                    "--namespace",
+                    "shop"
+                ]
+            );
+            Ok(br#"{"items":[{"kind":"Route","metadata":{"name":"web"}}]}"#.to_vec())
+        })
+        .unwrap();
+        assert_eq!(snapshot.items[0]["kind"], "Route");
+        assert_eq!(Resource::Routes.key(), "routes");
+    }
+
+    #[test]
+    fn counts_routes_only_on_openshift() {
+        let kinds = "Pod\nPod\nService\nDeployment\nRoute\nRoute\n";
+        for (versions, resources, routes) in [
+            (
+                "route.openshift.io/v1\nv1\n",
+                "pods,services,deployments.apps,persistentvolumeclaims,routes.route.openshift.io",
+                Some(2),
+            ),
+            (
+                "v1\n",
+                "pods,services,deployments.apps,persistentvolumeclaims",
+                None,
+            ),
+        ] {
+            let counts = counts(Some("dev"), true, |args| {
+                if args[0] == "api-versions" {
+                    return Ok(versions.as_bytes().to_vec());
+                }
+                assert_eq!(
+                    args,
+                    [
+                        "get",
+                        resources,
+                        "--request-timeout=10s",
+                        "--no-headers",
+                        "-o",
+                        "custom-columns=KIND:.kind",
+                        "--context",
+                        "dev",
+                        "--all-namespaces"
+                    ]
+                );
+                Ok(kinds.as_bytes().to_vec())
+            })
+            .unwrap();
+            assert_eq!(counts["pods"], 2);
+            assert_eq!(counts["claims"], 0);
+            assert_eq!(counts.get("routes").copied(), routes);
+        }
+        let unreachable = counts(None, false, |args| {
+            assert_eq!(args[0], "api-versions");
+            Err("Unable to connect".into())
+        });
+        assert_eq!(unreachable.unwrap_err(), "Unable to connect");
+    }
+
+    #[test]
+    fn builds_the_route_address_from_its_host_path_and_tls() {
+        let url = |spec: Value| route_url(&serde_json::json!({ "spec": spec }));
+        assert_eq!(
+            url(
+                serde_json::json!({"host": "shop.apps.example.com", "path": "/cart", "tls": {"termination": "edge"}})
+            ),
+            Ok("https://shop.apps.example.com/cart".into())
+        );
+        assert_eq!(
+            url(serde_json::json!({"host": "shop.apps.example.com"})),
+            Ok("http://shop.apps.example.com".into())
+        );
+        for spec in [
+            serde_json::json!({}),
+            serde_json::json!({"host": "javascript:alert(1)"}),
+            serde_json::json!({"host": "shop.example.com", "path": "cart"}),
+            serde_json::json!({"host": "shop.example.com", "path": "/a b"}),
+        ] {
+            assert!(url(spec).is_err());
         }
     }
 
@@ -346,42 +575,4 @@ mod tests {
         });
         assert_eq!(denied.err().as_deref(), Some("dev: Forbidden"));
     }
-}
-
-pub fn kube_counts(
-    context: Option<String>,
-    all_namespaces: bool,
-) -> Result<std::collections::BTreeMap<String, usize>, String> {
-    let mut args = vec![
-        "get",
-        "pods,services,deployments.apps,persistentvolumeclaims",
-        "--request-timeout=10s",
-        "--no-headers",
-        "-o",
-        "custom-columns=KIND:.kind",
-    ];
-    if let Some(ref c) = context {
-        args.extend(["--context", c]);
-    }
-    if all_namespaces {
-        args.push("--all-namespaces");
-    }
-    let bytes = kubectl(&args)?;
-    let mut counts = std::collections::BTreeMap::from([
-        ("pods".into(), 0),
-        ("services".into(), 0),
-        ("deployments".into(), 0),
-        ("claims".into(), 0),
-    ]);
-    for line in String::from_utf8_lossy(&bytes).lines() {
-        let key = match line.trim() {
-            "Pod" => "pods",
-            "Service" => "services",
-            "Deployment" => "deployments",
-            "PersistentVolumeClaim" => "claims",
-            _ => continue,
-        };
-        *counts.get_mut(key).unwrap() += 1;
-    }
-    Ok(counts)
 }

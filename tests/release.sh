@@ -30,6 +30,7 @@ for arch in x86_64 aarch64; do
   put "podbag-$arch-linux" podbag
   put "podbag-$arch-macos" "podbag-$arch-macos"
   put "podbag-desktop-$arch-macos" "podbag-desktop-$arch-macos.zip"
+  put "podbag-desktop-$arch-macos" "podbag-desktop-$arch-macos.dmg"
   put "podbag-$arch-windows" podbag.exe
   put "podbag-vm-guest-$arch" Image
 done
@@ -52,8 +53,10 @@ podbag-aarch64-macos
 podbag-aarch64-windows.exe
 podbag-desktop-9.8.7-1.aarch64.rpm
 podbag-desktop-9.8.7-1.x86_64.rpm
+podbag-desktop-aarch64-macos.dmg
 podbag-desktop-aarch64-macos.zip
 podbag-desktop-aarch64-windows.msi
+podbag-desktop-x86_64-macos.dmg
 podbag-desktop-x86_64-macos.zip
 podbag-desktop-x86_64-windows.msi
 podbag-desktop_9.8.7-1_amd64.deb
@@ -67,7 +70,7 @@ grep -Fx 'podbag-desktop-aarch64-windows/Podbag Desktop_9.8.7_arm64_en-US.msi' \
   "$work/out/podbag-desktop-aarch64-windows.msi" > /dev/null
 echo 'PASS  Name every release file the way installers and updates look for it'
 
-[ "$(wc -l < "$work/out/SHA256SUMS")" -eq 15 ]
+[ "$(wc -l < "$work/out/SHA256SUMS")" -eq 17 ]
 if command -v sha256sum > /dev/null 2>&1; then
   (cd "$work/out" && sha256sum -c --quiet SHA256SUMS)
 else
