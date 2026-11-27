@@ -145,3 +145,36 @@ fn pid_one_runs_the_cli() {
     );
     assert!(String::from_utf8_lossy(&out.stdout).contains("podbag"));
 }
+
+// On macOS and Windows the command runs where the engine runs (the VM, WSL).
+#[cfg(target_os = "linux")]
+#[test]
+fn system_compression_saves_the_mode_and_shows_it() {
+    let config = tempfile::tempdir().unwrap();
+    let run = |args: &[&str]| {
+        let out = Command::new(BIN)
+            .arg("system")
+            .arg("compression")
+            .args(args)
+            .env("PODBAG_CONFIG_DIR", config.path())
+            .env_remove("PODBAG_IMAGE_COMPRESSION")
+            .env_remove("PODBAG_COMPRESS_IDLE_AFTER")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let saved = r#"{"mode":"idle","after":172800}"#;
+    assert_eq!(run(&["idle", "--after", "2d", "--json"]), saved);
+    assert_eq!(run(&["--json"]), saved);
+    assert_eq!(run(&["off"]), "Image compression: off");
+    let text = std::fs::read_to_string(config.path().join("config.toml")).unwrap();
+    assert_eq!(
+        text,
+        "compress_idle_after = \"2d\"\nimage_compression = \"off\"\n"
+    );
+}

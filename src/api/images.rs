@@ -408,17 +408,39 @@ pub(super) fn is_this_platform(p: &str) -> bool {
 
 /// Every image name, grouped by image (digest).
 fn stored(ctx: &Ctx) -> crate::Result<BTreeMap<String, (Vec<String>, ImageRecord)>> {
+    match Store::open_existing(&ctx.dirs) {
+        Some(store) => by_image(&store),
+        None => Ok(BTreeMap::new()),
+    }
+}
+
+fn by_image(store: &Store) -> crate::Result<BTreeMap<String, (Vec<String>, ImageRecord)>> {
     let mut images: BTreeMap<String, (Vec<String>, ImageRecord)> = BTreeMap::new();
-    if let Some(store) = Store::open_existing(&ctx.dirs) {
-        for (name, record, _) in store.list()? {
-            images
-                .entry(record.digest.clone())
-                .or_insert_with(|| (Vec::new(), record))
-                .0
-                .push(name);
-        }
+    for (name, record, _) in store.list()? {
+        images
+            .entry(record.digest.clone())
+            .or_insert_with(|| (Vec::new(), record))
+            .0
+            .push(name);
     }
     Ok(images)
+}
+
+/// podbag's own field for an image with compressed objects: their size on disk and the
+/// plain size, over all the image's files. `None` (no field) for any other image, and
+/// when the numbers cannot be read: the listing does not fail for them. No lock is
+/// taken: `docker images` never waits for a removal or a freeze.
+fn compression_field(store: &Store, digest: &str) -> Option<Value> {
+    let stats = store.compression_of(digest).ok()??;
+    Some(json!({"Size": stats.stored, "OriginalSize": stats.original}))
+}
+
+/// Add `PodbagCompression` to an image's JSON when there is one.
+fn with_compression(mut image: Value, compression: Option<Value>) -> Value {
+    if let (Some(c), Some(map)) = (compression, image.as_object_mut()) {
+        map.insert("PodbagCompression".to_string(), c);
+    }
+    image
 }
 
 /// Docker's RepoTags and RepoDigests for these full names.
@@ -495,7 +517,10 @@ fn list(req: &Request, ctx: &Ctx) -> Reply {
     if wants("dangling", "true") || wants("dangling", "1") {
         return Reply::Json(200, json!([]));
     }
-    let images = match stored(ctx) {
+    let Some(store) = Store::open_existing(&ctx.dirs) else {
+        return Reply::Json(200, json!([]));
+    };
+    let images = match by_image(&store) {
         Ok(i) => i,
         Err(e) => return reply_error(&e),
     };
@@ -512,21 +537,20 @@ fn list(req: &Request, ctx: &Ctx) -> Reply {
             continue;
         }
         let (tags, digests) = repo_names(&names, &digest);
-        out.push((
-            record.created,
-            json!({
-                "Id": digest,
-                "ParentId": "",
-                "RepoTags": tags,
-                "RepoDigests": digests,
-                "Created": record.created,
-                "Size": record.size,
-                "SharedSize": -1,
-                "VirtualSize": record.size,
-                "Labels": record.config.labels,
-                "Containers": -1,
-            }),
-        ));
+        let compression = compression_field(&store, &digest);
+        let image = json!({
+            "Id": digest,
+            "ParentId": "",
+            "RepoTags": tags,
+            "RepoDigests": digests,
+            "Created": record.created,
+            "Size": record.size,
+            "SharedSize": -1,
+            "VirtualSize": record.size,
+            "Labels": record.config.labels,
+            "Containers": -1,
+        });
+        out.push((record.created, with_compression(image, compression)));
     }
     // Newest first, like Docker.
     out.sort_by(|a, b| b.0.cmp(&a.0));
@@ -574,6 +598,11 @@ fn config_json(c: &ImageConfig) -> Value {
 fn find(ctx: &Ctx, name: &str) -> Result<(ImageRecord, Vec<String>), Reply> {
     let missing = || message(404, format!("No such image: {name}"));
     let store = Store::open_existing(&ctx.dirs).ok_or_else(missing)?;
+    find_in(&store, name)
+}
+
+fn find_in(store: &Store, name: &str) -> Result<(ImageRecord, Vec<String>), Reply> {
+    let missing = || message(404, format!("No such image: {name}"));
     let (_, record) = store.find(name).map_err(|e| match e.kind {
         crate::ErrorKind::NotFound => missing(),
         _ => reply_error(&e),
@@ -590,32 +619,34 @@ fn find(ctx: &Ctx, name: &str) -> Result<(ImageRecord, Vec<String>), Reply> {
 
 /// `GET /images/{name}/json`.
 fn inspect(ctx: &Ctx, name: &str) -> Reply {
-    let (record, names) = match find(ctx, name) {
+    let Some(store) = Store::open_existing(&ctx.dirs) else {
+        return message(404, format!("No such image: {name}"));
+    };
+    let (record, names) = match find_in(&store, name) {
         Ok(found) => found,
         Err(reply) => return reply,
     };
+    let compression = compression_field(&store, &record.digest);
     let (tags, digests) = repo_names(&names, &record.digest);
-    Reply::Json(
-        200,
-        json!({
-            "Id": record.digest,
-            "RepoTags": tags,
-            "RepoDigests": digests,
-            "Parent": "",
-            "Comment": "",
-            "Created": rfc3339(Some(record.created)),
-            "DockerVersion": "",
-            "Author": "",
-            "Config": config_json(&record.config),
-            "Architecture": docker_arch(std::env::consts::ARCH),
-            "Os": "linux",
-            "Size": record.size,
-            "VirtualSize": record.size,
-            "GraphDriver": {"Name": "podbag", "Data": null},
-            "RootFS": {"Type": "layers", "Layers": record.diff_ids},
-            "Metadata": {"LastTagTime": "0001-01-01T00:00:00Z"},
-        }),
-    )
+    let image = json!({
+        "Id": record.digest,
+        "RepoTags": tags,
+        "RepoDigests": digests,
+        "Parent": "",
+        "Comment": "",
+        "Created": rfc3339(Some(record.created)),
+        "DockerVersion": "",
+        "Author": "",
+        "Config": config_json(&record.config),
+        "Architecture": docker_arch(std::env::consts::ARCH),
+        "Os": "linux",
+        "Size": record.size,
+        "VirtualSize": record.size,
+        "GraphDriver": {"Name": "podbag", "Data": null},
+        "RootFS": {"Type": "layers", "Layers": record.diff_ids},
+        "Metadata": {"LastTagTime": "0001-01-01T00:00:00Z"},
+    });
+    Reply::Json(200, with_compression(image, compression))
 }
 
 /// `DELETE /images/{name}`: `[{"Untagged": …}, {"Deleted": …}]`.
@@ -835,6 +866,19 @@ mod tests {
         for key in ["before", "since", "until", "bogus"] {
             assert!(check_list_filters(&keys(key)).is_err(), "{key}");
         }
+    }
+
+    #[test]
+    fn only_a_compressed_image_gets_the_podbag_field() {
+        let c = json!({"Size": 1, "OriginalSize": 2});
+        assert_eq!(
+            with_compression(json!({"Id": "x"}), Some(c.clone())),
+            json!({"Id": "x", "PodbagCompression": c})
+        );
+        assert_eq!(
+            with_compression(json!({"Id": "x"}), None),
+            json!({"Id": "x"})
+        );
     }
 
     #[test]
