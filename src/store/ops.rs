@@ -274,7 +274,7 @@ mod linux_ops {
                 let config = config::load(dirs)?;
                 store.use_mount_method(rootless, config.image_mount);
                 store.use_compression(config.image_compression, config.compress_idle_after);
-                let mut input = std::io::stdin().lock();
+                let mut input = crate::helper::FramedInput::new(std::io::stdin().lock());
                 to_json(&store.load(&mut input, config.store_limit, &|| images_in_use(dirs))?)
             }
             StoreOp::Import { options } => {
@@ -282,7 +282,7 @@ mod linux_ops {
                 let config = config::load(dirs)?;
                 store.use_mount_method(rootless, config.image_mount);
                 store.use_compression(config.image_compression, config.compress_idle_after);
-                let mut input = std::io::stdin().lock();
+                let mut input = crate::helper::FramedInput::new(std::io::stdin().lock());
                 to_json(&store.import(&mut input, options, config.store_limit, &|| {
                     images_in_use(dirs)
                 })?)

@@ -741,6 +741,53 @@ mod tests {
         b.into_inner().unwrap()
     }
 
+    /// A transfer that sent a whole tar and then failed must not name an image: the
+    /// helper gets its input through the framing that `Image::import` uses.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_import_transfer_keeps_the_old_tag() {
+        struct Failing(Vec<u8>);
+        impl Read for Failing {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.0.is_empty() {
+                    return Err(std::io::Error::other("the download broke"));
+                }
+                let count = self.0.len().min(buf.len());
+                buf[..count].copy_from_slice(&self.0[..count]);
+                self.0.drain(..count);
+                Ok(count)
+            }
+        }
+        let options = || ImportOptions {
+            name: Some("demo:latest".to_string()),
+            ..ImportOptions::default()
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let store = open(&tmp);
+        let mut first = Vec::new();
+        crate::helper::send_framed(&mut &tar_of(&[("old", b"1")])[..], &mut first).unwrap();
+        let old = store
+            .import(
+                &mut crate::helper::FramedInput::new(&first[..]),
+                options(),
+                u64::MAX,
+                &none,
+            )
+            .unwrap();
+
+        let mut cut = Vec::new();
+        let sent = crate::helper::send_framed(&mut Failing(tar_of(&[("new", b"2")])), &mut cut);
+        assert!(sent.is_err());
+        let result = store.import(
+            &mut crate::helper::FramedInput::new(&cut[..]),
+            options(),
+            u64::MAX,
+            &none,
+        );
+        assert!(result.is_err(), "{result:?}");
+        assert_eq!(store.find("demo:latest").unwrap().1.digest, old);
+    }
+
     fn digest(data: &[u8]) -> String {
         format!("sha256:{}", sha256_hex(data))
     }

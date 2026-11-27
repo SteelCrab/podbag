@@ -639,7 +639,8 @@ pub fn run_store_op(
     .wait_done()
 }
 
-/// [`run_store_op`] with `input` on the helper's stdin.
+/// [`run_store_op`] with `input` on the helper's stdin, framed by [`send_framed`]: the
+/// helper reads it through [`FramedInput`], so a failed `input` never looks complete.
 pub fn run_store_op_with_input(
     op: &crate::store::ops::StoreOp,
     input: &mut dyn std::io::Read,
@@ -653,8 +654,8 @@ pub fn run_store_op_with_input(
         None,
     )?;
     let copied = match helper.take_stdin() {
-        Some(mut stdin) => std::io::copy(input, &mut stdin),
-        None => Ok(0),
+        Some(mut stdin) => send_framed(input, &mut stdin),
+        None => Ok(()),
     };
     // A helper that ended (done, or failed) closed its end: its result tells.
     let result = helper.wait_done();
@@ -665,6 +666,80 @@ pub fn run_store_op_with_input(
             "send all of it",
         )),
         _ => result,
+    }
+}
+
+/// Copy `input` to `out` in frames: a 4-byte big-endian length, then that many bytes. An
+/// empty frame ends the input. It is sent only after `input` ended normally, so a reader
+/// that fails (or a sender that dies) leaves the input without its end.
+pub(crate) fn send_framed(
+    input: &mut dyn std::io::Read,
+    out: &mut dyn std::io::Write,
+) -> std::io::Result<()> {
+    let mut buffer = vec![0; 64 * 1024];
+    loop {
+        let count = match input.read(&mut buffer) {
+            Ok(count) => count,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        out.write_all(&(count as u32).to_be_bytes())?;
+        if count == 0 {
+            return out.flush();
+        }
+        out.write_all(&buffer[..count])?;
+    }
+}
+
+/// The input that [`send_framed`] wrote. It ends at the empty frame. An input that ends
+/// before it is an error, so a store job does not take a failed transfer as complete.
+pub(crate) struct FramedInput<R> {
+    inner: R,
+    /// Bytes left in the current frame.
+    left: u32,
+    ended: bool,
+}
+
+impl<R: std::io::Read> FramedInput<R> {
+    pub(crate) fn new(inner: R) -> FramedInput<R> {
+        FramedInput {
+            inner,
+            left: 0,
+            ended: false,
+        }
+    }
+}
+
+impl<R: std::io::Read> std::io::Read for FramedInput<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let cut = || {
+            std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "the input stopped before its end",
+            )
+        };
+        while self.left == 0 {
+            if self.ended || buf.is_empty() {
+                return Ok(0);
+            }
+            let mut length = [0; 4];
+            self.inner.read_exact(&mut length).map_err(|e| {
+                if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                    cut()
+                } else {
+                    e
+                }
+            })?;
+            self.left = u32::from_be_bytes(length);
+            self.ended = self.left == 0;
+        }
+        let wanted = buf.len().min(self.left as usize);
+        let count = self.inner.read(&mut buf[..wanted])?;
+        if count == 0 {
+            return Err(cut());
+        }
+        self.left -= count as u32;
+        Ok(count)
     }
 }
 
@@ -920,6 +995,55 @@ mod tests {
 #[cfg(test)]
 mod done_tests {
     use super::*;
+
+    /// Gives `data`, then fails.
+    struct Failing(&'static [u8]);
+
+    impl std::io::Read for Failing {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.0.is_empty() {
+                return Err(std::io::Error::other("the source broke"));
+            }
+            let count = self.0.len().min(buf.len());
+            buf[..count].copy_from_slice(&self.0[..count]);
+            self.0 = &self.0[count..];
+            Ok(count)
+        }
+    }
+
+    fn read_all(framed: &[u8]) -> std::io::Result<Vec<u8>> {
+        let mut out = Vec::new();
+        std::io::Read::read_to_end(&mut FramedInput::new(framed), &mut out)?;
+        Ok(out)
+    }
+
+    #[test]
+    fn framed_input_arrives_whole() {
+        let data: Vec<u8> = (0..200_000u32).map(|i| i as u8).collect();
+        let mut framed = Vec::new();
+        send_framed(&mut data.as_slice(), &mut framed).unwrap();
+        assert_eq!(read_all(&framed).unwrap(), data);
+        let mut empty = Vec::new();
+        send_framed(&mut std::io::empty(), &mut empty).unwrap();
+        assert_eq!(read_all(&empty).unwrap(), b"");
+    }
+
+    #[test]
+    fn a_failed_source_never_looks_complete() {
+        let mut framed = Vec::new();
+        let sent = send_framed(&mut Failing(b"a complete tar"), &mut framed);
+        assert_eq!(sent.unwrap_err().to_string(), "the source broke");
+        // The pipe closes here. The helper must see an error, not a normal end.
+        let e = read_all(&framed).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::UnexpectedEof);
+        // Cut inside a frame, or inside a length.
+        let mut whole = Vec::new();
+        send_framed(&mut &b"data"[..], &mut whole).unwrap();
+        for cut in [2, 6, whole.len() - 1] {
+            let e = read_all(&whole[..cut]).unwrap_err();
+            assert_eq!(e.kind(), std::io::ErrorKind::UnexpectedEof);
+        }
+    }
 
     #[test]
     fn scope_command_line() {
