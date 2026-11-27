@@ -3,6 +3,8 @@
 use crate::cgroup::{Budget, parse_budget};
 use crate::paths::Dirs;
 use crate::{Error, ErrorKind, Result};
+use std::fs::File;
+use std::path::{Path, PathBuf};
 
 /// The default image store limit.
 pub const DEFAULT_STORE_LIMIT: u64 = 10 << 30;
@@ -138,22 +140,86 @@ fn parse_age(text: &str) -> std::result::Result<u64, String> {
 /// override it.
 pub fn load(dirs: &Dirs) -> Result<Config> {
     let path = dirs.config.join("config.toml");
-    let mut config = match std::fs::read_to_string(&path) {
-        Ok(text) => parse(&text).map_err(|mut e| {
+    let mut config = match read_text(&path)? {
+        Some(text) => parse(&text).map_err(|mut e| {
             e.what = format!("invalid settings in {}", path.display());
             e
         })?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config::default(),
-        Err(e) => {
-            return Err(Error::io(
-                format!("cannot read {}", path.display()),
-                &e,
-                "check the file permissions",
-            ));
-        }
+        None => Config::default(),
     };
     apply_overrides(&mut config, |k| std::env::var(k).ok())?;
     Ok(config)
+}
+
+#[derive(Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct Document {
+    pub path: PathBuf,
+    /// None means the configuration file has not been created.
+    pub text: Option<String>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+pub struct Edit {
+    pub original: Option<String>,
+    pub text: String,
+}
+
+pub fn document(dirs: &Dirs) -> Result<Document> {
+    let path = dirs.config.join("config.toml");
+    let text = read_text(&path)?;
+    Ok(Document { path, text })
+}
+
+pub fn apply_edit(dirs: &Dirs, edit: Edit) -> Result<Document> {
+    parse(&edit.text)?;
+    let _lock = lock_config(dirs)?;
+    let current = document(dirs)?;
+    if current.text != edit.original {
+        return Err(Error::new(
+            ErrorKind::Conflict,
+            "cannot save the engine configuration",
+            "config.toml changed after it was opened",
+            "reload the file and apply your edits again",
+        ));
+    }
+    write_text(&current.path, &edit.text)?;
+    Ok(Document {
+        path: current.path,
+        text: Some(edit.text),
+    })
+}
+
+fn read_text(path: &Path) -> Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(Error::io(
+            format!("cannot read {}", path.display()),
+            &e,
+            "check the file permissions",
+        )),
+    }
+}
+
+fn lock_config(dirs: &Dirs) -> Result<File> {
+    let result = || -> std::io::Result<File> {
+        std::fs::create_dir_all(&dirs.config)?;
+        let file = File::options()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(dirs.config.join("config.lock"))?;
+        file.lock()?;
+        Ok(file)
+    };
+    result().map_err(|e| {
+        Error::io(
+            "cannot lock the engine configuration",
+            &e,
+            "check the configuration directory permissions",
+        )
+    })
 }
 
 /// Set `key = "value"` in `<config>/config.toml`, which is made when missing. The line that
@@ -161,18 +227,9 @@ pub fn load(dirs: &Dirs) -> Result<Config> {
 /// end; every other line stays as it is. A value [`parse`] refuses changes nothing. The
 /// file is replaced at once: a reader sees the old text or the new one.
 pub fn set_value(dirs: &Dirs, key: &str, value: &str) -> Result<()> {
-    let path = dirs.config.join("config.toml");
-    let old = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => {
-            return Err(Error::io(
-                format!("cannot read {}", path.display()),
-                &e,
-                "check the file permissions",
-            ));
-        }
-    };
+    let _lock = lock_config(dirs)?;
+    let Document { path, text } = document(dirs)?;
+    let old = text.unwrap_or_default();
     let setting = format!("{key} = \"{value}\"");
     let sets_key = |line: &str| {
         strip_comment(line)
@@ -207,18 +264,31 @@ pub fn set_value(dirs: &Dirs, key: &str, value: &str) -> Result<()> {
         e.what = format!("invalid settings in {}", path.display());
         e
     })?;
+    write_text(&path, &text)
+}
+
+fn write_text(path: &Path, text: &str) -> Result<()> {
     let write = || -> std::io::Result<()> {
-        std::fs::create_dir_all(&dirs.config)?;
+        let resolved = if path
+            .symlink_metadata()
+            .is_ok_and(|metadata| metadata.is_symlink())
+        {
+            Some(path.canonicalize()?)
+        } else {
+            None
+        };
+        let path = resolved.as_deref().unwrap_or(path);
+        let dir = path.parent().expect("a config file has a directory");
         // A new file gets the mode any new file gets (the umask applies), not 0600.
         #[cfg(unix)]
         let mut tmp = tempfile::Builder::new()
             .permissions(std::os::unix::fs::PermissionsExt::from_mode(0o666))
-            .tempfile_in(&dirs.config)?;
+            .tempfile_in(dir)?;
         #[cfg(not(unix))]
-        let mut tmp = tempfile::NamedTempFile::new_in(&dirs.config)?;
+        let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
         std::io::Write::write_all(&mut tmp, text.as_bytes())?;
         // The file keeps the mode it had: this replaces the user's whole file.
-        match std::fs::metadata(&path) {
+        match std::fs::metadata(path) {
             Ok(old) => tmp.as_file().set_permissions(old.permissions())?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e),
@@ -226,7 +296,7 @@ pub fn set_value(dirs: &Dirs, key: &str, value: &str) -> Result<()> {
         // On disk before it takes the old file's place: after a crash an empty file would
         // read as all defaults, and every other setting would be lost without an error.
         tmp.as_file().sync_all()?;
-        tmp.persist(&path)?;
+        tmp.persist(path)?;
         Ok(())
     };
     write().map_err(|e| {
@@ -409,6 +479,65 @@ pub fn parse_size(s: &str) -> Result<u64> {
 mod tests {
     use super::*;
     use crate::ErrorKind;
+
+    fn isolated_config(directory: &Path) -> Dirs {
+        Dirs {
+            config: directory.join("conf"),
+            data: directory.join("data"),
+            runtime: directory.join("run"),
+        }
+    }
+
+    #[test]
+    fn an_engine_config_edit_keeps_its_text_and_refuses_stale_or_invalid_input() {
+        let temp = tempfile::tempdir().unwrap();
+        let dirs = isolated_config(temp.path());
+        let expected = "# Keep this comment\r\n\r\nembedded_dns = true\r\n";
+        assert!(document(&dirs).unwrap().text.is_none());
+        let edit = |original: Option<&str>, text: &str| Edit {
+            original: original.map(str::to_owned),
+            text: text.to_owned(),
+        };
+        let created = apply_edit(&dirs, edit(None, expected)).unwrap();
+        assert_eq!(created.text.as_deref(), Some(expected));
+        assert_eq!(document(&dirs).unwrap(), created);
+        let invalid =
+            apply_edit(&dirs, edit(Some(expected), "embedded_dns = invalid")).unwrap_err();
+        assert_eq!(invalid.kind, ErrorKind::InvalidInput);
+        assert_eq!(document(&dirs).unwrap(), created);
+
+        set_value(&dirs, "keeper", "false").unwrap();
+        let concurrent = document(&dirs).unwrap();
+        let stale = apply_edit(&dirs, edit(Some(expected), "embedded_dns = false")).unwrap_err();
+        assert_eq!(stale.kind, ErrorKind::Conflict);
+        assert_eq!(document(&dirs).unwrap(), concurrent);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saving_a_symlinked_config_keeps_the_link() {
+        let temp = tempfile::tempdir().unwrap();
+        let dirs = isolated_config(temp.path());
+        std::fs::create_dir(&dirs.config).unwrap();
+        let target = temp.path().join("settings.toml");
+        std::fs::write(&target, "# existing file\n").unwrap();
+        let link = dirs.config.join("config.toml");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let saved = apply_edit(
+            &dirs,
+            Edit {
+                original: Some("# existing file\n".into()),
+                text: "keeper = false\n".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(saved.path, link);
+        assert_eq!(std::fs::read_link(&link).unwrap(), target);
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "keeper = false\n"
+        );
+    }
 
     #[test]
     fn parses_sizes() {

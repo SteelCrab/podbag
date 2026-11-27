@@ -695,6 +695,18 @@ fn compression(
     cli::compression(&state.podbag, mode.as_deref())
 }
 
+#[tauri::command(async)]
+fn engine_config(
+    state: State<'_, AppState>,
+    token: u64,
+    request: cli::EngineConfigRequest,
+) -> Result<Option<podbag::config::Document>, String> {
+    if state.session(token)?.target.choice != Choice::Podbag {
+        return Err("Engine configuration requires the local Podbag engine".into());
+    }
+    cli::engine_config(&state.podbag, request)
+}
+
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct VmResources {
@@ -1446,6 +1458,7 @@ fn main() {
             import_images,
             vm_resources,
             compression,
+            engine_config,
             take_star_prompt,
             terminal_command,
             install_terminal_command,

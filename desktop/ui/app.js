@@ -1470,6 +1470,85 @@ function startupSettings() {
     h("label", { class: "check" }, toggle, t("settings.launchAtLogin")), status);
 }
 
+function engineConfigurationSetting() {
+  if (!S.connection?.local || !isPodbag()) return null;
+  const edit = button("inspect", t("engineConfig.edit"), openEngineConfiguration);
+  edit.id = "edit-engine-configuration";
+  return h("div", { class: "setting-row", ...searchableSetting("engineConfig.title", "settings.search.terms.engineConfig") },
+    h("div", {}, h("span", { text: t("engineConfig.title") }),
+      h("p", { class: "hint", text: t("engineConfig.localHint") })), edit);
+}
+
+function openEngineConfiguration() {
+  const heading = h("h2", { id: "engine-config-heading", text: t("engineConfig.title") });
+  const dialog = h("dialog", { id: "engine-config-editor", "aria-labelledby": heading.id });
+  const path = h("p", { class: "mono", hidden: true });
+  const status = h("p", { class: "engine-config-status", role: "status", text: t("engineConfig.loading") });
+  const editor = h("textarea", { id: "engine-config-text", rows: 12, spellcheck: "false", disabled: true });
+  const endpoint = S.engine?.endpoint;
+  let original = null;
+  let loaded = false;
+  let busy = true;
+  let saved = "";
+  const close = button(null, t("engineConfig.close"), () => dialog.close());
+  const validate = button(null, t("engineConfig.check"), () => perform("check"));
+  const save = h("button", { type: "submit", class: "button primary", text: t("settings.apply") });
+
+  function controls() {
+    editor.disabled = busy || !loaded;
+    validate.disabled = editor.disabled;
+    save.disabled = editor.disabled || editor.value === saved;
+  }
+
+  function setStatus(text, error = false) {
+    status.textContent = text;
+    status.classList.toggle("error-text", error);
+  }
+
+  async function perform(action) {
+    if (action !== "read" && (busy || !loaded)) return;
+    if (!S.connection?.local || !isPodbag() || S.engine?.endpoint !== endpoint) {
+      setStatus(t("engineConfig.connectionChanged"), true);
+      return;
+    }
+    const text = editor.value;
+    // Textareas display LF. Keep CRLF for existing files that use it consistently.
+    const contents = original?.includes("\r\n") && !original.replaceAll("\r\n", "").includes("\n")
+      ? text.replaceAll("\n", "\r\n") : text;
+    const request = action === "save" ? { action, edit: { original, text: contents } }
+      : action === "check" ? { action, text: contents } : { action };
+    busy = true;
+    controls();
+    setStatus(t("engineConfig.loading"));
+    try {
+      const document = await API.engineConfig(request);
+      if (document) {
+        original = document.text;
+        editor.value = original ?? "";
+        saved = editor.value;
+        path.textContent = document.path;
+        path.hidden = false;
+        loaded = true;
+      }
+      setStatus(action === "save" ? t("engineConfig.saved") : action === "check" ? t("engineConfig.valid") : "");
+    } catch (error) {
+      setStatus(String(error), true);
+    } finally {
+      busy = false;
+      controls();
+    }
+  }
+
+  editor.oninput = controls;
+  dialog.append(h("form", { onsubmit: (event) => { event.preventDefault(); perform("save"); } },
+    heading, path, h("label", { for: editor.id, text: t("engineConfig.contents") }), editor, status,
+    h("div", { class: "buttons" }, close, validate, save)));
+  dialog.addEventListener("close", () => dialog.remove(), { once: true });
+  document.body.append(dialog);
+  dialog.showModal();
+  perform("read");
+}
+
 async function renderSettings(main) {
   if (!S.languageNames) S.languageNames = await I18N.names();
   if (S.view !== "settings") return;
@@ -1509,6 +1588,7 @@ async function renderSettings(main) {
         h("p", { class: "hint", text: t("settings.engineNote") }),
         h("dl", { class: "fields" },
           field(t("settings.socket"), e.endpoint, "mono"), field(t("settings.version"), e.version)),
+        engineConfigurationSetting(),
         dockerSettings(),
         compressionSetting()),
       settingDetails("vm-settings", "vm", "vm"),

@@ -184,6 +184,7 @@
       endpoint: selected === "kiri" ? "unix:///Users/me/.kiri/run/docker.sock" : selected, vm: null, version: selected });
   }
   let launchAtLogin = false;
+  let engineConfigText = "# Local engine settings\nstore_limit = \"10GiB\"\nembedded_dns = true\n";
   // podbag system compression --json. URL: compression=idle (already on), compression=broken
   // (a reply without a mode), override (an environment setting keeps the mode as it is),
   // after (seconds an image stays unused; 0: at once), vm-error (vm status fails), busy
@@ -233,6 +234,15 @@
       return { running: modelRunner, version: modelRunner ? "0.40.17" : "", models: modelRunner ? models.map((item) => ({ ...item })) : [] };
     },
     engine: () => engine,
+    engine_config: ({ request }) => {
+      if ((request.edit?.text ?? request.text)?.includes("invalid_setting")) throw "line 2: unknown setting invalid_setting";
+      if (request.action === "check") return null;
+      if (request.action === "save") {
+        if (request.edit.original !== engineConfigText) throw "config.toml changed after it was opened";
+        engineConfigText = request.edit.text;
+      }
+      return { path: "/home/podbag/.config/podbag/config.toml", text: engineConfigText };
+    },
     list: ({ kind }) => lists[kind],
     kube_list: ({ kind, allNamespaces, context }) => ({
       context: context || "dev", namespace: "default",
@@ -410,6 +420,10 @@
       },
       tutorials: () => app.go("tutorials"),
       "settings-vm": () => app.openSettingsSection("vm-settings"),
+      "settings-engine-config": async () => {
+        await app.openSettingsSection("engine-settings");
+        document.getElementById("edit-engine-configuration")?.click();
+      },
       "settings-cli": () => app.openSettingsSection("terminal-command"),
       "settings-updates": app.openUpdates,
       "update-source": app.openUpdates,

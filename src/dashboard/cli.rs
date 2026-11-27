@@ -41,16 +41,38 @@ impl Ran {
 
 /// Run the program with `args`; stdin is empty, so it never waits for an answer.
 pub fn run(podbag: &Path, args: &[&str]) -> Result<Ran, String> {
+    run_with_input(podbag, args, None)
+}
+
+fn run_with_input(podbag: &Path, args: &[&str], input: Option<&[u8]>) -> Result<Ran, String> {
+    use std::io::Write;
+    use std::process::Stdio;
+
     let mut cmd = std::process::Command::new(podbag);
-    cmd.args(args).stdin(std::process::Stdio::null());
+    cmd.args(args);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000);
     }
-    let out = cmd
-        .output()
-        .map_err(|e| format!("{}: {e}", podbag.display()))?;
+    let process_error = |e: std::io::Error| format!("{}: {e}", podbag.display());
+    let out = match input {
+        Some(input) => {
+            let mut child = cmd
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(process_error)?;
+            let sent = child.stdin.take().expect("piped stdin").write_all(input);
+            let out = child.wait_with_output().map_err(process_error)?;
+            if out.status.success() {
+                sent.map_err(process_error)?;
+            }
+            out
+        }
+        None => cmd.stdin(Stdio::null()).output().map_err(process_error)?,
+    };
     Ok(Ran {
         code: out.status.code().unwrap_or(-1),
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -147,6 +169,38 @@ pub fn compression(podbag: &Path, mode: Option<&str>) -> Result<Value, String> {
     args.push("--json");
     let out = run_ok(podbag, &args)?;
     serde_json::from_str(out.trim()).map_err(|e| format!("podbag system compression --json: {e}"))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case", tag = "action")]
+pub enum EngineConfigRequest {
+    Read,
+    Check { text: String },
+    Save { edit: crate::config::Edit },
+}
+
+pub fn engine_config(
+    podbag: &Path,
+    request: EngineConfigRequest,
+) -> Result<Option<crate::config::Document>, String> {
+    let (action, input) = match request {
+        EngineConfigRequest::Read => ("show", None),
+        EngineConfigRequest::Check { text } => ("check", Some(text.into_bytes())),
+        EngineConfigRequest::Save { edit } => (
+            "apply",
+            Some(serde_json::to_vec(&edit).map_err(|e| e.to_string())?),
+        ),
+    };
+    let call = run_with_input(podbag, &["system", "config", action], input.as_deref())?;
+    if call.code != 0 {
+        return Err(call.error());
+    }
+    if action == "check" {
+        return Ok(None);
+    }
+    serde_json::from_str(&call.stdout)
+        .map(Some)
+        .map_err(|e| format!("podbag system config {action}: {e}"))
 }
 
 /// `podbag --version`: `0.1.0` from `podbag 0.1.0`.
