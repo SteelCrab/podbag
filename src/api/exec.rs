@@ -93,11 +93,18 @@ impl Execs {
 
 /// What an exec create body asks for: the command, its settings, the streams to attach.
 pub fn exec_from_body(body: &Value) -> Result<(Vec<String>, ExecOptions, Wanted)> {
-    if body["Privileged"].as_bool().unwrap_or(false) {
+    exec_in_container(body, false)
+}
+
+fn exec_in_container(
+    body: &Value,
+    container_privileged: bool,
+) -> Result<(Vec<String>, ExecOptions, Wanted)> {
+    if body["Privileged"].as_bool().unwrap_or(false) && !container_privileged {
         return Err(Error::new(
             ErrorKind::Unsupported,
             "cannot run a privileged exec",
-            "podbag does not run privileged commands",
+            "the container was not started with --privileged",
             "drop --privileged",
         ));
     }
@@ -191,7 +198,16 @@ pub fn create(req: &Request, ctx: &Ctx, container: &str) -> Reply {
         Ok(b) => b,
         Err(e) => return message(400, format!("{e:?}")),
     };
-    let (command, options, wanted) = match exec_from_body(&body) {
+    let privileged = if body["Privileged"].as_bool() == Some(true) {
+        match crate::state::read_config(&ctx.dirs, handle.id()) {
+            Ok(spec) => spec.security.privileged,
+            Err(e) => return reply_error(&e),
+        }
+    } else {
+        false
+    };
+    // The Linux exec helper applies the container's saved security settings.
+    let (command, options, wanted) = match exec_in_container(&body, privileged) {
         Ok(x) => x,
         Err(e) => return reply_error(&e),
     };
@@ -524,6 +540,16 @@ mod tests {
             let e = exec_from_body(&body).unwrap_err();
             assert_eq!(e.kind, kind, "{body}");
         }
+    }
+
+    #[test]
+    fn privileged_exec_requires_an_already_privileged_container() {
+        let body = json!({"Cmd": ["id"], "Privileged": true});
+        assert_eq!(
+            exec_in_container(&body, false).unwrap_err().kind,
+            ErrorKind::Unsupported
+        );
+        assert_eq!(exec_in_container(&body, true).unwrap().0, ["id"]);
     }
 
     #[test]
