@@ -141,7 +141,7 @@ const observeResult = `
   if (window === window.top) {
     const observer = new MutationObserver(() => {
       const result = document.getElementById("result")?.textContent.trim();
-      if (result === "PASS" || result?.startsWith("FAIL")) {
+      if (/^(PASS|FAIL)(?::|$)/.test(result ?? "")) {
         observer.disconnect();
         window[${JSON.stringify(binding)}](result);
       }
@@ -175,7 +175,8 @@ async function runTest(cdp, url) {
       const navigation = await send("Page.navigate", { url });
       if (navigation.errorText) throw new Error(navigation.errorText);
       const status = await timeout(result.promise, 30_000, "Timed out waiting for #result");
-      if (status !== "PASS") throw new Error(status);
+      if (!status.startsWith("PASS")) throw new Error(status);
+      return status.slice(4);
     } catch (error) {
       if (errors.length) error.message += "\n" + errors.join("\n");
       throw error;
@@ -205,8 +206,8 @@ async function main() {
     let passed = 0;
     for (const file of tests) {
       try {
-        await runTest(cdp, `${origin}/${file.split(/[\\/]/).map(encodeURIComponent).join("/")}`);
-        console.log(`PASS ${file}`);
+        const details = await runTest(cdp, `${origin}/${file.split(/[\\/]/).map(encodeURIComponent).join("/")}`);
+        console.log(`PASS ${file}${details}`);
         passed++;
       } catch (error) {
         console.error(`FAIL ${file}\n${error.message}`);
