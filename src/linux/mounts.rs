@@ -69,6 +69,9 @@ fn mount_one(root: BorrowedFd<'_>, m: &Mount, nfs: &NfsMounts) -> std::io::Resul
                 .ok_or_else(|| std::io::Error::other("NFS mount was not prepared"))?;
             attach(mount.as_fd(), target.as_fd())
         }
+        MountSource::Driver { .. } => Err(std::io::Error::other(
+            "the volume driver has not supplied a mount path",
+        )),
         MountSource::Tmpfs { options } => {
             let target = open_target(root, &m.target, false)?;
             tmpfs(options, m.read_only, target.as_fd())
@@ -86,7 +89,7 @@ pub(super) fn prepare_nfs(rootless: bool, mounts: &[Mount]) -> Result<NfsMounts>
         let MountSource::Nfs { name, options } = &mount.source else {
             continue;
         };
-        NfsOptions::require_rootful(rootless)?;
+        crate::volume::require_rootful("native NFS mounts", rootless)?;
         let fd = open_nfs(options, mount.read_only).map_err(|e| {
             Error::new(
                 ErrorKind::Runtime,

@@ -346,7 +346,10 @@ pub(super) fn run(
     // A detached container of the keeper needs no process of its own: the keeper becomes
     // its parent and takes over the watching once it runs. Published ports
     // are relayed by a shim, so such a container keeps this process.
-    let hand_over = spec.detach && crate::keeper::under_keeper() && spec.publish.is_empty();
+    let hand_over = spec.detach
+        && crate::keeper::under_keeper()
+        && spec.publish.is_empty()
+        && !crate::volume::plugin::has_mounts(spec);
     let mut io = match Io::prepare(spec) {
         Ok(io) => io,
         Err(e) => return failed(status, e),
@@ -477,6 +480,13 @@ pub(super) fn run(
             return failed(status, e);
         }
     }
+    let driver_mounts = match crate::volume::plugin::Mounts::prepare(dirs, spec, &mut run_spec) {
+        Ok(mounts) => mounts,
+        Err(e) => {
+            undo(group);
+            return failed(status, e);
+        }
+    };
     let mut attach = |pid: u32| super::net::attach(spec, &addresses, session, pid);
     let child = match linux::spawn(
         &run_spec,
@@ -493,6 +503,7 @@ pub(super) fn run(
         Ok(c) => c,
         Err(e) => {
             undo(group);
+            driver_mounts.release();
             return failed(status, e);
         }
     };
@@ -502,6 +513,7 @@ pub(super) fn run(
         unsafe { libc::kill(child.pid as libc::pid_t, libc::SIGKILL) };
         let _ = linux::wait(child.pid);
         undo(group);
+        driver_mounts.release();
         return failed(status, e);
     }
     // Published ports: bound now, so a taken port fails the start.
@@ -512,6 +524,7 @@ pub(super) fn run(
             unsafe { libc::kill(child.pid as libc::pid_t, libc::SIGKILL) };
             let _ = linux::wait(child.pid);
             undo(group);
+            driver_mounts.release();
             return failed(status, e);
         }
     };
@@ -610,6 +623,7 @@ pub(super) fn run(
     if let (Some(g), false) = (&group, spec.namespaces.pid == crate::spec::Namespace::Own) {
         cgroup::kill_all(g.path());
     }
+    driver_mounts.release();
     finish(
         dirs,
         spec,

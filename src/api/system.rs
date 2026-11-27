@@ -198,8 +198,12 @@ pub fn df() -> Reply {
                         .any(|m| m.kind == "volume" && m.source == v.name)
                 })
                 .count();
-            let size = dir_size(std::path::Path::new(&v.mountpoint));
-            json!({"Name": v.name, "Driver": "local", "Mountpoint": v.mountpoint,
+            let size = if v.plugin.is_some() {
+                0
+            } else {
+                dir_size(std::path::Path::new(&v.mountpoint))
+            };
+            json!({"Name": v.name, "Driver": v.driver(), "Mountpoint": v.mountpoint,
                    "Scope": "local", "UsageData": {"Size": size, "RefCount": users}})
         })
         .collect();

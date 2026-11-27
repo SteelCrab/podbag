@@ -338,6 +338,18 @@ fn mount_root(spec: &Rootfs, rootless: bool) -> Result<&Path> {
 /// process's own, mount its root filesystem and its volumes and bind mounts (not its tmpfs
 /// mounts: they would hold nothing afterwards) and make it this process's root.
 pub(super) fn enter_files(spec: &crate::spec::ContainerSpec, rootless: bool) -> Result<()> {
+    if spec
+        .mounts
+        .iter()
+        .any(|m| matches!(m.source, crate::volume::MountSource::Driver { .. }))
+    {
+        return Err(Error::new(
+            ErrorKind::Unsupported,
+            "cannot access files of a stopped container with an external volume",
+            "the volume driver supplies a mount only while the container runs",
+            "start the container before using copy operations",
+        ));
+    }
     step(
         rootless,
         "make mounts private",

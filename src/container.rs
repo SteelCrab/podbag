@@ -791,25 +791,9 @@ mod linux_launch {
                     nocopy,
                 } => {
                     let (v, _) = volume::create_in(dirs, Some(&name), false)?;
-                    if let Some(options) = v.nfs {
-                        Mount {
-                            source: MountSource::Nfs { name, options },
-                            target,
-                            read_only: access(a),
-                            copy_up: false,
-                        }
-                    } else {
-                        Mount {
-                            copy_up: !nocopy && empty(&v.mountpoint),
-                            source: MountSource::Volume {
-                                name,
-                                anonymous: false,
-                                path: v.mountpoint,
-                            },
-                            target,
-                            read_only: access(a),
-                        }
-                    }
+                    let copy_up =
+                        !nocopy && v.nfs.is_none() && v.plugin.is_none() && empty(&v.mountpoint);
+                    named_mount(v, target, access(a), copy_up)?
                 }
                 MountRequest::NamedNfs {
                     name,
@@ -817,19 +801,29 @@ mod linux_launch {
                     access: a,
                     nfs,
                 } => {
-                    volume::create_with_nfs(
+                    let (volume, _) = volume::create_with_nfs(
                         dirs,
                         Some(&name),
                         false,
                         Default::default(),
-                        Some(nfs.clone()),
+                        Some(nfs),
                     )?;
-                    Mount {
-                        copy_up: false,
-                        source: MountSource::Nfs { name, options: nfs },
-                        target,
-                        read_only: access(a),
-                    }
+                    named_mount(volume, target, access(a), false)?
+                }
+                MountRequest::NamedDriver {
+                    name,
+                    target,
+                    access: a,
+                    plugin,
+                } => {
+                    let (volume, _) = volume::create_with_backend(
+                        dirs,
+                        Some(&name),
+                        false,
+                        Default::default(),
+                        volume::Backend::Plugin(plugin),
+                    )?;
+                    named_mount(volume, target, access(a), false)?
                 }
                 MountRequest::Anonymous { target, access: a } => {
                     let (v, _) = volume::create_in(dirs, None, true)?;
@@ -862,6 +856,43 @@ mod linux_launch {
             });
         }
         Ok(mounts)
+    }
+
+    fn named_mount(
+        v: volume::Volume,
+        target: String,
+        read_only: bool,
+        copy_up: bool,
+    ) -> Result<Mount> {
+        let name = v.name;
+        let (source, copy_up) = if let Some(options) = v.nfs {
+            (MountSource::Nfs { name, options }, false)
+        } else if let Some(plugin) = v.plugin {
+            // SAFETY: geteuid has no preconditions.
+            volume::require_rootful("external volume drivers", unsafe { libc::geteuid() } != 0)?;
+            (
+                MountSource::Driver {
+                    name,
+                    driver: plugin.name,
+                },
+                false,
+            )
+        } else {
+            (
+                MountSource::Volume {
+                    name,
+                    anonymous: false,
+                    path: v.mountpoint,
+                },
+                copy_up,
+            )
+        };
+        Ok(Mount {
+            source,
+            target,
+            read_only,
+            copy_up,
+        })
     }
 
     /// A host path for `-v`: absolute, created when missing (as `docker run -v` does).
@@ -1019,9 +1050,7 @@ mod linux_launch {
         };
         // Held until the config names the volumes: `volume rm` checks the configs under
         // the exclusive lock.
-        let volume_lock = (!requests.is_empty())
-            .then(|| volume::lock_shared(&dirs))
-            .transpose()?;
+        let volume_lock = volume::lock_for_mounts(&dirs, &requests)?;
         let mounts = resolve_mounts(&dirs, requests, &mut cleanup.anonymous)?;
         match c.source {
             Source::Rootfs(ref path) => {

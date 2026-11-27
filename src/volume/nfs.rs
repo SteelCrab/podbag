@@ -58,18 +58,6 @@ pub fn parse_options(options: BTreeMap<String, String>) -> Result<Option<NfsOpti
 }
 
 impl NfsOptions {
-    pub(crate) fn require_rootful(rootless: bool) -> Result<()> {
-        if rootless || !cfg!(target_os = "linux") {
-            return Err(Error::new(
-                ErrorKind::Unsupported,
-                "cannot use an NFS volume",
-                "native NFS mounts require a rootful Linux engine",
-                "use a rootful engine or bind a share already mounted by the system",
-            ));
-        }
-        Ok(())
-    }
-
     fn export(&self) -> Option<(&str, &str)> {
         let (server, path) = self.device.split_once(":/")?;
         let bracketed_ip = server.starts_with('[') && server.ends_with(']');
@@ -121,6 +109,13 @@ impl NfsOptions {
             .unwrap_or_default()
             .split(',')
             .filter(|s| !s.is_empty())
+    }
+
+    pub(crate) fn read_only(&self) -> bool {
+        self.parameters()
+            .filter(|option| matches!(*option, "ro" | "rw"))
+            .last()
+            == Some("ro")
     }
 }
 

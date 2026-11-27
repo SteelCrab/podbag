@@ -66,12 +66,13 @@ impl From<&crate::volume::Mount> for MountInfo {
         use crate::volume::MountSource;
         let (kind, source) = match &m.source {
             MountSource::Bind { path, .. } => ("bind", path.clone()),
-            MountSource::Volume { name, .. } | MountSource::Nfs { name, .. } => {
-                ("volume", name.clone())
-            }
+            MountSource::Volume { name, .. }
+            | MountSource::Nfs { name, .. }
+            | MountSource::Driver { name, .. } => ("volume", name.clone()),
             MountSource::Tmpfs { .. } => ("tmpfs", "tmpfs".to_string()),
         };
         let read_only = m.read_only
+            || matches!(&m.source, MountSource::Nfs { options, .. } if options.read_only())
             || matches!(&m.source, MountSource::Tmpfs { options } if options.split(',').any(|o| o == "ro"));
         MountInfo {
             kind: kind.to_string(),
@@ -949,6 +950,10 @@ impl ContainerHandle {
             // is left of the directory goes below.
             Err(_) if may_vanish => {}
             Err(e) => return Err(e),
+        }
+        #[cfg(target_os = "linux")]
+        if let Ok(spec) = state::read_config(&dirs, &self.id) {
+            crate::volume::plugin::release(&dirs, &spec)?;
         }
         if state::remove_container_dir(&dirs, &self.id).is_ok() {
             return Ok(());

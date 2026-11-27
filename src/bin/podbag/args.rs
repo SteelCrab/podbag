@@ -401,7 +401,10 @@ pub enum VolumeCmd {
         /// A label, as key=value or key (may be repeated)
         #[arg(long = "label", value_name = "KEY=VALUE")]
         labels: Vec<String>,
-        /// Local NFS options (type, device and o, each as key=value)
+        /// A volume driver configured in this engine
+        #[arg(short, long, default_value = "local")]
+        driver: String,
+        /// Driver options (each as key=value)
         #[arg(short = 'o', long = "opt", value_name = "KEY=VALUE")]
         options: Vec<String>,
         name: Option<String>,

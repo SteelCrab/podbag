@@ -522,6 +522,32 @@ or pruning the volume deletes only its local record. Stopped containers still ke
 their volume references. On a rootless engine, mount the NFS export outside Podbag and
 bind the resulting directory if its permissions allow access from the container.
 
+### Unix-socket volume drivers
+
+A rootful Linux engine can use trusted, locally installed Docker v1 volume drivers.
+The operator provides a running driver over a Unix socket named `DRIVER.sock` inside
+`/etc/podbag/volume-drivers`, or `$PODBAG_CONFIG_DIR/volume-drivers` when set. The
+directory must be owned by root and writable only by root. Only register drivers you
+trust to choose host directories for containers.
+
+```sh
+podbag volume create --driver my-driver --opt pool=dev workspace
+podbag run --rm -v workspace:/data alpine ls /data
+```
+
+Docker CLI volume creation and structured `--mount` configurations also accept
+the configured driver. Podbag calls `Create`, `Mount`, `Unmount`, and `Remove`.
+A driver must accept retries after an interrupted request with the same volume name
+and mount ID. Podbag leaves a mount record if the driver fails to unmount and retries
+before the next start, container removal, or explicit volume removal. The destination
+can be read-only, and the driver directory is never populated with image files.
+
+Plugin volumes are skipped during prune. Explicit `volume rm` calls the driver's
+`Remove` operation. The driver's own storage policy determines what happens to its
+data. Podbag never removes files from its mount path. Install and start the legacy
+driver separately. Managed Docker plugins, network plugin endpoints, and anonymous
+volumes using an external driver are outside this support.
+
 ## Limits and security
 
 ### Options
