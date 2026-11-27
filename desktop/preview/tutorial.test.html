@@ -46,7 +46,8 @@ async function test() {
     win.localStorage.removeItem(key);
     open();
     await wait(() => /No modules installed/.test(doc.getElementById("main").textContent), "Show the empty list");
-    check(toolbar().querySelector("button").textContent === "Install module", "Put installation in the toolbar");
+    check([...toolbar().querySelectorAll("button")].some((button) => button.textContent === "Install module"),
+      "Put installation in the toolbar");
     check(!doc.querySelector(".training-library .tutorial-card"), "Do not show an installation card");
     await choose("broken");
     check(doc.querySelector(".tutorial-status").textContent, "Explain an invalid package");

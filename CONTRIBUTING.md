@@ -88,6 +88,13 @@ PODBAG=./target/debug/podbag tests/e2e/nginx.sh   # another podbag binary
 
 In the VM: `dev/vm.sh run bash -c 'cargo build && PODBAG=$CARGO_TARGET_DIR/debug/podbag tests/e2e/run.sh'`.
 
+### Desktop browser tests
+
+Run `node desktop/preview/test.mjs` with Node.js 22 or later and Chrome. It runs every
+`*.test.html` in `desktop/preview` against the real UI with a mocked engine API. Update
+or add the applicable browser test when changing a Desktop workflow. CI runs this suite
+on pull requests and on `main`.
+
 ## Pull requests
 
 - One change per pull request, with tests for new behavior.

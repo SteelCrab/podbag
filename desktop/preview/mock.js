@@ -172,6 +172,19 @@
     { id: "gitlab-self", label: "GitLab Self-Managed", host: "", hostExample: "registry.example.com", needsHost: true },
     { id: "custom", label: "Other registry", host: "", needsHost: true, account: null, hint: null },
   ];
+  const migrationImages = [
+    { Id: "sha256:103afa055a409b34", RepoTags: ["example/api:1.5", "registry.gitlab.com/example/api:1.5"] },
+    { Id: "sha256:158bb8104d657e3f", RepoTags: ["ghcr.io/example/frontend:2.0"] },
+    { Id: "sha256:498bdb036ad35429", RepoTags: ["quay.io/example/proxy:0.8"] },
+    { Id: "sha256:8ab61e38dd2ac135", RepoTags: ["<none>:<none>"] },
+  ];
+  function migrationRegistry(reference, hosts) {
+    const host = reference.includes("/") ? reference.split("/")[0] : "";
+    const configured = hosts.find(([, address]) => address && address === host)?.[0];
+    const registry = registries.find(r => configured ? r.id === configured : r.host && r.host === host)
+      || registries.find(r => r.id === (host.includes(".") ? "custom" : "dockerhub"));
+    return { id: registry.id, label: registry.label };
+  }
   const elsewhere = ["banner", "settings-docker", "pull", "pull-locations"].includes(view);
   const desktopContext = { installed: true, name: "Docker Desktop", isPodbag: false, fromEnv: false, context: "desktop-linux", previous: null };
   const podbagContext = { installed: true, name: "podbag", isPodbag: true, fromEnv: false, context: "podbag", previous: "desktop-linux" };
@@ -205,7 +218,16 @@
     migration_sources: () => ["docker", "podman", "kiri", "podbag"],
     kube_counts: ({ allNamespaces, context }) => Object.fromEntries(Object.keys(context === "ocp" ? { ...kube, routes } : kube).map((kind) =>
       [kind, kubeItems(kind, context).filter(i=>allNamespaces||i.metadata.namespace==="default").length])),
-    migration_list: ({ kind }) => lists[kind],
+    migration_list: ({ kind, hosts = [] }) => {
+      if (kind === "images") return [...lists.images, ...migrationImages].map(image => ({
+        ...image, MigrationRegistries: Object.fromEntries(image.RepoTags.filter(tag => tag !== "<none>:<none>")
+          .map(tag => [tag, migrationRegistry(tag, hosts)])),
+      }));
+      if (kind === "containers") return lists.containers.map(container => ({
+        ...container, MigrationRegistry: migrationRegistry(container.Image, hosts),
+      }));
+      return lists[kind];
+    },
     migrate: async ({ request, updates }) => {
       for (const phase of ["prepare", request.kind === "images" ? "image" : "files", "verify"]) {
         updates.onmessage(phase);

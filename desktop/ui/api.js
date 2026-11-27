@@ -19,7 +19,7 @@ const API = (() => {
       token = id;
       return { name, local };
     },
-    migrationList: (source, kind) => invoke("migration_list", { source, kind }),
+    migrationList: (source, kind, hosts) => invoke("migration_list", { source, kind, hosts }),
     migrate(request, onProgress) {
       const updates = new tauri.core.Channel();
       updates.onmessage = onProgress;
