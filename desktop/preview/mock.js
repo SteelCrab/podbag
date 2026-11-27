@@ -202,6 +202,9 @@
   // after (seconds an image stays unused; 0: at once), vm-error (vm status fails), busy
   // (another dialog is open when the window first asks for the VM's state).
   const compression = { mode: params.get("compression") === "idle" ? "idle" : "off", after: Number(params.get("after") ?? 604800) };
+  let registryProxy = params.get("registryProxy") === "manual"
+    ? { mode: "manual", url: "http://proxy.example.com:3128", bypass: "localhost, .example.com" }
+    : { mode: "inherited", url: "", bypass: "" };
   const practiceModules = new Map();
   const checklist = {
     apiVersion: 1, id: "example.workspace-checklist", name: "Workspace checklist", version: "1.0.0",
@@ -222,6 +225,13 @@
     "plugin:autostart|is_enabled": () => launchAtLogin,
     "plugin:autostart|enable": () => { launchAtLogin = true; },
     "plugin:autostart|disable": () => { launchAtLogin = false; },
+    registry_proxy: ({ values }) => {
+      if (values) {
+        (window.previewRegistryProxyWrites ||= []).push(values);
+        registryProxy = values.mode === "manual" ? values : { mode: values.mode, url: "", bypass: "" };
+      }
+      return { ...registryProxy };
+    },
     connection: () => [token, selected, selected === "podbag"],
     contexts: () => ["desktop-linux", "orbstack"],
     kube_contexts: () => ["dev", "staging", "ocp"],

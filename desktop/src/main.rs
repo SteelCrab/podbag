@@ -709,6 +709,20 @@ fn compression(
     cli::compression(&state.podbag, mode.as_deref())
 }
 
+#[tauri::command(async)]
+fn registry_proxy(
+    state: State<'_, AppState>,
+    token: u64,
+    values: Option<podbag::image::proxy::Settings>,
+) -> Result<podbag::image::proxy::Settings, String> {
+    if !cfg!(any(target_os = "linux", target_os = "macos"))
+        || state.session(token)?.target.choice != Choice::Podbag
+    {
+        return Err("Registry proxy settings require the local Podbag engine".into());
+    }
+    cli::registry_proxy(&state.podbag, values)
+}
+
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct VmResources {
@@ -1477,6 +1491,7 @@ fn main() {
             import_images,
             vm_resources,
             compression,
+            registry_proxy,
             take_star_prompt,
             terminal_command,
             install_terminal_command,

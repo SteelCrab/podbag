@@ -547,7 +547,7 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 .vm-footer { margin-top: 12px; }
 fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
 .radios { display: flex; gap: 22px; flex-wrap: wrap; }
-select, input[type="text"] {
+select, input[type="text"], .registry-proxy-form input[type="url"] {
   height: 34px; min-width: 240px; max-width: 100%; padding: 0 10px; border: 1px solid var(--line); border-radius: 7px;
   background: var(--surface); color: var(--ink); font: inherit;
 }
@@ -560,6 +560,16 @@ select, input[type="text"] {
 .buttons-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
 .empty .buttons-row { justify-content: center; }
 .empty .buttons-row .button { margin-top: 0; }
+.registry-proxy-form, .registry-proxy-fields { display: grid; gap: 12px; }
+.registry-proxy-fields[hidden] { display: none; }
+.registry-proxy-form fieldset {
+  display: grid; gap: 12px; min-width: 0; border: 0; padding: 0; margin: 0;
+}
+.registry-proxy-form label { display: grid; gap: 5px; min-width: 0; max-width: 480px; }
+.registry-proxy-form input, .registry-proxy-form select { width: 100%; min-width: 0; }
+.registry-proxy-form small { color: var(--muted); }
+.registry-proxy-form [role="status"]:empty { display: none; }
+.registry-proxy-actions { display: flex; }
 .vm-form { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
 .compression-setting { display: flex; align-items: flex-start; gap: 16px; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); }
 .compression-text { flex: 1; min-width: 0; }

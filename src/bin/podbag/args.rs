@@ -505,6 +505,12 @@ pub enum SystemCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Read or update the local engine's registry proxy settings as JSON
+    RegistryProxy {
+        /// Read new settings as JSON from standard input
+        #[arg(long)]
+        set: bool,
+    },
     /// Serve the Docker Engine API on a Unix socket, for the docker CLI
     ///
     /// Point the CLI at it with DOCKER_HOST=unix://<socket>. Containers do not depend on
