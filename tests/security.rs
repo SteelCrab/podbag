@@ -42,6 +42,56 @@ fn no_new_privileges_flag() {
 }
 
 #[test]
+fn read_only_root_keeps_tmpfs_writable() {
+    let sb = Sandbox::new();
+    let script = "if touch /readonly-probe 2>/dev/null; then exit 1; fi; touch /writable/probe";
+    assert_eq!(
+        ok(&sb.run_with(
+            &["--read-only", "--tmpfs", "/writable"],
+            &["sh", "-ec", script],
+        )),
+        ""
+    );
+}
+
+#[test]
+fn device_maps_a_node_in_root_mode_and_is_refused_rootless() {
+    let sb = Sandbox::new();
+    let out = sb.run_with(
+        &["--device", "/dev/zero:/dev/podbag-zero:r"],
+        &[
+            "sh",
+            "-ec",
+            "test -c /dev/podbag-zero; head -c 3 /dev/podbag-zero",
+        ],
+    );
+    if root_mode() {
+        assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+        assert_eq!(out.stdout, [0; 3]);
+        let out = sb.run_with(&["--device", "/etc/passwd:/not-a-device"], &["true"]);
+        assert_eq!(out.status.code(), Some(125), "{}", stderr(&out));
+        assert!(
+            stderr(&out).contains("not a device node"),
+            "{}",
+            stderr(&out)
+        );
+        if std::path::Path::new("/dev/fuse").exists() {
+            ok(&sb.run_with(
+                &["--device", "/dev/fuse:/dev/podbag-fuse:r"],
+                &[
+                    "sh",
+                    "-ec",
+                    "exec 3</dev/podbag-fuse; if (exec 4>/dev/podbag-fuse) 2>/dev/null; then exit 1; fi",
+                ],
+            ));
+        }
+    } else {
+        assert_eq!(out.status.code(), Some(125), "{}", stderr(&out));
+        assert!(stderr(&out).contains("require root"), "{}", stderr(&out));
+    }
+}
+
+#[test]
 fn non_root_user_has_no_capabilities() {
     let sb = Sandbox::new();
     assert_eq!(

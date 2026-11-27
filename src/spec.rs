@@ -150,6 +150,73 @@ pub struct Device {
     pub access: String,
 }
 
+impl Device {
+    pub fn new(host: &str, container: &str, access: &str) -> Result<Self> {
+        let device = Self {
+            host: host.into(),
+            container: if container.is_empty() {
+                host
+            } else {
+                container
+            }
+            .into(),
+            access: if access.is_empty() { "rwm" } else { access }.into(),
+        };
+        device.validate()?;
+        Ok(device)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if !self.host.starts_with('/') || self.host.contains('\0') {
+            return Err(device_error(
+                "the host path must be an absolute device path",
+            ));
+        }
+        if self.container.contains('\0') || self.container.split('/').any(|part| part == ".") {
+            return Err(device_error(
+                "the container path contains an invalid component",
+            ));
+        }
+        crate::volume::check_target(&self.container)?;
+        if !device_access(&self.access) {
+            return Err(device_error(
+                "access must contain one or more of r, w and m",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl std::str::FromStr for Device {
+    type Err = Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        let parts: Vec<&str> = s.split(':').collect();
+        match parts.as_slice() {
+            [host] => Self::new(host, "", ""),
+            [host, access] if device_access(access) => Self::new(host, "", access),
+            [host, container] => Self::new(host, container, ""),
+            [host, container, access] => Self::new(host, container, access),
+            _ => Err(device_error(
+                "expected a host path, container path and access",
+            )),
+        }
+    }
+}
+
+fn device_access(access: &str) -> bool {
+    !access.is_empty() && access.bytes().all(|c| matches!(c, b'r' | b'w' | b'm'))
+}
+
+fn device_error(why: &str) -> Error {
+    Error::new(
+        ErrorKind::InvalidInput,
+        "invalid device mapping",
+        why,
+        "use HOST[:CONTAINER][:rwm], for example /dev/fuse:/dev/fuse:rw",
+    )
+}
+
 /// A further network of a container (`--network` given again; an entry of Docker's
 /// `EndpointsConfig`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -379,6 +446,9 @@ impl ContainerSpec {
         crate::caps::effective(&self.security.cap_add, &self.security.cap_drop)?;
         for m in &self.mounts {
             crate::volume::check_target(&m.target)?;
+        }
+        for device in &self.devices {
+            device.validate()?;
         }
         if self.hostname.is_empty() {
             return invalid("the hostname is empty", "give a non-empty hostname");

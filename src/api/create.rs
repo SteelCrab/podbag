@@ -2,8 +2,9 @@
 
 use crate::image::Image;
 use crate::network::{NetworkMode, PortMapping, Proto};
-use crate::spec::SecurityOpt;
+use crate::spec::{Device, SecurityOpt};
 use crate::{Access, Container, Error, ErrorKind, MountRequest, Result};
+use serde::Deserialize;
 use serde_json::Value;
 
 /// The container a create body describes, and warnings about settings podbag ignores.
@@ -191,6 +192,32 @@ pub fn map_create(
         };
     }
     c = c.privileged(host["Privileged"].as_bool().unwrap_or(false));
+    c = c.read_only(host["ReadonlyRootfs"].as_bool().unwrap_or(false));
+    if !host["Devices"].is_null() {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "PascalCase")]
+        struct DeviceMapping {
+            path_on_host: String,
+            #[serde(default)]
+            path_in_container: String,
+            #[serde(default)]
+            cgroup_permissions: String,
+        }
+        let mappings = Vec::<DeviceMapping>::deserialize(&host["Devices"]).map_err(|e| {
+            invalid(
+                "invalid Devices",
+                &e.to_string(),
+                "pass a list of device mappings with PathOnHost",
+            )
+        })?;
+        for d in mappings {
+            c = c.device(Device::new(
+                &d.path_on_host,
+                &d.path_in_container,
+                &d.cgroup_permissions,
+            )?);
+        }
+    }
     let auto_remove = host["AutoRemove"].as_bool().unwrap_or(false);
     if auto_remove {
         c = c.remove_on_exit(true);
@@ -235,11 +262,14 @@ fn refuse_unsupported(host: &Value) -> Result<()> {
         ))
     };
     let listed = |key: &str| host[key].as_array().is_some_and(|a| !a.is_empty());
-    if listed("Devices") || listed("DeviceRequests") || listed("DeviceCgroupRules") {
-        return refuse("devices", "drop --device and --gpus");
+    if listed("DeviceRequests") {
+        return refuse("GPU device requests", "omit --gpus");
     }
-    if host["ReadonlyRootfs"].as_bool().unwrap_or(false) {
-        return refuse("a read-only root filesystem", "drop --read-only");
+    if listed("DeviceCgroupRules") {
+        return refuse(
+            "custom device cgroup rules",
+            "use --device with a host device path",
+        );
     }
     for key in ["PidMode", "IpcMode", "UTSMode", "UsernsMode"] {
         let mode = host[key].as_str().unwrap_or("");
@@ -740,6 +770,8 @@ mod tests {
                 "PidsLimit": 100,
                 "CapAdd": ["CAP_NET_ADMIN"],
                 "CapDrop": ["MKNOD"],
+                "ReadonlyRootfs": true,
+                "Devices": [{"PathOnHost": "/dev/zero", "PathInContainer": "/dev/podbag-zero", "CgroupPermissions": "r"}],
                 "SecurityOpt": ["no-new-privileges:true", "seccomp=unconfined"],
                 "AutoRemove": true,
                 "RestartPolicy": {"Name": "no", "MaximumRetryCount": 0},
@@ -756,6 +788,11 @@ mod tests {
         assert_eq!(f["workdir"], "/w");
         assert_eq!(f["user"], "1000:1000");
         assert_eq!(f["hostname"], "h1");
+        assert_eq!(f["security"]["read_only_rootfs"], true);
+        assert_eq!(
+            f["devices"],
+            json!([{"host": "/dev/zero", "container": "/dev/podbag-zero", "access": "r"}])
+        );
         assert_eq!(f["tty"], true);
         assert_eq!(f["interactive"], true);
         assert_eq!(f["name"], "web");
@@ -888,7 +925,7 @@ mod tests {
     fn create_refuses_what_podbag_cannot_do() {
         let cases = [
             (
-                json!({"Devices": [{"PathOnHost": "/dev/fuse", "PathInContainer": "/dev/fuse", "CgroupPermissions": "rwm"}]}),
+                json!({"Devices": [{"PathOnHost": "dev/fuse", "PathInContainer": "/dev/fuse", "CgroupPermissions": "rwm"}]}),
                 ErrorKind::InvalidInput,
             ),
             (json!({"Binds": ["rel/path:/x"]}), ErrorKind::InvalidInput),
@@ -901,7 +938,6 @@ mod tests {
                 json!({"NetworkMode": "container:abc"}),
                 ErrorKind::InvalidInput,
             ),
-            (json!({"ReadonlyRootfs": true}), ErrorKind::InvalidInput),
             (json!({"PidMode": "host"}), ErrorKind::InvalidInput),
             (json!({"IpcMode": "host"}), ErrorKind::InvalidInput),
             (json!({"VolumesFrom": ["other"]}), ErrorKind::InvalidInput),

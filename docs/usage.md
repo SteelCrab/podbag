@@ -508,7 +508,13 @@ podbag build -t myapp - < Dockerfile               # only a Dockerfile, no conte
 | `--cap-add NAME`, `--cap-drop NAME` | change Docker's 14 default capabilities (`ALL` works; drops first) |
 | `--security-opt no-new-privileges` | setuid programs cannot gain privileges (off by default, as in Docker) |
 | `--security-opt seccomp=unconfined` | turn off the default seccomp filter |
+| `--read-only` | make the root filesystem read-only; volumes and tmpfs keep their own access |
+| `--device HOST[:TARGET][:rwm]` | map a host block or character device when the Linux engine runs as root |
 | `--privileged` | every capability, no seccomp filter, kernel files shown, writable `/sys` and cgroup, any device; host devices are not added to `/dev` |
+
+The target of `--device` defaults to the host path. The access defaults to `rwm`: read,
+write, and make device nodes. Without `--privileged`, device access is enforced by the
+cgroup. In a VM, the source path names a device in the Linux guest.
 
 ### Memory budget
 
@@ -699,8 +705,8 @@ podbag system docker restore    # back to the context you had (Docker Desktop, â
 
 ### What does not work
 
-- Refused, with the reason: devices, `--read-only`, `--pid host`, `--volumes-from`,
-  `--link`, port ranges, other network or volume drivers.
+- Refused, with the reason: GPU requests (`--gpus`), custom device cgroup rules,
+  `--pid host`, `--volumes-from`, `--link`, port ranges, other network or volume drivers.
 - Accepted with a warning, because ignoring them is safe: `--dns`, `--add-host`, ulimits,
   log drivers, fixed addresses.
 - Answered with 501 and what to do instead: BuildKit's build API (use buildx with the

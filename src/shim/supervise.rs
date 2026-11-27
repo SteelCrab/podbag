@@ -342,6 +342,10 @@ pub(super) fn run(
         started: false,
         handed_over: false,
     };
+    let device_rules = match crate::cgroup::device_rules(&spec.devices) {
+        Ok(rules) => rules,
+        Err(e) => return failed(status, e),
+    };
     let id = spec.id.as_str();
     // A detached container of the keeper needs no process of its own: the keeper becomes
     // its parent and takes over the watching once it runs. Published ports
@@ -397,17 +401,12 @@ pub(super) fn run(
     // As root, the container may open only the usual devices (a privileged one: all).
     // Rootless, the kernel refuses device nodes to the user namespace already.
     if let (false, false, Some(g)) = (rootless, spec.security.privileged, &group) {
-        let rules = crate::cgroup::device_rules(&spec.devices);
-        let restricted = rules.and_then(|rules| {
-            crate::cgroup::restrict_devices(g.fd(), &rules).map_err(|e| {
-                Error::io(
-                    "cannot limit the devices the container may open",
-                    &e,
-                    "check that the kernel has cgroup BPF (CONFIG_CGROUP_BPF)",
-                )
-            })
-        });
-        if let Err(e) = restricted {
+        if let Err(e) = crate::cgroup::restrict_devices(g.fd(), &device_rules) {
+            let e = Error::io(
+                "cannot limit the devices the container may open",
+                &e,
+                "check that the kernel has cgroup BPF (CONFIG_CGROUP_BPF)",
+            );
             remove_control(dirs, id);
             if let Some(g) = group {
                 g.remove();

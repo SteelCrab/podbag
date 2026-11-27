@@ -637,6 +637,12 @@ pub struct RunArgs {
     /// cgroup (inside the user namespace when rootless)
     #[arg(long)]
     pub privileged: bool,
+    /// Mount the container's root filesystem read-only
+    #[arg(long)]
+    pub read_only: bool,
+    /// Map a device as root on Linux (HOST[:CONTAINER][:rwm])
+    #[arg(long = "device", value_name = "DEVICE")]
+    pub devices: Vec<podbag::spec::Device>,
     /// Start it again after it ends: no, always, unless-stopped, on-failure[:max]
     #[arg(long, value_name = "POLICY")]
     pub restart: Option<String>,
