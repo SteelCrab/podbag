@@ -166,6 +166,21 @@ pub fn compression(podbag: &Path, mode: Option<&str>) -> Result<Value, String> {
     serde_json::from_str(out.trim()).map_err(|e| format!("podbag system compression --json: {e}"))
 }
 
+/// Read or save network preferences using the companion CLI on the engine's host.
+pub fn network_settings(
+    podbag: &Path,
+    values: Option<crate::network::NetworkPreferences>,
+) -> Result<Value, String> {
+    let mut args = vec!["system", "network-settings"];
+    let json;
+    if let Some(values) = values {
+        json = serde_json::to_string(&values).map_err(|e| e.to_string())?;
+        args.extend(["--set", &json]);
+    }
+    let out = run_ok(podbag, &args)?;
+    serde_json::from_str(out.trim()).map_err(|e| format!("podbag system network-settings: {e}"))
+}
+
 /// `podbag --version`: `0.1.0` from `podbag 0.1.0`.
 pub fn engine_version(podbag: &Path) -> Option<String> {
     let out = run_ok(podbag, &["--version"]).ok()?;

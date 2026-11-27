@@ -244,6 +244,13 @@ pub fn system(cmd: SystemCmd) -> i32 {
                 Err(e) => report(&e),
             }
         }
+        SystemCmd::NetworkSettings { set } => match network_settings(set.as_deref()) {
+            Ok(settings) => {
+                println!("{}", serde_json::json!(settings));
+                0
+            }
+            Err(e) => report(&e),
+        },
         SystemCmd::Prune { force: true } => match podbag::prune() {
             Ok(r) => {
                 println!(
@@ -256,6 +263,22 @@ pub fn system(cmd: SystemCmd) -> i32 {
             Err(e) => report(&e),
         },
     }
+}
+
+fn network_settings(set: Option<&str>) -> podbag::Result<podbag::network::NetworkSettings> {
+    let dirs = podbag::paths::dirs()?;
+    let Some(set) = set else {
+        return podbag::network::settings(&dirs);
+    };
+    let requested = serde_json::from_str(set).map_err(|error| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            "cannot read the requested network settings",
+            error.to_string(),
+            "pass the network preferences as a JSON object",
+        )
+    })?;
+    podbag::network::save_settings(&dirs, requested)
 }
 
 /// Save what `system compression` was given, then the settings in effect (environment

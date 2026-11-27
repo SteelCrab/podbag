@@ -695,6 +695,18 @@ fn compression(
     cli::compression(&state.podbag, mode.as_deref())
 }
 
+#[tauri::command(async)]
+fn network_settings(
+    state: State<'_, AppState>,
+    token: u64,
+    values: Option<podbag::network::NetworkPreferences>,
+) -> Result<Value, String> {
+    if state.session(token)?.target.choice != Choice::Podbag {
+        return Err("Network settings require the local podbag engine".into());
+    }
+    cli::network_settings(&state.podbag, values)
+}
+
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct VmResources {
@@ -1462,6 +1474,7 @@ fn main() {
             import_images,
             vm_resources,
             compression,
+            network_settings,
             take_star_prompt,
             terminal_command,
             install_terminal_command,
