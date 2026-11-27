@@ -30,6 +30,15 @@
 - `podbag kube migrate` does not copy Routes, because a Route's host belongs to its
   cluster.
 
+### Networking
+
+- `podbag run` and `podbag create` take `--add-host NAME:IP`, `--dns`, `--dns-search` and
+  `--dns-option`, as Docker does. `host-gateway` stands for the host.
+- The Docker API applies `ExtraHosts`, `Dns`, `DnsSearch` and `DnsOptions`, and inspect
+  shows them. Compose `extra_hosts` and `dns` now take effect.
+- Where `host-gateway` has no address (rootless bridge, `--network none`, WSL), the CLI
+  refuses it. The Docker API leaves the entry out with a warning.
+
 ### Builds
 
 - `podbag build` and `docker build` pull private base images with the login for each

@@ -81,6 +81,15 @@ pub struct ContainerSpec {
     /// Further names of the container on its primary network (`--network-alias`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aliases: Vec<String>,
+    /// Extra `/etc/hosts` lines (`--add-host`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_hosts: Vec<crate::netfiles::ExtraHost>,
+    /// DNS settings for its `/etc/resolv.conf` (`--dns`, `--dns-search`, `--dns-option`).
+    #[serde(
+        default,
+        skip_serializing_if = "crate::netfiles::DnsSettings::is_empty"
+    )]
+    pub dns: crate::netfiles::DnsSettings,
     /// Seconds allowed for a graceful stop. A negative value allows an unlimited wait.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_timeout: Option<i64>,
@@ -392,6 +401,8 @@ impl ContainerSpec {
             }
         }
         check_networks(&self.network, &self.aliases, &self.extra_networks)?;
+        self.extra_hosts.iter().try_for_each(|e| e.check())?;
+        self.dns.check()?;
         self.check_namespaces()
     }
 
@@ -498,6 +509,8 @@ pub(crate) fn spec_fixture() -> ContainerSpec {
         network: crate::network::NetworkMode::Host,
         publish: Vec::new(),
         aliases: Vec::new(),
+        extra_hosts: Vec::new(),
+        dns: Default::default(),
         stop_timeout: None,
         restart: Default::default(),
         health: None,
