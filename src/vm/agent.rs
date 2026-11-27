@@ -43,6 +43,8 @@ fn run() -> Result<()> {
     let cli = listen(CLI_PORT)?;
     let forwarder = listen(FORWARD_PORT)?;
     let dirs = crate::paths::dirs()?;
+    let sync_dirs = dirs.clone();
+    std::thread::spawn(move || super::sync::watch(sync_dirs));
     let mut ctx = crate::api::router::Ctx::new(dirs);
     // Use only folders that the init process mounted successfully.
     ctx.binds_under = Some(super::shares::active().unwrap_or_default());
@@ -204,6 +206,19 @@ fn serve_cli(stream: UnixStream, shares: &[std::path::PathBuf]) -> std::io::Resu
         125
     } else {
         match first {
+            Some("__vm-sync") => match super::sync::command(&req.argv[1..]) {
+                Ok(data) => {
+                    for part in data.as_bytes().chunks(64 * 1024) {
+                        out.send(Frame::Stdout(part.to_vec()))?;
+                    }
+                    out.send(Frame::Stdout(b"\n".to_vec()))?;
+                    0
+                }
+                Err(error) => {
+                    out.send(Frame::Stderr(format!("podbag: {error}\n").into_bytes()))?;
+                    1
+                }
+            },
             Some("__vm-check") => 0,
             Some("__vm-renew") => match super::dhcp::renew() {
                 Ok(secs) => {

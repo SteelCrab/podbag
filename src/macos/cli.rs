@@ -148,13 +148,17 @@ fn error_since(log: &Path, at: u64) -> String {
     }
 }
 
+const SYNC_USAGE: &str = "usage: podbag vm sync list|add NAME PATH|now NAME|remove NAME";
+
 const VM_USAGE: &str = "usage: podbag vm start|stop|restart [--yes]|status [--json]|logs|resources [CPUS MEMORY_MIB]\n       \
-                        podbag vm set [--cpus N] [--memory SIZE] [--idle TIME] [--share PATH]... [--no-shares] [--restart] [--yes]";
+                        podbag vm set [--cpus N] [--memory SIZE] [--idle TIME] [--share PATH]... [--no-shares] [--restart] [--yes]\n       \
+                        podbag vm sync list|add NAME PATH|now NAME|remove NAME";
 
 /// `podbag vm start|stop|restart|status|set|logs|resources`.
 pub fn vm_command(args: &[String]) -> i32 {
     let rest = args.get(1..).unwrap_or_default();
     let result = match args.first().map(String::as_str) {
+        Some("sync") => return sync_command(rest),
         Some("--help" | "-h" | "help") => {
             println!("{VM_USAGE}");
             Ok(())
@@ -194,6 +198,52 @@ pub fn vm_command(args: &[String]) -> i32 {
             1
         }
     }
+}
+
+fn sync_command(args: &[String]) -> i32 {
+    if matches!(args, [help] if matches!(help.as_str(), "-h" | "--help" | "help")) {
+        println!("{SYNC_USAGE}");
+        return 0;
+    }
+    let mut argv = vec!["__vm-sync".into()];
+    argv.extend_from_slice(args);
+    let paths = match args {
+        [cmd] if cmd == "list" => Vec::new(),
+        [cmd, _] if matches!(cmd.as_str(), "now" | "remove") => Vec::new(),
+        [cmd, _, given] if cmd == "add" => match sync_source(given) {
+            Ok(path) => {
+                argv[3] = path.clone();
+                vec![path]
+            }
+            Err(e) => {
+                eprintln!("podbag: cannot synchronize {given}: {e}");
+                return 1;
+            }
+        },
+        _ => {
+            eprintln!("{SYNC_USAGE}");
+            return 1;
+        }
+    };
+    forward(Forward {
+        argv,
+        stdin: false,
+        paths,
+        env: Vec::new(),
+    })
+}
+
+/// The canonical source of a new synchronized share. It must be inside a folder that
+/// the VM shares now (or at its next start, when it is off).
+fn sync_source(given: &str) -> Result<String, String> {
+    let path = Path::new(given).canonicalize().map_err(|e| e.to_string())?;
+    if !path.is_dir() {
+        return Err("it is not a directory".into());
+    }
+    shares::check_sync_source(&active_shares(&paths()?), &path)?;
+    path.into_os_string()
+        .into_string()
+        .map_err(|_| "the path is not UTF-8".into())
 }
 
 /// A round trip to the VM's agent: the VM is up, and works. Its exit code.
