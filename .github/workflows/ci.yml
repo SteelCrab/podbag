@@ -18,6 +18,18 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  desktop-e2e:
+    name: Desktop E2E
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Run Desktop preview tests in Chrome
+        run: node desktop/preview/test.mjs
+
   linux:
     name: Linux ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
@@ -322,6 +334,7 @@ jobs:
           commands_run_in_the_vm
           two_commands_share_one_vm_and_it_stops_when_idle
           only_paths_under_users_reach_the_vm
+          synchronized_share_moves_edits_across_the_vm_restart
           configured_mac_folder_reaches_cli_and_docker_after_restart
           a_stopped_host_keeps_what_was_written
           a_bare_env_name_takes_the_macs_value

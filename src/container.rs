@@ -807,7 +807,9 @@ mod linux_launch {
                 } => {
                     let (v, _) = volume::create_in(dirs, Some(&name), false)?;
                     Mount {
-                        copy_up: !nocopy && empty(&v.mountpoint),
+                        copy_up: !nocopy
+                            && !crate::vm::sync::is_cache_volume(&v)
+                            && empty(&v.mountpoint),
                         source: MountSource::Volume {
                             name,
                             anonymous: false,
