@@ -369,32 +369,20 @@ pub fn bind_sources(body: &Value) -> Result<Vec<String>> {
     Ok(sources)
 }
 
-/// Whether `path` is `root` or below it, with links followed as far as the path exists
-/// and `..` taken out (a link under `root` may lead anywhere).
-pub fn lies_under(path: &std::path::Path, root: &std::path::Path) -> bool {
-    use std::path::{Component, PathBuf};
-    fn resolve(path: &std::path::Path) -> PathBuf {
-        if let Ok(real) = path.canonicalize() {
-            return real;
-        }
-        match (path.parent(), path.file_name()) {
-            (Some(dir), Some(name)) => resolve(dir).join(name),
-            _ => {
-                let mut clean = PathBuf::from("/");
-                for c in path.components() {
-                    match c {
-                        Component::ParentDir => {
-                            clean.pop();
-                        }
-                        Component::Normal(n) => clean.push(n),
-                        _ => {}
-                    }
-                }
-                clean
-            }
-        }
+/// Refuse bind sources outside the Mac folders mounted by the VM.
+pub fn check_shared_bind(
+    source: &str,
+    roots: &[std::path::PathBuf],
+) -> std::result::Result<(), super::router::Reply> {
+    if crate::vm::shares::contains(roots, std::path::Path::new(source)) {
+        return Ok(());
     }
-    resolve(path).starts_with(root)
+    Err(super::router::message(
+        400,
+        format!(
+            "mounts denied: {source} is outside the Mac folders shared with the VM; share the folder or use a named volume"
+        ),
+    ))
 }
 
 /// A `HostConfig.Binds` entry: `src:dst[:opts]`, src a host path or a volume name.
@@ -693,12 +681,27 @@ mod tests {
         let root = root.path().canonicalize().unwrap();
         std::fs::create_dir(root.join("in")).unwrap();
         std::os::unix::fs::symlink("/", root.join("out")).unwrap();
-        assert!(lies_under(&root.join("in"), &root));
-        assert!(lies_under(&root.join("in/not/made/yet"), &root));
-        assert!(!lies_under(&root.join("in/../../x"), &root));
-        assert!(!lies_under(&root.join("out/tmp"), &root));
+        assert!(crate::vm::shares::contains(
+            std::slice::from_ref(&root),
+            &root.join("in")
+        ));
+        assert!(crate::vm::shares::contains(
+            std::slice::from_ref(&root),
+            &root.join("in/not/made/yet")
+        ));
+        assert!(!crate::vm::shares::contains(
+            std::slice::from_ref(&root),
+            &root.join("in/../../x")
+        ));
+        assert!(!crate::vm::shares::contains(
+            std::slice::from_ref(&root),
+            &root.join("out/tmp")
+        ));
         let sibling = format!("{}-other", root.display());
-        assert!(!lies_under(std::path::Path::new(&sibling), &root));
+        assert!(!crate::vm::shares::contains(
+            std::slice::from_ref(&root),
+            std::path::Path::new(&sibling)
+        ));
         let body = json!({"HostConfig": {
             "Binds": ["/a:/a", "vol:/v"],
             "Mounts": [{"Type": "bind", "Source": "/b", "Target": "/b"},

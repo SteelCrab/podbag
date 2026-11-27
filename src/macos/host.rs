@@ -13,6 +13,7 @@
 use super::settings;
 use super::vm::{Vm, VmSpec};
 use crate::vm::proto::{API_PORT, CLI_PORT, CliRequest, FORWARD_PORT, Frame};
+use crate::vm::shares;
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -391,8 +392,28 @@ fn serve_vm(p: &Paths, lock: &std::fs::File, inherited: Option<&Inherited>) -> R
     super::cpu::check_guest(&p.guest.join("Image"))?;
     make_disk(p)?;
     let env = |k: &str| std::env::var(k).ok();
-    let (resources, _) =
-        settings::effective(&settings::read(&p.home)?, &env, &settings::Mac::this());
+    let saved = settings::read(&p.home)?;
+    let (resources, _) = settings::effective(&saved, &env, &settings::Mac::this());
+    let shared_paths = saved.shared_paths();
+    let config = if shared_paths == shares::defaults() {
+        None
+    } else {
+        // A replaced directory must not redirect a previously approved share.
+        if settings::normalize_shares(&shared_paths)? != shared_paths {
+            return Err("a shared folder moved; review the file sharing settings".into());
+        }
+        let config =
+            tempfile::tempdir_in(&p.run).map_err(|e| format!("share configuration: {e}"))?;
+        let paths = serde_json::to_vec(&shared_paths).map_err(|e| e.to_string())?;
+        std::fs::write(config.path().join(shares::MANIFEST), paths)
+            .map_err(|e| format!("share configuration: {e}"))?;
+        Some(config)
+    };
+    let share_boot = if config.is_some() {
+        " podbag.shares=1"
+    } else {
+        ""
+    };
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
@@ -412,12 +433,13 @@ fn serve_vm(p: &Paths, lock: &std::fs::File, inherited: Option<&Inherited>) -> R
         // boot, so the Mac holds them), and nothing uses them: virtio here does not go
         // through the DMA API.
         cmdline: format!(
-            "console=hvc0 ip=dhcp loglevel=4 panic=-1 swiotlb=2048 podbag.time={}.{:09} -- {}",
+            "console=hvc0 ip=dhcp loglevel=4 panic=-1 swiotlb=2048 podbag.time={}.{:09}{share_boot} -- {}",
             now.as_secs(),
             now.subsec_nanos(),
             crate::vm::proto::INIT_ARG
         ),
-        share: PathBuf::from("/Users"),
+        share_config: config.as_ref().map(|dir| dir.path().to_owned()),
+        shared_paths: shared_paths.clone(),
         mac: mac_address(&p.home),
     };
     let vm = Arc::new(Vm::start(&spec).map_err(start_error)?);
@@ -436,6 +458,7 @@ fn serve_vm(p: &Paths, lock: &std::fs::File, inherited: Option<&Inherited>) -> R
         seen: Mutex::new(settings::Running {
             started: now.as_secs(),
             resources: Some(resources),
+            shared_paths: Some(shared_paths),
             ..Default::default()
         }),
     });
@@ -732,6 +755,7 @@ fn guest_command(vm: &Vm, what: &str) -> std::io::Result<(i32, String)> {
         argv: vec![what.into()],
         env: Vec::new(),
         cwd: "/".into(),
+        paths: Vec::new(),
         tty: false,
         rows: 0,
         cols: 0,

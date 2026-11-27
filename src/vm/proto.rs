@@ -23,8 +23,11 @@ pub struct CliRequest {
     pub argv: Vec<String>,
     /// Environment the command sees (only `PODBAG_*` variables are sent).
     pub env: Vec<(String, String)>,
-    /// The working directory: a Mac path, the same in the VM under /Users.
+    /// The working directory, shared from the Mac when appropriate.
     pub cwd: String,
+    /// Mac paths in bind mounts and file arguments, checked against the active shares.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
     /// Run it under a terminal (the Mac's stdin and stdout are one).
     pub tty: bool,
     pub rows: u16,
@@ -175,6 +178,7 @@ mod tests {
             argv: vec!["run".into(), "--rm".into(), "alpine".into()],
             env: vec![("PODBAG_KEEPER".into(), "0".into())],
             cwd: "/Users/someone/project".into(),
+            paths: Vec::new(),
             tty: true,
             rows: 24,
             cols: 80,

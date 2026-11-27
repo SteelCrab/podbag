@@ -5,10 +5,11 @@
 use super::host::{Paths, make_run_dir, paths};
 use super::settings;
 use crate::vm::proto::{CLI_PORT, CliRequest, Frame};
+use crate::vm::shares;
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -147,7 +148,7 @@ fn error_since(log: &Path, at: u64) -> String {
 }
 
 const VM_USAGE: &str = "usage: podbag vm start|stop|restart [--yes]|status [--json]|logs|resources [CPUS MEMORY_MIB]\n       \
-                        podbag vm set [--cpus N] [--memory SIZE] [--idle TIME] [--restart] [--yes]";
+                        podbag vm set [--cpus N] [--memory SIZE] [--idle TIME] [--share PATH]... [--no-shares] [--restart] [--yes]";
 
 /// `podbag vm start|stop|restart|status|set|logs|resources`.
 pub fn vm_command(args: &[String]) -> i32 {
@@ -253,7 +254,14 @@ pub fn status_json(p: &Paths) -> serde_json::Value {
             "sizeBytes": m.len(),
         })
     });
-    let pending = in_use.is_some_and(|u| u.cpus != next.cpus || u.memory_mib != next.memory_mib);
+    let shared_next = saved.shared_paths();
+    let shared_in_use = info
+        .as_ref()
+        .map(|i| i.shared_paths.clone().unwrap_or_else(shares::defaults));
+    let pending = in_use.is_some_and(|u| u.cpus != next.cpus || u.memory_mib != next.memory_mib)
+        || shared_in_use
+            .as_ref()
+            .is_some_and(|paths| paths != &shared_next);
     serde_json::json!({
         "platform": "macos",
         "state": state,
@@ -263,6 +271,7 @@ pub fn status_json(p: &Paths) -> serde_json::Value {
         "saved": saved,
         "overriddenBy": overridden,
         "pending": pending,
+        "sharedPaths": {"next": shared_next, "inUse": shared_in_use},
         "limits": {
             "cpusMin": 1,
             "cpusMax": mac.cpus,
@@ -340,6 +349,8 @@ fn set(args: &[String]) -> Result<(), String> {
     let mut saved = settings::read(&p.home)?;
     let mut changes = settings::Saved::default();
     let (mut restart_now, mut yes, mut changed) = (false, false, false);
+    let mut new_shares = Vec::new();
+    let mut no_shares = false;
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
@@ -374,6 +385,14 @@ fn set(args: &[String]) -> Result<(), String> {
                 changes.idle_seconds = Some(settings::parse_idle(&value()?)?);
                 changed = true;
             }
+            "--share" => {
+                new_shares.push(PathBuf::from(value()?));
+                changed = true;
+            }
+            "--no-shares" if inline.is_none() => {
+                no_shares = true;
+                changed = true;
+            }
             "--restart" => restart_now = true,
             "--yes" | "-y" => yes = true,
             _ => return Err(format!("unknown option {a}\n{VM_USAGE}")),
@@ -382,6 +401,13 @@ fn set(args: &[String]) -> Result<(), String> {
     }
     if !changed {
         return Err(format!("nothing to set\n{VM_USAGE}"));
+    }
+    if no_shares && !new_shares.is_empty() {
+        return Err("--no-shares cannot be used with --share".into());
+    }
+    let shares_changed = no_shares || !new_shares.is_empty();
+    if shares_changed {
+        saved.shared_paths = Some(settings::normalize_shares(&new_shares)?);
     }
     let mac = settings::Mac::this();
     settings::validate(&changes, &mac)?;
@@ -404,6 +430,17 @@ fn set(args: &[String]) -> Result<(), String> {
         next.cpus,
         settings::memory_text(next.memory_mib),
     );
+    if shares_changed {
+        let paths = saved.shared_paths();
+        if paths.is_empty() {
+            println!("Shared folders: none");
+        } else {
+            println!("Shared folders:");
+            for path in paths {
+                println!("  {}", path.display());
+            }
+        }
+    }
     for v in overridden {
         println!("{v} is set here, and it wins over the saved value.");
     }
@@ -521,43 +558,30 @@ fn stop() -> Result<(), String> {
     }
 }
 
-/// The path with `..` and links resolved, as far as it exists (the rest is appended).
-fn resolve(path: &Path) -> PathBuf {
-    if let Ok(real) = path.canonicalize() {
-        return real;
-    }
-    match (path.parent(), path.file_name()) {
-        (Some(dir), Some(name)) => resolve(dir).join(name),
-        _ => {
-            let mut clean = PathBuf::from("/");
-            for c in path.components() {
-                match c {
-                    Component::ParentDir => {
-                        clean.pop();
-                    }
-                    Component::Normal(n) => clean.push(n),
-                    _ => {}
-                }
-            }
-            clean
-        }
-    }
-}
-
-/// The VM shares only the Mac's /Users, at the same path: any other path would be the
-/// VM's own, silently.
-fn check_paths(paths: &[String], cwd: &Path) -> Result<(), String> {
+/// A Mac path needs the same file or directory in the VM. The spelling must also
+/// be under a mounted root, since Mac-only aliases such as /tmp are not mounted.
+fn check_paths(paths: &[String], cwd: &Path, roots: &[PathBuf]) -> Result<(), String> {
     for given in paths {
-        let full = resolve(&cwd.join(given));
-        if !full.starts_with("/Users") {
+        let path = cwd.join(given);
+        if !roots.iter().any(|root| path.starts_with(root)) || !shares::contains(roots, &path) {
+            let hint = if roots == shares::defaults() {
+                "the VM sees only /Users unless other folders are shared"
+            } else {
+                "the path is outside the Mac folders shared with the VM"
+            };
             return Err(format!(
-                "cannot use {given} ({}): the VM sees only /Users of this Mac\n  \
-                 fix:   move it under /Users, or use a named volume",
-                full.display()
+                "cannot use {given}: {hint}\n  fix:   use the original shared path, share the folder, or use a named volume"
             ));
         }
     }
     Ok(())
+}
+
+fn active_shares(p: &Paths) -> Vec<PathBuf> {
+    running_info(p).map_or_else(
+        || settings::load(&p.home).shared_paths(),
+        |info| info.shared_paths.unwrap_or_else(shares::defaults),
+    )
 }
 
 /// Why a connection did not get a command into the VM.
@@ -572,23 +596,24 @@ enum Failed {
 pub fn forward(f: Forward) -> i32 {
     // SAFETY: isatty has no memory arguments.
     let tty = unsafe { libc::isatty(0) == 1 && libc::isatty(1) == 1 };
+    let p = match paths() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("podbag: {e}");
+            return 125;
+        }
+    };
     let here = std::env::current_dir().unwrap_or_else(|_| "/".into());
-    if let Err(e) = check_paths(&f.paths, &here) {
+    let real = shares::resolve(&here).unwrap_or(here);
+    if let Err(e) = check_paths(&f.paths, &real, &active_shares(&p)) {
         eprintln!("podbag: {e}");
         return 125;
     }
-    // The VM has the same directory only under /Users.
-    let real = resolve(&here);
-    let cwd = if real.starts_with("/Users") {
-        real.display().to_string()
-    } else {
-        "/".to_string()
-    };
     let deadline = Instant::now() + WAIT_FOR_VM;
     loop {
         let result = connect_host(true, deadline)
             .map_err(Failed::Error)
-            .and_then(|stream| run_remote(stream, &f, tty, &cwd));
+            .and_then(|stream| run_remote(stream, &f, tty, &real, &p));
         match result {
             Ok(code) => return code,
             Err(Failed::NotTaken) if Instant::now() < deadline => {
@@ -675,7 +700,13 @@ impl Out {
 #[derive(Default)]
 struct Window(Mutex<u64>, Condvar);
 
-fn run_remote(mut stream: UnixStream, f: &Forward, tty: bool, cwd: &str) -> Result<i32, Failed> {
+fn run_remote(
+    mut stream: UnixStream,
+    f: &Forward,
+    tty: bool,
+    cwd: &Path,
+    p: &Paths,
+) -> Result<i32, Failed> {
     // A host that is stopping closes without `OK`: the command never reached its VM. One
     // whose VM cannot start says why (`ERR …`).
     stream
@@ -699,6 +730,14 @@ fn run_remote(mut stream: UnixStream, f: &Forward, tty: bool, cwd: &str) -> Resu
     if answer != "OK" {
         return Err(Failed::NotTaken);
     }
+    // The host may have switched to a new VM while this request was in the queue.
+    let roots = active_shares(p);
+    check_paths(&f.paths, cwd, &roots).map_err(Failed::Error)?;
+    let cwd = if roots.iter().any(|root| cwd.starts_with(root)) {
+        cwd
+    } else {
+        Path::new("/")
+    };
     let io = |e: std::io::Error| Failed::Error(format!("the connection to the VM failed: {e}"));
     let (rows, cols) = if tty { window_size() } else { (24, 80) };
     let req = CliRequest {
@@ -707,7 +746,8 @@ fn run_remote(mut stream: UnixStream, f: &Forward, tty: bool, cwd: &str) -> Resu
             .filter(|(k, _)| SETTINGS.contains(&k.as_str()))
             .chain(f.env.iter().cloned())
             .collect(),
-        cwd: cwd.to_string(),
+        cwd: cwd.to_string_lossy().into_owned(),
+        paths: f.paths.clone(),
         tty,
         rows,
         cols,
@@ -832,15 +872,23 @@ mod tests {
         let paths = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         let home = std::env::var("HOME").unwrap();
         let home = Path::new(&home);
-        assert!(check_paths(&paths(&["./src", "x/y", "/Users"]), home).is_ok());
-        assert!(check_paths(&paths(&["./src"]), Path::new("/tmp")).is_err());
-        assert!(check_paths(&paths(&["/opt/x"]), home).is_err());
+        assert!(
+            check_paths(
+                &paths(&["./src", "x/y", "/Users"]),
+                home,
+                &shares::defaults()
+            )
+            .is_ok()
+        );
+        assert!(check_paths(&paths(&["./src"]), Path::new("/tmp"), &shares::defaults()).is_err());
+        assert!(check_paths(&paths(&["/opt/x"]), home, &shares::defaults()).is_err());
         let up = "../".repeat(home.components().count());
-        assert!(check_paths(&paths(&[&format!("{up}tmp")]), home).is_err());
+        assert!(check_paths(&paths(&[&format!("{up}tmp")]), home, &shares::defaults()).is_err());
         assert!(
             check_paths(
                 &paths(&[&format!("{}/a/../../../../tmp", home.display())]),
-                home
+                home,
+                &shares::defaults(),
             )
             .is_err()
         );
@@ -852,9 +900,9 @@ mod tests {
         let link = dir.path().join("out");
         std::os::unix::fs::symlink("/tmp", &link).unwrap();
         let paths = vec![link.join("new-file").display().to_string()];
-        assert!(check_paths(&paths, dir.path()).is_err());
+        assert!(check_paths(&paths, dir.path(), &shares::defaults()).is_err());
         let paths = vec![dir.path().join("new/deeper").display().to_string()];
-        assert!(check_paths(&paths, dir.path()).is_ok());
+        assert!(check_paths(&paths, dir.path(), &shares::defaults()).is_ok());
     }
 }
 

@@ -1550,6 +1550,55 @@ function idleText(secs) {
 
 const ENV_FIELD = { PODBAG_VM_CPUS: "cpus", PODBAG_VM_MEMORY: "memory", PODBAG_VM_IDLE: "idle" };
 
+function vmSharedFolders() {
+  const input = h("input", { id: "vm-share-path", type: "text", placeholder: "/Volumes/Projects" });
+  const list = h("ul", { class: "shared-folders", "aria-label": t("settings.sharedFolders") });
+  const add = () => {
+    const path = input.value;
+    if (!path.startsWith("/")) {
+      input.setCustomValidity(t("settings.sharedFolderAbsolute"));
+      input.reportValidity();
+      return;
+    }
+    if (!vmSharedPaths(list).includes(path)) list.append(vmSharedFolderRow(path));
+    vmFormDirty = true;
+    input.value = "";
+    input.focus();
+  };
+  input.oninput = () => input.setCustomValidity("");
+  input.onkeydown = (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    add();
+  };
+  return h("div", { class: "vm-shares form-field" },
+    h("label", { for: input.id, text: t("settings.sharedFolders") }),
+    h("div", { class: "shared-folder" }, input, button(null, t("settings.addSharedFolder"), add)),
+    list,
+    h("p", { class: "hint", text: t("settings.sharedFoldersHint") }));
+}
+
+function vmSharedFolderRow(path) {
+  const row = h("li", { class: "shared-folder", "data-shared-path": path },
+    h("span", { class: "mono", text: path }),
+    button(null, t("settings.removeSharedFolder"), () => {
+      const next = row.nextElementSibling || row.previousElementSibling;
+      row.remove();
+      (next?.querySelector("button") || document.getElementById("vm-share-path")).focus();
+      vmFormDirty = true;
+    }));
+  row.querySelector("button").setAttribute("aria-label", t("settings.removeSharedFolderName", { path }));
+  return row;
+}
+
+function vmSharedPaths(list) {
+  return Array.from(list.children, (row) => row.dataset.sharedPath);
+}
+
+function samePaths(a, b) {
+  return a.length === b.length && a.every((path, index) => path === b[index]);
+}
+
 function vmForm(vm) {
   const l = vm.limits || {};
   const over = new Map((vm.overriddenBy || []).map((name) => [ENV_FIELD[name], name]));
@@ -1570,6 +1619,7 @@ function vmForm(vm) {
       input("vm-memory", t("settings.memory"), { min: (l.memoryMinMiB || 1024) / 1024, max: (l.memoryMaxMiB || 65536) / 1024, step: 0.25 },
         t("settings.limits", { min: mib(l.memoryMinMiB || 1024), max: mib(l.memoryMaxMiB) })),
       input("vm-idle", t("settings.idle"), { min: 0, max: 1440, step: 1 }, t("settings.idleHint"))),
+    vm.sharedPaths ? vmSharedFolders() : null,
     h("p", { class: "hint vm-pending", text: t("settings.vmPending"), hidden: !vm.pending }),
     h("p", { class: "error-text vm-error", "aria-live": "polite" }),
     h("div", { class: "buttons-row" }, h("button", { type: "submit", class: "button primary", text: t("settings.apply") })));
@@ -1584,6 +1634,9 @@ function fillVmForm(form, vm) {
   form.querySelector("#vm-memory").value = next.memoryMiB != null ? String(next.memoryMiB / 1024) : "";
   for (const range of form.querySelectorAll('input[type="range"]')) range.value = range.previousElementSibling.value;
   form.querySelector("#vm-idle").value = next.idleSeconds != null ? String(Math.round(next.idleSeconds / 60)) : "";
+  const list = form.querySelector(".shared-folders");
+  const paths = vm.sharedPaths?.next || [];
+  if (list && !samePaths(paths, vmSharedPaths(list))) list.replaceChildren(...paths.map(vmSharedFolderRow));
 }
 
 async function applyVm(form) {
@@ -1605,6 +1658,9 @@ async function applyVm(form) {
   if (cpus !== next.cpus) change.cpus = cpus;
   if (memoryMiB !== next.memoryMiB) change.memoryMiB = memoryMiB;
   if (idleSeconds !== next.idleSeconds) change.idleSeconds = idleSeconds;
+  const list = form.querySelector(".shared-folders");
+  const paths = list ? vmSharedPaths(list).sort() : [];
+  if (list && !samePaths(paths, (vm.sharedPaths?.next || []).slice().sort())) change.sharedPaths = paths;
   if (!Object.keys(change).length && !vm.pending) {
     toast(t("settings.vmSame"));
     return;
@@ -1612,7 +1668,8 @@ async function applyVm(form) {
   if (!Object.keys(change).length) change.cpus = cpus; // only to restart with them
   let restart = false;
   const inUse = vm.inUse || {};
-  const differs = cpus !== inUse.cpus || memoryMiB !== inUse.memoryMiB || idleSeconds !== inUse.idleSeconds;
+  const differs = cpus !== inUse.cpus || memoryMiB !== inUse.memoryMiB || idleSeconds !== inUse.idleSeconds
+    || (list && !samePaths(paths, (vm.sharedPaths?.inUse || []).slice().sort()));
   if (vm.state === "running" && differs) {
     const n = vm.containers || 0;
     const answer = await chooseDialog({

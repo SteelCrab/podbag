@@ -163,17 +163,10 @@ fn create(req: &Request, ctx: &Ctx) -> Reply {
         Ok(b) => b,
         Err(e) => return message(400, format!("{e:?}")),
     };
-    if let Some(root) = &ctx.binds_under {
+    if let Some(roots) = &ctx.binds_under {
         for source in ok_or_reply!(super::create::bind_sources(&body)) {
-            if !super::create::lies_under(std::path::Path::new(&source), root) {
-                return message(
-                    400,
-                    format!(
-                        "mounts denied: {source} is not under {}, the only Mac directory \
-                         the VM sees; move it there, or use a named volume",
-                        root.display()
-                    ),
-                );
+            if let Err(error) = super::create::check_shared_bind(&source, roots) {
+                return error;
             }
         }
     }
