@@ -1017,8 +1017,12 @@ fn mac_sockets<S>(
         Err(e) => return Err(e),
     };
     let mut all = vec![v4];
-    if let Ok(v6) = bind(SocketAddr::from((Ipv6Addr::LOCALHOST, port))) {
-        all.push((v6, false));
+    match bind(SocketAddr::from((Ipv6Addr::LOCALHOST, port))) {
+        Ok(v6) => all.push((v6, false)),
+        // Another program holds ::1: report it and try again later, as for IPv4.
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => return Err(e),
+        // A Mac without IPv6 on loopback serves IPv4 only.
+        Err(_) => {}
     }
     Ok(all)
 }
@@ -1057,6 +1061,9 @@ fn serve_port(
 /// or `UDP <port>`).
 fn open_forward(vm: &Vm, request: &str) -> Option<UnixStream> {
     let mut guest = UnixStream::from(vm.connect(FORWARD_PORT).ok()?);
+    // The forwarder answers at once. One that does not must not hold up the caller: for
+    // UDP, that is the loop that serves every client of the port.
+    guest.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
     guest.write_all(format!("{request}\n").as_bytes()).ok()?;
     let mut answer = Vec::new();
     let mut byte = [0u8; 1];
@@ -1067,6 +1074,7 @@ fn open_forward(vm: &Vm, request: &str) -> Option<UnixStream> {
             _ => return None,
         }
     }
+    guest.set_read_timeout(None).ok()?;
     (answer == b"OK").then_some(guest)
 }
 
@@ -1241,6 +1249,26 @@ fn power_off(vm: &Vm) {
 mod tests {
     use super::*;
     use std::time::SystemTime;
+
+    #[test]
+    fn an_occupied_ipv6_port_is_reported_and_a_missing_one_is_not() {
+        use std::io::{Error, ErrorKind};
+        use std::net::SocketAddr;
+        let v6_says = |kind: ErrorKind| {
+            move |a: SocketAddr| {
+                if a.is_ipv6() {
+                    Err(Error::from(kind))
+                } else {
+                    Ok(a)
+                }
+            }
+        };
+        let held = mac_sockets(8080, v6_says(ErrorKind::AddrInUse));
+        assert_eq!(held.unwrap_err().kind(), ErrorKind::AddrInUse);
+        let missing = mac_sockets(8080, v6_says(ErrorKind::AddrNotAvailable)).unwrap();
+        assert_eq!(missing.len(), 1);
+        assert!(missing[0].0.is_ipv4());
+    }
 
     #[test]
     fn the_guest_comes_from_the_setting_then_the_binary_then_beside_it_then_home() {
