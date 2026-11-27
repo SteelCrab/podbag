@@ -60,6 +60,21 @@ fn map_create_with(
     refuse_unsupported(host)?;
     let mut warnings = Vec::new();
     let mut c = Container::from_image(image);
+    let log_config = &host["LogConfig"];
+    if let Some(driver @ ("syslog" | "journald")) = log_config["Type"].as_str() {
+        let options = if log_config["Config"].is_null() {
+            Default::default()
+        } else {
+            serde_json::from_value(log_config["Config"].clone()).map_err(|_| {
+                invalid(
+                    "invalid LogConfig.Config",
+                    "expected an object with string values",
+                    "give logging options as strings",
+                )
+            })?
+        };
+        c = c.logging(crate::log_driver::LogConfig::parse(driver, options)?);
+    }
     if let Some(n) = name {
         c = c.name(n.trim_start_matches('/'));
     }
@@ -157,14 +172,15 @@ fn map_create_with(
             c = c.publish(p);
         }
     }
-    let (aliases, extra) = endpoints(
-        &body["NetworkingConfig"]["EndpointsConfig"],
-        &network,
-        &mut warnings,
-    )?;
+    let (aliases, extra, fixed) =
+        endpoints(&body["NetworkingConfig"]["EndpointsConfig"], &network)?;
     crate::spec::check_networks(&network, &aliases, &extra)?;
+    crate::spec::check_address_networks(&network, &extra, &fixed)?;
     c = names(c, host, &|| gateway(&network), &mut warnings)?;
     c = c.network(network);
+    for (name, addresses) in fixed {
+        c = c.fixed_addresses(name, addresses);
+    }
     for alias in aliases {
         c = c.network_alias(alias);
     }
@@ -356,7 +372,7 @@ fn ignored(body: &Value) -> Vec<String> {
         }
     }
     let driver = host["LogConfig"]["Type"].as_str().unwrap_or("");
-    if !matches!(driver, "" | "json-file") {
+    if !matches!(driver, "" | "json-file" | "syslog" | "journald") {
         note(format!(
             "log driver {driver} is ignored: podbag writes logs as json-file"
         ));
@@ -428,32 +444,20 @@ pub fn bind_sources(body: &Value) -> Result<Vec<String>> {
     Ok(sources)
 }
 
-/// Whether `path` is `root` or below it, with links followed as far as the path exists
-/// and `..` taken out (a link under `root` may lead anywhere).
-pub fn lies_under(path: &std::path::Path, root: &std::path::Path) -> bool {
-    use std::path::{Component, PathBuf};
-    fn resolve(path: &std::path::Path) -> PathBuf {
-        if let Ok(real) = path.canonicalize() {
-            return real;
-        }
-        match (path.parent(), path.file_name()) {
-            (Some(dir), Some(name)) => resolve(dir).join(name),
-            _ => {
-                let mut clean = PathBuf::from("/");
-                for c in path.components() {
-                    match c {
-                        Component::ParentDir => {
-                            clean.pop();
-                        }
-                        Component::Normal(n) => clean.push(n),
-                        _ => {}
-                    }
-                }
-                clean
-            }
-        }
+/// Refuse bind sources outside the Mac folders mounted by the VM.
+pub fn check_shared_bind(
+    source: &str,
+    roots: &[std::path::PathBuf],
+) -> std::result::Result<(), super::router::Reply> {
+    if crate::vm::shares::contains(roots, std::path::Path::new(source)) {
+        return Ok(());
     }
-    resolve(path).starts_with(root)
+    Err(super::router::message(
+        400,
+        format!(
+            "mounts denied: {source} is outside the Mac folders shared with the VM; share the folder or use a named volume"
+        ),
+    ))
 }
 
 /// A `HostConfig.Binds` entry: `src:dst[:opts]`, src a host path or a volume name.
@@ -599,8 +603,11 @@ fn parse_mount(m: &Value) -> Result<(MountRequest, Option<String>)> {
 fn endpoints(
     v: &Value,
     primary: &NetworkMode,
-    warnings: &mut Vec<String>,
-) -> Result<(Vec<String>, Vec<crate::spec::Attachment>)> {
+) -> Result<(
+    Vec<String>,
+    Vec<crate::spec::Attachment>,
+    crate::network::FixedByNetwork,
+)> {
     // The keys the docker CLI and Compose use for the primary network.
     let primary_keys: Vec<&str> = match primary {
         NetworkMode::Bridge { network } if network == crate::network::DEFAULT => {
@@ -612,6 +619,7 @@ fn endpoints(
     };
     let mut aliases = Vec::new();
     let mut extra = Vec::new();
+    let mut fixed = crate::network::FixedByNetwork::new();
     for (key, cfg) in v.as_object().into_iter().flatten() {
         let names = match &cfg["Aliases"] {
             Value::Null => Vec::new(),
@@ -635,25 +643,50 @@ fn endpoints(
                 ));
             }
         };
-        if cfg["IPAMConfig"]["IPv4Address"]
-            .as_str()
-            .is_some_and(|a| !a.is_empty())
-        {
-            warnings.push(format!("a fixed address on {key} is ignored"));
+        let network = if key == "default" {
+            crate::network::DEFAULT
+        } else {
+            key
+        };
+        let addresses = fixed_addresses(cfg)?;
+        if !addresses.is_empty() {
+            fixed.insert(network.to_string(), addresses);
         }
         if primary_keys.contains(&key.as_str()) {
             aliases = names;
         } else {
             extra.push(crate::spec::Attachment {
-                network: match key.as_str() {
-                    "default" => crate::network::DEFAULT.to_string(),
-                    other => other.to_string(),
-                },
+                network: network.to_string(),
                 aliases: names,
             });
         }
     }
-    Ok((aliases, extra))
+    Ok((aliases, extra, fixed))
+}
+
+/// Static addresses from Docker's EndpointSettings or NetworkConnectRequest.
+pub(super) fn fixed_addresses(endpoint: &Value) -> Result<crate::network::FixedAddresses> {
+    fn address<T: std::str::FromStr>(ipam: &Value, key: &str) -> Result<Option<T>> {
+        if ipam[key].is_null() || ipam[key] == "" {
+            return Ok(None);
+        }
+        ipam[key]
+            .as_str()
+            .and_then(|ip| ip.parse().ok())
+            .map(Some)
+            .ok_or_else(|| {
+                invalid(
+                    "invalid network address",
+                    format!("{key} is not a valid address"),
+                    "give an address of the appropriate family without a prefix length",
+                )
+            })
+    }
+    let ipam = &endpoint["IPAMConfig"];
+    Ok(crate::network::FixedAddresses {
+        ipv4: address(ipam, "IPv4Address")?,
+        ipv6: address(ipam, "IPv6Address")?,
+    })
 }
 
 fn network_mode(mode: &str) -> Result<NetworkMode> {
@@ -761,12 +794,27 @@ mod tests {
         let root = root.path().canonicalize().unwrap();
         std::fs::create_dir(root.join("in")).unwrap();
         std::os::unix::fs::symlink("/", root.join("out")).unwrap();
-        assert!(lies_under(&root.join("in"), &root));
-        assert!(lies_under(&root.join("in/not/made/yet"), &root));
-        assert!(!lies_under(&root.join("in/../../x"), &root));
-        assert!(!lies_under(&root.join("out/tmp"), &root));
+        assert!(crate::vm::shares::contains(
+            std::slice::from_ref(&root),
+            &root.join("in")
+        ));
+        assert!(crate::vm::shares::contains(
+            std::slice::from_ref(&root),
+            &root.join("in/not/made/yet")
+        ));
+        assert!(!crate::vm::shares::contains(
+            std::slice::from_ref(&root),
+            &root.join("in/../../x")
+        ));
+        assert!(!crate::vm::shares::contains(
+            std::slice::from_ref(&root),
+            &root.join("out/tmp")
+        ));
         let sibling = format!("{}-other", root.display());
-        assert!(!lies_under(std::path::Path::new(&sibling), &root));
+        assert!(!crate::vm::shares::contains(
+            std::slice::from_ref(&root),
+            std::path::Path::new(&sibling)
+        ));
         let body = json!({"HostConfig": {
             "Binds": ["/a:/a", "vol:/v"],
             "Mounts": [{"Type": "bind", "Source": "/b", "Target": "/b"},
@@ -1033,12 +1081,8 @@ mod tests {
             f["extra_networks"],
             json!([{"network": "back", "aliases": ["w"]}, {"network": "zed"}])
         );
-        let text = warnings.join("\n");
-        assert!(text.contains("fixed address"), "{warnings:?}");
-        assert!(
-            !text.contains("alias") && !text.contains("only the network"),
-            "{warnings:?}"
-        );
+        assert_eq!(f["fixed_addresses"], json!({"back": {"ipv4": "10.9.9.9"}}));
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
 
     #[test]
@@ -1098,6 +1142,31 @@ mod tests {
     }
 
     #[test]
+    fn create_validates_logging_options() {
+        for (driver, config) in [
+            ("syslog", json!({"syslog-address": 5514})),
+            ("syslog", json!({"syslog-address": "tcp://127.0.0.1:0"})),
+            ("syslog", json!({"syslog-facility": "24"})),
+            (
+                "journald",
+                json!({"syslog-address": "udp://127.0.0.1:5514"}),
+            ),
+            ("journald", json!({"tag": "{{.Unknown}}"})),
+        ] {
+            let body = json!({"HostConfig": {"LogConfig": {"Type": driver, "Config": config}}});
+            let error = map_create(&body, None, &image()).unwrap_err();
+            assert_eq!(error.kind, ErrorKind::InvalidInput, "{body}");
+        }
+        let body = json!({"HostConfig": {"LogConfig": {"Type": "journald"}}});
+        let (container, warnings) = map_create(&body, None, &image()).unwrap();
+        assert_eq!(
+            fields(&container)["log_config"],
+            json!({"Type": "journald", "Config": {}})
+        );
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
     fn create_warns_about_ignored_fields() {
         let body = json!({
             "Image": "alpine",
@@ -1109,7 +1178,7 @@ mod tests {
                 "DnsSearch": ["lan"],
                 "DnsOptions": ["ndots:2"],
                 "ExtraHosts": ["a:1.2.3.4"],
-                "LogConfig": {"Type": "syslog"},
+                "LogConfig": {"Type": "fluentd"},
                 "Init": true,
                 "ShmSize": 1000,
                 "Ulimits": [{"Name": "nofile", "Soft": 1, "Hard": 2}],

@@ -3,7 +3,9 @@
 //! `PODBAG_VM_IDLE` still win over the file. The host reads them when it starts a VM.
 
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use crate::vm::shares;
 
 /// The least memory a VM gets.
 pub const MEMORY_MIN_MIB: u64 = 1024;
@@ -22,6 +24,48 @@ pub struct Saved {
     #[serde(rename = "memoryMiB", alias = "memoryMib")]
     pub memory_mib: Option<u64>,
     pub idle_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shared_paths: Option<Vec<PathBuf>>,
+}
+
+impl Saved {
+    pub(super) fn shared_paths(&self) -> Vec<PathBuf> {
+        self.shared_paths.clone().unwrap_or_else(shares::defaults)
+    }
+}
+
+/// Resolve paths when saved so each host directory has one guest mount point.
+pub(super) fn normalize_shares(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
+    let mut shares = Vec::with_capacity(paths.len());
+    for path in paths {
+        let label = path.display();
+        if !path.is_absolute() {
+            return Err(format!("shared folder {label} must be an absolute path"));
+        }
+        let real = path
+            .canonicalize()
+            .map_err(|e| format!("cannot share {label}: {e}"))?;
+        if !real.is_dir() {
+            return Err(format!("cannot share {label}: it is not a directory"));
+        }
+        if real.to_str().is_none_or(|s| s.contains(['\n', '\r'])) || !shares::valid_target(&real) {
+            return Err(format!(
+                "cannot share {label}: {} is not a usable VM path",
+                real.display()
+            ));
+        }
+        if shares
+            .iter()
+            .any(|previous: &PathBuf| previous.starts_with(&real) || real.starts_with(previous))
+        {
+            return Err(format!(
+                "cannot share {label}: shared folders must not overlap"
+            ));
+        }
+        shares.push(real);
+    }
+    shares.sort_unstable();
+    Ok(shares)
 }
 
 /// What a VM runs with. `idle_seconds` 0: it never powers off by itself.
@@ -243,6 +287,7 @@ pub struct Running {
     /// Unix seconds.
     pub started: u64,
     pub resources: Option<Resources>,
+    pub shared_paths: Option<Vec<PathBuf>>,
     /// Running containers, as the host last counted them.
     pub containers: Option<u64>,
     /// The guest's CPU use (percent of all its CPUs) and memory, as last read.
@@ -264,6 +309,26 @@ mod tests {
 
     fn no_env(_: &str) -> Option<String> {
         None
+    }
+
+    #[test]
+    fn shares_resolve_links_and_reject_overlapping_or_system_paths() {
+        let dir = tempfile::tempdir_in("/private/tmp").unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let folder = root.join("my projects");
+        let child = folder.join("app");
+        std::fs::create_dir_all(&child).unwrap();
+        let link = root.join("alias");
+        std::os::unix::fs::symlink(&folder, &link).unwrap();
+
+        assert_eq!(normalize_shares(&[link.clone()]).unwrap(), [folder.clone()]);
+        assert!(normalize_shares(&[link.clone(), folder.clone()]).is_err());
+        assert!(normalize_shares(&[child, folder]).is_err());
+        for path in ["relative", "/", "/dev", "/tmp/does-not-exist"] {
+            assert!(normalize_shares(&[PathBuf::from(path)]).is_err(), "{path}");
+        }
+        assert!(normalize_shares(&[]).unwrap().is_empty());
+        assert_eq!(Saved::default().shared_paths(), [PathBuf::from("/Users")]);
     }
 
     #[test]
@@ -302,6 +367,7 @@ mod tests {
             cpus: Some(10),
             memory_mib: Some(20 * 1024),
             idle_seconds: Some(0),
+            shared_paths: None,
         };
         assert!(validate(&ok, &MAC).is_ok());
         let e = validate(
@@ -366,6 +432,7 @@ mod tests {
             cpus: Some(2),
             memory_mib: Some(4096),
             idle_seconds: Some(0),
+            shared_paths: None,
         };
         let (r, _) = effective(&saved, &no_env, &MAC);
         assert_eq!((r.cpus, r.memory_mib, r.idle_seconds), (2, 4096, 0));
@@ -378,6 +445,7 @@ mod tests {
             cpus: Some(64),
             memory_mib: Some(1 << 20),
             idle_seconds: None,
+            shared_paths: None,
         };
         let (r, _) = effective(&big, &no_env, &MAC);
         assert_eq!((r.cpus, r.memory_mib), (10, 20 * 1024));
@@ -391,6 +459,7 @@ mod tests {
             cpus: Some(4),
             memory_mib: None,
             idle_seconds: Some(300),
+            shared_paths: None,
         };
         save(dir.path(), &s).unwrap();
         assert_eq!(load(dir.path()), s);

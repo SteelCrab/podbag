@@ -322,13 +322,12 @@ fn socket_pair() -> Result<(OwnedFd, OwnedFd)> {
 }
 
 /// The memory budget in bytes (`None`: no limit), from the settings and the host's memory.
-fn memory_budget(dirs: &Dirs) -> Result<Option<u64>> {
-    let setting = crate::config::load(dirs)?.memory_budget;
+fn memory_budget(setting: cgroup::Budget) -> Option<u64> {
     let total = std::fs::read_to_string("/proc/meminfo")
         .ok()
         .and_then(|m| cgroup::mem_total(&m))
         .unwrap_or(0);
-    Ok(setting.bytes(total).filter(|&b| b > 0))
+    setting.bytes(total).filter(|&b| b > 0)
 }
 
 pub(super) fn run(
@@ -343,10 +342,6 @@ pub(super) fn run(
         handed_over: false,
     };
     let id = spec.id.as_str();
-    // A detached container of the keeper needs no process of its own: the keeper becomes
-    // its parent and takes over the watching once it runs. Published ports
-    // are relayed by a shim, so such a container keeps this process.
-    let hand_over = spec.detach && crate::keeper::under_keeper() && spec.publish.is_empty();
     let mut io = match Io::prepare(spec) {
         Ok(io) => io,
         Err(e) => return failed(status, e),
@@ -378,13 +373,14 @@ pub(super) fn run(
         remove_control(dirs, id);
         return failed(status, e);
     }
-    let budget = match memory_budget(dirs) {
-        Ok(b) => b,
+    let config = match crate::config::load(dirs) {
+        Ok(config) => config,
         Err(e) => {
             remove_control(dirs, id);
             return failed(status, e);
         }
     };
+    let budget = memory_budget(config.memory_budget);
     let group = match crate::keeper::cgroups::create(&spec.cgroup, id, &spec.limits, budget) {
         Ok(g) => g,
         Err(e) => {
@@ -466,18 +462,32 @@ pub(super) fn run(
         }
     };
     let mut run_spec = spec.clone();
-    match super::net::files(spec, dirs, rootless, own) {
-        Ok(mut files) => {
+    let mut dns_upstream = match super::net::files(spec, dirs, rootless, own, config.embedded_dns) {
+        Ok((mut files, upstream)) => {
             files.append(&mut run_spec.mounts);
             run_spec.mounts = files;
             run_spec.mounts.extend(device_mounts(&spec.devices));
+            upstream
         }
         Err(e) => {
             undo(group);
             return failed(status, e);
         }
-    }
-    let mut attach = |pid: u32| super::net::attach(spec, &addresses, session, pid);
+    };
+    // The keeper can watch detached containers. Containers with published ports or
+    // embedded DNS keep this shim to serve them.
+    let hand_over = spec.detach
+        && crate::keeper::under_keeper()
+        && spec.publish.is_empty()
+        && dns_upstream.is_none();
+    let mut resolver = None;
+    let mut attach = |pid: u32| {
+        super::net::attach(spec, &addresses, session, pid)?;
+        if let Some(upstream) = dns_upstream.take() {
+            resolver = Some(super::dns::Resolver::start(dirs, id, pid, upstream)?);
+        }
+        Ok(())
+    };
     let child = match linux::spawn(
         &run_spec,
         io.stdio,
@@ -492,6 +502,7 @@ pub(super) fn run(
     ) {
         Ok(c) => c,
         Err(e) => {
+            drop(resolver);
             undo(group);
             return failed(status, e);
         }
@@ -501,6 +512,7 @@ pub(super) fn run(
         // SAFETY: killing our own child, which runs but has no terminal to talk on.
         unsafe { libc::kill(child.pid as libc::pid_t, libc::SIGKILL) };
         let _ = linux::wait(child.pid);
+        drop(resolver);
         undo(group);
         return failed(status, e);
     }
@@ -511,6 +523,7 @@ pub(super) fn run(
             // SAFETY: killing our own child; nothing is published for it.
             unsafe { libc::kill(child.pid as libc::pid_t, libc::SIGKILL) };
             let _ = linux::wait(child.pid);
+            drop(resolver);
             undo(group);
             return failed(status, e);
         }
@@ -543,7 +556,16 @@ pub(super) fn run(
             .as_ref()
             .map(|g| g.path().to_string_lossy().into_owned()),
         oom: None,
-        ip: addresses.first().map(|(_, ip)| ip.to_string()),
+        ip: addresses.first().map(|(_, ip)| ip.ipv4.to_string()),
+        network_inode: if addresses.is_empty() {
+            None
+        } else {
+            use std::os::unix::fs::MetadataExt;
+            linux::net::namespace(child.pid)
+                .and_then(|ns| ns.metadata())
+                .ok()
+                .map(|metadata| metadata.ino())
+        },
         ports: published.iter().map(|(m, _)| *m).collect(),
         paused: false,
     };
@@ -579,7 +601,7 @@ pub(super) fn run(
     }
     let relays = addresses
         .first()
-        .map(|(_, ip)| super::proxy::serve(published, *ip, session));
+        .map(|(_, ip)| super::proxy::serve(published, ip.ipv4, session));
 
     let echo = io
         .outputs
@@ -600,7 +622,8 @@ pub(super) fn run(
         &sig_r,
         spec.health.as_ref(),
     );
-    // Published ports close first: the address goes back to the network below.
+    // Stop DNS and published ports before returning the container's addresses.
+    drop(resolver);
     if let Some(relays) = relays {
         relays.close();
     }
@@ -703,6 +726,7 @@ pub(crate) fn finish(
     waiters: &[UnixStream],
 ) {
     st.status = Status::Exited;
+    st.network_inode = None;
     st.paused = false;
     st.exit_code = Some(code);
     st.oom = oom;

@@ -266,6 +266,7 @@ fn vm(ui: &mut Screen, exe: &Path) -> Result<Change> {
                 memory_mib: Some(memory_mib),
                 idle_seconds: Some(idle_seconds),
                 restart,
+                ..cli::VmSettings::default()
             };
             ui.confirm(
                 &format!(

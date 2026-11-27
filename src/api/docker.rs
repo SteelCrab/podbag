@@ -98,6 +98,7 @@ mod tests {
             cgroup: None,
             oom: None,
             ip: None,
+            network_inode: None,
             ports: vec![],
             paused: false,
         }
