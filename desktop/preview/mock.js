@@ -381,13 +381,14 @@
     open_repository: () => null,
     open_training_guide: () => null,
     // practice-tracks: a course session at a module `ui` step. A test sets window.practiceUi to
-    // switch the step (window.practiceStage and window.practiceContainers change the stage and
-    // the containers), and reads window.practiceCalls: [action, session, name] of each request.
+    // switch the step (window.practiceStage, window.practiceContainers and window.practiceSession
+    // change the stage, the containers and the session), and reads window.practiceCalls:
+    // [action, session, name] of each request.
     practice_volumes: ({ action, session, name, course }) => {
       if (view !== "practice-tracks" || !course) return null;
       const volume = { Name: "data", Driver: "local", Mountpoint: "/var/lib/podbag/volumes/data/_data", CreatedAt: new Date(now * 1000).toISOString() };
       const state = {
-        module: "image-basics", session: "podbag-container-abc", stage: window.practiceStage ?? "removeTag", command: "podbag rmi my-busybox:1",
+        module: "image-basics", session: window.practiceSession ?? "podbag-container-abc", stage: window.practiceStage ?? "removeTag", command: "podbag rmi my-busybox:1",
         containers: window.practiceContainers ?? [{ Id: "c1", Names: ["/web"], Image: "busybox:1.37.0", Command: "httpd -f", Created: now, State: "running", Status: "Up 1 minute", Ports: [] }],
         volumes: [volume], ui: window.practiceUi, text: null, detail: null,
       };

@@ -265,11 +265,13 @@ function renderPracticeContainers(main) {
   }
   async function stepRow(action, row) {
     const name = containerName(row);
+    // The row's session: `change` refuses the request if polling replaces it during the question.
+    const session = state.session;
     if (action === "remove") {
       const running = ["running", "paused", "restarting"].includes(row.State);
       if (!(await confirmDialog(t(running ? "confirm.removeRunning" : "confirm.removeContainer", { name })))) return;
     }
-    const result = await change(action, name, state?.session);
+    const result = await change(action, name, session);
     if (action === "logs" && result?.text) {
       log = { id: row.Id, stage: result.stage, text: result.text };
       detailId = row.Id;

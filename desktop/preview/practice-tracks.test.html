@@ -84,6 +84,21 @@ async function test() {
   answerYes = true;
   btn("Remove").click();
   await wait(() => called("remove,podbag-container-abc,web"), "Send remove");
+  // A new session while the question is open: the request is for the confirmed session, and
+  // the page sends nothing to the new one.
+  win.confirmDialog = async (text) => {
+    asked.push(text);
+    win.practiceSession = "podbag-container-new";
+    await new Promise(resolve => setTimeout(resolve, 300));
+    return true;
+  };
+  btn("Remove").click();
+  await wait(() => win.practiceSession === "podbag-container-new", "Ask again");
+  await new Promise(resolve => setTimeout(resolve, 500));
+  check(!called("remove,podbag-container-new,web"), "Send nothing to the new session");
+  win.practiceSession = undefined;
+  win.confirmDialog = async (text) => { asked.push(text); return answerYes; };
+  await wait(() => btn("Remove"), "Show Remove again in the first session");
 
   // Inspect of a name that no row has: a toolbar button.
   win.practiceUi = { action: "inspect", name: "ghost" };
@@ -91,7 +106,7 @@ async function test() {
   // Inspect of a row: opening the row sends inspect.
   win.practiceUi = { action: "inspect", name: "web" };
   await wait(() => !btn("Details: ghost"), "Drop the toolbar button when a row has the name");
-  doc.querySelector('#main button[aria-label="Back"]').click();
+  doc.querySelector('#main button[aria-label="Back"]')?.click();
   await wait(() => doc.querySelector("#main td button.link"), "Return to the list");
   doc.querySelector("#main td button.link").click();
   await wait(() => called("inspect,podbag-container-abc,web"), "Send inspect when opening the row");
