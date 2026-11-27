@@ -375,6 +375,7 @@ pub fn container_spec(
         extra_networks: Vec::new(),
         namespaces,
         devices,
+        log_config: Default::default(),
         cri_log: log_file(&pod.log_directory, &config.log_path),
         stdin_fifo: None,
     })

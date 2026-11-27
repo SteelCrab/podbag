@@ -124,7 +124,7 @@ pub fn inspect(f: &Facts) -> Value {
         Some(n) => (n.gateway.clone(), prefix_len(&n.subnet)),
         None => (String::new(), 0),
     };
-    json!({
+    let info = json!({
         "Id": f.spec.id,
         "Created": rfc3339(Some(st.created)),
         "Path": f.spec.command.first().cloned().unwrap_or_default(),
@@ -192,7 +192,16 @@ pub fn inspect(f: &Facts) -> Value {
             "Networks": networks(f),
         },
         "Mounts": mounts(f),
-    })
+    });
+    #[cfg(target_os = "linux")]
+    if !f.spec.log_config.is_default()
+        && let Some(status) = crate::shim::logbook::delivery_status(f.dir)
+    {
+        let mut info = info;
+        info["PodbagLogDelivery"] = json!(status);
+        return info;
+    }
+    info
 }
 
 fn proto(p: &PortMapping) -> &'static str {
@@ -346,7 +355,7 @@ fn host_config(f: &Facts) -> Value {
             "MaximumRetryCount": f.spec.restart.docker().1,
         },
         "AutoRemove": f.spec.auto_remove,
-        "LogConfig": {"Type": "json-file", "Config": {}},
+        "LogConfig": f.spec.log_config,
         "Memory": limits.memory.unwrap_or(0),
         "NanoCpus": nano_cpus,
         "CpuQuota": cpu_quota,

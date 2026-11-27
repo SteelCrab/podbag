@@ -637,6 +637,12 @@ pub struct RunArgs {
     /// cgroup (inside the user namespace when rootless)
     #[arg(long)]
     pub privileged: bool,
+    /// Logging driver (json-file, syslog, journald)
+    #[arg(long)]
+    pub log_driver: Option<String>,
+    /// Logging driver option, repeatable
+    #[arg(long, value_name = "KEY=VALUE")]
+    pub log_opt: Vec<String>,
     /// Start it again after it ends: no, always, unless-stopped, on-failure[:max]
     #[arg(long, value_name = "POLICY")]
     pub restart: Option<String>,
