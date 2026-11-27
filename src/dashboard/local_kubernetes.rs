@@ -7,6 +7,20 @@ use std::process::Command;
 
 use super::kubernetes::host_command;
 
+#[derive(Clone, Copy, Default, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum Provider {
+    #[default]
+    Docker,
+    Podbag,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct Engine {
+    provider: Provider,
+    id: String,
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Record {
@@ -15,6 +29,8 @@ struct Record {
     nodes: u8,
     host: String,
     engine_id: String,
+    #[serde(default)]
+    provider: Provider,
     ready: bool,
 }
 
@@ -57,7 +73,8 @@ pub fn status() -> Result<Option<LocalCluster>, String> {
 pub fn create(version: Option<String>, nodes: u8) -> Result<LocalCluster, String> {
     let version = version.filter(|v| !v.is_empty());
     check_settings(version.as_deref(), nodes)?;
-    create_in(&directory()?, docker_host()?, version, nodes, &run)
+    let native = std::env::var("PODBAG_KUBERNETES_NATIVE").as_deref() == Ok("1");
+    create_in(&directory()?, docker_host()?, version, nodes, native, &run)
 }
 
 pub fn reset() -> Result<LocalCluster, String> {
@@ -150,13 +167,14 @@ fn create_in(
     host: String,
     version: Option<String>,
     nodes: u8,
+    allow_native: bool,
     run: &impl Fn(&mut Command) -> Result<String, String>,
 ) -> Result<LocalCluster, String> {
     let _lock = operation(dir)?;
     if read(dir)?.is_some() {
         return Err("Podbag already manages a local cluster".into());
     }
-    let engine_id = engine_id(&host, run)?;
+    let engine = engine(&host, allow_native, run)?;
     let name_file = tempfile::Builder::new()
         .prefix("podbag-")
         .rand_bytes(12)
@@ -173,7 +191,8 @@ fn create_in(
         version,
         nodes,
         host,
-        engine_id,
+        engine_id: engine.id,
+        provider: engine.provider,
         ready: false,
     };
 
@@ -195,7 +214,7 @@ fn provision(
     use std::io::Write;
     let mut config = tempfile::NamedTempFile::new_in(dir).map_err(|e| e.to_string())?;
     config
-        .write_all(node_config(record.nodes).as_bytes())
+        .write_all(node_config(record.nodes, record.provider).as_bytes())
         .map_err(|e| e.to_string())?;
     let mut command = kind(&record.host)?;
     command.args(["create", "cluster", "--name", &record.name, "--wait", "5m"]);
@@ -217,7 +236,8 @@ fn check_engine(
     record: &Record,
     run: &impl Fn(&mut Command) -> Result<String, String>,
 ) -> Result<(), String> {
-    if engine_id(&record.host, run)? != record.engine_id {
+    let current = engine(&record.host, record.provider == Provider::Podbag, run)?;
+    if current.id != record.engine_id || current.provider != record.provider {
         return Err("The local cluster belongs to a different Docker engine".into());
     }
     Ok(())
@@ -262,10 +282,20 @@ fn check_settings(version: Option<&str>, nodes: u8) -> Result<(), String> {
     Ok(())
 }
 
-fn node_config(nodes: u8) -> String {
-    let mut config = "kind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\nnetworking:\n  apiServerAddress: 127.0.0.1\nnodes:\n- role: control-plane\n".to_owned();
-    for _ in 1..nodes {
-        config.push_str("- role: worker\n");
+fn node_config(nodes: u8, provider: Provider) -> String {
+    let mut config = "kind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\nnetworking:\n  apiServerAddress: 127.0.0.1\nnodes:\n".to_owned();
+    for index in 0..nodes {
+        config.push_str(if index == 0 {
+            "- role: control-plane\n"
+        } else {
+            "- role: worker\n"
+        });
+        if provider == Provider::Podbag {
+            config.push_str("  extraMounts:\n  - hostPath: /dev/kmsg\n    containerPath: /dev/kmsg\n    readOnly: true\n");
+        }
+    }
+    if provider == Provider::Podbag {
+        config.push_str("kubeadmConfigPatches:\n- |\n  kind: KubeletConfiguration\n  protectKernelDefaults: true\n");
     }
     config
 }
@@ -295,26 +325,54 @@ fn local_host(host: &str) -> bool {
             .is_some_and(|name| !name.is_empty())
 }
 
-fn engine_id(
+fn engine(
     host: &str,
+    allow_native: bool,
     run: &impl Fn(&mut Command) -> Result<String, String>,
-) -> Result<String, String> {
+) -> Result<Engine, String> {
     if !local_host(host) {
         return Err("Select a local Docker engine before creating a cluster".into());
     }
-    let output =
-        run(docker_command("docker", host)?.args(["info", "--format", "{{.OSType}} {{.ID}}"]))?;
-    let id = output
-        .trim()
-        .strip_prefix("linux ")
-        .filter(|id| !id.is_empty());
-    match id {
-        Some("podbag") => Err(
-            "kind needs a separate local Docker engine. Select it with docker context use.".into(),
-        ),
-        Some(id) => Ok(id.into()),
-        None => Err("kind needs a local Docker engine running Linux containers".into()),
+    let output = run(docker_command("docker", host)?.args([
+        "info", "--format", r#"{"os":{{json .OSType}},"id":{{json .ID}},"name":{{json .Name}},"root":{{json .DockerRootDir}},"cgroup":{{json .CgroupVersion}},"security":{{json .SecurityOptions}}}"#,
+    ]))?;
+    let info: serde_json::Value = serde_json::from_str(&output)
+        .map_err(|e| format!("Could not read the local engine information: {e}"))?;
+    let id = info["id"].as_str().filter(|s| !s.is_empty());
+    if info["os"] != "linux" || id.is_none() {
+        return Err("kind needs a local engine running Linux containers".into());
     }
+    let id = id.unwrap_or_default();
+    if id != "podbag" {
+        return Ok(Engine {
+            provider: Provider::Docker,
+            id: id.into(),
+        });
+    }
+    if !cfg!(target_os = "linux") {
+        return Err("kind needs a separate local Docker engine on this platform".into());
+    }
+    if !allow_native {
+        return Err("Select a separate Docker engine or set PODBAG_KUBERNETES_NATIVE=1 for rootful Linux Podbag".into());
+    }
+    let security = info["security"].as_array();
+    if info["cgroup"] != "2"
+        || security.is_none_or(|options| options.iter().any(|v| v == "name=rootless"))
+    {
+        return Err("Local Kubernetes needs a rootful Podbag engine with cgroup v2".into());
+    }
+    let root = info["root"]
+        .as_str()
+        .filter(|s| Path::new(s).is_absolute())
+        .ok_or("Podbag did not report its local data directory")?;
+    let name = info["name"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or("Podbag did not report its host name")?;
+    Ok(Engine {
+        provider: Provider::Podbag,
+        id: serde_json::json!(["podbag", name, root]).to_string(),
+    })
 }
 
 fn docker_command(program: &str, host: &str) -> Result<Command, String> {
@@ -388,7 +446,7 @@ mod tests {
             calls.borrow_mut().push(format!("{program} {}", args[0]));
             if program == "docker" {
                 assert_eq!(args[0], "info");
-                return Ok(format!("linux {}", engine.get()));
+                return Ok(serde_json::json!({"os":"linux", "id":engine.get()}).to_string());
             }
             assert_eq!(
                 env[std::ffi::OsStr::new("KIND_EXPERIMENTAL_PROVIDER")].unwrap(),
@@ -422,7 +480,15 @@ mod tests {
         };
         assert!(remove_in(&dir, &run).is_err());
         assert!(calls.borrow().is_empty());
-        let created = create_in(&dir, TEST_HOST.into(), Some("v1.35.8".into()), 3, &run).unwrap();
+        let created = create_in(
+            &dir,
+            TEST_HOST.into(),
+            Some("v1.35.8".into()),
+            3,
+            false,
+            &run,
+        )
+        .unwrap();
         assert!(created.ready);
         engine.set("engine-two");
         let err = reset_in(&dir, &run).unwrap_err();
@@ -462,13 +528,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let run = |command: &mut Command| match command.get_args().next().unwrap().to_str().unwrap()
         {
-            "info" => Ok("linux engine-one".into()),
+            "info" => Ok(serde_json::json!({"os":"linux", "id":"engine-one"}).to_string()),
             "get" => Ok("".into()),
             "create" => Err("kind exited".into()),
             other => panic!("unexpected operation {other}"),
         };
         assert_eq!(
-            create_in(dir.path(), TEST_HOST.into(), None, 1, &run)
+            create_in(dir.path(), TEST_HOST.into(), None, 1, false, &run)
                 .err()
                 .as_deref(),
             Some("kind exited")
@@ -479,7 +545,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_remote_endpoints_invalid_settings_and_podbag_as_kind_backend() {
+    fn rejects_remote_endpoints_and_invalid_settings() {
         assert!(!local_host("ssh://example.com"));
         assert!(!local_host("tcp://127.0.0.1:2375"));
         assert!(!local_host("unix://relative.sock"));
@@ -488,7 +554,32 @@ mod tests {
         }
         assert!(check_settings(None, 0).is_err());
         assert!(check_settings(Some("v1.35.8"), 5).is_ok());
-        assert!(engine_id(TEST_HOST, &|_| Ok("linux podbag".into())).is_err());
+    }
+
+    #[test]
+    fn native_kind_requires_explicit_rootful_linux_and_mounts_kmsg_read_only() {
+        let info = serde_json::json!({
+            "os":"linux", "id":"podbag", "name":"test-guest", "root":"/srv/podbag",
+            "cgroup":"2", "security":["name=cgroupns"],
+        });
+        let query = |_: &mut Command| Ok(info.to_string());
+        assert!(engine(TEST_HOST, false, &query).is_err());
+        let mut rootless = info.clone();
+        rootless["security"] = serde_json::json!(["name=rootless"]);
+        assert!(engine(TEST_HOST, true, &|_| Ok(rootless.to_string())).is_err());
+        let mut old_cgroup = info.clone();
+        old_cgroup["cgroup"] = "1".into();
+        assert!(engine(TEST_HOST, true, &|_| Ok(old_cgroup.to_string())).is_err());
+        if cfg!(target_os = "linux") {
+            let native = engine(TEST_HOST, true, &query).unwrap();
+            assert_eq!(native.provider, Provider::Podbag);
+            assert_eq!(native.id, r#"["podbag","test-guest","/srv/podbag"]"#);
+        }
+        let native = node_config(2, Provider::Podbag);
+        assert_eq!(native.matches("hostPath: /dev/kmsg").count(), 2);
+        assert_eq!(native.matches("readOnly: true").count(), 2);
+        assert!(native.contains("protectKernelDefaults: true"));
+        assert!(!node_config(2, Provider::Docker).contains("/dev/kmsg"));
     }
 
     #[test]
@@ -499,7 +590,7 @@ mod tests {
         check_settings(Some(&version), 2).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let result = (|| -> Result<(), String> {
-            let cluster = create_in(dir.path(), docker_host()?, Some(version), 2, &run)?;
+            let cluster = create_in(dir.path(), docker_host()?, Some(version), 2, false, &run)?;
             let config = dir.path().join("kubeconfig");
             let nodes = || -> Result<usize, String> {
                 let output = run(host_command("kubectl")?
@@ -524,5 +615,72 @@ mod tests {
             cleanup.unwrap();
         }
         assert!(read(dir.path()).unwrap().is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires a prepared rootful Podbag engine, kind, and a private PODBAG_UI_DIR"]
+    fn linux_desktop_manages_a_real_native_kind_cluster() {
+        assert!(std::env::var_os("PODBAG_UI_DIR").is_some_and(|v| !v.is_empty()));
+        assert_eq!(
+            std::env::var("PODBAG_KUBERNETES_NATIVE").as_deref(),
+            Ok("1")
+        );
+        assert_eq!(
+            engine(&docker_host().unwrap(), true, &run)
+                .unwrap()
+                .provider,
+            Provider::Podbag
+        );
+        assert!(status().unwrap().is_none());
+        let version =
+            std::env::var("PODBAG_TEST_KIND_VERSION").unwrap_or_else(|_| "v1.35.8".into());
+        let count = std::env::var("PODBAG_TEST_KIND_NODES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1);
+        let result = (|| -> Result<(), String> {
+            let created = create(Some(version), count)?;
+            let config = kubeconfig().ok_or("the cluster did not create a private kubeconfig")?;
+            let kubectl = |args: &[&str]| -> Result<String, String> {
+                run(host_command("kubectl")?
+                    .arg("--kubeconfig")
+                    .arg(&config)
+                    .args(args))
+            };
+            let verify = || -> Result<(), String> {
+                kubectl(&[
+                    "wait",
+                    "--for=condition=Ready",
+                    "node",
+                    "--all",
+                    "--timeout=60s",
+                ])?;
+                if kubectl(&["get", "nodes", "-o", "name"])?.lines().count() != usize::from(count) {
+                    return Err("the provisioned node count does not match the request".into());
+                }
+                if kubectl(&["get", "--raw=/readyz"])?.trim() != "ok" {
+                    return Err("the Kubernetes API is not ready".into());
+                }
+                println!("{}", kubectl(&["get", "nodes", "-o", "wide"])?.trim());
+                Ok(())
+            };
+            verify()?;
+            println!("Desktop created a cluster on the native Podbag socket.");
+            if reset()?.context != created.context {
+                return Err("reset changed the owned cluster context".into());
+            }
+            verify()?;
+            println!("Desktop reset the same cluster and its nodes.");
+            Ok(())
+        })();
+        let cleanup = status().unwrap().map(|_| remove());
+        result.unwrap();
+        if let Some(cleanup) = cleanup {
+            cleanup.unwrap();
+        }
+        assert!(status().unwrap().is_none());
+        assert!(!directory().unwrap().join("kubeconfig").exists());
+        println!("Desktop removed its cluster and private kubeconfig.");
     }
 }

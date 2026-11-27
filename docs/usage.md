@@ -1251,8 +1251,7 @@ podbag lab remove container-network
 
 - Install [kind](https://kind.sigs.k8s.io/docs/user/quick-start/) and `kubectl` on the
   desktop host. Point the Docker CLI at a separate local Docker engine that runs Linux
-  containers. The stock kind Docker provider currently requires bridge network options
-  including IPv6 that Podbag's Docker-compatible engine does not support.
+  containers, or opt in to the rootful Linux Podbag provider below.
 - Open **Kubernetes → Local cluster**. Enter a Kubernetes release tag supported by your
   kind version, or keep the kind default. Choose the node count and select **Create
   cluster**. The first node is the control plane, and the remaining nodes are workers.
@@ -1262,6 +1261,19 @@ podbag lab remove container-network
 - **Reset cluster** deletes the Podbag-managed cluster and recreates it with the same
   settings. **Remove** deletes it and its private kubeconfig. Both erase the local
   workloads and data. Podbag checks the original Docker engine before deleting anything.
+
+**Rootful Linux Podbag provider**
+
+- Point the Docker CLI at an already configured local Podbag Unix socket. The engine needs
+  cgroup v2 and dual-stack IPv4 and IPv6 bridge support. Start Desktop with
+  `PODBAG_KUBERNETES_NATIVE=1` to create a cluster on that engine.
+- The kernel must meet the kubelet's protected defaults. These include
+  `vm.overcommit_memory=1`, `kernel.panic=10`, and `kernel.panic_on_oops=1`. Configure
+  the engine host separately. Desktop uses `protectKernelDefaults` so the kubelet
+  checks these settings during startup.
+- The engine host must provide `/dev/kmsg`. Each Kind node receives a read-only mount of
+  this device. The Kubernetes pods use the containerd bundled in the Kind nodes.
+- On macOS and Windows, use a separate local Docker engine.
 
 #### Engine switch
 
