@@ -253,7 +253,7 @@ function renderPracticeContainers(main) {
     const session = state.session;
     const stepButton = practiceStepButton(state, async (action, name) => {
       const result = await change(action, name, session);
-      if (action === "inspect" && result?.detail) {
+      if (action === "inspect" && result?.detail && current(result, session)) {
         inspected = { stage: result.stage, detail: result.detail };
         render();
       }
@@ -283,11 +283,16 @@ function renderPracticeContainers(main) {
       if (!(await confirmDialog(t(running ? "confirm.removeRunning" : "confirm.removeContainer", { name })))) return;
     }
     const result = await change(action, name, session);
-    if (action === "logs" && result?.text) {
+    if (action === "logs" && result?.text && current(result, session)) {
       log = { id: row.Id, stage: result.stage, text: result.text };
       detailId = row.Id;
       render();
     }
+  }
+  // A reply still for the page's session and step: `change` refreshes before it returns, and
+  // output of an earlier step must not come back after that refresh dropped it.
+  function current(result, session) {
+    return state?.session === session && state.stage === result.stage;
   }
   function openContainer(row) {
     if (log?.id !== row.Id) log = null;

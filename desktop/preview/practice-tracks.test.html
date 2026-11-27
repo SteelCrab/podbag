@@ -72,6 +72,15 @@ async function test() {
   await wait(() => !doc.querySelector("pre.lab-output"), "Drop the log when the step changes");
   check(doc.querySelector("#main h2")?.textContent === "web", "Stay on web");
   win.practiceStage = undefined;
+  // The step moves on before the reply comes back: the page shows no output of the old step.
+  await wait(() => !doc.querySelector("pre.lab-output") && btn("Logs"), "Show Logs for the first step again");
+  win.practiceAfterCall = () => { win.practiceStage = "removeJob"; };
+  btn("Logs").click();
+  await wait(() => win.practiceStage === "removeJob", "Send logs again");
+  await new Promise(resolve => setTimeout(resolve, 300));
+  check(!doc.querySelector("pre.lab-output"), "Show no log of the old step");
+  win.practiceAfterCall = undefined;
+  win.practiceStage = undefined;
 
   // Remove asks about a running container.
   win.practiceUi = { action: "remove", name: "web" };
@@ -109,6 +118,14 @@ async function test() {
   await wait(() => /10\.89\.0\.0\/24/.test(doc.getElementById("main").textContent), "Show the network's details");
   win.practiceStage = "inspectNext";
   await wait(() => !/10\.89\.0\.0\/24/.test(doc.getElementById("main").textContent), "Drop the details when the step changes");
+  win.practiceStage = undefined;
+  await wait(() => btn("Details: ghost"), "Show the toolbar button for the first step again");
+  win.practiceAfterCall = () => { win.practiceStage = "inspectNext"; };
+  btn("Details: ghost").click();
+  await wait(() => win.practiceStage === "inspectNext", "Send inspect again");
+  await new Promise(resolve => setTimeout(resolve, 300));
+  check(!/10\.89\.0\.0\/24/.test(doc.getElementById("main").textContent), "Show no details of the old step");
+  win.practiceAfterCall = undefined;
   win.practiceStage = undefined;
   // Inspect of a row: opening the row sends inspect.
   win.practiceUi = { action: "inspect", name: "web" };
