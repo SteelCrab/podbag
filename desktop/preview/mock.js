@@ -67,14 +67,15 @@
     throw 'kubectl (exit status: 1): error: the server doesn\'t have a resource type "routes"';
   };
   const docker = view.startsWith("docker");
+  const platform = params.get("platform") || "macos";
   const engine = {
-    platform: "macos",
+    platform,
     engine: docker ? "docker" : "podbag",
     engineName: docker ? "Docker" : "podbag",
     shell: true,
     endpoint: "unix:///Users/me/.podbag/run/docker.sock",
     reachable: !["offline", "vm"].includes(view),
-    vm: view === "vm" ? "stopped" : "running",
+    vm: platform === "linux" ? null : view === "vm" ? "stopped" : "running",
     version: "podbag 0.1.0 (API 1.47)",
     error: view === "vm" ? "vm-stopped" : view === "offline" ? "cannot connect to unix:///Users/me/.podbag/run/docker.sock: No such file or directory" : null,
   };
@@ -115,6 +116,7 @@
     uptimeSeconds: 7560, containers: 3, cpuPercent: 12.5, memoryUsedMiB: 1350, memoryTotalMiB: 3900,
     disk: { path: "/Users/me/.podbag/vm/disk.img", allocatedBytes: 5_800_000_000, sizeBytes: 68_719_476_736 },
   };
+  if (platform === "windows") Object.assign(vmStatus, { platform, resourcesEditable: false });
   // A packaged app with a separate podbag for the terminal; update-source: a build of its own.
   const packaged = { installer: "macos-app", terminal: "/usr/local/bin/podbag", terminalVersion: "0.1.0", appNewer: true, cliNewer: true };
   const source = { installer: null, terminal: null, terminalVersion: null, appNewer: false, cliNewer: true };
@@ -393,6 +395,13 @@
         prompt.form.requestSubmit();
       },
       settings: () => app.go("settings"),
+      "settings-search": async () => {
+        await app.go("settings");
+        const input = document.getElementById("settings-search");
+        input.value = "Virtual machine";
+        input.dispatchEvent(new Event("input"));
+        input.focus();
+      },
       tutorials: () => app.go("tutorials"),
       "settings-vm": () => app.openSettingsSection("vm-settings"),
       "settings-cli": () => app.openSettingsSection("terminal-command"),

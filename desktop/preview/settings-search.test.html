@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Settings search test</title>
+<iframe id="en" src="preview.html?view=settings&amp;lang=en" width="900" height="560" title="macOS settings"></iframe>
+<iframe id="ko" src="preview.html?view=settings&amp;lang=ko" width="900" height="560" title="Korean settings"></iframe>
+<iframe id="es" src="preview.html?view=settings&amp;lang=es" width="900" height="560" title="Spanish settings"></iframe>
+<iframe id="docker" src="preview.html?view=settings&amp;engine=docker&amp;lang=en" width="900" height="560" title="Docker engine settings"></iframe>
+<iframe id="linux" src="preview.html?view=settings&amp;platform=linux&amp;lang=en" width="900" height="560" title="Linux settings"></iframe>
+<iframe id="windows" src="preview.html?view=settings&amp;platform=windows&amp;lang=en" width="900" height="560" title="Windows settings"></iframe>
+<pre id="result">Running</pre>
+<script>
+"use strict";
+
+const check = (condition, message) => { if (!condition) throw Error(message); };
+
+async function preview(id) {
+  const frame = document.getElementById(id);
+  const deadline = performance.now() + 5000;
+  while (!frame.contentDocument.querySelector("#settings-search") ||
+         frame.contentDocument.documentElement.dataset.ready !== "1") {
+    check(performance.now() < deadline, `Settings preview did not load: ${id}`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  const doc = frame.contentDocument;
+  const win = frame.contentWindow;
+  const input = doc.getElementById("settings-search");
+  const results = doc.getElementById("settings-search-results");
+  return {
+    doc, input, results,
+    query(text) {
+      input.focus();
+      input.value = text;
+      input.dispatchEvent(new win.Event("input", { bubbles: true }));
+    },
+    press(key) {
+      doc.activeElement.dispatchEvent(new win.KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+    },
+  };
+}
+
+async function test() {
+  const [en, ko, es, docker, linux, windows] = await Promise.all(
+    ["en", "ko", "es", "docker", "linux", "windows"].map(preview)
+  );
+
+  check(en.results.hidden, "An empty search keeps the settings visible");
+  en.query("virtual machine RAM");
+  const hit = en.results.querySelector("button");
+  check(hit?.textContent.includes("Memory (GB)"), "Find a setting by its section and alias");
+  check(!en.doc.getElementById("vm-settings").open, "Find a closed section without opening it");
+  en.press("ArrowDown");
+  check(en.doc.activeElement === hit, "ArrowDown moves from the search field to the result");
+  en.press("ArrowUp");
+  check(en.doc.activeElement === en.input, "ArrowUp returns from the first result to search");
+  en.press("Enter");
+  check(en.doc.getElementById("vm-settings").open, "Enter opens the setting's section");
+  check(en.doc.activeElement.id === "vm-memory", "Enter focuses the actual memory control");
+  check(!en.input.value && en.results.hidden, "Opening a result clears the search");
+
+  en.query("does not exist");
+  check(en.results.textContent.includes("No settings found."), "Tell the user when there are no matches");
+  en.press("Escape");
+  check(!en.input.value && en.results.hidden && en.doc.activeElement === en.input, "Escape clears search and restores focus");
+  en.query("dark mode");
+  en.results.querySelector("button").click();
+  check(en.doc.activeElement.name === "theme", "Selecting a result focuses the theme setting");
+  en.query("resource saver");
+  en.doc.querySelector(".settings-search-clear").click();
+  check(!en.input.value && en.doc.activeElement === en.input, "The clear button returns focus to search");
+
+  ko.query("램");
+  check(ko.input.placeholder === "설정 검색", "Localize the search field");
+  check(ko.results.querySelector("button")?.textContent.includes("메모리"), "Search Korean aliases");
+  es.query("conexion");
+  check(es.results.querySelector("button")?.textContent.includes("Motor"), "Match a localized alias typed without accents");
+
+  docker.query("compression");
+  check(!docker.results.querySelector("button"), "Hide Podbag-only settings for Docker");
+  linux.query("RAM");
+  check(!linux.results.querySelector("button"), "Hide VM-only settings on Linux");
+  windows.query("RAM");
+  check(!windows.results.querySelector("button"), "Hide editable resources for a Windows VM");
+  windows.query("WSL");
+  check(windows.results.querySelector("button"), "Keep the available Windows VM settings searchable");
+}
+
+const result = document.getElementById("result");
+test().then(() => { result.textContent = "PASS"; },
+  (error) => { result.textContent = "FAIL: " + error.message; });
+</script>
+</html>
