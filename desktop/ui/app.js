@@ -108,6 +108,29 @@ function size(bytes) {
   return new Intl.NumberFormat(I18N.lang, { style: "unit", unit: "byte", unitDisplay: "short" }).format(bytes || 0);
 }
 
+// podbag's numbers for an image with compressed files (PodbagCompression in the engine's
+// list): the size on disk, the plain size and the space saved in whole percent.
+function compressionOf(image) {
+  const c = image.PodbagCompression;
+  if (!c || !(c.OriginalSize > 0)) return null;
+  return { stored: c.Size, original: c.OriginalSize, saved: Math.max(0, Math.round((1 - c.Size / c.OriginalSize) * 100)) };
+}
+
+// The Size cell: one line, or for a compressed image the size on disk with the
+// compression icon and, below it, how much smaller the image got.
+function sizeCell(image) {
+  const c = compressionOf(image);
+  if (!c) return h("span", { text: size(image.Size) });
+  const mark = icon("compress");
+  mark.removeAttribute("aria-hidden");
+  mark.setAttribute("role", "img");
+  mark.setAttribute("aria-label", t("compression.compressed"));
+  const note = t("compression.from", { size: size(c.original), percent: percent(c.saved) });
+  return h("div", { class: "size-cell" },
+    h("div", { class: "size-line" }, mark, h("span", { text: size(c.stored) })),
+    h("div", { class: "size-note secondary-text", text: note, title: note }));
+}
+
 function portsText(c) {
   const seen = new Set();
   for (const p of c.Ports || []) {
@@ -245,7 +268,10 @@ async function refreshVm() {
   }
   renderVmCard();
   renderStatusbar();
-  if (S.view === "settings") renderVmSettings();
+  if (S.view === "settings") {
+    renderVmSettings();
+    if (S.vm?.state === "running" && document.querySelector("#compression-switch[data-waiting]")) readCompressionSwitch();
+  }
 }
 
 // The Desktop and TUI share the preferred engine in Settings.
@@ -1034,7 +1060,7 @@ function cells(kind, o) {
       return [
         h("span", { class: "primary-text truncate", text: imageName(o), title: imageName(o) }),
         h("span", { class: "mono secondary-text", text: shortId(o.Id) }),
-        h("span", { text: size(o.Size) }),
+        sizeCell(o),
         h("span", { class: "secondary-text", text: ago(o.Created) }),
       ];
     case "volumes":
@@ -1138,7 +1164,9 @@ function resourceTable(kind, rows, open, actions) {
     });
     return tr;
   }));
-  return h("table", { class: `list list-${kind}` }, head, body);
+  // A compressed image's Size cell has a second line, which needs a wider column.
+  const wide = kind === "images" && rows.some(compressionOf);
+  return h("table", { class: `list list-${kind}${wide ? " has-compressed" : ""}` }, head, body);
 }
 
 function emptyState(kind) {
@@ -1271,10 +1299,14 @@ function infoPanel(kind, o) {
     ];
   } else if (kind === "images") {
     const users = S.lists.containers.filter((c) => (o.RepoTags || []).includes(c.Image) || c.Image === o.Id).map(containerName);
+    const c = compressionOf(o);
     rows = [
       field(t("col.id"), o.Id, "mono"),
       field(t("detail.tags"), (o.RepoTags || []).join(", ")),
       field(t("col.size"), size(o.Size)),
+      c ? [h("dt", { text: t("detail.compression") }), h("dd", {},
+        h("div", { text: t("compression.stored", { size: size(c.stored), before: size(c.original) }) }),
+        h("div", { class: "secondary-text", text: t("compression.smaller", { percent: percent(c.saved) }) }))] : null,
       field(t("col.created"), ago(o.Created)),
       field(t("detail.used"), users.join(", ")),
     ];
@@ -1432,7 +1464,8 @@ async function renderSettings(main) {
           h("p", { class: "hint", text: t("settings.engineNote") }),
           h("dl", { class: "fields" },
             field(t("settings.socket"), e.endpoint, "mono"), field(t("settings.version"), e.version)),
-          dockerSettings()),
+          dockerSettings(),
+          compressionSetting()),
         settingDetails("vm-settings", "vm", "vm"),
         settingDetails("updates", "updates", "update"),
         settingDetails("terminal-command", "terminalCommand", "shell"),
@@ -1440,6 +1473,7 @@ async function renderSettings(main) {
   renderVmSettings(true);
   renderUpdates();
   renderTerminalCommand();
+  readCompressionSwitch();
   for (const id of openSections) document.getElementById(id).open = true;
 }
 
@@ -1607,10 +1641,12 @@ async function applyVm(form) {
 }
 
 // A dialog with several answers; resolves with the chosen value ("" for none).
-function chooseDialog({ title, text, buttons }) {
+// `symbol`: an icon next to the title.
+function chooseDialog({ title, text, buttons, symbol }) {
+  const heading = h("h2", { id: "choose-title", text: title });
   const d = h("dialog", { class: "choose", "aria-labelledby": "choose-title" },
     h("form", { method: "dialog" },
-      h("h2", { id: "choose-title", text: title }),
+      symbol ? h("div", { class: "choose-head" }, h("span", { class: "choose-icon" }, icon(symbol)), heading) : heading,
       h("p", { text }),
       h("div", { class: "buttons" }, buttons.map((b, i) => h("button", {
         value: b.value, class: `button ${b.cls || ""}`, autofocus: i === 0,
@@ -1641,6 +1677,179 @@ async function showFirstLaunchStarPrompt() {
     } catch {
       toast(t("star.openFailed"), true);
     }
+  }
+}
+
+// ---- image compression ----
+
+// How the setting can be read: "read" (it can), "stopped" (podbag's VM is off, or its
+// state is unknown: reading in the VM would start it), or null (another engine). Only
+// macOS and Windows have a VM; elsewhere vmStatus gives null.
+async function compressionAccess() {
+  if (!S.connection || !S.connection.local) return null;
+  const vm = await API.vmStatus().catch(() => ({ state: "unknown" }));
+  return !vm || vm.state === "running" ? "read" : "stopped";
+}
+
+function compressionAnswered() {
+  if (S.settings.compressionPromptSeen) return;
+  S.settings.compressionPromptSeen = true;
+  saveSettings();
+}
+
+// How long an image stays unused before it is compressed: whole days, else hours, else
+// minutes. Intl gives the plural of each language.
+function compressionAge(secs) {
+  const fmt = (n, unit) => new Intl.NumberFormat(I18N.lang, { style: "unit", unit, unitDisplay: "long", maximumFractionDigits: 0 }).format(n);
+  if (secs % 86400 === 0) return fmt(secs / 86400, "day");
+  if (secs % 3600 === 0) return fmt(secs / 3600, "hour");
+  return fmt(Math.max(1, Math.round(secs / 60)), "minute");
+}
+
+// The switch's hint: the engine's own age when its state is known (0: at once), else the
+// default 7 days.
+function compressionHint(state) {
+  const after = state?.after;
+  if (after === 0) return t("compression.hintNow");
+  return Number.isInteger(after) && after > 0
+    ? t("compression.hintAfter", { time: compressionAge(after) })
+    : t("compression.hint");
+}
+
+// Asked once, on a new install and after an update to this version, for podbag only.
+// When the setting can be read, only while compression is off. A stopped VM is not
+// started to read it: the question comes anyway, and Turn on starts the VM.
+async function showCompressionPrompt() {
+  if (S.settings.compressionPromptSeen) return;
+  const access = await compressionAccess();
+  if (!access) return;
+  if (access === "read") {
+    let state;
+    try {
+      state = await API.compression();
+    } catch {
+      return;
+    }
+    if (state?.mode === "idle") compressionAnswered();
+    if (state?.mode !== "off") return;
+  }
+  // Another dialog is open (the user is busy): ask at the next launch.
+  if (document.querySelector("dialog[open]")) return;
+  const answer = await chooseDialog({
+    title: t("compression.title"),
+    text: t("compression.text"),
+    symbol: "compress",
+    buttons: [
+      { value: "", label: t("compression.later") },
+      { value: "on", label: t("compression.turnOn"), cls: "primary" },
+    ],
+  });
+  if (answer !== "on") {
+    compressionAnswered();
+    toast(t("compression.laterNote"));
+    return;
+  }
+  let error = null;
+  try {
+    // An environment setting (PODBAG_IMAGE_COMPRESSION) wins over the saved mode.
+    if ((await API.compression("idle"))?.mode !== "idle") error = t("compression.overridden");
+  } catch (e) {
+    error = String(e);
+  }
+  if (error) {
+    toast(t("compression.failed", { error }), true);
+    return;
+  }
+  compressionAnswered();
+  toast(t("compression.done"));
+  readCompressionSwitch();
+}
+
+// The switch's write while it runs (it never fails): a Settings view opened meanwhile
+// reads the mode after it.
+let compressionWrite = null;
+
+// The switch in the engine's settings (podbag only).
+function compressionSetting() {
+  if (!S.connection || !S.connection.local) return null;
+  const toggle = h("input", { type: "checkbox", role: "switch", class: "switch", id: "compression-switch",
+    disabled: true, "aria-describedby": "compression-hint" });
+  const hint = h("p", { class: "hint", id: "compression-hint", text: compressionHint(null) });
+  // Where to see what it saves; shown only while compression is on.
+  const images = h("p", { class: "hint", id: "compression-images", hidden: true, text: t("compression.imagesNote") });
+  toggle.addEventListener("change", async () => {
+    const on = toggle.checked;
+    toggle.disabled = true;
+    const write = API.compression(on ? "idle" : "off");
+    const done = write.then(() => {}, () => {});
+    compressionWrite = done;
+    let state;
+    let failed = false;
+    try {
+      state = await write;
+      // A reply without a mode does not say what happened: it fails like an error.
+      if (state?.mode !== "idle" && state?.mode !== "off") throw t("error.title");
+      compressionAnswered();
+      // An environment setting (PODBAG_IMAGE_COMPRESSION) wins over the saved mode.
+      if (state.mode !== (on ? "idle" : "off")) {
+        toast(on ? t("compression.failed", { error: t("compression.overridden") }) : t("compression.offOverridden"), true);
+      }
+    } catch (e) {
+      failed = true;
+      toast(String(e), true);
+    }
+    if (compressionWrite === done) compressionWrite = null;
+    // Settings may have been left or opened again meanwhile: the switch on screen now
+    // shows the result, and none is changed when Settings is not shown.
+    const shown = document.getElementById("compression-switch");
+    if (!shown) return;
+    shown.checked = failed ? !on : state?.mode === "idle";
+    if (!failed) document.getElementById("compression-hint").textContent = compressionHint(state);
+    showImagesNote(shown);
+    // A new switch comes back when its own read (readCompressionSwitch) is done.
+    if (shown === toggle) shown.disabled = false;
+  });
+  return h("div", { class: "compression-setting" },
+    h("div", { class: "compression-text" },
+      h("label", { for: "compression-switch", class: "compression-label" }, icon("compress"), t("compression.label")),
+      hint,
+      images,
+      h("p", { class: "hint compression-status", "aria-live": "polite" })),
+    toggle);
+}
+
+// The note on where to see what compression saves: only while the switch is on, and
+// then part of the switch's description.
+function showImagesNote(toggle) {
+  document.getElementById("compression-images").hidden = !toggle.checked;
+  toggle.setAttribute("aria-describedby", toggle.checked ? "compression-hint compression-images" : "compression-hint");
+}
+
+// Show the engine's state on the switch. While the VM is off it waits (marked
+// data-waiting), and refreshVm reads it again when the VM runs.
+async function readCompressionSwitch() {
+  // A write the switch started finishes first: the read shows its result.
+  await compressionWrite;
+  const toggle = document.getElementById("compression-switch");
+  if (!toggle) return;
+  const hint = document.getElementById("compression-hint");
+  const status = toggle.parentElement.querySelector(".compression-status");
+  const say = (cls, text) => { status.className = `${cls} compression-status`; status.textContent = text; };
+  if ((await compressionAccess()) !== "read") {
+    toggle.dataset.waiting = "";
+    say("hint", t("offline.vmTitle"));
+    return;
+  }
+  delete toggle.dataset.waiting;
+  say("hint", "");
+  try {
+    const state = await API.compression();
+    toggle.checked = state?.mode === "idle";
+    hint.textContent = compressionHint(state);
+    showImagesNote(toggle);
+    toggle.disabled = false;
+  } catch (e) {
+    say("error-text", String(e));
   }
 }
 
@@ -2002,6 +2211,12 @@ async function init() {
   await I18N.load(S.settings.language);
   try { setInstalledPractice(await API.volumeToolsLab("summary")); }
   catch { /* The Training page can retry the library. */ }
+  // New Training modules from podbag.dev appear without an app update.
+  S.trainingSyncedAt = Date.now();
+  API.volumeToolsLab("sync").then(records => {
+    setInstalledPractice(records);
+    renderNav();
+  }).catch(() => { /* Offline: the installed modules stay. */ });
   setupWindowBar();
   setupKubeNav();
   setupTrainingNav();
@@ -2050,7 +2265,7 @@ async function init() {
   setInterval(() => {
     if (!S.live && !document.hidden && S.engine && S.engine.reachable) refresh();
   }, 3000);
-  showFirstLaunchStarPrompt().then(showTerminalCommandNotice);
+  showFirstLaunchStarPrompt().then(showCompressionPrompt).then(showTerminalCommandNotice);
   pollVm(true);
   loadUpdates("due");
   await connect(false);

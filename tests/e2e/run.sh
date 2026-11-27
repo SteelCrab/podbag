@@ -6,7 +6,7 @@
 #   PODBAG=/path/to/podbag tests/e2e/run.sh
 set -euo pipefail
 dir="$(cd "$(dirname "$0")" && pwd)"
-for t in files repair; do
+for t in files repair compress; do
   echo "== $t"
   "$dir/$t.sh"
 done

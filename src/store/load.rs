@@ -7,6 +7,7 @@
 //! pull's (blob digest, diff ID, safe paths).
 
 use super::{Source, Store, io_error, now, remove_tree};
+use crate::config::ImageCompression;
 use crate::image::manifest::{self, Compression, Descriptor, Fetched, Platform};
 use crate::image::reference::{Reference, is_digest};
 use crate::image::registry::sha256_hex;
@@ -93,7 +94,9 @@ impl Store {
     }
 
     /// After names moved to the images `digests`: an image whose last name moved goes,
-    /// as with `tag`, unless a container uses it. Then the store limit.
+    /// as with `tag`, unless a container uses it. Then the store limit, as `maintain`
+    /// keeps it: with compression off, all under one exclusive lock; with it on, the
+    /// freeze goes between the removal and the eviction, without a lock held.
     pub(super) fn after_naming(
         &self,
         replaced: &[String],
@@ -101,8 +104,33 @@ impl Store {
         limit: u64,
         in_use: &dyn Fn() -> HashMap<String, String>,
     ) -> Result<()> {
-        let _exclusive = self.lock(true)?;
-        let in_use = in_use();
+        if self.compression.0 == ImageCompression::Off {
+            let _exclusive = self.lock(true)?;
+            let in_use = in_use();
+            self.drop_replaced(replaced, digests, &in_use)?;
+            if let Some(last) = digests.last() {
+                self.enforce_limit_locked(limit, &in_use, last)?;
+            }
+        } else {
+            {
+                let _exclusive = self.lock(true)?;
+                self.drop_replaced(replaced, digests, &in_use())?;
+            }
+            if let Some(last) = digests.last() {
+                self.maintain(limit, in_use, last)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Remove the images in `replaced` left without a name, except those a container
+    /// uses and those in `digests`. Call it under the exclusive lock.
+    fn drop_replaced(
+        &self,
+        replaced: &[String],
+        digests: &[String],
+        in_use: &HashMap<String, String>,
+    ) -> Result<()> {
         let unnamed = self.unnamed_images()?;
         let mut removed = false;
         for old in replaced {
@@ -113,9 +141,6 @@ impl Store {
         }
         if removed {
             self.collect_garbage()?;
-        }
-        if let Some(last) = digests.last() {
-            self.enforce_limit_locked(limit, &in_use, last)?;
         }
         Ok(())
     }

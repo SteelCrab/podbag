@@ -582,6 +582,10 @@ fn oom_choice_in(proc: &Path) -> Option<i32> {
 /// (`PODBAG_MEMORY_BUDGET`, forwarded to commands) still applies.
 pub const VM_BUDGET: (&str, &str) = ("PODBAG_MEMORY_BUDGET", "0");
 
+/// The VM's settings (`config.toml`) live on the data disk, which survives a restart:
+/// root's usual `/etc/podbag` is in the VM's memory.
+pub const VM_CONFIG_DIR: (&str, &str) = ("PODBAG_CONFIG_DIR", "/var/lib/podbag/config");
+
 fn command(req: &CliRequest) -> std::process::Command {
     let mut cmd = std::process::Command::new("/init");
     cmd.args(&req.argv)
@@ -593,7 +597,9 @@ fn command(req: &CliRequest) -> std::process::Command {
         .env("HOME", "/root")
         .env(VM_BUDGET.0, VM_BUDGET.1)
         .envs(req.env.iter().map(|(k, v)| (k, v)))
-        // Last: podbag is /init here, whatever the Mac sent.
+        // Last: podbag is /init here and keeps its settings on the data disk, whatever
+        // the Mac sent.
+        .env(VM_CONFIG_DIR.0, VM_CONFIG_DIR.1)
         .env("PODBAG_BIN", "/init");
     // A command is the user's work, not the agent's: it may be ended when memory runs out.
     // SAFETY: only open, write and close between fork and exec; no allocation.
@@ -1014,5 +1020,15 @@ mod tests {
         assert_eq!(budget(&command(&request(&[]))).as_deref(), Some("0"));
         let sent = request(&[("PODBAG_MEMORY_BUDGET", "50%")]);
         assert_eq!(budget(&command(&sent)).as_deref(), Some("50%"));
+    }
+
+    #[test]
+    fn a_command_in_the_vm_keeps_its_settings_on_the_data_disk() {
+        let sent = request(&[("PODBAG_CONFIG_DIR", "/Users/me/.config/podbag")]);
+        let config = command(&sent)
+            .get_envs()
+            .find(|(k, _)| *k == "PODBAG_CONFIG_DIR")
+            .and_then(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()));
+        assert_eq!(config.as_deref(), Some("/var/lib/podbag/config"));
     }
 }

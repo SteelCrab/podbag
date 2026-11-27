@@ -252,7 +252,15 @@ mod tests {
         assert!(b.run(Action::Status, None).unwrap().source.is_none());
         a.run(Action::End, None).unwrap();
         assert!(!file.exists());
-        assert!(std::net::TcpStream::connect(addr).is_err());
+        // tiny_http closes its listener on its own accept thread, a moment after `End`.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::net::TcpStream::connect(addr).is_ok() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the lab still serves {addr}"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
         assert!(a.run(Action::Start, None).unwrap().volume.is_none());
     }
 }

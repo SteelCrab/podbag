@@ -285,3 +285,243 @@ fn a_layer_stored_by_an_older_podbag_gets_its_times() {
         assert_eq!(seen, "1600000000\n1700000000", "{method}");
     }
 }
+
+/// A root-owned file with this mode (setuid bits too).
+fn with_mode(path: &str, data: &[u8], mode: u32) -> TarEntry {
+    TarEntry::File {
+        path: path.into(),
+        data: data.to_vec(),
+        mode,
+        uid: 0,
+        gid: 0,
+    }
+}
+
+fn hex_sha256(data: &[u8]) -> String {
+    sha256(data).strip_prefix("sha256:").unwrap().to_string()
+}
+
+/// True when the store owner sees `path`.
+fn exists_as_owner(path: &Path) -> bool {
+    as_owner("test")
+        .arg("-e")
+        .arg(path)
+        .status()
+        .unwrap()
+        .success()
+}
+
+/// The compressed copies in the store's objects folder.
+fn cold_objects(sb: &Sandbox) -> String {
+    let out = as_owner("find")
+        .arg(sb.data().join("store/objects"))
+        .args(["-name", "*.zst"])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "find: {}", stderr(&out));
+    stdout(&out)
+}
+
+/// An image whose files compress well: a big one with an old time, and a setuid one.
+fn push_cold(reg: &FakeRegistry, big: &[u8]) -> String {
+    push(
+        reg,
+        "cold",
+        &[&[
+            timed("srv/big", big, 1_600_000_000),
+            with_mode("bin/tool", b"#!/bin/sh\n", 0o4755),
+        ]],
+    )
+}
+
+#[test]
+fn compressed_images_run_with_the_same_files() {
+    let reg = FakeRegistry::start(false);
+    let big = b"podbag ".repeat(10_000);
+    let image = push_cold(&reg, &big);
+    for (mode, sb) in sandboxes() {
+        ok(&podbag(&sb, &["pull", &image]));
+        let out = ok(&podbag(&sb, &["system", "compress", &image]));
+        assert!(out.contains("Compressed 1 images"), "{mode}: {out}");
+        let zst = PathBuf::from(format!("{}.zst", object_of(&sb, &big).display()));
+        assert!(exists_as_owner(&zst), "{mode}: no {}", zst.display());
+        let df = ok(&podbag(&sb, &["system", "df"]));
+        assert!(df.contains("Compressed"), "{mode}: {df}");
+        let seen = run(
+            &sb,
+            &image,
+            "sha256sum /srv/big; stat -c '%Y %a' /srv/big /bin/tool",
+        );
+        assert!(seen.contains("1600000000"), "{mode}: {seen}");
+        assert!(seen.contains("4755"), "{mode}: {seen}");
+        assert!(seen.contains(&hex_sha256(&big)), "{mode}: {seen}");
+    }
+}
+
+#[test]
+fn save_of_a_compressed_image_is_unchanged() {
+    let reg = FakeRegistry::start(false);
+    let big = b"podbag ".repeat(10_000);
+    let image = push_cold(&reg, &big);
+    for (mode, sb) in sandboxes() {
+        ok(&podbag(&sb, &["pull", &image]));
+        let a = sb.tmp.path().join("a.tar");
+        let b = sb.tmp.path().join("b.tar");
+        ok(&podbag(&sb, &["save", "-o", a.to_str().unwrap(), &image]));
+        ok(&podbag(&sb, &["system", "compress", &image]));
+        assert!(!cold_objects(&sb).is_empty(), "{mode}: nothing compressed");
+        ok(&podbag(&sb, &["save", "-o", b.to_str().unwrap(), &image]));
+        let (a, b) = (std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap());
+        assert!(a == b, "{mode}: the archives differ");
+    }
+}
+
+#[test]
+fn decompress_makes_the_image_plain_again() {
+    let reg = FakeRegistry::start(false);
+    let big = b"podbag ".repeat(10_000);
+    let image = push_cold(&reg, &big);
+    for (mode, sb) in sandboxes() {
+        ok(&podbag(&sb, &["pull", &image]));
+        ok(&podbag(&sb, &["system", "compress", &image]));
+        let object = object_of(&sb, &big);
+        assert!(!exists_as_owner(&object), "{mode}: still plain");
+        let out = ok(&podbag(&sb, &["system", "decompress", &image]));
+        assert!(out.contains("Decompressed 1 images"), "{mode}: {out}");
+        assert!(exists_as_owner(&object), "{mode}: not plain");
+        assert_eq!(cold_objects(&sb), "", "{mode}");
+    }
+}
+
+/// An image a container uses stays as it is, and the user is told why.
+#[test]
+fn compress_tells_which_images_a_container_uses() {
+    let reg = FakeRegistry::start(false);
+    let image = push_cold(&reg, &b"podbag ".repeat(10_000));
+    for (mode, sb) in sandboxes() {
+        ok(&podbag(&sb, &["pull", &image]));
+        ok(&podbag(&sb, &["create", "--network", "none", &image]));
+        let out = podbag(&sb, &["system", "compress", &image]);
+        assert!(
+            stdout(&out).contains("Compressed 0 images"),
+            "{mode}: {}",
+            stdout(&out)
+        );
+        let want = format!("podbag: {image} is not compressed: a container uses it");
+        assert!(stderr(&out).contains(&want), "{mode}: {}", stderr(&out));
+        assert_eq!(cold_objects(&sb), "", "{mode}");
+    }
+}
+
+/// A build context in the sandbox with this Dockerfile and a `hello.txt`, readable by all:
+/// rootless, the store helper reads it as another user.
+fn context(sb: &Sandbox, name: &str, dockerfile: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = sb.tmp.path().join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("Dockerfile"), dockerfile).unwrap();
+    std::fs::write(dir.join("hello.txt"), "hello\n").unwrap();
+    for (path, mode) in [
+        (sb.tmp.path().to_path_buf(), 0o755),
+        (dir.clone(), 0o755),
+        (dir.join("Dockerfile"), 0o644),
+        (dir.join("hello.txt"), 0o644),
+    ] {
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+    dir
+}
+
+/// Builds read files of a compressed base image (`COPY --chown` reads its /etc/passwd) and
+/// of a compressed `COPY --from` image.
+#[test]
+fn builds_read_files_of_a_compressed_image() {
+    let reg = FakeRegistry::start(false);
+    // Big enough to be compressed: objects under 4096 bytes stay plain.
+    let mut passwd = String::from("root:x:0:0:root:/root:/bin/sh\n");
+    let mut group = String::from("root:x:0:root\n");
+    for i in 0..300 {
+        passwd.push_str(&format!("user{i}:x:{}:{}::/:/bin/sh\n", 2000 + i, 2000 + i));
+        group.push_str(&format!("group{i}:x:{}:\n", 2000 + i));
+    }
+    passwd.push_str("app:x:1234:1234::/:/bin/sh\n");
+    group.push_str("app:x:1234:\n");
+    let big = b"podbag ".repeat(10_000);
+    let image = push(
+        &reg,
+        "coldbase",
+        &[&[
+            with_mode("etc/passwd", passwd.as_bytes(), 0o644),
+            with_mode("etc/group", group.as_bytes(), 0o644),
+            with_mode("srv/big", &big, 0o644),
+        ]],
+    );
+    let compress = |mode: &str, sb: &Sandbox| {
+        ok(&podbag(sb, &["system", "compress", &image]));
+        for data in [passwd.as_bytes(), &big] {
+            let zst = PathBuf::from(format!("{}.zst", object_of(sb, data).display()));
+            assert!(exists_as_owner(&zst), "{mode}: no {}", zst.display());
+        }
+    };
+    for (mode, sb) in sandboxes() {
+        ok(&podbag(&sb, &["pull", &image]));
+        compress(mode, &sb);
+        let chown = context(
+            &sb,
+            "chown",
+            &format!("FROM {image}\nCOPY --chown=app:app hello.txt /hello.txt\n"),
+        );
+        let dir = chown.to_str().unwrap();
+        ok(&podbag(
+            &sb,
+            &["build", "--network", "none", "-t", "chown", dir],
+        ));
+        let seen = run(&sb, "chown", "stat -c '%u %g' /hello.txt; cat /hello.txt");
+        assert_eq!(seen, "1234 1234\nhello", "{mode}");
+        // The built image keeps the shared objects plain: without it they compress again.
+        ok(&podbag(&sb, &["rmi", "chown"]));
+        compress(mode, &sb);
+        let from = context(
+            &sb,
+            "from",
+            &format!("FROM {image}\nCOPY --from={image} /srv/big /big\n"),
+        );
+        let dir = from.to_str().unwrap();
+        ok(&podbag(
+            &sb,
+            &["build", "--network", "none", "-t", "from", dir],
+        ));
+        let seen = run(&sb, "from", "sha256sum /big");
+        assert!(seen.contains(&hex_sha256(&big)), "{mode}: {seen}");
+    }
+}
+
+/// A config.toml that does not parse does not stop `rmi` or `system prune`: they go on
+/// with compression off.
+#[test]
+fn a_malformed_config_does_not_stop_image_removal() {
+    use std::os::unix::fs::PermissionsExt;
+    let reg = FakeRegistry::start(false);
+    let a = push(&reg, "a", &[&[timed("x", b"a\n", 1)]]);
+    let b = push(&reg, "b", &[&[timed("y", b"b\n", 1)]]);
+    let mut sb = Sandbox::new();
+    // Readable by all: rootless, the store helper reads it as another user.
+    let config = sb.tmp.path().join("config");
+    std::fs::create_dir_all(&config).unwrap();
+    for dir in [sb.tmp.path(), config.as_path()] {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    sb.env.push((
+        "PODBAG_CONFIG_DIR".to_string(),
+        config.display().to_string(),
+    ));
+    ok(&podbag(&sb, &["pull", &a]));
+    ok(&podbag(&sb, &["pull", &b]));
+    let file = config.join("config.toml");
+    std::fs::write(&file, "image_compression = \"zstd\"\n").unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    ok(&podbag(&sb, &["rmi", &a]));
+    ok(&podbag(&sb, &["system", "prune", "-f"]));
+    let images = ok(&podbag(&sb, &["images"]));
+    assert!(!images.contains(&a) && !images.contains(&b), "{images}");
+}

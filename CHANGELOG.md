@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### Training
+
+- Training modules come from the catalog on podbag.dev. Podbag Desktop refreshes it at
+  start, when Training opens, and with **Refresh**. `podbag lab list` refreshes it too.
+  New modules appear without a new podbag.
+- Course modules are data files (`podbag-course-v1`): steps, commands, checks and step
+  names. podbag only reads the practice engine to check a step; it never runs a command
+  from a module file.
+- Each file is checked against the catalog's SHA-256. Offline, the installed modules stay.
+  A finished module stays finished after an update.
+- New module `web-service-recovery`: a web server exits because a setting is missing.
+  Read the cause with `podbag logs`, then start it again with `-e` and open its page.
+- New module `container-network`: create a network, run a server without a port, and
+  reach it by name from other containers on the same network.
+- Module format `podbag-course-v2`: checks for images, container states, health, restarts
+  and networks; text files for the practice directory; steps with the Docker CLI and
+  Compose. Training modules for every podbag feature use it.
+- All modules and their guides: https://podbag.dev/training/.
+
 ### macOS
 
 - Published UDP ports, such as `-p 5353:53/udp`, answer on the Mac's localhost, like TCP

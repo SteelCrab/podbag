@@ -46,6 +46,9 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'The installed engine launcher failed' }
 
     $stderr = Join-Path $env:TEMP "podbag-window-$Arch.log"
+    # A closed local address: the Training list stays empty, as the window check expects,
+    # instead of syncing the live catalog on podbag.dev.
+    $env:PODBAG_TRAINING_CATALOG = 'http://127.0.0.1:9/training/catalog.json'
     $app = Start-Process $gui -PassThru -RedirectStandardError $stderr
     try {
         # Windows PowerShell has the desktop UI Automation assemblies on both runners.

@@ -123,7 +123,7 @@ jobs:
         run: dev/root-lib-tests.sh
 
   # Real images and programs, compared with Docker: Python's .pyc files, cron, a damaged
-  # file in the store.
+  # file in the store, compressed images (containers, save, build, verify, decompress).
   e2e:
     name: E2E ${{ matrix.mode }} ${{ matrix.arch }}
     needs: linux
@@ -144,8 +144,8 @@ jobs:
       - name: Packages
         run: dev/ci/setup.sh
       - run: sudo install -m 0755 bin/podbag /usr/local/bin/podbag
-      - name: Files and repair
-        timeout-minutes: 15
+      - name: Files, repair and compression
+        timeout-minutes: 20
         run: tests/e2e/run.sh
 
   # nginx through podbag and through the docker CLI on podbag's Docker API.
