@@ -322,19 +322,24 @@ pub struct StepDef {
 }
 
 /// A step's `ui` with an action this app does not know (a later app's) is no `ui`: the
-/// step stays a CLI step, and the module still installs. podbag-page refuses one.
+/// step stays a CLI step, and the module still installs. podbag-page refuses one. Only a
+/// known action needs `name`.
 fn lenient_ui<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Ui>, D::Error> {
     #[derive(Deserialize)]
     struct Raw {
         action: String,
-        name: String,
+        name: Option<String>,
     }
-    Ok(Option::<Raw>::deserialize(d)?.and_then(|raw| {
-        Some(Ui {
-            action: UiAction::parse(&raw.action)?,
-            name: raw.name,
-        })
-    }))
+    let Some(raw) = Option::<Raw>::deserialize(d)? else {
+        return Ok(None);
+    };
+    let Some(action) = UiAction::parse(&raw.action) else {
+        return Ok(None);
+    };
+    let name = raw
+        .name
+        .ok_or_else(|| serde::de::Error::missing_field("name"))?;
+    Ok(Some(Ui { action, name }))
 }
 
 /// A step's `ui` whose action does not complete its check (outside `UI_CHECKS`) is no
@@ -1688,6 +1693,8 @@ mod tests {
         };
         let (ui, command) = ui_of("remove", json!({"action": "future-thing", "name": "x"}));
         assert_eq!((ui, command.as_deref()), (None, Some("podbag rm lab-web")));
+        // A later app's action may need no name.
+        assert_eq!(ui_of("remove", json!({"action": "future-thing"})).0, None);
         // runApi is container-running: stop does not complete it.
         let network = include_str!("../../tests/fixtures/training/container-network.podbag");
         let package = with_ui(network, "runApi", json!({"action": "stop", "name": "api"})).unwrap();
