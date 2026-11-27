@@ -20,6 +20,7 @@ pub const IFA_LOCAL: u16 = 2;
 pub const RTA_GATEWAY: u16 = 5;
 pub const IFF_UP: u32 = 1;
 const AF_INET: u8 = 2;
+const AF_INET6: u8 = 10;
 const CREATE: u16 = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
 
 /// `struct ifinfomsg` (16 bytes) for link `index` (0: none), with `flags` under `change`.
@@ -96,6 +97,19 @@ pub fn add_address(index: u32, addr: [u8; 4], prefix: u8) -> Message {
     let mut m = Message::new(RTM_NEWADDR, CREATE, &h);
     m.attr(IFA_LOCAL, &addr);
     m.attr(IFA_ADDRESS, &addr);
+    m
+}
+
+/// Give a bridge interface its allocated IPv6 address. IPAM reserves it before the
+/// link is configured, so duplicate address detection need not delay container starts.
+pub fn add_address6(index: u32, addr: std::net::Ipv6Addr, prefix: u8) -> Message {
+    let mut h = [0u8; 8];
+    h[0] = AF_INET6;
+    h[1] = prefix;
+    h[2] = 2; // IFA_F_NODAD
+    h[4..8].copy_from_slice(&index.to_ne_bytes());
+    let mut m = Message::new(RTM_NEWADDR, CREATE, &h);
+    m.attr(IFA_ADDRESS, &addr.octets());
     m
 }
 

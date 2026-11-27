@@ -14,6 +14,7 @@ mod images;
 mod kubernetes;
 use podbag::dashboard::lab;
 mod migration;
+mod model_runner;
 mod run;
 mod settings;
 mod strings;
@@ -63,6 +64,7 @@ struct TrayItems {
 
 struct AppState {
     migration: Mutex<()>,
+    models: model_runner::ModelRunner,
     /// The engine this window uses, and its client.
     session: Mutex<Arc<Session>>,
     podbag: PathBuf,
@@ -117,6 +119,7 @@ impl AppState {
         });
         AppState {
             migration: Mutex::new(()),
+            models: model_runner::ModelRunner::default(),
             session: Mutex::new(Arc::new(Session::new(1, target))),
             podbag,
             installer: std::env::current_exe()
@@ -290,6 +293,20 @@ fn desktop_extensions(
         .map_err(|error| extensions::Failure::detail("storage", error))?
         .join("extensions");
     extensions::apply(&directory, request)
+}
+
+#[tauri::command(async)]
+fn models(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: model_runner::Action,
+) -> Result<model_runner::Reply, model_runner::Failure> {
+    let store = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| model_runner::Failure::with_detail("start", error))?
+        .join("models");
+    state.models.action(request, &store)
 }
 
 #[tauri::command(async)]
@@ -1397,6 +1414,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             engine,
             desktop_extensions,
+            models,
             tutorial_lab,
             volume_tools_lab,
             practice_volumes,
@@ -1521,6 +1539,7 @@ fn main() {
         });
     app.run(|app, event| {
         if matches!(event, tauri::RunEvent::Exit) {
+            app.state::<AppState>().models.stop();
             let lab = app.state::<Mutex<lab::Lab>>();
             let _ = lock(&lab).run(lab::Action::End, None);
         }

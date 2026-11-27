@@ -185,9 +185,10 @@ pub fn apply(dirs: &Dirs, service: &mut ServiceRecord, tasks: &[&Task]) -> Resul
                     aliases: &[],
                     networks: &[],
                     extra_hosts: &[],
+                    fixed: Default::default(),
                 },
             )?;
-            let ip = ip.to_string();
+            let ip = ip.ipv4.to_string();
             if service.vips.get(&a.network) != Some(&ip) {
                 service.vips.insert(a.network.clone(), ip);
                 crate::network::refresh_hosts(dirs, &a.network);

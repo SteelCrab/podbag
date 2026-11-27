@@ -34,6 +34,7 @@ const API = (() => {
     createVolume: (name) => scoped("create_volume", { name }),
     engine: (start) => scoped("engine", { start: !!start }),
     extensions: (request) => invoke("desktop_extensions", { request }),
+    models: (request) => invoke("models", { request }),
     list: (kind) => scoped("list", { kind }),
     kubeList: (kind, allNamespaces, context) => invoke("kube_list", { kind, allNamespaces, context: context || null }),
     inspect: (kind, id) => scoped("inspect", { kind, id }),
