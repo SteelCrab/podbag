@@ -380,6 +380,26 @@ podbag logout ghcr.io
 - When the registry gives a token for the login (an identity token), podbag keeps the
   token, not the password.
 
+### Registry proxies
+
+Open **Settings → Registry proxies** in Podbag Desktop on Linux or macOS with the local
+Podbag engine selected. The saved choice applies to new engine registry requests,
+including pulls, pushes, search, and registry authentication. The engine reads it from
+`registry-proxy.json` in its configuration directory.
+
+- **Use engine environment** is the default. It uses the engine's proxy environment
+  variables, including `ALL_PROXY`, `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY`.
+- **Connect directly** opens registry connections without a proxy.
+- **Manual proxy** uses an HTTP or HTTPS proxy URL, such as
+  `http://proxy.example.com:3128`. The URL must omit credentials. Enter bypass rules
+  separated by commas. Use exact hosts or IP addresses, `.example.com` or
+  `*.example.com` for subdomains, and `*` for every host.
+
+On macOS this configures the Linux VM's engine. Opening the form can start a stopped VM.
+The proxy address must be reachable from that VM. Inherited mode uses the engine
+environment inside the VM. Docker contexts, container applications, and BuildKit use
+their own proxy settings.
+
 ### Pull and push
 
 ```sh
@@ -1343,6 +1363,45 @@ podbag lab remove container-network
 - Languages: English, 한국어, 日本語, 简体中文, Filipino, Español and Tiếng Việt. The app
   follows the system language. Settings can change it.
 
+#### Desktop extensions
+
+Open **Extensions** and select **Install manifest** to install a local UTF-8 JSON file.
+New extensions are disabled. Use **Enable** to show a view, **Disable** to hide it, or
+**Remove** to delete the installed copy. The original file stays in place.
+
+Podbag supports its own manifest version 1. Save this example as a JSON file and install it.
+
+```json
+{
+  "apiVersion": 1,
+  "id": "example.workspace-checklist",
+  "name": "Workspace checklist",
+  "version": "1.0.0",
+  "description": "Review local resources before changing the workspace.",
+  "permissions": ["engineSummary"],
+  "content": [
+    { "type": "heading", "text": "Before you change a workspace" },
+    { "type": "text", "text": "Review your current containers and volumes." },
+    { "type": "list", "items": ["Stop the containers you intend to replace.", "Check which volumes contain data to keep."] },
+    { "type": "code", "text": "podbag ps" },
+    { "type": "engineSummary" }
+  ]
+}
+```
+
+- The ID starts with a lowercase letter and uses up to 64 lowercase letters, digits,
+  periods or hyphens. IDs are unique. Remove an installed manifest before replacing it.
+- The name fits in 120 characters, the version in 40, and the description in 2,000.
+  Files can be up to 128 KiB and contain 1 to 40 blocks. The app keeps up to 64 extensions.
+- Heading blocks accept up to 120 characters. Text and code blocks accept up to 8,000.
+  List blocks have 1 to 40 items of up to 1,000 characters each.
+- The optional `engineSummary` permission authorizes a single matching block. After
+  enabling an extension, explicitly allow summary access to display only the current
+  counts of containers, images, volumes and networks. Disabling clears that grant.
+- The host renders text, code, lists and counted summaries directly. Extending the app
+  with scripts, HTML, external links, files, commands or network requests is unsupported.
+  Docker Desktop extension bundles and manifests use a different format.
+
 #### Local models
 
 Install [Ollama](https://docs.ollama.com/) and make its executable available to Podbag Desktop.
@@ -1402,6 +1461,9 @@ in each Desktop session.
   with `Ctrl+,` elsewhere.
 - Search settings by name or a related term. Use the arrow keys to move through results,
   Enter to open a setting, and Escape to clear the search.
+- In **Notifications**, choose whether routine tasks show popups. Errors always show.
+  The toolbar bell opens the latest 50 messages from this session. Clear the list
+  from the history dialog.
 - Virtual machine (podbag on macOS): the state, the settings in use, uptime and disk use.
   Start, Stop and Restart. CPUs, memory and the idle power-off time (0 = never). Apply
   saves them with `podbag vm set`.

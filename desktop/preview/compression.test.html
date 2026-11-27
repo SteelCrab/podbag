@@ -37,7 +37,7 @@ function frame(id) {
   const el = document.getElementById(id);
   el.scrollIntoView();
   return new Promise((resolve, reject) => {
-    const ready = () => el.contentDocument?.documentElement.dataset.ready === "1";
+    const ready = () => el.contentDocument?.documentElement?.dataset.ready === "1";
     // A frame that never gets ready fails the test.
     const wait = () => until(ready, `${id} ready`).then(() => resolve(el.contentWindow), reject);
     if (el.contentDocument?.readyState === "complete") wait();
