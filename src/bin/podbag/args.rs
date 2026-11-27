@@ -260,6 +260,11 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: CriCmd,
     },
+    /// Enroll a Podbag Swarm worker
+    Swarm {
+        #[command(subcommand)]
+        cmd: SwarmCmd,
+    },
     /// Manage the image store
     System {
         #[command(subcommand)]
@@ -447,6 +452,20 @@ pub enum CriCmd {
 pub enum CgroupDriverArg {
     Cgroupfs,
     Systemd,
+}
+
+#[derive(Subcommand)]
+pub enum SwarmCmd {
+    /// Enroll a worker using a trusted OpenSSH key and host key
+    WorkerAdd {
+        /// Name to display in docker node ls
+        name: String,
+        /// An OpenSSH host alias or user@host
+        destination: String,
+        /// Use this OpenSSH configuration file
+        #[arg(long)]
+        ssh_config: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]

@@ -9,7 +9,7 @@ use super::store::{
     Cluster, FileObject, Kind, NodeRecord, Overlay, ServiceRecord, Store, Tokens, now,
 };
 use super::tasks::{self, NewTask, Task};
-use super::{net, update};
+use super::{net, remote, update};
 use crate::paths::Dirs;
 use crate::{Error, ErrorKind, Result};
 use serde_json::{Value, json};
@@ -173,7 +173,7 @@ impl Engine {
     /// `POST /swarm/init`: the node ID.
     pub fn init(&self, body: &Value) -> Result<String> {
         let _lock = self.store.lock()?;
-        if self.store.cluster()?.is_some() {
+        if self.store.cluster()?.is_some() || self.store.membership()?.is_some() {
             return Err(Error::new(
                 ErrorKind::Conflict,
                 "This node is already part of a swarm",
@@ -254,6 +254,14 @@ impl Engine {
     pub fn leave(&self) -> Result<()> {
         let _lock = self.store.lock()?;
         let cluster = self.require()?;
+        if !self.store.workers()?.is_empty() {
+            return Err(Error::new(
+                ErrorKind::Conflict,
+                "cannot leave the Swarm",
+                "registered workers still belong to this manager",
+                "remove their services and run docker node rm for each worker",
+            ));
+        }
         let all = tasks::list(&self.dirs, &cluster.node_id);
         for service in self.store.services()? {
             let mine: Vec<&Task> = all.iter().filter(|t| t.service_id == service.id).collect();
@@ -380,6 +388,18 @@ impl Engine {
     /// networks, secrets and configs, and the container a task would get. Returns the
     /// mapping's warnings.
     fn check(&self, cluster: &Cluster, service: &ServiceRecord) -> Result<Vec<String>> {
+        if let Some(worker) = remote::worker_for(self, cluster, service)? {
+            remote::check_remote(service)?;
+            return worker.check(cluster, service);
+        }
+        self.check_local(cluster, service)
+    }
+
+    pub(super) fn check_local(
+        &self,
+        cluster: &Cluster,
+        service: &ServiceRecord,
+    ) -> Result<Vec<String>> {
         let spec = &service.spec;
         if !plan::valid_name(service.name()) {
             return Err(invalid(
@@ -536,9 +556,26 @@ impl Engine {
         let mut candidate = service.clone();
         candidate.spec = new.clone();
         candidate.ports = ports.clone();
-        let warnings = self.check(&cluster, &candidate)?;
+        let old_worker = remote::assignment(&service, &cluster)?;
+        let new_worker = remote::assignment(&candidate, &cluster)?;
+        if old_worker != new_worker {
+            return Err(invalid(
+                "cannot move the service to another node",
+                "placement cannot be changed on an existing service",
+                "create a service with the requested node constraint",
+            ));
+        }
         let tasks_change = new["TaskTemplate"] != old["TaskTemplate"]
             || new["EndpointSpec"] != old["EndpointSpec"];
+        if tasks_change && old_worker.is_some() {
+            return Err(Error::new(
+                ErrorKind::Unsupported,
+                "cannot update worker tasks",
+                "rolling updates of worker services are not supported",
+                "scale the service or create a new one with the required task settings",
+            ));
+        }
+        let warnings = self.check(&cluster, &candidate)?;
         service.previous_spec = Some(old);
         service.spec = new;
         service.ports = ports;
@@ -563,6 +600,11 @@ impl Engine {
         let _lock = self.store.lock()?;
         let cluster = self.require()?;
         let service = self.find_service(key)?;
+        if let Some(worker) = remote::worker_for(self, &cluster, &service)? {
+            worker.remove_service(&cluster, &service.id)?;
+            self.store.remove_service(&service.id)?;
+            return Ok(());
+        }
         update::forget(&service.id);
         self.store.remove_service(&service.id)?;
         let all = tasks::list(&self.dirs, &cluster.node_id);
@@ -677,6 +719,18 @@ impl Engine {
         service: &mut ServiceRecord,
         all: &[Task],
     ) -> Result<()> {
+        if let Some(worker) = remote::worker_for(self, cluster, service)? {
+            return worker.reconcile(cluster, service);
+        }
+        self.reconcile_local(cluster, service, all)
+    }
+
+    pub(super) fn reconcile_local(
+        &self,
+        cluster: &Cluster,
+        service: &mut ServiceRecord,
+        all: &[Task],
+    ) -> Result<()> {
         let mode = plan::mode_of(&service.spec).unwrap_or(plan::Mode::Replicated(0));
         let mine: Vec<&Task> = all.iter().filter(|t| t.service_id == service.id).collect();
         let plan = plan::reconcile(mode, cluster.active(), &self.live(service, &mine));
@@ -718,7 +772,7 @@ impl Engine {
     }
 
     /// Task directories whose task is gone (not the rejected ones of live services).
-    fn clean_task_dirs(&self, all: &[Task]) {
+    pub(super) fn clean_task_dirs(&self, all: &[Task]) {
         let services: Vec<String> = self
             .store
             .services()
@@ -750,12 +804,27 @@ impl Engine {
     /// container's labels, made from the current spec, its service's name).
     pub fn task_list(&self) -> Result<Vec<TaskEntry>> {
         let cluster = self.require()?;
+        let mut out = self.local_task_list(&cluster)?;
+        for worker in self
+            .store
+            .workers()?
+            .into_iter()
+            .filter(|worker| worker.host.is_some())
+        {
+            if let Ok(tasks) = worker.tasks(&cluster) {
+                out.extend(tasks);
+            }
+        }
+        Ok(out)
+    }
+
+    pub(super) fn local_task_list(&self, cluster: &Cluster) -> Result<Vec<TaskEntry>> {
         let services = self.store.services()?;
         let mut out = Vec::new();
         let all = tasks::list(&self.dirs, &cluster.node_id);
         for t in &all {
             let service = services.iter().find(|s| s.id == t.service_id);
-            let facts = tasks::facts(&self.dirs, &self.store, &cluster, service, t);
+            let facts = tasks::facts(&self.dirs, &self.store, cluster, service, t);
             let up = service.is_some_and(|s| self.up_to_date(s, &t.task_id));
             let name = service.map(|s| s.name().to_string()).unwrap_or_default();
             out.push((facts, t.labels.clone(), up, name));
@@ -774,7 +843,7 @@ impl Engine {
                 continue;
             }
             let up = spec.template == service.spec["TaskTemplate"];
-            let facts = tasks::rejected_facts(&cluster, &id, &spec, service.version);
+            let facts = tasks::rejected_facts(cluster, &id, &spec, service.version);
             out.push((facts, Default::default(), up, service.name().to_string()));
         }
         Ok(out)

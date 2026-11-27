@@ -1,4 +1,4 @@
-//! Swarm mode on one node: services, tasks, secrets and configs behind the Docker API.
+//! Swarm services, tasks, secrets and configs behind the Docker API.
 //!
 //! There is no daemon. Each task is a podbag container; the state of the swarm is in
 //! files under `<data>/swarm`; every API call that changes what is wanted, and every
@@ -10,6 +10,7 @@ pub mod http;
 pub mod net;
 pub mod ops;
 pub mod plan;
+pub mod remote;
 pub mod shapes;
 pub mod store;
 pub mod tasks;

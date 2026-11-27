@@ -164,8 +164,8 @@ pub fn facts(
             .map(|s| s.template)
             .or_else(|| service.map(|s| s.spec["TaskTemplate"].clone()))
             .unwrap_or(Value::Null),
-        desired_state: desired,
-        state,
+        desired_state: desired.into(),
+        state: state.into(),
         message,
         err,
         container_id: task.container_id.clone(),
@@ -196,8 +196,8 @@ pub fn rejected_facts(
         slot: spec.slot,
         node_id: cluster.node_id.clone(),
         spec: spec.template.clone(),
-        desired_state: "shutdown",
-        state: "rejected",
+        desired_state: "shutdown".into(),
+        state: "rejected".into(),
         message: "preparing".into(),
         err: spec.error.clone().unwrap_or_default(),
         container_id: String::new(),

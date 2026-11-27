@@ -1,6 +1,8 @@
 //! The swarm's files under `<data>/swarm` (a private directory):
 //!
-//! - `cluster.json`: the swarm and its one node; there only while the swarm is active.
+//! - `cluster.json`: the swarm's manager state, present on the manager only.
+//! - `workers/<id>.json`: the manager's registered workers and SSH endpoints.
+//! - `membership.json`: a worker's assignment to one manager.
 //! - `services/<id>.json`: each service's spec, the spec before it, and its update state.
 //! - `secrets/<id>.json` and `.data`, `configs/<id>.json` and `.data`: the data files are
 //!   0600 and never leave the store except into a task's files.
@@ -16,7 +18,7 @@ use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// The swarm and its node.
+/// The swarm manager and its configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Cluster {
     pub id: String,
@@ -51,7 +53,7 @@ pub struct NodeRecord {
     pub spec: Value,
 }
 
-/// The join tokens. No node can join: they are shown because Docker shows them.
+/// Docker's join-token shape. Podbag worker enrollment authenticates over SSH.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tokens {
     pub worker: String,
@@ -324,6 +326,30 @@ impl Store {
 
     pub fn write_cluster(&self, c: &Cluster) -> Result<()> {
         Store::write(&self.dir.join("cluster.json"), c)
+    }
+
+    pub fn workers(&self) -> Result<Vec<super::remote::Worker>> {
+        Store::read_all(&self.dir.join("workers"))
+    }
+
+    pub fn write_worker(&self, node: &super::remote::Worker) -> Result<()> {
+        Store::write(&self.object_path("workers", &node.id, "json")?, node)
+    }
+
+    pub fn remove_worker(&self, id: &str) -> Result<()> {
+        Store::remove(&self.object_path("workers", id, "json")?)
+    }
+
+    pub fn membership(&self) -> Result<Option<super::remote::Membership>> {
+        Store::read(&self.dir.join("membership.json"))
+    }
+
+    pub fn write_membership(&self, node: &super::remote::Membership) -> Result<()> {
+        Store::write(&self.dir.join("membership.json"), node)
+    }
+
+    pub fn remove_membership(&self) -> Result<()> {
+        Store::remove(&self.dir.join("membership.json"))
     }
 
     pub fn services(&self) -> Result<Vec<ServiceRecord>> {

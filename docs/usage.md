@@ -742,7 +742,7 @@ podbag system docker restore    # back to the context you had (Docker Desktop, â
   addresses.
 - Answered with 501 and what to do instead: BuildKit's build API (use buildx with the
   `docker-container` driver), `image history` and plugins.
-- Swarm mode works on one node. See [Swarm mode](#swarm-mode).
+- Swarm mode supports one manager and explicitly assigned SSH workers. See [Swarm mode](#swarm-mode).
 
 ### cp, save and load
 
@@ -1440,9 +1440,8 @@ open target/release/podbag.app
 
 - `docker swarm init`, `docker service`, `docker stack deploy`, `docker secret`,
   `docker config` and `docker node ls` work through `podbag system service`.
-- **One node only.** The swarm is this machine. Docker's swarm nodes (SwarmKit) cannot
-  join it, and it cannot join theirs: `docker swarm join` is refused.
-- Several podbag nodes may come later. They will be podbag nodes only, never Docker's.
+- The manager runs services locally by default. A service can also select one enrolled
+  Podbag worker. Each worker runs its own Linux Podbag engine.
 
 ```sh
 docker swarm init
@@ -1452,6 +1451,35 @@ docker service rollback web
 docker stack deploy -c compose.yml app
 docker swarm leave --force                       # removes services, secrets, configs
 ```
+
+### Enroll a worker
+
+- Install this Podbag version on both Linux hosts. Set up OpenSSH key access from the
+  manager to the worker's Podbag account. Verify and save the worker's host key on the
+  manager. Make sure `podbag system dial-stdio` is available in the SSH user's path.
+- Run the manager's API service and the commands below under the same account. The
+  worker uses its private Docker API socket over SSH. Enrollment uses the OpenSSH
+  host and user keys. Docker's `swarm join` and join tokens are for SwarmKit peers.
+
+```sh
+worker_id=$(podbag swarm worker-add worker1 podbag@worker1)
+docker node ls
+docker service create --name web --replicas 2 --constraint "node.id==$worker_id" nginx
+docker service ps web
+docker service scale web=3
+docker service rm web
+docker node rm "$worker_id"
+```
+
+- An SSH config alias supports custom ports and key locations. Set `--ssh-config` on
+  enrollment to use a specific OpenSSH config file. The manager uses that same
+  configuration for task requests.
+- A worker service uses one `node.id==ID` constraint with the worker's full ID. The
+  worker pulls the image and runs the tasks. If a task is removed, reading or changing
+  the service asks the worker to reconcile it again. Unreachable workers stay assigned
+  to their services.
+- Remove the services assigned to a worker before removing it. Remove the workers before
+  leaving the manager's swarm.
 
 ### How it runs without a daemon
 
@@ -1494,8 +1522,11 @@ docker swarm leave --force                       # removes services, secrets, co
 
 ### What does not work
 
-- Jobs (`replicated-job`, `global-job`), placement across nodes, `--autolock`, secret
-  drivers and templating.
+- Jobs (`replicated-job`, `global-job`), automatic placement and failover, multiple
+  managers, `--autolock`, secret drivers and templating.
+- Worker services use node-local networking. Cross-host overlay networking, ingress
+  publishing, custom networks, mounts, secrets, configs, streaming logs and rolling
+  updates are unavailable for those services.
 - Restart delays and windows: podbag's own restart timing applies.
 - Registry logins sent with `--with-registry-auth`: tasks pull with podbag's own
   credentials.
