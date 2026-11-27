@@ -342,8 +342,26 @@ enum Report<'a> {
 
 /// The login for the registry an image name gives, from the front end or Docker's config.
 fn login_for(name: &str) -> Option<auth::AuthConfig> {
-    let r = reference::Reference::parse(name).ok()?;
-    auth::lookup(&r.registry)
+    login_for_image(name, &[])
+}
+
+/// The login to pull image `name` with: the one in `given` for its registry (a build's
+/// `X-Registry-Config`), else the front end's or Docker config's.
+pub fn login_for_image(
+    name: &str,
+    given: &[(String, auth::AuthConfig)],
+) -> Option<auth::AuthConfig> {
+    pick_login(name, given, auth::lookup)
+}
+
+/// [`login_for_image`] with `stored` to find a login that `given` lacks.
+fn pick_login(
+    name: &str,
+    given: &[(String, auth::AuthConfig)],
+    stored: impl FnOnce(&str) -> Option<auth::AuthConfig>,
+) -> Option<auth::AuthConfig> {
+    let registry = reference::Reference::parse(name).ok()?.registry;
+    auth::find_login(given, &registry).or_else(|| stored(&registry))
 }
 
 fn pull_job(
@@ -550,6 +568,43 @@ pub struct ImageConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_build_login_is_picked_by_the_image_registry() {
+        let made = |user: &str| {
+            auth::AuthConfig::with_password(user, &format!("pw-{user}-{}", std::process::id()))
+        };
+        let given = vec![
+            (auth::DOCKER_HUB_KEY.to_string(), made("hub")),
+            ("ghcr.io".to_string(), made("ghcr")),
+            ("localhost:5000".to_string(), made("local")),
+        ];
+        let none = |_: &str| None;
+        let user = |name: &str| pick_login(name, &given, none).map(|a| a.username);
+        assert_eq!(user("alpine").as_deref(), Some("hub"));
+        assert_eq!(user("docker.io/library/alpine:3").as_deref(), Some("hub"));
+        assert_eq!(user("team/app").as_deref(), Some("hub"));
+        assert_eq!(user("ghcr.io/team/app:v1").as_deref(), Some("ghcr"));
+        assert_eq!(user("localhost:5000/app:v1").as_deref(), Some("local"));
+        assert_eq!(user("quay.io/team/app"), None);
+        assert_eq!(user("not a name!"), None);
+
+        // A registry the build gave no login for: the stored one, asked by registry.
+        let mut asked = None;
+        let got = pick_login("localhost:5001/app", &given, |r: &str| {
+            asked = Some(r.to_string());
+            Some(made("stored"))
+        });
+        assert_eq!(got.map(|a| a.username).as_deref(), Some("stored"));
+        assert_eq!(asked.as_deref(), Some("localhost:5001"));
+        // The build's login comes first: the stored one is not read.
+        let got = pick_login(
+            "ghcr.io/team/app",
+            &given,
+            |_: &str| -> Option<auth::AuthConfig> { panic!("the stored login was read") },
+        );
+        assert_eq!(got.map(|a| a.username).as_deref(), Some("ghcr"));
+    }
 
     #[test]
     fn human_size_matches_docker() {

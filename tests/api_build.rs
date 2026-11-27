@@ -8,7 +8,7 @@
 
 mod common;
 use common::api::*;
-use common::registry::{FakeRegistry, TestImage, alpine_layer};
+use common::registry::{Auth, FakeRegistry, TestImage, alpine_layer};
 use common::*;
 use std::process::{Command, Output};
 
@@ -42,7 +42,11 @@ impl Drop for Setup {
 
 impl Setup {
     fn new() -> Setup {
-        let reg = FakeRegistry::start(false);
+        Setup::on(FakeRegistry::start(false), Sandbox::new())
+    }
+
+    /// The base image in this registry, for a service in this sandbox.
+    fn on(reg: FakeRegistry, sb: Sandbox) -> Setup {
         reg.push(
             "base",
             "v1",
@@ -52,7 +56,6 @@ impl Setup {
             },
         );
         let base = format!("{}/base:v1", reg.host);
-        let sb = Sandbox::new();
         let service = Service::start(&sb, &["--timeout", "0"]);
         Setup {
             _reg: reg,
@@ -212,6 +215,50 @@ fn docker_build_uses_the_classic_builder() {
         format!("{}{}", stdout(&failed), stderr(&failed)).contains("non-zero code: 7"),
         "{}",
         stderr(&failed)
+    );
+}
+
+#[test]
+fn a_bad_registry_config_header_is_refused() {
+    let sb = Sandbox::new();
+    let service = Service::start(&sb, &["--timeout", "0"]);
+    let (body, head) = curl(
+        &service.socket,
+        &["-X", "POST", "-H", "X-Registry-Config: %%%", "/build"],
+    );
+    assert!(head.starts_with("HTTP/1.1 400"), "{head}");
+    assert!(body.contains("X-Registry-Config"), "{body}");
+}
+
+#[test]
+fn docker_build_pulls_a_private_base_with_the_cli_login() {
+    if !have_docker() {
+        return;
+    }
+    // Made at run time: no secret in the source.
+    let user = format!("builder{}", std::process::id());
+    let password = format!("pw-{}", std::process::id());
+    let reg = FakeRegistry::start_with(Auth::token(&user, &password));
+    let host = reg.host.clone();
+    // The service has no login of its own: only the docker CLI's header can carry one.
+    let mut sb = Sandbox::new();
+    let own = sb.tmp.path().join("service-config");
+    sb.env
+        .push(("DOCKER_CONFIG".to_string(), own.display().to_string()));
+    let s = Setup::on(reg, sb);
+    let dir = s.context(&[("Dockerfile", "FROM @BASE@\nRUN echo private > /p\n")]);
+    let ctx = dir.display().to_string();
+
+    let out = s.docker(&["build", "--network", "none", &ctx], &[]);
+    assert_ne!(out.status.code(), Some(0), "{}", stdout(&out));
+
+    s.ok(&["login", &host, "-u", &user, "-p", &password]);
+    let out = s.ok(&["build", "--network", "none", "-t", "private:1", &ctx]);
+    assert!(out.contains("Successfully tagged private:1"), "{out}");
+    assert!(!out.contains(&password), "{out}");
+    assert_eq!(
+        s.ok(&["run", "--rm", "--network", "none", "private:1", "cat", "/p"]),
+        "private"
     );
 }
 

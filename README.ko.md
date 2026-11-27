@@ -55,10 +55,24 @@ Linux와 macOS에서 컨테이너, 이미지, 볼륨, 네트워크를 관리합�
 [최신 릴리스](https://github.com/SteelCrab/podbag/releases/latest)에서 시스템에 맞는 패키지를 받습니다.
 
 - **Linux(x86_64, arm64).** Debian과 Ubuntu에서는 `.deb`를 설치합니다. Fedora에서는 `.rpm`을 설치합니다. 패키지에 엔진이 포함됩니다.
-- **macOS(Apple silicon, Intel).** `podbag-desktop-aarch64-macos.zip`(Apple silicon) 또는 `podbag-desktop-x86_64-macos.zip`(Intel)의 압축을 풀고 `podbag.app`을 응용 프로그램 폴더로 옮긴 다음 엽니다.
+- **macOS(Apple silicon, Intel).** `podbag-desktop-aarch64-macos.dmg`(Apple silicon) 또는 `podbag-desktop-x86_64-macos.dmg`(Intel)를 엽니다. `podbag`을 응용 프로그램 폴더로 끌어다 놓은 다음 응용 프로그램 폴더에서 엽니다. 처음 열 때는 한 번 허용해야 합니다: [macOS에서 처음 열기](#macos에서-처음-열기).
 - **Windows(x86_64, ARM64, 실험 단계).** CPU에 맞는 `.msi`를 실행합니다. 릴리스에 MSI가 없으면 성공한 [CI 실행](https://github.com/SteelCrab/podbag/actions/workflows/ci.yml?query=branch%3Amain)에서 받습니다. 컨테이너를 실행하려면 WSL 2를 활성화합니다.
 
 앱에는 CLI가 포함됩니다. 터미널에 `podbag`이 없으면 앱이 `podbag` 명령 설치를 제안합니다. 이 명령은 앱의 CLI를 사용하므로 앱과 함께 업데이트됩니다.
+
+### macOS에서 처음 열기
+
+podbag은 Apple의 공증을 받지 않았습니다. 그래서 브라우저로 받은 앱이나 CLI는 한 번 허용할 때까지 macOS가 막습니다.
+
+1. 응용 프로그램 폴더에서 `podbag`을 엽니다. macOS가 악성 코드를 확인할 수 없다고 알립니다. **완료**를 누릅니다.
+2. **시스템 설정 > 개인정보 보호 및 보안**을 엽니다. `podbag`에 관한 메시지 옆의 **그래도 열기**를 누르고 암호로 확인합니다.
+
+이 과정을 건너뛰려면 터미널로 설치합니다. `curl`로 받은 파일은 막히지 않습니다.
+
+```sh
+curl -fsSL https://podbag.dev/install.sh | PODBAG_DESKTOP=1 sh   # Podbag Desktop
+curl -fsSL https://podbag.dev/install.sh | sh                    # CLI만
+```
 
 ### Linux(x86_64, arm64)와 macOS(Apple silicon, Intel)용 CLI
 
@@ -71,7 +85,7 @@ podbag --version
 
 Linux 커널 5.12 이상과 cgroup v2가 필요합니다. `podbag check`로 빠진 항목을 확인합니다. 일반 사용자로 브리지 네트워크를 사용하려면 `uidmap`과 `passt` 패키지를 확인합니다. [Linux 실행 요건](docs/usage.md#requirements-on-linux)
 
-직접 설치하려면 운영체제와 CPU에 맞는 파일을 받고 `SHA256SUMS`로 검증합니다. [릴리스 다운로드](https://github.com/SteelCrab/podbag/releases/latest)
+직접 설치하려면 운영체제와 CPU에 맞는 파일을 받고 `SHA256SUMS`로 검증합니다. `chmod +x`로 실행 권한을 줍니다. Mac에서는 `xattr -d com.apple.quarantine`도 실행합니다. [릴리스 다운로드](https://github.com/SteelCrab/podbag/releases/latest)
 
 ### Windows용 CLI(실험 단계)
 

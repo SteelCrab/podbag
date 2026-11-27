@@ -4,15 +4,25 @@
 #
 #   curl -fsSL https://podbag.dev/install.sh | sh
 #
+# Podbag Desktop on a Mac (the app, with the CLI in it):
+#
+#   curl -fsSL https://podbag.dev/install.sh | PODBAG_DESKTOP=1 sh
+#
+# The release files are not notarized. curl and wget do not mark what they download as
+# quarantined, so macOS opens what this script installs without a warning.
+#
 # Settings:
 #   PODBAG_VERSION=v0.3.2      install this release (default: the latest)
-#   PODBAG_INSTALL_DIR=DIR     install into DIR (default: /usr/local/bin; sudo when needed)
+#   PODBAG_INSTALL_DIR=DIR     install the CLI into DIR (default: /usr/local/bin; sudo when needed)
+#   PODBAG_DESKTOP=1           install Podbag Desktop instead (macOS)
+#   PODBAG_APP_DIR=DIR         install Podbag Desktop into DIR (default: /Applications)
 #   PODBAG_SKIP_APPARMOR=1     do not add the AppArmor profile (Ubuntu 24.04 and later)
 set -eu
 
 repo=SteelCrab/podbag
 version=${PODBAG_VERSION:-latest}
 dir=${PODBAG_INSTALL_DIR:-/usr/local/bin}
+desktop=${PODBAG_DESKTOP:-0}
 
 say() { printf '%s\n' "$*" >&2; }
 fail() {
@@ -29,11 +39,19 @@ case $arch in
   *) fail "there is no podbag build for this CPU ($arch)" ;;
 esac
 case $os in
-  Linux) file=podbag-$arch-linux ;;
+  Linux)
+    [ "$desktop" != 1 ] ||
+      fail "on Linux, install Podbag Desktop from the .deb or .rpm at https://github.com/$repo/releases/latest"
+    file=podbag-$arch-linux
+    ;;
   Darwin)
     # A shell that Rosetta runs says x86_64 on Apple silicon; the VM needs the Mac's CPU.
     [ "$(sysctl -n sysctl.proc_translated 2>/dev/null)" != 1 ] || arch=aarch64
-    file=podbag-$arch-macos
+    if [ "$desktop" = 1 ]; then
+      file=podbag-desktop-$arch-macos.zip
+    else
+      file=podbag-$arch-macos
+    fi
     ;;
   *) fail "no installer for $os; on Windows, download podbag.exe from https://github.com/$repo/releases" ;;
 esac
@@ -55,7 +73,7 @@ tmp=$(mktemp -d)
 staged=
 install_sudo=
 cleanup() {
-  if [ -n "$staged" ]; then $install_sudo rm -f "$staged"; fi
+  if [ -n "$staged" ]; then $install_sudo rm -rf "$staged"; fi
   rm -rf "$tmp"
 }
 trap cleanup EXIT
@@ -74,7 +92,32 @@ else
 fi
 [ "$got" = "$want" ] || fail "the download does not match SHA256SUMS"
 
-# 4. Install it, with sudo when the directory needs it.
+# 4. Podbag Desktop: unpack the app, check that its podbag runs, then put it in place of
+#    the old one (the same way as the app's own updates).
+if [ "$desktop" = 1 ]; then
+  appdir=${PODBAG_APP_DIR:-/Applications}
+  app=$appdir/podbag.app
+  ditto -x -k "$tmp/podbag" "$tmp/unpacked" || fail "cannot unpack $file"
+  [ -d "$tmp/unpacked/podbag.app" ] || fail "$file has no podbag.app"
+  installed_version=$("$tmp/unpacked/podbag.app/Contents/MacOS/podbag" --version) ||
+    fail "cannot run the podbag in $file"
+  if [ "$(id -u)" -ne 0 ] && ! { mkdir -p "$appdir" 2>/dev/null && [ -w "$appdir" ]; }; then
+    command -v sudo >/dev/null 2>&1 || fail "$appdir is not writable; set PODBAG_APP_DIR"
+    install_sudo=sudo
+  fi
+  $install_sudo mkdir -p "$appdir"
+  # Stage in the same folder, so the swap is two renames.
+  staged=$($install_sudo mktemp -d "$appdir/.podbag.XXXXXXXX")
+  $install_sudo mv "$tmp/unpacked/podbag.app" "$staged/podbag.app"
+  if [ -e "$app" ]; then $install_sudo mv "$app" "$staged/old.app"; fi
+  $install_sudo mv "$staged/podbag.app" "$app"
+  say "Installed $app ($installed_version)"
+  say "Next: open $app    (quit podbag first if it is running)"
+  say "      It offers to install the podbag command for the terminal."
+  exit 0
+fi
+
+# 5. Install the CLI, with sudo when the directory needs it.
 if [ "$(id -u)" -ne 0 ] && ! { mkdir -p "$dir" 2>/dev/null && [ -w "$dir" ]; }; then
   command -v sudo >/dev/null 2>&1 || fail "$dir is not writable; set PODBAG_INSTALL_DIR"
   install_sudo=sudo
@@ -88,7 +131,7 @@ $install_sudo mv -f "$staged" "$dir/podbag"
 staged=
 say "Installed $dir/podbag ($installed_version)"
 
-# 5. Ubuntu 24.04 and later allow user namespaces (rootless containers) only to programs
+# 6. Ubuntu 24.04 and later allow user namespaces (rootless containers) only to programs
 #    with an AppArmor profile.
 if [ "$os" = Linux ] && [ "${PODBAG_SKIP_APPARMOR:-0}" != 1 ] &&
   [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = 1 ] &&

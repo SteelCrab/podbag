@@ -1,5 +1,5 @@
-//! The macOS VM's shared parts: the CLI protocol, the data disk template, and (on Linux)
-//! the guest's init and agent.
+//! The macOS VM's shared parts: the CLI protocol, the data disk template, the flows of
+//! published UDP ports, and (on Linux) the guest's init and agent.
 
 #[cfg(target_os = "linux")]
 pub mod agent;
@@ -10,3 +10,4 @@ pub mod proto;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) mod shares;
 pub mod template;
+pub mod udp;

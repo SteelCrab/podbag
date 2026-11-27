@@ -311,6 +311,13 @@ pub fn migrate(
         "services" => "services",
         "deployments" => "deployments.apps",
         "claims" => "persistentvolumeclaims",
+        // The host names an address of the source cluster's router.
+        "routes" => {
+            return Err(
+                "A Route's host belongs to its cluster. Create a new Route in the destination cluster"
+                    .into(),
+            );
+        }
         _ => return Err("Unsupported Kubernetes resource".into()),
     };
     if !dns_name(name) || src.context == dst.context {
@@ -447,6 +454,19 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn routes_are_not_copied_between_clusters() {
+        let scope = |context| Scope {
+            context,
+            namespace: "default",
+        };
+        let error = migrate(scope("a"), scope("b"), "routes", "web", None, |_| {
+            panic!("A Route migration must not start")
+        })
+        .unwrap_err();
+        assert!(error.contains("Route's host belongs to its cluster"));
     }
 
     // The two disposable contexts contain the fixtures described in docs/usage.md's migration section.

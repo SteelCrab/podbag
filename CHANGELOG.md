@@ -21,6 +21,49 @@
   Compose. Training modules for every podbag feature use it.
 - All modules and their guides: https://podbag.dev/training/.
 
+### Kubernetes
+
+- Show OpenShift Routes in Podbag Desktop, the TUI and `podbag kube`. They appear only
+  when the context's API serves `route.openshift.io/v1`.
+- In Podbag Desktop, the Routes tab shows each Route's host, path, Service and TLS mode.
+  Select a host to open its address in the browser.
+- `podbag kube migrate` does not copy Routes, because a Route's host belongs to its
+  cluster.
+
+### Networking
+
+- `podbag run` and `podbag create` take `--add-host NAME:IP`, `--dns`, `--dns-search` and
+  `--dns-option`, as Docker does. `host-gateway` stands for the host.
+- The Docker API applies `ExtraHosts`, `Dns`, `DnsSearch` and `DnsOptions`, and inspect
+  shows them. Compose `extra_hosts` and `dns` now take effect.
+- Where `host-gateway` has no address (rootless bridge, `--network none`, WSL), the CLI
+  refuses it. The Docker API leaves the entry out with a warning.
+
+### Builds
+
+- `podbag build` and `docker build` pull private base images with the login for each
+  image's registry. Before, base images were pulled anonymously.
+- The Docker API reads the `X-Registry-Config` header from the docker CLI and falls back
+  to logins saved with `podbag login`. A malformed header gets a 400 reply.
+- On macOS and Windows, `podbag build` sends the host's logins for the registries in the
+  Dockerfile to the engine. A Dockerfile on stdin sends none.
+
+### Desktop
+
+- Run a container from Podbag Desktop: Run container on the Containers page, and Run on
+  each image row. The form takes the image, a name and ports.
+- More options set environment variables, volumes, the command, a restart policy and
+  auto-remove.
+- A missing image is pulled first. The new container then opens with its logs.
+
+### macOS
+
+- Published UDP ports, such as `-p 5353:53/udp`, answer on the Mac's localhost, like TCP
+  ports.
+- A UDP client's flow ends after 90 seconds without traffic, as with Docker.
+- A port that another Mac program holds no longer stops the other published ports. It is
+  reported in `~/.podbag/run/host.log`.
+
 ## v0.3.2 (2026-11-23)
 
 ### Desktop

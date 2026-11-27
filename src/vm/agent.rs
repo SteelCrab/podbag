@@ -271,8 +271,8 @@ fn stats_of(stat: &str, meminfo: &str) -> serde_json::Value {
     })
 }
 
-/// A connection the Mac forwards from one of its ports: `TCP <port>` names the port
-/// published in this VM, where the shim's proxy listens on every address.
+/// A connection the Mac forwards from one of its ports: `TCP <port>` or `UDP <port>`
+/// names the port published in this VM, where the shim's proxy listens on every address.
 fn forward(mut stream: UnixStream) {
     let mut line = Vec::new();
     let mut byte = [0u8; 1];
@@ -283,15 +283,30 @@ fn forward(mut stream: UnixStream) {
             _ => return,
         }
     }
-    let port: Option<u16> = String::from_utf8_lossy(&line)
+    let line = String::from_utf8_lossy(&line);
+    let port = |p: &str| p.trim().parse::<u16>().ok();
+    let local = |p: u16| std::net::SocketAddr::from(([127, 0, 0, 1], p));
+    if let Some(p) = line.strip_prefix("UDP ").and_then(port) {
+        let target = std::net::UdpSocket::bind(("0.0.0.0", 0)).and_then(|s| {
+            s.connect(local(p))?;
+            Ok(s)
+        });
+        match target {
+            Ok(target) => {
+                if stream.write_all(b"OK\n").is_ok() {
+                    carry_datagrams(stream, target);
+                }
+            }
+            Err(e) => {
+                let _ = stream.write_all(format!("ERR {e}\n").as_bytes());
+            }
+        }
+        return;
+    }
+    let target = line
         .strip_prefix("TCP ")
-        .and_then(|p| p.trim().parse().ok());
-    let target = port.map(|p| {
-        std::net::TcpStream::connect_timeout(
-            &std::net::SocketAddr::from(([127, 0, 0, 1], p)),
-            Duration::from_secs(5),
-        )
-    });
+        .and_then(port)
+        .map(|p| std::net::TcpStream::connect_timeout(&local(p), Duration::from_secs(5)));
     match target {
         Some(Ok(target)) => {
             if stream.write_all(b"OK\n").is_ok() {
@@ -305,6 +320,48 @@ fn forward(mut stream: UnixStream) {
             let _ = stream.write_all(b"ERR bad request\n");
         }
     }
+}
+
+/// One UDP flow of the Mac: its datagrams to the published port, and the replies back,
+/// until the Mac ends the flow.
+fn carry_datagrams(mac: UnixStream, target: std::net::UdpSocket) {
+    use super::udp::{MAX_DATAGRAM, read_datagram, write_datagram};
+    let (mac, target) = (Arc::new(mac), Arc::new(target));
+    let done = Arc::new(AtomicBool::new(false));
+    // A timeout lets the reply loop see that the flow ended.
+    let _ = target.set_read_timeout(Some(Duration::from_secs(1)));
+    let up = {
+        let (mac, target, done) = (mac.clone(), target.clone(), done.clone());
+        std::thread::spawn(move || {
+            let mut buf = vec![0u8; MAX_DATAGRAM];
+            while let Ok(Some(n)) = read_datagram(&mut &*mac, &mut buf) {
+                // Nothing listens yet: the datagram is lost, as UDP allows.
+                let _ = target.send(&buf[..n]);
+            }
+            done.store(true, Ordering::SeqCst);
+        })
+    };
+    let mut buf = vec![0u8; MAX_DATAGRAM];
+    while !done.load(Ordering::SeqCst) {
+        match target.recv(&mut buf) {
+            Ok(n) => {
+                if write_datagram(&mut &*mac, &buf[..n]).is_err() {
+                    break;
+                }
+            }
+            // A timeout, or an earlier datagram found no listener.
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::ConnectionRefused
+                ) => {}
+            Err(_) => break,
+        }
+    }
+    let _ = mac.shutdown(std::net::Shutdown::Both);
+    let _ = up.join();
 }
 
 /// Bytes both ways between the Mac and a TCP connection, until both directions end.

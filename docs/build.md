@@ -140,9 +140,13 @@ adb shell /data/local/tmp/podbag --version
 
 - Build the guest first (step 1).
 - `desktop/bundle-macos.sh release --with-cli` builds `podbag.app` with the CLI in it.
-- `dev/macos/release-files.sh` builds both release files for this Mac's CPU in
-  `target/release-files`: `podbag-<arch>-macos` and `podbag-desktop-<arch>-macos.zip`.
+- `dev/macos/release-files.sh` builds the release files for this Mac's CPU in
+  `target/release-files`: `podbag-<arch>-macos`, `podbag-desktop-<arch>-macos.dmg` (installs
+  by drag and drop) and `podbag-desktop-<arch>-macos.zip` (for the app's own updates).
   CI uses the same script.
+- The files are ad-hoc signed and not notarized. `install.sh` downloads with curl, so
+  macOS opens what it installs. A copy downloaded in a browser needs Open Anyway once:
+  [Open it the first time on macOS](../README.md#open-it-the-first-time-on-macos).
 - More: [Build the desktop app](usage.md#build-the-desktop-app).
 
 ## Windows

@@ -8,8 +8,9 @@ use std::io::{Read, Write};
 pub const CLI_PORT: u32 = 2;
 /// The Docker Engine API (`podbag system service`).
 pub const API_PORT: u32 = 2375;
-/// The forwarder of published ports: a first line `TCP <port>`, answered `OK` once the
-/// VM's `127.0.0.1:<port>` is connected (or `ERR …`), then bytes both ways.
+/// The forwarder of published ports: a first line `TCP <port>` or `UDP <port>`, answered
+/// `OK` once the VM's `127.0.0.1:<port>` is connected (or `ERR …`), then bytes both ways
+/// (TCP) or datagrams both ways (UDP, see [`super::udp`]).
 pub const FORWARD_PORT: u32 = 3;
 
 /// The argument the kernel passes the VM's /init (after `--` on its command line): only
