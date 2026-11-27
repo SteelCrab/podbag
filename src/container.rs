@@ -791,13 +791,42 @@ mod linux_launch {
                     nocopy,
                 } => {
                     let (v, _) = volume::create_in(dirs, Some(&name), false)?;
+                    if let Some(options) = v.nfs {
+                        Mount {
+                            source: MountSource::Nfs { name, options },
+                            target,
+                            read_only: access(a),
+                            copy_up: false,
+                        }
+                    } else {
+                        Mount {
+                            copy_up: !nocopy && empty(&v.mountpoint),
+                            source: MountSource::Volume {
+                                name,
+                                anonymous: false,
+                                path: v.mountpoint,
+                            },
+                            target,
+                            read_only: access(a),
+                        }
+                    }
+                }
+                MountRequest::NamedNfs {
+                    name,
+                    target,
+                    access: a,
+                    nfs,
+                } => {
+                    volume::create_with_nfs(
+                        dirs,
+                        Some(&name),
+                        false,
+                        Default::default(),
+                        Some(nfs.clone()),
+                    )?;
                     Mount {
-                        copy_up: !nocopy && empty(&v.mountpoint),
-                        source: MountSource::Volume {
-                            name,
-                            anonymous: false,
-                            path: v.mountpoint,
-                        },
+                        copy_up: false,
+                        source: MountSource::Nfs { name, options: nfs },
                         target,
                         read_only: access(a),
                     }

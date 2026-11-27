@@ -102,6 +102,7 @@ pub fn spawn(
     let (status_read, status_write) = pipe()?;
 
     let joins = Joins::open(&spec.namespaces)?;
+    let nfs = super::mounts::prepare_nfs(rootless, &spec.mounts)?;
     let mut flags = libc::CLONE_NEWNS | libc::CLONE_NEWCGROUP;
     if userns == UserNs::New {
         flags |= libc::CLONE_NEWUSER;
@@ -165,8 +166,9 @@ pub fn spawn(
     if ret == 0 {
         drop(sync_write);
         drop(status_read);
-        child_main(spec, rootless, sync_read, status_write, stdio, &joins);
+        child_main(spec, rootless, sync_read, status_write, stdio, &joins, &nfs);
     }
+    drop(nfs);
     drop(joins);
 
     let pid = ret as u32;

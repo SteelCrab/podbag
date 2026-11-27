@@ -6,9 +6,11 @@ use podbag::Volume;
 
 pub fn run(cmd: VolumeCmd) -> i32 {
     match cmd {
-        VolumeCmd::Create { labels, name } => match podbag::network::parse_labels(&labels)
-            .and_then(|labels| Volume::create_with(name.as_deref(), labels))
-        {
+        VolumeCmd::Create {
+            labels,
+            options,
+            name,
+        } => match create(name.as_deref(), &labels, &options) {
             Ok(v) => {
                 println!("{}", v.name);
                 0
@@ -49,4 +51,11 @@ pub fn run(cmd: VolumeCmd) -> i32 {
             Err(e) => report(&e),
         },
     }
+}
+
+fn create(name: Option<&str>, labels: &[String], options: &[String]) -> podbag::Result<Volume> {
+    let labels = podbag::network::parse_labels(labels)?;
+    let opts = podbag::network::parse_labels(options)?;
+    let nfs = podbag::volume::parse_options(opts)?;
+    Volume::create_with_options(&podbag::paths::dirs()?, name, labels, nfs)
 }

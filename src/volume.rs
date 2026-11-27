@@ -6,6 +6,9 @@ use crate::paths::Dirs;
 use crate::{Error, ErrorKind, Result};
 use serde::{Deserialize, Serialize};
 
+mod nfs;
+pub use nfs::{NfsOptions, parse_options};
+
 /// A named (or anonymous) volume in `<data>/volumes/<name>`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Volume {
@@ -19,6 +22,8 @@ pub struct Volume {
     /// Labels (Docker's `--label`; Compose finds a project's volumes by them).
     #[serde(default)]
     pub labels: crate::network::Labels,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nfs: Option<NfsOptions>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -29,6 +34,8 @@ struct Meta {
     /// Missing in the files of volumes made before volumes had labels.
     #[serde(default)]
     labels: crate::network::Labels,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    nfs: Option<NfsOptions>,
 }
 
 const META: &str = "meta.json";
@@ -52,8 +59,18 @@ impl Volume {
         name: Option<&str>,
         labels: crate::network::Labels,
     ) -> Result<Volume> {
+        Self::create_with_options(dirs, name, labels, None)
+    }
+
+    /// Create a local volume with optional NFS settings.
+    pub fn create_with_options(
+        dirs: &Dirs,
+        name: Option<&str>,
+        labels: crate::network::Labels,
+        nfs: Option<NfsOptions>,
+    ) -> Result<Volume> {
         let _lock = lock_shared(dirs)?;
-        create_labeled_in(dirs, name, false, labels).map(|(v, _)| v)
+        create_with_nfs(dirs, name, false, labels, nfs).map(|(v, _)| v)
     }
 
     pub fn get(name: &str) -> Result<Volume> {
@@ -114,6 +131,7 @@ fn volume_of(dirs: &Dirs, meta: Meta) -> Volume {
         created: meta.created,
         anonymous: meta.anonymous,
         labels: meta.labels,
+        nfs: meta.nfs,
     }
 }
 
@@ -134,6 +152,24 @@ pub(crate) fn create_labeled_in(
     anonymous: bool,
     labels: crate::network::Labels,
 ) -> Result<(Volume, bool)> {
+    create_with_nfs(dirs, name, anonymous, labels, None)
+}
+
+pub(crate) fn create_with_nfs(
+    dirs: &Dirs,
+    name: Option<&str>,
+    anonymous: bool,
+    labels: crate::network::Labels,
+    nfs: Option<NfsOptions>,
+) -> Result<(Volume, bool)> {
+    if nfs.is_some() {
+        #[cfg(unix)]
+        // SAFETY: geteuid has no preconditions.
+        let rootless = unsafe { libc::geteuid() } != 0;
+        #[cfg(not(unix))]
+        let rootless = true;
+        NfsOptions::require_rootful(rootless)?;
+    }
     let name = match name {
         Some(n) => {
             check_name(n)?;
@@ -156,6 +192,14 @@ pub(crate) fn create_labeled_in(
                     {
                         std::thread::sleep(std::time::Duration::from_millis(10));
                     }
+                    Ok(v) if nfs.is_some() && v.nfs != nfs => {
+                        return Err(Error::new(
+                            ErrorKind::Conflict,
+                            format!("volume {name} already exists with different options"),
+                            "an existing volume's backing storage cannot change",
+                            "choose another volume name",
+                        ));
+                    }
                     other => return other.map(|v| (v, false)),
                 }
             }
@@ -171,6 +215,7 @@ pub(crate) fn create_labeled_in(
         created: crate::state::now(),
         anonymous,
         labels,
+        nfs,
     };
     let json = serde_json::to_vec(&meta).unwrap_or_default();
     let tmp = dir.join(".meta.json.tmp");
@@ -236,10 +281,10 @@ fn users_except(dirs: &Dirs, name: &str, except_id: &str) -> Result<Vec<String>>
         let Ok(spec) = crate::state::read_config(dirs, &id) else {
             continue;
         };
-        let uses = spec
-            .mounts
-            .iter()
-            .any(|m| matches!(&m.source, MountSource::Volume { name: n, .. } if n == name));
+        let uses = spec.mounts.iter().any(|m| match &m.source {
+            MountSource::Volume { name: n, .. } | MountSource::Nfs { name: n, .. } => n == name,
+            _ => false,
+        });
         if uses {
             users.push(spec.name);
         }
@@ -305,7 +350,11 @@ pub(crate) fn prune_matching_in(
         if (!all && !v.anonymous) || !pick(&v) {
             continue;
         }
-        let size = tree_size(&dirs.volume_dir(&v.name));
+        let size = if v.nfs.is_some() {
+            0
+        } else {
+            tree_size(&dirs.volume_dir(&v.name))
+        };
         // Checks the users again under the volume lock: one mounted meanwhile stays.
         match remove_in(dirs, &v.name, false) {
             Ok(()) => {
@@ -376,6 +425,16 @@ pub fn anonymous_volumes(mounts: &[Mount]) -> impl Iterator<Item = &str> {
 /// subordinate IDs; the store helper removes them inside the user namespace.
 pub(crate) fn remove_files(dirs: &Dirs, name: &str) -> Result<()> {
     let dir = dirs.volume_dir(name);
+    if get_in(dirs, name).is_ok_and(|v| v.nfs.is_some()) {
+        // Never descend into an NFS mountpoint, even if someone mounted it separately.
+        match std::fs::remove_dir(dir.join("data")) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(store_error(&dir.join("data"), e)),
+        }
+        std::fs::remove_file(dir.join(META)).map_err(|e| store_error(&dir, e))?;
+        return std::fs::remove_dir(&dir).map_err(|e| store_error(&dir, e));
+    }
     match crate::store::remove_tree(&dir) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -418,6 +477,13 @@ pub enum MountRequest {
         /// Do not fill a new volume with the image's files at the target.
         nocopy: bool,
     },
+    /// A named NFS volume with explicit options, created on first use.
+    NamedNfs {
+        name: String,
+        target: String,
+        access: Access,
+        nfs: NfsOptions,
+    },
     /// A volume of its own, removed with the container under `--rm` or `rm -v`.
     Anonymous { target: String, access: Access },
     /// A memory file system; `options` are mount options.
@@ -429,6 +495,7 @@ impl MountRequest {
         match self {
             MountRequest::Bind { target, .. }
             | MountRequest::Named { target, .. }
+            | MountRequest::NamedNfs { target, .. }
             | MountRequest::Anonymous { target, .. }
             | MountRequest::Tmpfs { target, .. } => target,
         }
@@ -438,6 +505,7 @@ impl MountRequest {
         match self {
             MountRequest::Bind { target, .. }
             | MountRequest::Named { target, .. }
+            | MountRequest::NamedNfs { target, .. }
             | MountRequest::Anonymous { target, .. }
             | MountRequest::Tmpfs { target, .. } => target,
         }
@@ -462,6 +530,11 @@ pub enum MountSource {
         anonymous: bool,
         /// The volume's `data` directory.
         path: String,
+    },
+    /// The export is mounted directly into the container's mount namespace.
+    Nfs {
+        name: String,
+        options: NfsOptions,
     },
     Tmpfs {
         options: String,

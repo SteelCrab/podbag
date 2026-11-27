@@ -491,13 +491,36 @@ podbag build -t myapp - < Dockerfile               # only a Dockerfile, no conte
 | `-v /dir` | an anonymous volume, removed with the container by `--rm` or `rm -v` |
 | `--tmpfs /dir[:size=64m,mode=1777,…]` | a file system in memory (`nosuid,nodev,noexec` unless asked) |
 
-- The first time an empty volume is mounted, it gets the image's files at its target (with
+- The first time an empty local directory volume is mounted, it gets the image's files at its target (with
   their owners and modes). `nocopy` turns this off.
 - An image's `Volumes` become anonymous volumes.
 - `podbag volume rm` refuses a volume that a container still names.
 - Mount targets are found inside the container's root. A symbolic link in the image cannot
   send a mount outside it.
 - `/proc` and `/sys` cannot hold mounts.
+
+### NFS volumes
+
+On a rootful Linux engine with kernel NFS client support, create an NFS-backed volume
+with the local driver. Replace `nfs.example.com` and `/export` with the server name and
+export path.
+
+```sh
+podbag volume create --opt type=nfs --opt device=nfs.example.com:/export --opt o=vers=4 shared
+podbag run --rm -v shared:/data:ro alpine ls /data
+```
+
+The Docker CLI can create the same volume with `docker volume create --driver local`
+and the same `--opt` arguments. `type=nfs4` and `device=:/export` with `addr=SERVER`
+in `o` are also accepted. The engine resolves server names and makes the NFS connection
+on its own network. `o=ro` makes the volume read-only for every container. A mount
+can also select read-only access with `:ro` or `--mount …,readonly`.
+
+The Podbag mountpoint shown in volume inspection is a local placeholder. The export
+appears at the container's mount target and is never seeded with image files. Removing
+or pruning the volume deletes only its local record. Stopped containers still keep
+their volume references. On a rootless engine, mount the NFS export outside Podbag and
+bind the resulting directory if its permissions allow access from the container.
 
 ## Limits and security
 

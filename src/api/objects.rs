@@ -60,7 +60,7 @@ pub fn volume_json(v: &Volume) -> Value {
         "CreatedAt": rfc3339(Some(v.created)),
         "Labels": v.labels,
         "Scope": "local",
-        "Options": {},
+        "Options": v.nfs.as_ref().map(|opts| json!(opts)).unwrap_or_else(|| json!({})),
         "UsageData": null,
     })
 }
@@ -140,7 +140,7 @@ pub fn special_network_json(name: &str) -> Value {
 pub fn volumes(req: &Request, ctx: &Ctx, rest: &[&str]) -> Option<Reply> {
     Some(match (req.method.as_str(), rest) {
         ("GET", []) => list_volumes(req, ctx),
-        ("POST", ["create"]) => create_volume(req),
+        ("POST", ["create"]) => create_volume(req, ctx),
         ("POST", ["prune"]) => prune_volumes(req),
         ("GET", [name]) => match Volume::get(name) {
             Ok(v) => Reply::Json(200, volume_json(&v)),
@@ -207,7 +207,7 @@ fn list_volumes(req: &Request, ctx: &Ctx) -> Reply {
 }
 
 /// `POST /volumes/create`.
-fn create_volume(req: &Request) -> Reply {
+fn create_volume(req: &Request, ctx: &Ctx) -> Reply {
     let body = match req.json() {
         Ok(b) => b,
         Err(e) => return message(400, format!("{e:?}")),
@@ -219,21 +219,16 @@ fn create_volume(req: &Request) -> Reply {
             format!("volume driver {driver} is not supported (use local)"),
         );
     }
-    if body["DriverOpts"]
-        .as_object()
-        .is_some_and(|o| !o.is_empty())
-    {
-        return message(
-            400,
-            "volume options are not supported (podbag volumes are plain directories)",
-        );
-    }
+    let opts = match nfs_options(&body["DriverOpts"]) {
+        Ok(opts) => opts,
+        Err(e) => return reply_error(&e),
+    };
     let name = body["Name"].as_str().filter(|n| !n.is_empty());
     let labels = match labels_of(&body) {
         Ok(l) => l,
         Err(reply) => return reply,
     };
-    match Volume::create_with(name, labels) {
+    match Volume::create_with_options(&ctx.dirs, name, labels, opts) {
         Ok(v) => {
             publish(
                 "volume",
@@ -245,6 +240,21 @@ fn create_volume(req: &Request) -> Reply {
         }
         Err(e) => reply_error(&e),
     }
+}
+
+pub(super) fn nfs_options(options: &Value) -> crate::Result<Option<crate::volume::NfsOptions>> {
+    if options.is_null() {
+        return Ok(None);
+    }
+    let map = serde_json::from_value(options.clone()).map_err(|_| {
+        crate::Error::new(
+            ErrorKind::InvalidInput,
+            "invalid volume driver options",
+            "options must be an object of strings",
+            "set type, device and o as strings",
+        )
+    })?;
+    crate::volume::parse_options(map)
 }
 
 /// `POST /volumes/prune?filters`: unused anonymous volumes, all unused ones with
@@ -630,6 +640,7 @@ mod tests {
             created: 1_700_000_000,
             anonymous: false,
             labels: Labels::new(),
+            nfs: None,
         };
         let j = volume_json(&v);
         assert_eq!(j["Name"], "v1");
@@ -638,6 +649,21 @@ mod tests {
         assert_eq!(j["CreatedAt"], "2023-11-14T22:13:20.000000000Z");
         assert_eq!(j["Labels"], json!({}));
         assert_eq!(j["Scope"], "local");
+    }
+
+    #[test]
+    fn nfs_volume_inspect_returns_docker_options() {
+        let options = json!({"type":"nfs", "device":":/data", "o":"addr=192.0.2.1,vers=4"});
+        let v = Volume {
+            name: "share".into(),
+            mountpoint: "/d/volumes/share/data".into(),
+            created: 1_700_000_000,
+            anonymous: false,
+            labels: Labels::new(),
+            nfs: nfs_options(&options).unwrap(),
+        };
+        assert_eq!(volume_json(&v)["Options"], options);
+        assert!(nfs_options(&json!({"type":false})).is_err());
     }
 
     #[test]

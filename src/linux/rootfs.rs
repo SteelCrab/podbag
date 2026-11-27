@@ -15,6 +15,7 @@ pub(super) fn enter_rootfs(
     own_netns: bool,
     rootless: bool,
     security: &crate::spec::Security,
+    nfs: &super::mounts::NfsMounts,
 ) -> Result<()> {
     let privileged = security.privileged;
     // Mounts of the host reach the container only through a mount that asks for them:
@@ -191,7 +192,7 @@ pub(super) fn enter_rootfs(
         )?;
     }
     // The container's own mounts come last, as with runc, so they may cover /dev/shm.
-    super::mounts::mount_all(rootless, rootfs, mounts)?;
+    super::mounts::mount_all(rootless, rootfs, mounts, nfs)?;
     // Other kernel paths a caller listed.
     mask(rootless, rootfs, &masked, "")?;
     for rel in read_only
@@ -356,7 +357,8 @@ pub(super) fn enter_files(spec: &crate::spec::ContainerSpec, rootless: bool) -> 
             ..m.clone()
         })
         .collect();
-    super::mounts::mount_all(rootless, rootfs, &lasting)?;
+    let nfs = super::mounts::prepare_nfs(rootless, &lasting)?;
+    super::mounts::mount_all(rootless, rootfs, &lasting, &nfs)?;
     step(
         rootless,
         "enter the root filesystem",

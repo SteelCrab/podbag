@@ -66,7 +66,9 @@ impl From<&crate::volume::Mount> for MountInfo {
         use crate::volume::MountSource;
         let (kind, source) = match &m.source {
             MountSource::Bind { path, .. } => ("bind", path.clone()),
-            MountSource::Volume { name, .. } => ("volume", name.clone()),
+            MountSource::Volume { name, .. } | MountSource::Nfs { name, .. } => {
+                ("volume", name.clone())
+            }
             MountSource::Tmpfs { .. } => ("tmpfs", "tmpfs".to_string()),
         };
         let read_only = m.read_only

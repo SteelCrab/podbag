@@ -547,7 +547,6 @@ fn parse_mount(m: &Value) -> Result<(MountRequest, Option<String>)> {
                 access,
             }
         }
-        "volume" if source.is_empty() => MountRequest::Anonymous { target, access },
         "volume" => {
             let driver = m["VolumeOptions"]["DriverConfig"]["Name"]
                 .as_str()
@@ -559,12 +558,32 @@ fn parse_mount(m: &Value) -> Result<(MountRequest, Option<String>)> {
                     "use local volumes",
                 ));
             }
-            crate::volume::check_name(source)?;
-            MountRequest::Named {
-                name: source.to_string(),
-                target,
-                access,
-                nocopy: m["VolumeOptions"]["NoCopy"].as_bool().unwrap_or(false),
+            let opts = super::objects::nfs_options(&m["VolumeOptions"]["DriverConfig"]["Options"])?;
+            if source.is_empty() {
+                if opts.is_some() {
+                    return Err(invalid(
+                        format!("invalid mount {spec}"),
+                        "an NFS mount needs a volume name",
+                        "set a source name for the volume",
+                    ));
+                }
+                MountRequest::Anonymous { target, access }
+            } else {
+                crate::volume::check_name(source)?;
+                match opts {
+                    Some(nfs) => MountRequest::NamedNfs {
+                        name: source.to_string(),
+                        target,
+                        access,
+                        nfs,
+                    },
+                    None => MountRequest::Named {
+                        name: source.to_string(),
+                        target,
+                        access,
+                        nocopy: m["VolumeOptions"]["NoCopy"].as_bool().unwrap_or(false),
+                    },
+                }
             }
         }
         "tmpfs" => {

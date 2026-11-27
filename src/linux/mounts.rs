@@ -6,16 +6,21 @@
 //! parts are created relative to directory descriptors, and mounts are attached to the
 //! target's descriptor (`open_tree`, `fsmount`, `move_mount`), never to a path string.
 
-use crate::volume::{Mount, MountSource};
+use crate::volume::{Mount, MountSource, NfsOptions};
 use crate::{Error, ErrorKind, Result};
 use rustix::fs::{AtFlags, FileType, Mode, OFlags, ResolveFlags};
 use rustix::mount::{FsMountFlags, FsOpenFlags, MountAttrFlags, MoveMountFlags, OpenTreeFlags};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::path::Path;
 
 /// Make every mount under `root` (the container's root, not yet entered), parents first.
-pub(super) fn mount_all(rootless: bool, root: &Path, mounts: &[Mount]) -> Result<()> {
+pub(super) fn mount_all(
+    rootless: bool,
+    root: &Path,
+    mounts: &[Mount],
+    nfs: &NfsMounts,
+) -> Result<()> {
     if mounts.is_empty() {
         return Ok(());
     }
@@ -28,14 +33,14 @@ pub(super) fn mount_all(rootless: bool, root: &Path, mounts: &[Mount]) -> Result
     let mut ordered: Vec<&Mount> = mounts.iter().collect();
     ordered.sort_by_key(|m| m.target.split('/').filter(|p| !p.is_empty()).count());
     for m in ordered {
-        mount_one(root_fd.as_fd(), m).map_err(|e| {
+        mount_one(root_fd.as_fd(), m, nfs).map_err(|e| {
             super::userns_denial(rootless, Some(&e), None).unwrap_or_else(|| fail(&m.target, e))
         })?;
     }
     Ok(())
 }
 
-fn mount_one(root: BorrowedFd<'_>, m: &Mount) -> std::io::Result<()> {
+fn mount_one(root: BorrowedFd<'_>, m: &Mount, nfs: &NfsMounts) -> std::io::Result<()> {
     match &m.source {
         MountSource::Bind {
             path,
@@ -57,11 +62,81 @@ fn mount_one(root: BorrowedFd<'_>, m: &Mount) -> std::io::Result<()> {
             }
             bind(Path::new(path), target.as_fd(), m.read_only, true)
         }
+        MountSource::Nfs { .. } => {
+            let target = open_target(root, &m.target, false)?;
+            let mount = nfs
+                .get(&m.target)
+                .ok_or_else(|| std::io::Error::other("NFS mount was not prepared"))?;
+            attach(mount.as_fd(), target.as_fd())
+        }
         MountSource::Tmpfs { options } => {
             let target = open_target(root, &m.target, false)?;
             tmpfs(options, m.read_only, target.as_fd())
         }
     }
+}
+
+pub(super) type NfsMounts = BTreeMap<String, OwnedFd>;
+
+/// Open detached mounts in the engine's network namespace, before cloning the container.
+/// The only attachment is in the container's private mount namespace.
+pub(super) fn prepare_nfs(rootless: bool, mounts: &[Mount]) -> Result<NfsMounts> {
+    let mut prepared = BTreeMap::new();
+    for mount in mounts {
+        let MountSource::Nfs { name, options } = &mount.source else {
+            continue;
+        };
+        NfsOptions::require_rootful(rootless)?;
+        let fd = open_nfs(options, mount.read_only).map_err(|e| {
+            Error::new(
+                ErrorKind::Runtime,
+                format!("cannot mount NFS volume {name} at {}", mount.target),
+                e.to_string(),
+                "check the NFS server, export, client kernel support and mount options",
+            )
+        })?;
+        prepared.insert(mount.target.clone(), fd);
+    }
+    Ok(prepared)
+}
+
+fn open_nfs(options: &NfsOptions, read_only: bool) -> std::io::Result<OwnedFd> {
+    let addr = options.resolve_address()?.to_string();
+    let fs = rustix::mount::fsopen(options.fs_type(), FsOpenFlags::FSOPEN_CLOEXEC)?;
+    rustix::mount::fsconfig_set_string(&fs, "source", options.source().as_str())?;
+    rustix::mount::fsconfig_set_string(&fs, "addr", addr.as_str())?;
+    if options.fs_type() == "nfs4" {
+        // The descriptor API does not infer the NFS version from the filesystem alias.
+        rustix::mount::fsconfig_set_string(&fs, "vers", "4")?;
+    }
+    let mut attrs = MountAttrFlags::empty();
+    for option in options.parameters() {
+        match option {
+            "ro" => attrs |= MountAttrFlags::MOUNT_ATTR_RDONLY,
+            "rw" => attrs -= MountAttrFlags::MOUNT_ATTR_RDONLY,
+            "nosuid" => attrs |= MountAttrFlags::MOUNT_ATTR_NOSUID,
+            "suid" => attrs -= MountAttrFlags::MOUNT_ATTR_NOSUID,
+            "nodev" => attrs |= MountAttrFlags::MOUNT_ATTR_NODEV,
+            "dev" => attrs -= MountAttrFlags::MOUNT_ATTR_NODEV,
+            "noexec" => attrs |= MountAttrFlags::MOUNT_ATTR_NOEXEC,
+            "exec" => attrs -= MountAttrFlags::MOUNT_ATTR_NOEXEC,
+            _ => match option.split_once('=') {
+                Some(("addr", _)) => {}
+                Some(("source", _)) => return Err(rustix::io::Errno::INVAL.into()),
+                Some((key, value)) => rustix::mount::fsconfig_set_string(&fs, key, value)?,
+                None => rustix::mount::fsconfig_set_flag(&fs, option)?,
+            },
+        }
+    }
+    if read_only {
+        attrs |= MountAttrFlags::MOUNT_ATTR_RDONLY;
+    }
+    rustix::mount::fsconfig_create(&fs)?;
+    Ok(rustix::mount::fsmount(
+        &fs,
+        FsMountFlags::FSMOUNT_CLOEXEC,
+        attrs,
+    )?)
 }
 
 fn fail(target: &str, e: std::io::Error) -> Error {
