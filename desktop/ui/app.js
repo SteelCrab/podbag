@@ -1595,13 +1595,13 @@ const ENV_FIELD = { PODBAG_VM_CPUS: "cpus", PODBAG_VM_MEMORY: "memory", PODBAG_V
 function vmForm(vm) {
   const l = vm.limits || {};
   const over = new Map((vm.overriddenBy || []).map((name) => [ENV_FIELD[name], name]));
-  const input = (id, key, props, hint) => {
-    const label = t(`settings.${key}`);
+  const input = (id, label, props, hint) => {
+    const key = id.slice(3);
     const value = h("input", { id, type: "number", inputmode: "decimal", required: true, ...props });
     const slider = id === "vm-idle" ? null : h("input", { type: "range", "aria-label": label, ...props });
     value.oninput = () => { vmFormDirty = true; if (slider) slider.value = value.value; };
     if (slider) slider.oninput = () => { vmFormDirty = true; value.value = slider.value; };
-    const variable = over.get(id.slice(3));
+    const variable = over.get(key);
     return h("div", { class: "form-field", ...searchableSetting(`settings.${key}`, `settings.search.terms.${key}`) },
       h("label", { for: id, text: label }), value, slider,
       h("span", { class: "hint", text: hint }),
@@ -1609,11 +1609,11 @@ function vmForm(vm) {
   };
   const form = h("form", { class: "vm-form", novalidate: true, onsubmit: (e) => { e.preventDefault(); applyVm(form); } },
     h("div", { class: "form-grid" },
-      input("vm-cpus", "cpus", { min: l.cpusMin || 1, max: l.cpusMax || 64, step: 1 },
+      input("vm-cpus", t("settings.cpus"), { min: l.cpusMin || 1, max: l.cpusMax || 64, step: 1 },
         t("settings.limits", { min: l.cpusMin || 1, max: l.cpusMax || "?" })),
-      input("vm-memory", "memory", { min: (l.memoryMinMiB || 1024) / 1024, max: (l.memoryMaxMiB || 65536) / 1024, step: 0.25 },
+      input("vm-memory", t("settings.memory"), { min: (l.memoryMinMiB || 1024) / 1024, max: (l.memoryMaxMiB || 65536) / 1024, step: 0.25 },
         t("settings.limits", { min: mib(l.memoryMinMiB || 1024), max: mib(l.memoryMaxMiB) })),
-      input("vm-idle", "idle", { min: 0, max: 1440, step: 1 }, t("settings.idleHint"))),
+      input("vm-idle", t("settings.idle"), { min: 0, max: 1440, step: 1 }, t("settings.idleHint"))),
     h("p", { class: "hint vm-pending", text: t("settings.vmPending"), hidden: !vm.pending }),
     h("p", { class: "error-text vm-error", "aria-live": "polite" }),
     h("div", { class: "buttons-row" }, h("button", { type: "submit", class: "button primary", text: t("settings.apply") })));
