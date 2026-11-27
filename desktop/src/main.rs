@@ -9,10 +9,12 @@ use podbag::dashboard::cli;
 use podbag::dashboard::cluster_migration;
 mod commands;
 mod dockercmd;
+mod extensions;
 mod images;
 mod kubernetes;
 use podbag::dashboard::lab;
 mod migration;
+mod model_runner;
 mod run;
 mod settings;
 mod strings;
@@ -62,6 +64,7 @@ struct TrayItems {
 
 struct AppState {
     migration: Mutex<()>,
+    models: model_runner::ModelRunner,
     /// The engine this window uses, and its client.
     session: Mutex<Arc<Session>>,
     podbag: PathBuf,
@@ -116,6 +119,7 @@ impl AppState {
         });
         AppState {
             migration: Mutex::new(()),
+            models: model_runner::ModelRunner::default(),
             session: Mutex::new(Arc::new(Session::new(1, target))),
             podbag,
             installer: std::env::current_exe()
@@ -276,6 +280,33 @@ fn engine(
     };
     update_tray(&app);
     Ok(status)
+}
+
+#[tauri::command(async)]
+fn desktop_extensions(
+    app: AppHandle,
+    request: extensions::Action,
+) -> Result<Vec<extensions::Installed>, extensions::Failure> {
+    let directory = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| extensions::Failure::detail("storage", error))?
+        .join("extensions");
+    extensions::apply(&directory, request)
+}
+
+#[tauri::command(async)]
+fn models(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: model_runner::Action,
+) -> Result<model_runner::Reply, model_runner::Failure> {
+    let store = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| model_runner::Failure::with_detail("start", error))?
+        .join("models");
+    state.models.action(request, &store)
 }
 
 #[tauri::command(async)]
@@ -678,6 +709,20 @@ fn compression(
     cli::compression(&state.podbag, mode.as_deref())
 }
 
+#[tauri::command(async)]
+fn registry_proxy(
+    state: State<'_, AppState>,
+    token: u64,
+    values: Option<podbag::image::proxy::Settings>,
+) -> Result<podbag::image::proxy::Settings, String> {
+    if !cfg!(any(target_os = "linux", target_os = "macos"))
+        || state.session(token)?.target.choice != Choice::Podbag
+    {
+        return Err("Registry proxy settings require the local Podbag engine".into());
+    }
+    cli::registry_proxy(&state.podbag, values)
+}
+
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct VmResources {
@@ -760,6 +805,21 @@ fn vm_set(app: AppHandle, token: u64, settings: cli::VmSettings) -> Result<Strin
         let _ = session.emit(&app, "engine-changed", "restart");
     }
     done
+}
+
+/// List or change synchronized file shares in the macOS VM.
+#[tauri::command(async)]
+fn vm_sync(
+    state: State<'_, AppState>,
+    token: u64,
+    action: String,
+    name: Option<String>,
+    path: Option<String>,
+) -> Result<Value, String> {
+    if state.session(token)?.target.choice != Choice::Podbag || commands::platform() != "macos" {
+        return Err("Synchronized shares require Podbag on macOS".into());
+    }
+    cli::vm_sync(&state.podbag, &action, name.as_deref(), path.as_deref())
 }
 
 /// Switch this window to `podbag` or `docker`; saved for the TUI too.
@@ -1382,6 +1442,8 @@ fn main() {
         .manage(Mutex::new(lab::Lab::default()))
         .invoke_handler(tauri::generate_handler![
             engine,
+            desktop_extensions,
+            models,
             tutorial_lab,
             volume_tools_lab,
             practice_volumes,
@@ -1414,6 +1476,7 @@ fn main() {
             vm,
             vm_status,
             vm_set,
+            vm_sync,
             set_engine,
             updates,
             upgrade,
@@ -1428,6 +1491,7 @@ fn main() {
             import_images,
             vm_resources,
             compression,
+            registry_proxy,
             take_star_prompt,
             terminal_command,
             install_terminal_command,
@@ -1506,6 +1570,7 @@ fn main() {
         });
     app.run(|app, event| {
         if matches!(event, tauri::RunEvent::Exit) {
+            app.state::<AppState>().models.stop();
             let lab = app.state::<Mutex<lab::Lab>>();
             let _ = lock(&lab).run(lab::Action::End, None);
         }

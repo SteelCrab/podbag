@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod manifest;
+pub mod proxy;
 pub mod reference;
 pub mod registry;
 

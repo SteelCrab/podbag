@@ -117,7 +117,10 @@ pub fn create_body(template: &Value, facts: &TemplateFacts, networks: &[Attach])
     copy(&mut host, "DnsSearch", dns, "Search");
     copy(&mut host, "DnsOptions", dns, "Options");
     if let Some(driver) = template["LogDriver"]["Name"].as_str() {
-        host.insert("LogConfig".into(), json!({"Type": driver}));
+        host.insert(
+            "LogConfig".into(),
+            json!({"Type": driver, "Config": template["LogDriver"]["Options"]}),
+        );
     }
     let primary = networks.first().map_or("default", |a| a.network.as_str());
     host.insert("NetworkMode".into(), Value::from(primary));

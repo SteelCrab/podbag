@@ -6,6 +6,7 @@ The [README](../README.md) shows how to install podbag. This page shows what it 
 
 - [Commands](#commands)
 - [How containers run](#how-containers-run)
+  - [Forward container logs](#forward-container-logs)
   - [No daemon](#no-daemon)
   - [The keeper](#the-keeper)
   - [Isolation](#isolation)
@@ -154,6 +155,41 @@ podbag upgrade                               # install the latest release
 ```
 
 ## How containers run
+
+### Forward container logs
+
+Podbag's Linux engine keeps a rotating local log. Both `podbag logs` and `docker logs`
+read that copy. Set `--log-driver` on `run` or `create` to forward new lines as well.
+The engine connects to the destination from its own host or VM.
+
+```sh
+podbag run --log-driver=syslog --log-opt syslog-address=udp://127.0.0.1:5514 \
+  --log-opt syslog-facility=local0 --log-opt syslog-format=rfc5424 \
+  --log-opt 'tag={{.Name}}' --name web alpine echo hello
+
+docker run --log-driver=journald --log-opt 'tag={{.Name}}' --name worker alpine echo hello
+journalctl SYSLOG_IDENTIFIER=worker
+```
+
+- `json-file` is the default driver.
+- `syslog` accepts `syslog-address` over UDP, TCP, Unix stream or Unix datagram.
+  Use IPv4, bracketed IPv6 or `localhost` for UDP and TCP. The default port is `514`.
+  With a Unix socket, use an absolute path. The default socket is `/dev/log`.
+  `syslog-facility` accepts names such as `daemon` (the default) and `local0`, or a number
+  from `0` to `23`. `syslog-format` accepts `rfc3164`, `rfc5424` and `rfc5424micro`.
+- `journald` sends to `/run/systemd/journal/socket`. Use the engine's Linux host or VM
+  to read entries with `journalctl`. Entries include the container ID, name, image,
+  tag, original timestamp and priority.
+- Both drivers accept a literal `tag` or a tag with `{{.ID}}`, `{{.FullID}}`,
+  `{{.Name}}`, `{{.ImageName}}`, `{{.ImageID}}` and `{{.ImageFullID}}`.
+  The default tag is the short container ID.
+
+The engine preserves the local log if the destination is busy, missing or inaccessible.
+It counts lines it could not send and waits a second before attempting the next delivery.
+UDP delivery remains best effort after the kernel accepts a datagram. The raw Engine API
+inspect response includes `PodbagLogDelivery.Dropped` and `PodbagLogDelivery.LastError`
+once a delivery error occurs. You can read the same values from `log-delivery.json`
+beside the container's local log. The counter includes dropped lines across restarts.
 
 ### No daemon
 
@@ -357,6 +393,26 @@ podbag logout ghcr.io
   `0600`), but the password is not encrypted.
 - When the registry gives a token for the login (an identity token), podbag keeps the
   token, not the password.
+
+### Registry proxies
+
+Open **Settings → Registry proxies** in Podbag Desktop on Linux or macOS with the local
+Podbag engine selected. The saved choice applies to new engine registry requests,
+including pulls, pushes, search, and registry authentication. The engine reads it from
+`registry-proxy.json` in its configuration directory.
+
+- **Use engine environment** is the default. It uses the engine's proxy environment
+  variables, including `ALL_PROXY`, `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY`.
+- **Connect directly** opens registry connections without a proxy.
+- **Manual proxy** uses an HTTP or HTTPS proxy URL, such as
+  `http://proxy.example.com:3128`. The URL must omit credentials. Enter bypass rules
+  separated by commas. Use exact hosts or IP addresses, `.example.com` or
+  `*.example.com` for subdomains, and `*` for every host.
+
+On macOS this configures the Linux VM's engine. Opening the form can start a stopped VM.
+The proxy address must be reachable from that VM. Inherited mode uses the engine
+environment inside the VM. Docker contexts, container applications, and BuildKit use
+their own proxy settings.
 
 ### Pull and push
 
@@ -636,6 +692,7 @@ podbag build -t myapp - < Dockerfile               # only a Dockerfile, no conte
 | `--network-alias NAME` | one more name on the first user network |
 | `--network host` | the host's network |
 | `--network none` | loopback only |
+| `--ip ADDRESS`, `--ip6 ADDRESS` | request a fixed address on the first bridge network |
 | `-p [IP:][HOST:]CONTAINER[/tcp\|udp]` | publish a port; without a host port, the kernel picks one (see `ps`, `inspect`) |
 | `--add-host NAME:IP` | one more line in `/etc/hosts`; `NAME=IP` and IPv6 (`NAME=[::1]`) work too |
 | `--add-host NAME:host-gateway` | `NAME` leads to the host (see [host-gateway](#host-gateway)) |
@@ -646,13 +703,23 @@ podbag build -t myapp - < Dockerfile               # only a Dockerfile, no conte
 ### Names and addresses
 
 - New networks get `10.78.<n>.0/24`, unless `--subnet` gives another.
+- `podbag network create --ipv6 NAME` adds a local IPv6 subnet to the IPv4 bridge.
+  Specify a subnet with `--subnet6`, or use the default ULA `/64`. For Docker CLI use
+  `docker network create --ipv6 --subnet fd42:1234::/64 NAME`.
+- IPv6 addresses reach peers on the same bridge. External routing and published ports
+  continue to use IPv4.
+- Fixed addresses must be inside their subnet and outside its reserved addresses. The
+  engine refuses an address already assigned to another running container.
 - A subnet that overlaps another network or a host route is refused.
 - Container names and aliases are written into each container's `/etc/hosts`. podbag
-  updates them as containers start and stop.
-- There is no DNS server. When two containers share an alias, the first one answers.
-- `podbag network connect [--alias NAME] NET CONTAINER` and
-  `podbag network disconnect NET CONTAINER` change the networks of a stopped container,
-  for its next start. A running container is refused.
+  updates them when containers start, stop or change their network attachments.
+- By default, when two containers share an alias, the first one found in `/etc/hosts`
+  answers. Enable embedded DNS to receive the addresses of every matching peer.
+- `podbag network connect [--alias NAME] [--ip ADDRESS] [--ip6 ADDRESS] NET CONTAINER` and
+  `podbag network disconnect NET CONTAINER` change the container's secondary bridge
+  networks. The change takes effect immediately while the container runs and also
+  applies to later starts. The primary bridge and its default route stay in place.
+  Containers using host, none or a shared network namespace cannot join another bridge.
 
 ### Extra hosts and DNS
 
@@ -664,6 +731,19 @@ podbag build -t myapp - < Dockerfile               # only a Dockerfile, no conte
   Each `--dns` option replaces its part of that file.
 - The Docker API takes `ExtraHosts`, `Dns`, `DnsSearch` and `DnsOptions`, and `inspect`
   shows them.
+
+### Embedded DNS
+
+Set `embedded_dns = true` in `config.toml` or run with `PODBAG_EMBEDDED_DNS=1`. This
+applies to bridge containers when they start. Each enabled container gets a private
+resolver at `127.0.0.11` on port 53 over UDP and TCP. It returns IPv4 and IPv6 addresses
+for names and aliases on its attached user bridges. Live attachment changes take effect
+in subsequent DNS queries. The default bridge does not publish container names.
+
+Other names are sent to the usual upstream servers. In rootless mode that is pasta's
+forwarder. An explicit `--dns` server list or a mount over `/etc/resolv.conf` takes
+priority and bypasses the embedded resolver. DNS search domains and resolver options
+still apply. Each enabled container keeps its shim process to serve these requests.
 
 ### host-gateway
 
@@ -751,7 +831,7 @@ podbag system docker restore    # back to the context you had (Docker Desktop, �
 
 - Refused, with the reason: devices, `--read-only`, `--pid host`, `--volumes-from`,
   `--link`, port ranges, other network or volume drivers.
-- Accepted with a warning, because ignoring them is safe: ulimits, log drivers, fixed
+- Accepted with a warning, because ignoring them is safe: ulimits, unsupported log drivers, fixed
   addresses.
 - Answered with 501 and what to do instead: BuildKit's build API (use buildx with the
   `docker-container` driver) and plugins.
@@ -780,7 +860,6 @@ podbag system docker restore    # back to the context you had (Docker Desktop, �
   log. It cannot send input.
 - When a client leaves an attached `exec`, the command ends. (Docker keeps it running.)
 - Volumes and networks keep their labels.
-- `network connect` changes stopped containers only.
 
 ### Docker Compose
 
@@ -788,8 +867,9 @@ podbag system docker restore    # back to the context you had (Docker Desktop, �
 - Supports the project's networks and volumes, several networks per service, service and
   container names, `depends_on` with `condition: service_healthy`, restart policies and
   health checks.
-- Names live in each container's `/etc/hosts` (no DNS server). When replicas share a name,
-  the first one answers.
+- By default, names live in each container's `/etc/hosts`. When replicas share a name,
+  the first one answers. The optional embedded DNS resolver returns every matching
+  address for direct DNS queries.
 - `docker compose build` works with the classic builder (see below), or with a buildx
   builder (`--builder`).
 
@@ -1259,6 +1339,63 @@ podbag lab remove container-network
 - Languages: English, 한국어, 日本語, 简体中文, Filipino, Español and Tiếng Việt. The app
   follows the system language. Settings can change it.
 
+#### Desktop extensions
+
+Open **Extensions** and select **Install manifest** to install a local UTF-8 JSON file.
+New extensions are disabled. Use **Enable** to show a view, **Disable** to hide it, or
+**Remove** to delete the installed copy. The original file stays in place.
+
+Podbag supports its own manifest version 1. Save this example as a JSON file and install it.
+
+```json
+{
+  "apiVersion": 1,
+  "id": "example.workspace-checklist",
+  "name": "Workspace checklist",
+  "version": "1.0.0",
+  "description": "Review local resources before changing the workspace.",
+  "permissions": ["engineSummary"],
+  "content": [
+    { "type": "heading", "text": "Before you change a workspace" },
+    { "type": "text", "text": "Review your current containers and volumes." },
+    { "type": "list", "items": ["Stop the containers you intend to replace.", "Check which volumes contain data to keep."] },
+    { "type": "code", "text": "podbag ps" },
+    { "type": "engineSummary" }
+  ]
+}
+```
+
+- The ID starts with a lowercase letter and uses up to 64 lowercase letters, digits,
+  periods or hyphens. IDs are unique. Remove an installed manifest before replacing it.
+- The name fits in 120 characters, the version in 40, and the description in 2,000.
+  Files can be up to 128 KiB and contain 1 to 40 blocks. The app keeps up to 64 extensions.
+- Heading blocks accept up to 120 characters. Text and code blocks accept up to 8,000.
+  List blocks have 1 to 40 items of up to 1,000 characters each.
+- The optional `engineSummary` permission authorizes a single matching block. After
+  enabling an extension, explicitly allow summary access to display only the current
+  counts of containers, images, volumes and networks. Disabling clears that grant.
+- The host renders text, code, lists and counted summaries directly. Extending the app
+  with scripts, HTML, external links, files, commands or network requests is unsupported.
+  Docker Desktop extension bundles and manifests use a different format.
+
+#### Local models
+
+Install [Ollama](https://docs.ollama.com/) and make its executable available to Podbag Desktop.
+Open **Models** and select **Start runner**. Podbag starts its own Ollama process on a
+loopback port with cloud features disabled. It uses a separate model folder in Podbag
+Desktop's application data. Startup never downloads models.
+
+Enter a model name from the [Ollama library](https://ollama.com/library), such as
+`smollm2:135m`, and select **Pull model**. The download must fit on disk. Running a
+model needs enough RAM or GPU memory for the model and its working data. The text
+generation form uses local Ollama models such as the library's GGUF text models.
+It sends one prompt per run and generates up to 512 output tokens.
+
+**Unload** frees a model's working memory. **Stop runner** interrupts active work and
+stops the process. Quitting Desktop also stops it. Downloaded models remain available
+the next time you start the runner. The runner is off until you explicitly start it
+in each Desktop session.
+
 #### Engine switch
 
 - Select the browsing engine in **Settings → Engine**. Migration uses its own source and destination.
@@ -1298,6 +1435,8 @@ podbag lab remove container-network
 
 - Settings opens from the sidebar, from the tray (Settings…), with `⌘,` on macOS and
   with `Ctrl+,` elsewhere.
+- Search settings by name or a related term. Use the arrow keys to move through results,
+  Enter to open a setting, and Escape to clear the search.
 - Virtual machine (podbag on macOS): the state, the settings in use, uptime and disk use.
   Start, Stop and Restart. CPUs, memory and the idle power-off time (0 = never). Apply
   saves them with `podbag vm set`.
@@ -1600,15 +1739,76 @@ sudo k3s server --container-runtime-endpoint unix:///run/podbag/cri.sock
 - Commands run in the VM. Their output, exit code, signals and terminal size pass through.
 - Only commands that read input (`-i`, or `load` without `-i FILE`) take the Mac's stdin.
 - `-e NAME` takes the Mac's value of NAME.
-- The Mac's `/Users` is in the VM at the same path, so `-v ./src:/work` works from a folder
-  under `/Users`.
-- Other Mac paths are refused, also for `save -o`, `load -i` and `--rootfs`.
+- By default the VM shares `/Users` at the same path, so `-v ./src:/work` works from
+  a folder under `/Users`. See [File sharing](#file-sharing) to change the folders.
+- Paths outside the active shares are refused for bind mounts, builds, `save -o`,
+  `load -i` and `--rootfs`.
 - Named volumes live in the VM.
 - Images, containers and volumes stay on a 64 GiB sparse disk, `~/.podbag/disk.img`.
 - `podbag vm stop`, or logging out, powers the VM off cleanly.
 - `podbag vm start`, `vm restart` and `vm status` start it, restart it and show its state.
   `vm status` wakes no VM.
 - Containers cannot reach the VM's agent.
+
+### File sharing
+
+In Podbag Desktop, open **Settings → Virtual machine → Shared folders**. Enter an
+absolute path, choose **Add folder**, and apply the changes. Use **Remove** to stop
+sharing a folder. Changes take effect at the next VM start.
+
+In the CLI, repeat `--share` to give the full list. Include `/Users` to keep it shared.
+Use `--no-shares` to remove all shares.
+
+```sh
+podbag vm set --share /Users --share "/Volumes/My Projects"
+podbag vm status --json
+podbag run --rm -v "/Volumes/My Projects:/work" alpine ls /work
+```
+
+Restart a running VM before using a newly shared folder. Shared folders must exist
+when saved and at startup. The list uses the original paths after resolving symlinks.
+Use those paths in container commands. Folders cannot overlap or cover the VM's
+system directories. A removable disk must be attached at VM startup to share its
+folders. Remove the folders from the list when the disk is disconnected.
+
+### Synchronized shares
+
+A synchronized share keeps a copy of a macOS project on the Linux VM's disk. The
+project must be inside one of the [shared folders](#file-sharing), because the VM
+reads it through that folder. With the default list, any project under `/Users`
+works. To synchronize a project somewhere else, add a folder that contains it to the
+shared folders first, and restart the VM. A shared folder itself cannot be the
+source; choose a folder inside it. Use **Settings → Synchronized shares** while the
+VM runs, or use the CLI.
+
+```sh
+podbag vm sync add project "$HOME/projects/app"
+podbag run --rm -v podbag-sync-project:/work alpine ls /work
+podbag vm sync list
+podbag vm sync now project
+podbag vm sync remove project
+```
+
+Use the named volume to access the cached files. A bind mount from a shared folder
+still uses VirtioFS directly. A share's source cannot overlap the source of another
+synchronized share. Removing a share stops synchronization and keeps its cache volume.
+If you later remove the source's folder from the shared folders, the share reports
+an error and stops synchronizing until the folder is shared again.
+
+The guest checks shares about every 15 seconds while it runs. It copies regular files
+and directories in both directions, including renames and deletions. It preserves
+ordinary Unix permission bits. It skips symlinks and special files. Each share's last
+common version is saved on the VM disk so it can resume after a restart.
+
+The share reports a conflict when two sides change a path differently. Both files
+stay where they are. Resolve the conflict by making the affected paths match on
+both sides. The next sync records the resolved version. Access the cache volume
+with a container to inspect or edit its version.
+
+Replaced or deleted regular files are kept in `.podbag-sync-recovery/` at the root
+of the destination tree. Each recovery directory contains the old file and its
+original relative path. A file changed during replacement can also appear there. Remove old recovery copies when you no longer need them.
+The synchronizer ignores its recovery and temporary files.
 
 ### Registry logins
 
@@ -1666,11 +1866,16 @@ docker buildx build --load -t app .
 
 - The socket stays while the VM is off. The standby process waits on it, and the first
   request starts the VM.
-- Bind mounts must come from `/Users`.
+- Bind mounts must come from the [active shared folders](#file-sharing).
 
 ### Ports, disk and memory
 
-- Published ports (`-p 8080:80`) answer on the Mac's `localhost:8080`. TCP only for now.
+- Published ports (`-p 8080:80`) answer on the Mac's `localhost:8080`.
+- UDP ports (`-p 5353:53/udp`) work too. Each client gets its own replies.
+- A UDP client that sends nothing and gets nothing for 90 seconds is forgotten, as with
+  Docker. Its next datagram starts again.
+- If another program on the Mac has the port, podbag cannot forward it. It writes why in
+  `~/.podbag/run/host.log`, and tries again every second.
 - Disk space comes back while the VM runs: the Mac gets back what deleted images,
   containers and volumes used, within seconds.
 - Memory comes back when the VM powers off.

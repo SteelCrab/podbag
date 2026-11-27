@@ -228,7 +228,7 @@ mod linux_ops {
                         eprintln!("{line}");
                     }
                 };
-                to_json(&store.push(&name, &mut Registry::with_auth(auth), &mut show)?)
+                to_json(&store.push(&name, &mut Registry::for_engine(dirs, auth)?, &mut show)?)
             }
             StoreOp::Tag { source, name } => {
                 to_json(
@@ -257,7 +257,7 @@ mod linux_ops {
                 };
                 let (full, record) = store.pull(
                     &name,
-                    &mut Registry::with_auth(auth),
+                    &mut Registry::for_engine(dirs, auth)?,
                     limit,
                     &in_use,
                     &mut show,

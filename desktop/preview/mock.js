@@ -67,14 +67,15 @@
     throw 'kubectl (exit status: 1): error: the server doesn\'t have a resource type "routes"';
   };
   const docker = view.startsWith("docker");
+  const platform = params.get("platform") || "macos";
   const engine = {
-    platform: "macos",
+    platform,
     engine: docker ? "docker" : "podbag",
     engineName: docker ? "Docker" : "podbag",
     shell: true,
     endpoint: "unix:///Users/me/.podbag/run/docker.sock",
     reachable: !["offline", "vm"].includes(view),
-    vm: view === "vm" ? "stopped" : "running",
+    vm: platform === "linux" ? null : view === "vm" ? "stopped" : "running",
     version: "podbag 0.1.0 (API 1.47)",
     error: view === "vm" ? "vm-stopped" : view === "offline" ? "cannot connect to unix:///Users/me/.podbag/run/docker.sock: No such file or directory" : null,
   };
@@ -103,6 +104,7 @@
     platform: "macos", state: "stopped", resourcesEditable: true, inUse: null,
     next: { cpus: 4, memoryMiB: 4096, idleSeconds: 300 }, saved: { cpus: 4, memoryMiB: 4096, idleSeconds: null },
     overriddenBy: [], pending: false,
+    sharedPaths: { inUse: null, next: ["/Users"] },
     limits: { cpusMin: 1, cpusMax: 10, memoryMinMiB: 1024, memoryMaxMiB: 20480, macMemoryMiB: 24576 },
     uptimeSeconds: null, containers: null, cpuPercent: null, memoryUsedMiB: null, memoryTotalMiB: null,
     disk: { path: "/Users/me/.podbag/vm/disk.img", allocatedBytes: 3_400_000_000, sizeBytes: 68_719_476_736 },
@@ -111,10 +113,12 @@
     inUse: { cpus: 4, memoryMiB: 4096, idleSeconds: 300 },
     next: { cpus: 4, memoryMiB: 6144, idleSeconds: 300 }, saved: { cpus: null, memoryMiB: 6144, idleSeconds: null },
     overriddenBy: view === "settings-vm" ? ["PODBAG_VM_CPUS"] : [], pending: true,
+    sharedPaths: { inUse: ["/Users"], next: ["/Users"] },
     limits: { cpusMin: 1, cpusMax: 10, memoryMinMiB: 1024, memoryMaxMiB: 20480, macMemoryMiB: 24576 },
     uptimeSeconds: 7560, containers: 3, cpuPercent: 12.5, memoryUsedMiB: 1350, memoryTotalMiB: 3900,
     disk: { path: "/Users/me/.podbag/vm/disk.img", allocatedBytes: 5_800_000_000, sizeBytes: 68_719_476_736 },
   };
+  if (platform === "windows") Object.assign(vmStatus, { platform, resourcesEditable: false });
   // A packaged app with a separate podbag for the terminal; update-source: a build of its own.
   const packaged = { installer: "macos-app", terminal: "/usr/local/bin/podbag", terminalVersion: "0.1.0", appNewer: true, cliNewer: true };
   const source = { installer: null, terminal: null, terminalVersion: null, appNewer: false, cliNewer: true };
@@ -168,6 +172,19 @@
     { id: "gitlab-self", label: "GitLab Self-Managed", host: "", hostExample: "registry.example.com", needsHost: true },
     { id: "custom", label: "Other registry", host: "", needsHost: true, account: null, hint: null },
   ];
+  const migrationImages = [
+    { Id: "sha256:103afa055a409b34", RepoTags: ["example/api:1.5", "registry.gitlab.com/example/api:1.5"] },
+    { Id: "sha256:158bb8104d657e3f", RepoTags: ["ghcr.io/example/frontend:2.0"] },
+    { Id: "sha256:498bdb036ad35429", RepoTags: ["quay.io/example/proxy:0.8"] },
+    { Id: "sha256:8ab61e38dd2ac135", RepoTags: ["<none>:<none>"] },
+  ];
+  function migrationRegistry(reference, hosts) {
+    const host = reference.includes("/") ? reference.split("/")[0] : "";
+    const configured = hosts.find(([, address]) => address && address === host)?.[0];
+    const registry = registries.find(r => configured ? r.id === configured : r.host && r.host === host)
+      || registries.find(r => r.id === (host.includes(".") ? "custom" : "dockerhub"));
+    return { id: registry.id, label: registry.label };
+  }
   const elsewhere = ["banner", "settings-docker", "pull", "pull-locations"].includes(view);
   const desktopContext = { installed: true, name: "Docker Desktop", isPodbag: false, fromEnv: false, context: "desktop-linux", previous: null };
   const podbagContext = { installed: true, name: "podbag", isPodbag: true, fromEnv: false, context: "podbag", previous: "desktop-linux" };
@@ -185,11 +202,36 @@
   // after (seconds an image stays unused; 0: at once), vm-error (vm status fails), busy
   // (another dialog is open when the window first asks for the VM's state).
   const compression = { mode: params.get("compression") === "idle" ? "idle" : "off", after: Number(params.get("after") ?? 604800) };
+  let registryProxy = params.get("registryProxy") === "manual"
+    ? { mode: "manual", url: "http://proxy.example.com:3128", bypass: "localhost, .example.com" }
+    : { mode: "inherited", url: "", bypass: "" };
   const practiceModules = new Map();
+  const checklist = {
+    apiVersion: 1, id: "example.workspace-checklist", name: "Workspace checklist", version: "1.0.0",
+    description: "Review local resources before changing the workspace.", permissions: ["engineSummary"],
+    content: [
+      { type: "heading", text: "Before you replace a container" },
+      { type: "list", items: ["Check which containers use the image.", "Keep the volumes that contain application data."] },
+      { type: "code", text: "podbag ps" },
+      { type: "engineSummary" },
+    ],
+  };
+  let extensions = view === "extension-view" ? [{ manifest: checklist, enabled: true, engineSummary: true }] : [];
+  const synchronized = view === "settings-sync" ? [{ name: "project", source: "/Users/me/projects/app", volume: "podbag-sync-project", conflicts: [], lastError: null }] : [];
+  const demoModel = { name: "smollm2:135m", size: 92_078_644, loaded: true };
+  const models = view === "models-report" ? [{ ...demoModel }] : [];
+  let modelRunner = view === "models-report";
   const commands = {
     "plugin:autostart|is_enabled": () => launchAtLogin,
     "plugin:autostart|enable": () => { launchAtLogin = true; },
     "plugin:autostart|disable": () => { launchAtLogin = false; },
+    registry_proxy: ({ values }) => {
+      if (values) {
+        (window.previewRegistryProxyWrites ||= []).push(values);
+        registryProxy = values.mode === "manual" ? values : { mode: values.mode, url: "", bypass: "" };
+      }
+      return { ...registryProxy };
+    },
     connection: () => [token, selected, selected === "podbag"],
     contexts: () => ["desktop-linux", "orbstack"],
     kube_contexts: () => ["dev", "staging", "ocp"],
@@ -198,7 +240,16 @@
     migration_sources: () => ["docker", "podman", "kiri", "podbag"],
     kube_counts: ({ allNamespaces, context }) => Object.fromEntries(Object.keys(context === "ocp" ? { ...kube, routes } : kube).map((kind) =>
       [kind, kubeItems(kind, context).filter(i=>allNamespaces||i.metadata.namespace==="default").length])),
-    migration_list: ({ kind }) => lists[kind],
+    migration_list: ({ kind, hosts = [] }) => {
+      if (kind === "images") return [...lists.images, ...migrationImages].map(image => ({
+        ...image, MigrationRegistries: Object.fromEntries(image.RepoTags.filter(tag => tag !== "<none>:<none>")
+          .map(tag => [tag, migrationRegistry(tag, hosts)])),
+      }));
+      if (kind === "containers") return lists.containers.map(container => ({
+        ...container, MigrationRegistry: migrationRegistry(container.Image, hosts),
+      }));
+      return lists[kind];
+    },
     migrate: async ({ request, updates }) => {
       for (const phase of ["prepare", request.kind === "images" ? "image" : "files", "verify"]) {
         updates.onmessage(phase);
@@ -206,6 +257,48 @@
       }
     },
     create_volume: ({ name }) => { volumes.push({ Name: name, Driver: "local" }); },
+    desktop_extensions: ({ request }) => {
+      (window.previewExtensionActions ||= []).push(request);
+      const { action, id } = request;
+      if (action === "install") {
+        let manifest;
+        try { manifest = JSON.parse(request.source); } catch { throw { kind: "manifest" }; }
+        if (extensions.some((item) => item.manifest.id === manifest.id)) throw { kind: "duplicate" };
+        extensions.push({ manifest, enabled: false, engineSummary: false });
+      } else if (action !== "list") {
+        const item = extensions.find((ext) => ext.manifest.id === id);
+        if (!item) throw { kind: "notFound" };
+        if (action === "setEnabled") {
+          item.enabled = request.enabled;
+          if (!item.enabled) item.engineSummary = false;
+        } else if (action === "setEngineSummary") {
+          if (!item.enabled || !item.manifest.permissions.includes("engineSummary")) throw { kind: "permission" };
+          item.engineSummary = request.allow;
+        } else if (action === "remove") {
+          extensions = extensions.filter((ext) => ext.manifest.id !== id);
+        }
+      }
+      return structuredClone(extensions);
+    },
+    models: ({ request }) => {
+      (window.previewModelActions ||= []).push(request);
+      const { action, model } = request;
+      if (action === "start") {
+        if (params.get("ollama") === "missing") throw { kind: "missing" };
+        modelRunner = true;
+      } else if (action === "stop") {
+        modelRunner = false;
+        models.forEach((item) => { item.loaded = false; });
+      } else if (action === "pull") {
+        if (!models.some((item) => item.name === model)) models.push({ ...demoModel, name: model, loaded: false });
+      } else if (action === "run" || action === "unload") {
+        const selected = models.find((item) => item.name === model);
+        if (!selected) throw { kind: "notInstalled" };
+        selected.loaded = action === "run";
+        if (selected.loaded) return { response: "Blue." };
+      }
+      return { running: modelRunner, version: modelRunner ? "0.40.17" : "", models: modelRunner ? models.map((item) => ({ ...item })) : [] };
+    },
     engine: () => engine,
     list: ({ kind }) => lists[kind],
     kube_list: ({ kind, allNamespaces, context }) => ({
@@ -262,7 +355,24 @@
       if (!mode) window.previewCompressionReads = (window.previewCompressionReads || 0) + 1;
       return params.get("compression") === "broken" ? null : { ...compression };
     },
-    vm_set: () => "Saved.",
+    vm_set: ({ settings }) => {
+      if (settings.sharedPaths) vmStatus.sharedPaths.next = settings.sharedPaths;
+      if (settings.restart) vmStatus.sharedPaths.inUse = vmStatus.sharedPaths.next;
+      return "Saved.";
+    },
+    vm_sync: ({ action, name, path }) => {
+      if (action === "list") return synchronized.map(share => ({ ...share }));
+      const existing = synchronized.find(share => share.name === name);
+      if (action === "add") {
+        if (existing) throw "Share already exists";
+        const share = { name, source: path, volume: `podbag-sync-${name}`, conflicts: [], lastError: null };
+        synchronized.push(share);
+        return share;
+      }
+      if (!existing) throw "Share not found";
+      if (action === "remove") synchronized.splice(synchronized.indexOf(existing), 1);
+      return existing;
+    },
     set_engine: ({ engine }) => {
       sessionStorage.setItem("preview-engine", engine);
       sessionStorage.setItem("preview-token", String(token + 1));
@@ -357,9 +467,32 @@
       images: () => app.go("images"),
       volumes: () => app.go("volumes"),
       networks: () => app.go("networks"),
+      models: () => app.go("models"),
+      "models-report": async () => {
+        await app.go("models");
+        const until = performance.now() + 1500;
+        let prompt;
+        while (!(prompt = document.getElementById("model-prompt")) && performance.now() < until) {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        if (!prompt) return;
+        prompt.value = "Name the color of a clear daytime sky.";
+        prompt.dispatchEvent(new Event("input"));
+        prompt.form.requestSubmit();
+      },
       settings: () => app.go("settings"),
+      "settings-search": async () => {
+        await app.go("settings");
+        const input = document.getElementById("settings-search");
+        input.value = "Virtual machine";
+        input.dispatchEvent(new Event("input"));
+        input.focus();
+      },
       tutorials: () => app.go("tutorials"),
+      extensions: () => app.go("extensions"),
+      "extension-view": () => app.go("extensions"),
       "settings-vm": () => app.openSettingsSection("vm-settings"),
+      "settings-sync": () => app.openSettingsSection("sync-settings"),
       "settings-cli": () => app.openSettingsSection("terminal-command"),
       "settings-updates": app.openUpdates,
       "update-source": app.openUpdates,

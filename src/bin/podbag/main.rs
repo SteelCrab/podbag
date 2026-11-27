@@ -393,6 +393,9 @@ fn mac_command(cli: &Cli, argv: Vec<String>) -> podbag::macos::cli::Forward {
             f.paths.extend(a.file.clone());
         }
         Cmd::System {
+            cmd: args::SystemCmd::RegistryProxy { set },
+        } => f.stdin = *set,
+        Cmd::System {
             cmd: args::SystemCmd::Service {
                 socket: Some(p), ..
             },
@@ -608,6 +611,14 @@ fn dispatch(cmd: Cmd) -> i32 {
         }
         Cmd::Store { op } => podbag::store::ops::helper_main(&op),
         Cmd::Session => session_helper(),
+        #[cfg(target_os = "linux")]
+        Cmd::NetworkAttachment {
+            id,
+            network,
+            change,
+        } => podbag::network::attachment_main(&id, &network, &change),
+        #[cfg(not(target_os = "linux"))]
+        Cmd::NetworkAttachment { .. } => unsupported(),
         #[cfg(target_os = "linux")]
         Cmd::PodInit => podbag::cri::pod::pause_main(),
         #[cfg(not(target_os = "linux"))]

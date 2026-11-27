@@ -65,6 +65,8 @@ prost = { version = "0.14", default-features = false, features = ["derive", "std
 miniz_oxide = "0.9"
 
 [target.'cfg(target_os = "linux")'.dependencies]
+hickory-proto = "0.26.3"
+socket2 = "0.6"
 rustix = { version = "1", features = ["fs", "mount", "pipe", "process", "system", "thread"] }
 
 # The macOS front end: Virtualization.framework for the Linux VM.

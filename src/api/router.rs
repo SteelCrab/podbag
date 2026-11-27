@@ -71,9 +71,9 @@ pub struct Ctx {
     pub attachments: std::sync::Arc<super::stream::Attachments>,
     /// Commands made by `POST /containers/{id}/exec`.
     pub execs: super::exec::Execs,
-    /// Host paths a bind mount may come from (the macOS VM: `/Users`, the only Mac
-    /// directory it sees); any path when None.
-    pub binds_under: Option<std::path::PathBuf>,
+    /// Host paths a bind mount may come from (the macOS VM's shared folders).
+    /// None allows any path; an empty list allows no host paths.
+    pub binds_under: Option<Vec<std::path::PathBuf>>,
 }
 
 impl Ctx {

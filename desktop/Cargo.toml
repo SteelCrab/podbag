@@ -23,3 +23,7 @@ sys-locale = "0.3"
 open = "5"
 tauri-plugin-autostart = "2"
 tempfile = "3"
+ureq = { version = "3", default-features = false }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

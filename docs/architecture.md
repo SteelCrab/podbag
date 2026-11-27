@@ -117,6 +117,12 @@ base, with the same jars:
 - Without root:
   - each user's containers share a network namespace,
   - `pasta` connects it to the host.
+- A short-lived helper makes live changes to secondary bridge attachments. It holds the
+  container and network locks while changing the Linux interface and saved settings.
+  A failed change rolls back before addresses become available to other containers.
+- With embedded DNS enabled, each bridge container's shim serves UDP and TCP on that
+  container's loopback interface. It reads the caller's active memberships under the
+  network lock and forwards other queries through the container's network.
 
 ## On macOS and Windows
 
