@@ -21,7 +21,7 @@ async function until(get, what) {
 function frame(id) {
   const el = document.getElementById(id);
   return new Promise((resolve) => {
-    const ready = () => el.contentDocument?.documentElement.dataset.ready === "1";
+    const ready = () => el.contentDocument?.documentElement?.dataset.ready === "1";
     const wait = async () => resolve(await until(ready, `${id} ready`).then(() => el.contentWindow));
     if (el.contentDocument?.readyState === "complete") wait();
     else el.addEventListener("load", wait, { once: true });

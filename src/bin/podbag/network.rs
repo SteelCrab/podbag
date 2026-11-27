@@ -8,11 +8,17 @@ pub fn run(cmd: NetworkCmd) -> i32 {
     match cmd {
         NetworkCmd::Create {
             subnet,
+            ipv6,
+            subnet6,
             labels,
             name,
-        } => match podbag::network::parse_labels(&labels)
-            .and_then(|labels| Network::create_with(&name, subnet.as_deref(), labels))
-        {
+        } => match podbag::network::parse_labels(&labels).and_then(|labels| {
+            if ipv6 || subnet6.is_some() {
+                Network::create_dual_stack(&name, subnet.as_deref(), subnet6, labels)
+            } else {
+                Network::create_with(&name, subnet.as_deref(), labels)
+            }
+        }) {
             Ok(n) => {
                 println!("{}", n.id);
                 0
@@ -58,11 +64,20 @@ pub fn run(cmd: NetworkCmd) -> i32 {
         #[cfg(unix)]
         NetworkCmd::Connect {
             aliases,
+            ip,
+            ip6,
             network,
             container,
-        } => match podbag::ContainerHandle::get(&container)
-            .and_then(|h| h.connect(&network, &aliases))
-        {
+        } => match podbag::ContainerHandle::get(&container).and_then(|h| {
+            h.connect_with_addresses(
+                &network,
+                &aliases,
+                podbag::network::FixedAddresses {
+                    ipv4: ip,
+                    ipv6: ip6,
+                },
+            )
+        }) {
             Ok(()) => 0,
             Err(e) => report(&e),
         },

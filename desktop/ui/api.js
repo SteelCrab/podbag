@@ -19,7 +19,7 @@ const API = (() => {
       token = id;
       return { name, local };
     },
-    migrationList: (source, kind) => invoke("migration_list", { source, kind }),
+    migrationList: (source, kind, hosts) => invoke("migration_list", { source, kind, hosts }),
     migrate(request, onProgress) {
       const updates = new tauri.core.Channel();
       updates.onmessage = onProgress;
@@ -33,6 +33,7 @@ const API = (() => {
     kubeOpenRoute: (context, namespace, name) => invoke("kube_open_route", { context, namespace, name }),
     createVolume: (name) => scoped("create_volume", { name }),
     engine: (start) => scoped("engine", { start: !!start }),
+    extensions: (request) => invoke("desktop_extensions", { request }),
     models: (request) => invoke("models", { request }),
     list: (kind) => scoped("list", { kind }),
     kubeList: (kind, allNamespaces, context) => invoke("kube_list", { kind, allNamespaces, context: context || null }),
@@ -61,10 +62,12 @@ const API = (() => {
     vmResources: (values) => scoped("vm_resources", { values: values || null }),
     // No mode reads; "idle" or "off" sets. Resolves with { mode, after }.
     compression: (mode) => scoped("compression", { mode: mode || null }),
+    registryProxy: (values) => scoped("registry_proxy", { values: values || null }),
     launchAtLogin: () => invoke("plugin:autostart|is_enabled"),
     setLaunchAtLogin: (enabled) => invoke(enabled ? "plugin:autostart|enable" : "plugin:autostart|disable"),
     vmStatus: () => scoped("vm_status"),
     vmSet: (settings) => scoped("vm_set", { settings }),
+    vmSync: (action, name = null, path = null) => scoped("vm_sync", { action, name, path }),
     setEngine: (engine) => scoped("set_engine", { engine }),
     updates: (check) => invoke("updates", { check }),
     upgrade: (version) => invoke("upgrade", { version: version || null }),

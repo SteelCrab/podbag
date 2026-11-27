@@ -163,17 +163,10 @@ fn create(req: &Request, ctx: &Ctx) -> Reply {
         Ok(b) => b,
         Err(e) => return message(400, format!("{e:?}")),
     };
-    if let Some(root) = &ctx.binds_under {
+    if let Some(roots) = &ctx.binds_under {
         for source in ok_or_reply!(super::create::bind_sources(&body)) {
-            if !super::create::lies_under(std::path::Path::new(&source), root) {
-                return message(
-                    400,
-                    format!(
-                        "mounts denied: {source} is not under {}, the only Mac directory \
-                         the VM sees; move it there, or use a named volume",
-                        root.display()
-                    ),
-                );
+            if let Err(error) = super::create::check_shared_bind(&source, roots) {
+                return error;
             }
         }
     }
@@ -192,7 +185,7 @@ pub(super) fn shape(
     let alone = |name| shapes::Attached {
         name,
         network: None,
-        ip: None,
+        addresses: None,
         aliases: &[],
     };
     let networks: Vec<shapes::Attached> = match &spec.network {
@@ -201,15 +194,15 @@ pub(super) fn shape(
             .into_iter()
             .enumerate()
             .map(|(index, name)| {
-                let (network, ip) = match crate::network::with_address_of(&ctx.dirs, name, &info.id)
-                {
-                    Ok((network, ip)) => (Some(network), ip),
-                    Err(_) => (None, None),
-                };
+                let (network, addresses) =
+                    match crate::network::with_addresses_of(&ctx.dirs, name, &info.id) {
+                        Ok((network, ip)) => (Some(network), ip),
+                        Err(_) => (None, None),
+                    };
                 shapes::Attached {
                     name,
                     network,
-                    ip,
+                    addresses,
                     aliases: spec.aliases_on(index),
                 }
             })
