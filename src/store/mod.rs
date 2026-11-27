@@ -73,7 +73,7 @@ impl ImageRecord {
         history.extend_from_slice(&self.history);
         if self.history.is_empty() {
             if let Some(last) = history.last_mut() {
-                last.created = Some(crate::shim::logbook::rfc3339(self.created, 0));
+                last.created = Some(crate::client::time::rfc3339(self.created, 0));
             }
         }
         history
