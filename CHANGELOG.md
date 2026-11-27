@@ -21,6 +21,15 @@
   Compose. Training modules for every podbag feature use it.
 - All modules and their guides: https://podbag.dev/training/.
 
+### Kubernetes
+
+- Show OpenShift Routes in Podbag Desktop, the TUI and `podbag kube`. They appear only
+  when the context's API serves `route.openshift.io/v1`.
+- In Podbag Desktop, the Routes tab shows each Route's host, path, Service and TLS mode.
+  Select a host to open its address in the browser.
+- `podbag kube migrate` does not copy Routes, because a Route's host belongs to its
+  cluster.
+
 ## v0.3.2 (2026-11-23)
 
 ### Desktop
