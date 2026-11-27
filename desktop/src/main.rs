@@ -7,6 +7,7 @@
 use podbag::dashboard::app_update::{self, Installer};
 use podbag::dashboard::cli;
 use podbag::dashboard::cluster_migration;
+mod builders;
 mod commands;
 mod dockercmd;
 mod images;
@@ -63,6 +64,7 @@ struct TrayItems {
 
 struct AppState {
     migration: Mutex<()>,
+    builder_work: Mutex<()>,
     models: model_runner::ModelRunner,
     /// The engine this window uses, and its client.
     session: Mutex<Arc<Session>>,
@@ -118,6 +120,7 @@ impl AppState {
         });
         AppState {
             migration: Mutex::new(()),
+            builder_work: Mutex::new(()),
             models: model_runner::ModelRunner::default(),
             session: Mutex::new(Arc::new(Session::new(1, target))),
             podbag,
@@ -255,6 +258,36 @@ fn connection(state: State<'_, AppState>) -> (u64, String, bool) {
         current.target.choice.to_setting(),
         current.target.choice == Choice::Podbag,
     )
+}
+
+#[tauri::command(async)]
+fn builder_list(state: State<'_, AppState>, token: u64) -> Result<builders::Catalog, String> {
+    let session = state.session(token)?;
+    builders::list(&session.target)
+}
+
+#[tauri::command(async)]
+fn builder_inspect(
+    state: State<'_, AppState>,
+    token: u64,
+    scope: String,
+    name: String,
+) -> Result<builders::Inspection, String> {
+    let session = state.session(token)?;
+    builders::inspect(&session.target, &scope, &name)
+}
+
+#[tauri::command(async)]
+fn builder_action(
+    state: State<'_, AppState>,
+    token: u64,
+    scope: String,
+    name: String,
+    action: builders::Action,
+) -> Result<(), String> {
+    let _work = lock(&state.builder_work);
+    let session = state.session(token)?;
+    builders::act(&session.target, &scope, &name, action)
 }
 
 #[tauri::command(async)]
@@ -790,7 +823,10 @@ fn set_engine(
     let file = podbag::client::ui_dir()
         .ok_or("cannot find the folder for ui.json")?
         .join("ui.json");
-    state.switch(token, &engine, &file)?;
+    {
+        let _work = lock(&state.builder_work);
+        state.switch(token, &engine, &file)?;
+    }
     update_tray(&app);
     Ok(())
 }
@@ -1413,6 +1449,9 @@ fn main() {
             kubernetes::kube_openshift,
             kubernetes::kube_open_route,
             connection,
+            builder_list,
+            builder_inspect,
+            builder_action,
             contexts,
             create_volume,
             inspect,

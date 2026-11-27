@@ -493,6 +493,29 @@ input[type="checkbox"], input[type="radio"] { accent-color: var(--accent); }
 .setting-vm { background: #a76528; }
 .setting-updates { background: #316fb9; }
 .setting-terminalCommand { background: #3d7a55; }
+.setting-builders { background: #47588c; }
+.builder-settings { display: grid; gap: 10px; min-width: 0; }
+.builder-toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+.builder-toolbar p, .builder-toolbar h3, .builder-node h4, .builder-status { margin: 0; }
+.builder-toolbar h3, .builder-node h4 { overflow-wrap: anywhere; }
+.builder-status:empty { display: none; }
+.builder-list { list-style: none; margin: 0; padding: 0; border: 1px solid var(--line); border-radius: 8px; }
+.builder-list li + li { border-top: 1px solid var(--line); }
+.builder-row { width: 100%; min-height: 42px; display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+  color: var(--ink); background: transparent; border: 0; border-radius: 6px; cursor: pointer; text-align: start; font: inherit; }
+.builder-row:hover, .builder-row[aria-expanded="true"] { background: var(--hover); }
+.builder-row > .icon { flex: none; width: 14px; height: 14px; margin-inline-start: auto; color: var(--muted); }
+.builder-row[aria-expanded="true"] > .icon { transform: rotate(90deg); }
+.builder-name { font-weight: 600; overflow-wrap: anywhere; }
+.builder-driver, .builder-current { font-size: 12px; color: var(--muted); }
+.builder-current { color: var(--green); }
+.builder-inspection { border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+.builder-inspection:not([hidden]) { display: grid; gap: 10px; }
+.builder-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.builder-node { border-top: 1px solid var(--line); padding-block-start: 10px; }
+.builder-node .fields { margin: 5px 0 0; }
+.builder-node .fields dd { overflow-wrap: anywhere; }
+
 .themes { max-width: 100%; flex-wrap: wrap; }
 .themes .segment { flex: auto; }
 .themes .segment span { display: flex; justify-content: center; align-items: center; gap: 6px; padding: 4px 9px; }

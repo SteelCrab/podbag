@@ -1511,6 +1511,7 @@ async function renderSettings(main) {
           field(t("settings.socket"), e.endpoint, "mono"), field(t("settings.version"), e.version)),
         dockerSettings(),
         compressionSetting()),
+      builderSettings(),
       settingDetails("vm-settings", "vm", "vm"),
       settingDetails("updates", "updates", "update"),
       settingDetails("terminal-command", "terminalCommand", "shell"),

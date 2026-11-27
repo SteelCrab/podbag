@@ -193,7 +193,40 @@
   const demoModel = { name: "smollm2:135m", size: 92_078_644, loaded: true };
   const models = view === "models-report" ? [{ ...demoModel }] : [];
   let modelRunner = view === "models-report";
+  const builderAvailability = params.get("builders") || "ready";
+  const demoBuilders = new Map([
+    ["podbag", { driver: "docker", managed: false, status: "running" }],
+    ["ci-builder", { driver: "docker-container", managed: true, status: "running" }],
+  ]);
+  let currentBuilder = "podbag";
+  const builderScope = `preview-buildx-${selected}`;
+  const getBuilder = (scope, name) => {
+    if (scope !== builderScope || !demoBuilders.has(name)) throw Error("Builder is outside this context");
+    return demoBuilders.get(name);
+  };
   const commands = {
+    builder_list: () => ({
+      availability: builderAvailability, context: selected, scope: builderScope, outsideScope: false,
+      builders: builderAvailability === "ready" ? [...demoBuilders].map(([name, builder]) => ({
+        name, driver: builder.driver, managed: builder.managed, current: name === currentBuilder,
+      })) : [],
+    }),
+    builder_inspect: ({ scope, name }) => {
+      const builder = getBuilder(scope, name);
+      return { error: "", nodes: [{ name: builder.managed ? name + "0" : name, endpoint: selected, status: builder.status,
+        buildkit: builder.status === "running" ? "v0.33.1" : "", platforms: "linux/arm64, linux/amd64", error: "" }] };
+    },
+    builder_action: ({ scope, name, action }) => {
+      const builder = getBuilder(scope, name);
+      if (action !== "select" && !builder.managed) throw Error("Only docker-container builders can be controlled");
+      if (action === "select") currentBuilder = name;
+      if (action === "start") builder.status = "running";
+      if (action === "stop") builder.status = "stopped";
+      if (action === "remove") {
+        demoBuilders.delete(name);
+        if (currentBuilder === name) currentBuilder = "podbag";
+      }
+    },
     "plugin:autostart|is_enabled": () => launchAtLogin,
     "plugin:autostart|enable": () => { launchAtLogin = true; },
     "plugin:autostart|disable": () => { launchAtLogin = false; },
@@ -409,6 +442,15 @@
         input.focus();
       },
       tutorials: () => app.go("tutorials"),
+      "settings-builders": async () => {
+        await app.openSettingsSection("builder-settings");
+        const until = performance.now() + 1500;
+        let row;
+        while (!(row = document.querySelector('[data-builder="ci-builder"]')) && performance.now() < until) {
+          await new Promise(resolve => setTimeout(resolve, 20));
+        }
+        row?.click();
+      },
       "settings-vm": () => app.openSettingsSection("vm-settings"),
       "settings-cli": () => app.openSettingsSection("terminal-command"),
       "settings-updates": app.openUpdates,
