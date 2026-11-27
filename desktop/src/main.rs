@@ -1001,6 +1001,18 @@ fn open_training_guide(id: &str, lang: &str) -> Result<(), String> {
     open::that_detached(url).map_err(|e| e.to_string())
 }
 
+#[tauri::command(async)]
+fn engine_config(
+    state: State<'_, AppState>,
+    token: u64,
+    request: cli::EngineConfigRequest,
+) -> Result<Option<podbag::config::Document>, String> {
+    if state.session(token)?.target.choice != Choice::Podbag {
+        return Err("Engine configuration requires the local Podbag engine".into());
+    }
+    cli::engine_config(&state.podbag, request)
+}
+
 #[tauri::command]
 fn get_settings(state: State<'_, AppState>) -> Settings {
     lock(&state.settings).clone()
@@ -1539,6 +1551,7 @@ fn main() {
             install_terminal_command,
             open_repository,
             open_training_guide,
+            engine_config,
             get_settings,
             set_settings,
         ])

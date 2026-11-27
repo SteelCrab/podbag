@@ -663,6 +663,13 @@ dialog p { margin: 0; color: var(--ink-2); white-space: pre-line; overflow-wrap:
 dialog label { font-weight: 600; font-size: 13px; }
 dialog input[type="text"] { width: 100%; }
 .progress { min-height: 1.4em; font: 12.5px/1.4 var(--mono); }
+#engine-config-editor { width: min(660px, calc(100vw - 48px)); }
+#engine-config-text {
+  width: 100%; resize: vertical; min-height: 120px; padding: 10px; border: 1px solid var(--line);
+  border-radius: 7px; background: var(--page); color: var(--ink); font: 13px/1.5 var(--mono);
+}
+.engine-config-status { min-height: 1.4em; }
+#engine-config-editor .error-text { color: var(--red); }
 .buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
 .toasts { position: fixed; bottom: 18px; right: 18px; display: grid; gap: 8px; z-index: 10; max-width: min(420px, calc(100vw - 36px)); }
 .toast {

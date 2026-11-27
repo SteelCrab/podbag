@@ -501,10 +501,107 @@ pub fn parse_size(s: &str) -> Result<u64> {
     Ok((value * multiplier as f64).round() as u64)
 }
 
+#[derive(Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct Document {
+    pub path: std::path::PathBuf,
+    /// None means the configuration file has not been created.
+    pub text: Option<String>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+pub struct Edit {
+    pub original: Option<String>,
+    pub text: String,
+}
+
+pub fn document(dirs: &Dirs) -> Result<Document> {
+    let path = dirs.config.join("config.toml");
+    let text = read_text(&path)?;
+    Ok(Document { path, text })
+}
+
+pub fn apply_edit(dirs: &Dirs, edit: Edit) -> Result<Document> {
+    parse(&edit.text)?;
+    let _lock = lock_config(dirs)?;
+    let current = document(dirs)?;
+    if current.text != edit.original {
+        return Err(Error::new(
+            ErrorKind::Conflict,
+            "cannot save the engine configuration",
+            "config.toml changed after it was opened",
+            "reload the file and apply your edits again",
+        ));
+    }
+    write_text(&current.path, &edit.text)?;
+    Ok(Document {
+        path: current.path,
+        text: Some(edit.text),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ErrorKind;
+
+    fn isolated_config(directory: &Path) -> Dirs {
+        Dirs {
+            config: directory.join("conf"),
+            data: directory.join("data"),
+            runtime: directory.join("run"),
+        }
+    }
+
+    #[test]
+    fn an_engine_config_edit_keeps_its_text_and_refuses_stale_or_invalid_input() {
+        let temp = tempfile::tempdir().unwrap();
+        let dirs = isolated_config(temp.path());
+        let expected = "# Keep this comment\r\n\r\nembedded_dns = true\r\n";
+        assert!(document(&dirs).unwrap().text.is_none());
+        let edit = |original: Option<&str>, text: &str| Edit {
+            original: original.map(str::to_owned),
+            text: text.to_owned(),
+        };
+        let created = apply_edit(&dirs, edit(None, expected)).unwrap();
+        assert_eq!(created.text.as_deref(), Some(expected));
+        assert_eq!(document(&dirs).unwrap(), created);
+        let invalid =
+            apply_edit(&dirs, edit(Some(expected), "embedded_dns = invalid")).unwrap_err();
+        assert_eq!(invalid.kind, ErrorKind::InvalidInput);
+        assert_eq!(document(&dirs).unwrap(), created);
+
+        set_value(&dirs, "keeper", "false").unwrap();
+        let concurrent = document(&dirs).unwrap();
+        let stale = apply_edit(&dirs, edit(Some(expected), "embedded_dns = false")).unwrap_err();
+        assert_eq!(stale.kind, ErrorKind::Conflict);
+        assert_eq!(document(&dirs).unwrap(), concurrent);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saving_a_symlinked_config_keeps_the_link() {
+        let temp = tempfile::tempdir().unwrap();
+        let dirs = isolated_config(temp.path());
+        std::fs::create_dir(&dirs.config).unwrap();
+        let target = temp.path().join("settings.toml");
+        std::fs::write(&target, "# existing file\n").unwrap();
+        let link = dirs.config.join("config.toml");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let saved = apply_edit(
+            &dirs,
+            Edit {
+                original: Some("# existing file\n".into()),
+                text: "keeper = false\n".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(saved.path, link);
+        assert_eq!(std::fs::read_link(&link).unwrap(), target);
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "keeper = false\n"
+        );
+    }
 
     #[test]
     fn parses_sizes() {

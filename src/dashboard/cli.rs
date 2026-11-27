@@ -232,6 +232,38 @@ pub fn engine_version(podbag: &Path) -> Option<String> {
     crate::upgrade::Version::parse(v).map(|v| v.to_string())
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case", tag = "action")]
+pub enum EngineConfigRequest {
+    Read,
+    Check { text: String },
+    Save { edit: crate::config::Edit },
+}
+
+pub fn engine_config(
+    podbag: &Path,
+    request: EngineConfigRequest,
+) -> Result<Option<crate::config::Document>, String> {
+    let (action, input) = match request {
+        EngineConfigRequest::Read => ("show", None),
+        EngineConfigRequest::Check { text } => ("check", Some(text.into_bytes())),
+        EngineConfigRequest::Save { edit } => (
+            "apply",
+            Some(serde_json::to_vec(&edit).map_err(|e| e.to_string())?),
+        ),
+    };
+    let call = run_with_input(podbag, &["system", "config", action], input.as_deref())?;
+    if call.code != 0 {
+        return Err(call.error());
+    }
+    if action == "check" {
+        return Ok(None);
+    }
+    serde_json::from_str(&call.stdout)
+        .map(Some)
+        .map_err(|e| format!("podbag system config {action}: {e}"))
+}
+
 /// `latest` is newer than `current`.
 pub fn is_newer(latest: &str, current: &str) -> bool {
     use crate::upgrade::Version;

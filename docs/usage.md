@@ -1478,6 +1478,11 @@ in each Desktop session.
 - In **Notifications**, choose whether routine tasks show popups. Errors always show.
   The toolbar bell opens the latest 50 messages from this session. Clear the list
   from the history dialog.
+- In **Engine**, open **Engine configuration** to read or edit the selected local
+  Podbag engine's `config.toml`. **Validate** checks the text without saving. **Apply**
+  validates and saves the file. If it changed since it was opened, the editor keeps
+  your draft and reports a conflict. Environment variables still take precedence.
+  Opening the editor can start the VM on macOS or Windows.
 - Virtual machine (podbag on macOS): the state, the settings in use, uptime and disk use.
   Start, Stop and Restart. CPUs, memory and the idle power-off time (0 = never). Apply
   saves them with `podbag vm set`.

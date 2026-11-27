@@ -237,6 +237,7 @@
   const demoModel = { name: "smollm2:135m", size: 92_078_644, loaded: true };
   const models = view === "models-report" ? [{ ...demoModel }] : [];
   let modelRunner = view === "models-report";
+  let engineConfigText = "# Local engine settings\nstore_limit = \"10GiB\"\nembedded_dns = true\n";
   const commands = {
     "plugin:autostart|is_enabled": () => launchAtLogin,
     "plugin:autostart|enable": () => { launchAtLogin = true; },
@@ -316,6 +317,15 @@
       return { running: modelRunner, version: modelRunner ? "0.40.17" : "", models: modelRunner ? models.map((item) => ({ ...item })) : [] };
     },
     engine: () => engine,
+    engine_config: ({ request }) => {
+      if ((request.edit?.text ?? request.text)?.includes("invalid_setting")) throw "line 2: unknown setting invalid_setting";
+      if (request.action === "check") return null;
+      if (request.action === "save") {
+        if (request.edit.original !== engineConfigText) throw "config.toml changed after it was opened";
+        engineConfigText = request.edit.text;
+      }
+      return { path: "/home/podbag/.config/podbag/config.toml", text: engineConfigText };
+    },
     list: ({ kind }) => lists[kind],
     kube_list: ({ kind, allNamespaces, context }) => ({
       context: context || "dev", namespace: "default",
@@ -535,6 +545,10 @@
         prompt.form.requestSubmit();
       },
       settings: () => app.go("settings"),
+      "settings-engine-config": async () => {
+        await app.openSettingsSection("engine-settings");
+        document.getElementById("edit-engine-configuration")?.click();
+      },
       "settings-search": async () => {
         await app.go("settings");
         const input = document.getElementById("settings-search");
