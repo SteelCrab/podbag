@@ -305,6 +305,7 @@
   "analysis.error.imageUnavailable": "This image is no longer available on the selected engine.",
   "analysis.error.scannerMissing": "Trivy was not found. Install it and make it available on PATH.",
   "analysis.error.export": "The selected engine could not export this image.",
+  "analysis.error.exportStalled": "The selected engine stopped sending this image. Try again.",
   "analysis.error.workspace": "Could not create the files for this scan. Check free disk space and permissions.",
   "analysis.error.scanner": "Trivy could not scan this image. Check its version and database access.",
   "analysis.error.report": "Trivy returned a report that Podbag could not read.",

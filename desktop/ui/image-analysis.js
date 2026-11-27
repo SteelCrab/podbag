@@ -19,7 +19,7 @@ function imageAnalysisPanel(detail, image) {
       if (report.imageId !== image.Id) throw "imageUnavailable";
       state.report = report;
     } catch (error) {
-      state.error = ["busy", "engineChanged", "imageUnavailable", "scannerMissing", "export", "workspace", "scanner", "report"]
+      state.error = ["busy", "engineChanged", "imageUnavailable", "scannerMissing", "export", "exportStalled", "workspace", "scanner", "report"]
         .includes(error) ? error : "scanner";
     } finally {
       state.running = false;

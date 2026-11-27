@@ -305,6 +305,7 @@
   "analysis.error.imageUnavailable": "Ảnh không còn khả dụng trên công cụ đã chọn.",
   "analysis.error.scannerMissing": "Không tìm thấy Trivy. Hãy cài đặt và thêm Trivy vào PATH.",
   "analysis.error.export": "Công cụ đã chọn không thể xuất ảnh này.",
+  "analysis.error.exportStalled": "Công cụ đã chọn đã ngừng gửi ảnh này. Hãy thử lại.",
   "analysis.error.workspace": "Không thể tạo tệp quét. Hãy kiểm tra dung lượng đĩa và quyền truy cập.",
   "analysis.error.scanner": "Trivy không thể quét ảnh. Hãy kiểm tra phiên bản và quyền truy cập cơ sở dữ liệu.",
   "analysis.error.report": "Podbag không thể đọc báo cáo của Trivy.",

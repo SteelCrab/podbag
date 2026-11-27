@@ -305,6 +305,7 @@
   "analysis.error.imageUnavailable": "La imagen ya no está disponible en el motor seleccionado.",
   "analysis.error.scannerMissing": "No se encontró Trivy. Instálalo y añádelo a PATH.",
   "analysis.error.export": "El motor seleccionado no pudo exportar la imagen.",
+  "analysis.error.exportStalled": "El motor seleccionado dejó de enviar la imagen. Inténtalo de nuevo.",
   "analysis.error.workspace": "No se pudieron crear los archivos del análisis. Revisa el espacio en disco y los permisos.",
   "analysis.error.scanner": "Trivy no pudo analizar la imagen. Revisa su versión y el acceso a la base de datos.",
   "analysis.error.report": "Podbag no pudo leer el informe de Trivy.",

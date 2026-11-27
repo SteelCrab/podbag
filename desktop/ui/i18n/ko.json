@@ -305,6 +305,7 @@
   "analysis.error.imageUnavailable": "선택한 엔진에서 이 이미지를 사용할 수 없습니다.",
   "analysis.error.scannerMissing": "Trivy를 찾을 수 없습니다. Trivy를 설치하고 PATH에 추가하세요.",
   "analysis.error.export": "선택한 엔진에서 이미지를 내보낼 수 없습니다.",
+  "analysis.error.exportStalled": "선택한 엔진이 이미지 전송을 멈췄습니다. 다시 시도하세요.",
   "analysis.error.workspace": "검사에 필요한 파일을 만들 수 없습니다. 디스크 공간과 권한을 확인하세요.",
   "analysis.error.scanner": "Trivy로 이미지를 검사할 수 없습니다. 버전과 데이터베이스 연결을 확인하세요.",
   "analysis.error.report": "Podbag이 Trivy 보고서를 읽을 수 없습니다.",

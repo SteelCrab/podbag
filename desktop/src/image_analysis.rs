@@ -1,13 +1,19 @@
 //! Scan the selected engine's image with an explicitly invoked local Trivy.
 
-use podbag::client::{Client, Kind, choice::find_tool};
+use podbag::client::{Client, Closer, Kind, choice::find_tool};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
+use std::time::Duration;
 
 const MAX_REPORT: u64 = 64 * 1024 * 1024;
+/// An export that sends nothing for this long is cut off. A large export that keeps
+/// sending has no limit.
+const EXPORT_IDLE: Duration = Duration::from_secs(120);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -17,6 +23,7 @@ pub enum Failure {
     ImageUnavailable,
     ScannerMissing,
     Export,
+    ExportStalled,
     Workspace,
     Scanner,
     Report,
@@ -164,7 +171,8 @@ fn analyze_with(
             .export_images(&[&name])
             .map_err(|_| Failure::Export)?;
         let mut output = File::create(&archive).map_err(|_| Failure::Workspace)?;
-        std::io::copy(&mut stream, &mut output).map_err(|_| Failure::Export)?;
+        let closer = stream.closer();
+        save_export(&mut stream, &closer, &mut output, EXPORT_IDLE)?;
     }
 
     let mut command = Command::new(scanner);
@@ -223,6 +231,59 @@ fn analyze_with(
     let report = read_report(id, &data)?;
     check_image(client, &name, hex)?;
     Ok(report)
+}
+
+/// Copy the export to `output`. If the engine sends nothing for `idle`, the connection is
+/// closed and the export fails, so the scan ends and frees its lock.
+fn save_export(
+    stream: &mut impl Read,
+    closer: &Closer,
+    output: &mut impl Write,
+    idle: Duration,
+) -> Result<(), Failure> {
+    let stalled = &AtomicBool::new(false);
+    let (progress, watch) = channel();
+    let copied = std::thread::scope(|scope| {
+        scope.spawn(move || {
+            loop {
+                match watch.recv_timeout(idle) {
+                    Ok(()) => {}
+                    Err(RecvTimeoutError::Timeout) => {
+                        stalled.store(true, Ordering::SeqCst);
+                        closer.close();
+                        return;
+                    }
+                    Err(RecvTimeoutError::Disconnected) => return,
+                }
+            }
+        });
+        copy_reporting(stream, output, progress)
+    });
+    // A closed connection can look like a normal end, so check this first.
+    if stalled.load(Ordering::SeqCst) {
+        return Err(Failure::ExportStalled);
+    }
+    copied.map_err(|_| Failure::Export)
+}
+
+/// Copy `stream` to `output`, with a message on `progress` after each read. Dropping
+/// `progress` at the end stops the watcher.
+fn copy_reporting(
+    stream: &mut impl Read,
+    output: &mut impl Write,
+    progress: Sender<()>,
+) -> std::io::Result<()> {
+    let mut buffer = vec![0; 64 * 1024];
+    loop {
+        let count = match stream.read(&mut buffer) {
+            Ok(0) => return output.flush(),
+            Ok(count) => count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        output.write_all(&buffer[..count])?;
+        let _ = progress.send(());
+    }
 }
 
 fn read_report(id: &str, bytes: &[u8]) -> Result<Report, Failure> {
@@ -446,6 +507,58 @@ printf '%s\n' '{INPUT_REPORT}' > "$cat_path"
                 let result = analyze_with(&engine.client, ID, &temp.path().join("cache"), &scanner);
                 assert_eq!(result, Err(Failure::ImageUnavailable));
             }
+        }
+
+        #[test]
+        fn an_export_that_stops_sending_is_cut_off() {
+            use std::io::{BufRead, BufReader};
+            use std::os::unix::net::UnixListener;
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("docker.sock");
+            let listener = UnixListener::bind(&path).unwrap();
+            // An engine that sends part of the archive and then waits, connection open.
+            std::thread::spawn(move || {
+                let (mut conn, _) = listener.accept().unwrap();
+                let mut request = BufReader::new(conn.try_clone().unwrap());
+                let mut line = String::new();
+                while request.read_line(&mut line).unwrap() > 2 {
+                    line.clear();
+                }
+                conn.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/x-tar\r\n\
+                      Content-Length: 1000\r\n\r\npartial",
+                )
+                .unwrap();
+                let _ = request.read_to_end(&mut Vec::new());
+            });
+            let client = Client::new(podbag::client::Endpoint::Socket { path, own: false });
+            let mut stream = client.export_images(&[ID]).unwrap();
+            let closer = stream.closer();
+            let mut output = Vec::new();
+            let started = std::time::Instant::now();
+            assert_eq!(
+                save_export(
+                    &mut stream,
+                    &closer,
+                    &mut output,
+                    Duration::from_millis(200)
+                ),
+                Err(Failure::ExportStalled)
+            );
+            assert!(started.elapsed() < Duration::from_secs(10));
+        }
+
+        #[test]
+        fn a_complete_export_is_saved() {
+            let mut output = Vec::new();
+            save_export(
+                &mut b"whole archive".as_slice(),
+                &Closer::default(),
+                &mut output,
+                Duration::from_secs(5),
+            )
+            .unwrap();
+            assert_eq!(output, b"whole archive");
         }
 
         #[test]

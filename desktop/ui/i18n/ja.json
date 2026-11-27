@@ -305,6 +305,7 @@
   "analysis.error.imageUnavailable": "このイメージは選択したエンジンで使用できなくなりました。",
   "analysis.error.scannerMissing": "Trivy が見つかりません。Trivy をインストールして PATH に追加してください。",
   "analysis.error.export": "選択したエンジンからイメージをエクスポートできませんでした。",
+  "analysis.error.exportStalled": "選択したエンジンがイメージの送信を停止しました。もう一度試してください。",
   "analysis.error.workspace": "スキャン用のファイルを作成できませんでした。空き容量と権限を確認してください。",
   "analysis.error.scanner": "Trivy でスキャンできませんでした。バージョンとデータベースへのアクセスを確認してください。",
   "analysis.error.report": "Podbag は Trivy のレポートを読み込めませんでした。",

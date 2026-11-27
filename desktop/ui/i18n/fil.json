@@ -305,6 +305,7 @@
   "analysis.error.imageUnavailable": "Hindi na available ang image sa napiling engine.",
   "analysis.error.scannerMissing": "Hindi nahanap ang Trivy. I-install ito at idagdag sa PATH.",
   "analysis.error.export": "Hindi na-export ng napiling engine ang image.",
+  "analysis.error.exportStalled": "Huminto ang napiling engine sa pagpapadala ng image. Subukang muli.",
   "analysis.error.workspace": "Hindi magawa ang mga file para sa scan. Suriin ang espasyo sa disk at mga permiso.",
   "analysis.error.scanner": "Hindi ma-scan ng Trivy ang image. Suriin ang bersyon at access sa database.",
   "analysis.error.report": "Hindi mabasa ng Podbag ang ulat ng Trivy.",
