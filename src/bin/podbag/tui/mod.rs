@@ -662,6 +662,7 @@ impl Runtime {
                 step: step.key.clone(),
                 action: action.to_owned(),
                 name,
+                seen: None,
             },
             report: self.report.clone(),
         }))
@@ -896,6 +897,11 @@ impl Runtime {
                                     }
                                 }
                             }
+                            // The step checks the details shown here, not a second read.
+                            let step = step.map(|mut s| {
+                                s.done.seen = Some(v);
+                                s
+                            });
                             report(step, &tx);
                             Msg::Text(
                                 format!("Inspect: {name}"),
@@ -1579,6 +1585,53 @@ mod tests {
         assert_eq!(
             Attempt::read(dir.path()).unwrap().step().unwrap().key,
             "inspectTwo"
+        );
+    }
+
+    #[test]
+    fn an_inspect_step_checks_the_details_it_showed() {
+        // web exits between the TUI's inspect and the report: the step reads what the
+        // learner saw (running), not a second inspect (exited).
+        let module = module_of(serde_json::json!([{
+            "key": "inspectExited", "names": {"en": "See that web exited"},
+            "command": "podbag inspect web",
+            "ui": {"action": "inspect", "name": "web"},
+            "check": {"kind": "output-contains", "text": "exited"},
+        }]));
+        let inspects = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let seen = inspects.clone();
+        let engine = FakeEngine::start(move |method: &str, path: &str| {
+            match (method, path.split('?').next()) {
+                ("GET", Some("/containers/a1b2c3d4e5f6a7b8/json" | "/containers/web/json")) => {
+                    let state = match seen.fetch_add(1, Ordering::SeqCst) {
+                        0 => "running",
+                        _ => "exited",
+                    };
+                    podbag::client::fake::json(
+                        200,
+                        serde_json::json!({"Id": "a1b2c3d4e5f6a7b8", "Name": "/web",
+                            "State": {"Status": state}}),
+                    )
+                }
+                _ => small_engine(method, path),
+            }
+        });
+        let (dir, mut rt) = training_of(&engine, &module, "inspectExited");
+        rt.apply(Effect::Inspect {
+            kind: Kind::Containers,
+            id: "a1b2c3d4e5f6a7b8".into(),
+            name: "web".into(),
+            running: true,
+        });
+        let msg = wait_for(&mut rt, |m| matches!(m, Msg::Step(_)));
+        assert!(
+            matches!(msg, Msg::Step(Err(ref e)) if e == "The practice result did not match this step."),
+            "{msg:?}"
+        );
+        assert_eq!(inspects.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            Attempt::read(dir.path()).unwrap().step().unwrap().key,
+            "inspectExited"
         );
     }
 

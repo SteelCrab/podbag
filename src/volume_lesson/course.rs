@@ -1063,7 +1063,7 @@ pub fn view(
         {
             expects(&step, port, action, target)?;
             perform(&client, action, target)?;
-            ui_step(&root, &mut attempt, action, target)?
+            ui_step(&root, &mut attempt, action, target, None)?
         }
         ("inspect-failed", Check::DesktopInspectExited { name })
         | ("ports", Check::DesktopPorts { name })
@@ -1281,9 +1281,45 @@ fn desktop_check(client: &Client, port: u16, check: &Check) -> io::Result<Shown>
     if verified { Ok(shown) } else { Err(unmet()) }
 }
 
+/// The inspect details of NAME: a container, else a volume, else a network.
+fn inspect_named(client: &Client, name: &str) -> io::Result<serde_json::Value> {
+    let kind = if client
+        .containers()
+        .map_err(io::Error::other)?
+        .iter()
+        .any(|row| row.name() == name)
+    {
+        Kind::Containers
+    } else if client
+        .volumes()
+        .map_err(io::Error::other)?
+        .iter()
+        .any(|vol| vol.name == name)
+    {
+        Kind::Volumes
+    } else if client
+        .networks()
+        .map_err(io::Error::other)?
+        .iter()
+        .any(|net| net.name == name)
+    {
+        Kind::Networks
+    } else {
+        return Err(unmet());
+    };
+    client.inspect(kind, name).map_err(io::Error::other)
+}
+
 /// Under the caller's lock: when the current step's UI form is ACTION on NAME, check it on
-/// the practice engine and advance.
-fn ui_step(root: &Path, attempt: &mut Attempt, action: &str, name: &str) -> io::Result<Shown> {
+/// the practice engine and advance. SEEN: the inspect details the UI showed, which an
+/// inspect step checks instead of inspecting again.
+fn ui_step(
+    root: &Path,
+    attempt: &mut Attempt,
+    action: &str,
+    name: &str,
+    seen: Option<serde_json::Value>,
+) -> io::Result<Shown> {
     let step = attempt.step()?;
     let port = attempt.port;
     expects(&step, port, action, name)?;
@@ -1303,31 +1339,11 @@ fn ui_step(root: &Path, attempt: &mut Attempt, action: &str, name: &str) -> io::
             }
         }
         Some(UiAction::Inspect) => {
-            let kind = if client
-                .containers()
-                .map_err(io::Error::other)?
-                .iter()
-                .any(|row| row.name() == name)
-            {
-                Kind::Containers
-            } else if client
-                .volumes()
-                .map_err(io::Error::other)?
-                .iter()
-                .any(|vol| vol.name == name)
-            {
-                Kind::Volumes
-            } else if client
-                .networks()
-                .map_err(io::Error::other)?
-                .iter()
-                .any(|net| net.name == name)
-            {
-                Kind::Networks
-            } else {
-                return Err(unmet());
+            // The details the UI showed (the TUI's), or a fresh inspect (Desktop's).
+            let detail = match seen {
+                Some(detail) => detail,
+                None => inspect_named(&client, name)?,
             };
-            let detail = client.inspect(kind, name).map_err(io::Error::other)?;
             let text = serde_json::to_string_pretty(&detail)?;
             step.verify_cli(root, port, text.as_bytes())?;
             Shown {
@@ -1346,7 +1362,7 @@ fn ui_step(root: &Path, attempt: &mut Attempt, action: &str, name: &str) -> io::
 
 /// A UI did ACTION on NAME: under the course lock, check and advance.
 pub fn ui_action(root: &Path, action: &str, name: &str) -> io::Result<Snapshot> {
-    locked_ui_step(root, None, action, name)?
+    locked_ui_step(root, None, action, name, None)?
         .ok_or_else(|| io::Error::other("Invalid Training step."))
 }
 
@@ -1357,20 +1373,30 @@ pub struct UiReport {
     pub step: String,
     pub action: String,
     pub name: String,
+    /// The inspect details the UI showed: an inspect step checks them.
+    pub seen: Option<serde_json::Value>,
 }
 
 /// As `ui_action`, while the attempt is still at REPORT's step. Ok(None): another report
 /// for that step has advanced it (two inspects before the first report), and nothing changes.
 pub fn ui_report(root: &Path, report: &UiReport) -> io::Result<Option<Snapshot>> {
-    locked_ui_step(root, Some(&report.step), &report.action, &report.name)
+    locked_ui_step(
+        root,
+        Some(&report.step),
+        &report.action,
+        &report.name,
+        report.seen.clone(),
+    )
 }
 
-/// Under the course lock: `ui_step` when the attempt is at step STEP (any step for None).
+/// Under the course lock: `ui_step` (with SEEN) when the attempt is at step STEP (any step
+/// for None).
 fn locked_ui_step(
     root: &Path,
     step: Option<&str>,
     action: &str,
     name: &str,
+    seen: Option<serde_json::Value>,
 ) -> io::Result<Option<Snapshot>> {
     if !Attempt::active(root) || root.join("run/closing").exists() {
         return Err(io::Error::other("The practice session has ended."));
@@ -1382,7 +1408,7 @@ fn locked_ui_step(
     {
         return Ok(None);
     }
-    let shown = ui_step(root, &mut attempt, action, name)?;
+    let shown = ui_step(root, &mut attempt, action, name, seen)?;
     let session = root
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
