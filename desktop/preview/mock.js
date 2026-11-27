@@ -492,6 +492,7 @@
       extensions: () => app.go("extensions"),
       "extension-view": () => app.go("extensions"),
       "settings-vm": () => app.openSettingsSection("vm-settings"),
+      "settings-notifications": () => app.openSettingsSection("notification-settings"),
       "settings-sync": () => app.openSettingsSection("sync-settings"),
       "settings-cli": () => app.openSettingsSection("terminal-command"),
       "settings-updates": app.openUpdates,

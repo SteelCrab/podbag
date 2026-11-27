@@ -141,7 +141,7 @@ const observeResult = `
   if (window === window.top) {
     const observer = new MutationObserver(() => {
       const result = document.getElementById("result")?.textContent.trim();
-      if (/^(PASS|FAIL)(?::|$)/.test(result ?? "")) {
+      if (/^PASS(?::|$)|^FAIL(?::| |$)/.test(result ?? "")) {
         observer.disconnect();
         window[${JSON.stringify(binding)}](result);
       }

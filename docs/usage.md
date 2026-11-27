@@ -1425,6 +1425,9 @@ in each Desktop session.
   with `Ctrl+,` elsewhere.
 - Search settings by name or a related term. Use the arrow keys to move through results,
   Enter to open a setting, and Escape to clear the search.
+- In **Notifications**, choose whether routine tasks show popups. Errors always show.
+  The toolbar bell opens the latest 50 messages from this session. Clear the list
+  from the history dialog.
 - Virtual machine (podbag on macOS): the state, the settings in use, uptime and disk use.
   Start, Stop and Restart. CPUs, memory and the idle power-off time (0 = never). Apply
   saves them with `podbag vm set`.

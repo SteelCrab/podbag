@@ -981,17 +981,25 @@ fn set_settings(
     settings: Settings,
 ) -> Result<(), String> {
     let settings = settings.checked();
-    if settings.theme != lock(&state.settings).theme {
+    let mut active = lock(&state.settings);
+    let theme_changed = settings.theme != active.theme;
+    if theme_changed {
         window
             .set_theme(settings.theme.native())
             .map_err(|e| e.to_string())?;
     }
-    *lock(&state.settings) = settings.clone();
-    update_tray(window.app_handle());
-    match lock(&state.settings_file).as_ref() {
-        Some(file) => settings.save(file),
-        None => Ok(()),
+    if let Some(file) = lock(&state.settings_file).as_ref()
+        && let Err(error) = settings.save(file)
+    {
+        if theme_changed {
+            let _ = window.set_theme(active.theme.native());
+        }
+        return Err(error);
     }
+    *active = settings;
+    drop(active);
+    update_tray(window.app_handle());
+    Ok(())
 }
 
 // The tray.
