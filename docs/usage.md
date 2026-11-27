@@ -1247,6 +1247,17 @@ podbag lab remove container-network
 - Languages: English, 한국어, 日本語, 简体中文, Filipino, Español and Tiếng Việt. The app
   follows the system language. Settings can change it.
 
+#### Image security analysis
+
+Open an image's **Security** tab and select **Scan image** to see installed packages and
+known vulnerabilities by severity. Install [Trivy](https://trivy.dev/docs/latest/getting-started/installation/)
+and make its executable available to Podbag Desktop.
+
+Podbag exports the selected image by its full ID to a temporary archive and gives the archive
+to local Trivy. Trivy may download or refresh its public vulnerability databases. The scan
+uses the image already on the selected engine and uses no registry credentials.
+Podbag removes the temporary archive and report after the scan.
+
 #### Engine switch
 
 - Select the browsing engine in **Settings → Engine**. Migration uses its own source and destination.

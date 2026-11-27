@@ -36,6 +36,7 @@ const API = (() => {
     list: (kind) => scoped("list", { kind }),
     kubeList: (kind, allNamespaces, context) => invoke("kube_list", { kind, allNamespaces, context: context || null }),
     inspect: (kind, id) => scoped("inspect", { kind, id }),
+    analyzeImage: (id) => scoped("analyze_image", { id }),
     act: (id, action) => scoped("act", { id, action }),
     remove: (kind, id, force) => scoped("remove", { kind, id, force: !!force }),
     prune: (kind) => scoped("prune", { kind }),
