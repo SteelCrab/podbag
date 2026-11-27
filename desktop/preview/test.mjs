@@ -70,12 +70,19 @@ function startChrome(profile) {
     const url = line.match(/^DevTools listening on (ws:\/\/127\.0\.0\.1:\d+\/devtools\/browser\/\S+)$/)?.[1];
     if (url) startup.resolve(url);
   });
-  child.once("error", startup.reject);
-  const closed = new Promise((done) => child.once("close", (code, signal) => {
-    startup.reject(new Error(`Chrome exited (${code ?? signal}).\n${logs.join("\n")}`));
-    done();
-  }));
-  return { child, closed, debuggerUrl: startup.promise };
+  const exited = new Promise((done) => {
+    const finish = (error) => {
+      startup.reject(error);
+      child.stderr.destroy();
+      done();
+    };
+    child.once("error", finish);
+    // An updater can inherit stderr and keep it open after Chrome exits.
+    child.once("exit", (code, signal) => {
+      finish(new Error(`Chrome exited (${code ?? signal}).\n${logs.join("\n")}`));
+    });
+  });
+  return { child, exited, debuggerUrl: startup.promise };
 }
 
 async function connect(url) {
@@ -210,7 +217,7 @@ async function main() {
   } finally {
     cdp?.close();
     browser?.child.kill();
-    await browser?.closed;
+    await browser?.exited;
     server.close();
     server.closeAllConnections();
     await rm(profile, { recursive: true, force: true, maxRetries: 3 });
