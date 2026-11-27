@@ -1116,18 +1116,26 @@ mod linux_launch {
                 format!("run `podbag pull {}`", image.name),
             )
         };
-        // As root the store may build what this mount method needs; rootless stores
-        // always hold the hard-link tree a pull made.
+        // As root the store may build what this mount method needs; rootless, the store
+        // helper builds it.
         let mut store = if rootless {
             Store::open_existing(dirs).ok_or_else(not_pulled)?
         } else {
             Store::open_existing(dirs).ok_or_else(not_pulled)?;
             Store::open(dirs, true)?
         };
-        store.use_mount_method(rootless, crate::config::load(dirs)?.image_mount);
+        let config = crate::config::load(dirs)?;
+        store.use_mount_method(rootless, config.image_mount);
         let _ = store.touch(&image.name);
         let lock = store.lock_shared()?;
         let (_, record) = store.find(&image.digest)?;
+        // A compressed image has no tree; only the store helper can build it rootless.
+        if rootless && !store.has_artifact(&record.digest) {
+            crate::image::ensure_artifact_with_helper(&record.digest)?;
+        }
+        if config.image_compression != crate::config::ImageCompression::Off {
+            let _ = store.note_use(&record.digest);
+        }
         let (lower, data) = match store.image_root(&record.digest)? {
             ImageRoot::Tree(tree) => (tree, None),
             ImageRoot::Composefs { lower, objects } => (lower, Some(objects)),

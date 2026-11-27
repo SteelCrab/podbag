@@ -468,6 +468,25 @@ pub enum SystemCmd {
         #[arg(long)]
         fix: bool,
     },
+    /// Compress images that no container uses; with no image named, those unused for compress_idle_after
+    Compress { images: Vec<String> },
+    /// Decompress images now, so that their next container starts at once
+    Decompress {
+        #[arg(required = true)]
+        images: Vec<String>,
+    },
+    /// Show or change image compression (idle: compress images that no container used for a while)
+    Compression {
+        /// Save this mode in config.toml
+        #[arg(value_parser = ["idle", "off"])]
+        mode: Option<String>,
+        /// Save how long an image stays unused before it is compressed (7d, 36h, 90m, 45s)
+        #[arg(long, value_name = "AGE")]
+        after: Option<String>,
+        /// Print the state as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Serve the Docker Engine API on a Unix socket, for the docker CLI
     ///
     /// Point the CLI at it with DOCKER_HOST=unix://<socket>. Containers do not depend on

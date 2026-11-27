@@ -39,6 +39,8 @@ const SETTINGS: &[&str] = &[
     "PODBAG_STORE_LIMIT",
     "PODBAG_MEMORY_BUDGET",
     "PODBAG_DEFAULT_SUBNET",
+    "PODBAG_IMAGE_COMPRESSION",
+    "PODBAG_COMPRESS_IDLE_AFTER",
 ];
 
 /// Input sent ahead of what the command took.

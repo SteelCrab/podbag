@@ -265,3 +265,61 @@ fn image_prune_removes_images_without_a_name() {
     assert!(pruned.contains(&id), "{pruned}");
     assert_ne!(docker(&["image", "inspect", &id]).status.code(), Some(0));
 }
+
+/// The image with this tag in a `/images/json` reply.
+fn listed<'a>(list: &'a serde_json::Value, tag: &str) -> &'a serde_json::Value {
+    list.as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["RepoTags"].as_array().unwrap().iter().any(|t| t == tag))
+        .unwrap_or_else(|| panic!("{tag} is not listed: {list}"))
+}
+
+#[test]
+fn compressed_images_report_their_sizes() {
+    let reg = FakeRegistry::start(false);
+    let warm = push(&reg, "warm");
+    reg.push(
+        "cold",
+        "v1",
+        &TestImage {
+            layers: vec![
+                alpine_layer(),
+                layer(&[TarEntry::file("big", &b"podbag ".repeat(10_000))]),
+            ],
+            config: serde_json::json!({"Env": [PATH], "Cmd": ["true"]}),
+        },
+    );
+    let cold = format!("{}/cold:v1", reg.host);
+    let sb = Sandbox::new();
+    let service = Service::start(&sb, &["--timeout", "0"]);
+    ok(&docker_out(&sb, &service, &["pull", &warm]));
+    ok(&docker_out(&sb, &service, &["pull", &cold]));
+    ok(&sb
+        .podbag()
+        .args(["system", "compress", &cold])
+        .output()
+        .unwrap());
+
+    let (body, head) = curl(&service.socket, &["/images/json"]);
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}{body}");
+    let list: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let c = &listed(&list, &cold)["PodbagCompression"];
+    let (size, original) = (
+        c["Size"].as_u64().unwrap(),
+        c["OriginalSize"].as_u64().unwrap(),
+    );
+    assert!(size < original, "{c}");
+    assert!(original >= 70_000, "{c}");
+    let w = listed(&list, &warm);
+    assert!(w.get("PodbagCompression").is_none(), "{w}");
+
+    let (body, _) = curl(&service.socket, &[&format!("/images/{cold}/json")]);
+    let inspected: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(inspected["PodbagCompression"], *c, "{inspected}");
+    // An error reply has no PodbagCompression either: only a found image counts.
+    let (body, head) = curl(&service.socket, &[&format!("/images/{warm}/json")]);
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}{body}");
+    let inspected: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(inspected.get("PodbagCompression").is_none(), "{inspected}");
+}
