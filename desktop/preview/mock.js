@@ -122,6 +122,20 @@
     uptimeSeconds: 7560, containers: 3, cpuPercent: 12.5, memoryUsedMiB: 1350, memoryTotalMiB: 3900,
     disk: { path: "/Users/me/.podbag/vm/disk.img", allocatedBytes: 5_800_000_000, sizeBytes: 68_719_476_736 },
   };
+  const storageStopped = params.get("vmStorage") === "stopped";
+  if (storageStopped) {
+    engine.vm = "stopped";
+    Object.assign(vmStatus, {
+      state: "stopped", inUse: null, uptimeSeconds: null, containers: null,
+      cpuPercent: null, memoryUsedMiB: null, memoryTotalMiB: null,
+    });
+  }
+  const storageGib = 2 ** 30;
+  const vmStorage = {
+    path: "/Users/sam/.podbag/disk.img", exists: true, configured: false, editable: storageStopped,
+    sizeBytes: 64 * storageGib, filesystemBytes: 64 * storageGib, allocatedBytes: 4 * storageGib,
+    growthPending: false, maxSizeGib: 1024,
+  };
   if (platform === "windows") Object.assign(vmStatus, { platform, resourcesEditable: false });
   // A packaged app with a separate podbag for the terminal; update-source: a build of its own.
   const packaged = { installer: "macos-app", terminal: "/usr/local/bin/podbag", terminalVersion: "0.1.0", appNewer: true, cliNewer: true };
@@ -385,6 +399,23 @@
       engine.reachable = action !== "stop";
       vmStatus.state = engine.vm;
       emit("engine-changed", action);
+    },
+    vm_storage: ({ edit }) => {
+      if (!edit) return { ...vmStorage };
+      if (!vmStorage.editable) throw "Stop the VM before changing its storage.";
+      (window.previewVmStorageWrites ||= []).push(edit);
+      const previous = vmStorage.path;
+      if (edit.action === "grow") {
+        vmStorage.sizeBytes = edit.gib * storageGib;
+        vmStorage.growthPending = true;
+        return { ...vmStorage, backupPath: "/Users/sam/.podbag/podbag-disk-backup-preview/disk.img" };
+      }
+      if (edit.action === "move") {
+        vmStorage.path = edit.path;
+        vmStorage.configured = true;
+        return { ...vmStorage, backupPath: previous };
+      }
+      throw "Unknown storage change";
     },
     vm_status: () => {
       if (params.has("busy") && !document.getElementById("busy-dialog")) {

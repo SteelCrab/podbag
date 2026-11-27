@@ -237,6 +237,103 @@ impl Drop for Mac {
 }
 
 #[test]
+fn storage_grows_the_filesystem_and_relocates_the_saved_disk() {
+    if !enabled() {
+        return;
+    }
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    const GIB: u64 = 1 << 30;
+    let mac = Mac::bare(0);
+    let storage = |args: &[&str]| -> serde_json::Value {
+        let mut argv = vec!["vm", "storage"];
+        argv.extend(args);
+        serde_json::from_str(&mac.ok(&argv)).unwrap()
+    };
+    let original = mac.home.path().join("disk.img");
+    let data = tempfile::tempdir().unwrap();
+    let destination = data.path().join("moved disk.img");
+    let target = destination.to_str().unwrap();
+    assert_eq!(storage(&[])["exists"], false);
+    assert_eq!(mac.ok(&["vm", "status"]), "stopped");
+
+    mac.ok(&[
+        "volume",
+        "create",
+        "--label",
+        "proof=retained",
+        "storage-marker",
+    ]);
+    assert_eq!(storage(&[])["filesystemBytes"], 64 * GIB);
+    for action in [["grow", "65"], ["move", target]] {
+        let output = mac.run(&["vm", "storage", action[0], action[1]]);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("stop the VM"));
+    }
+    mac.ok(&["vm", "stop"]);
+
+    // Legacy disk modes must not be copied into a new recovery file or destination.
+    std::fs::set_permissions(&original, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let shrink = mac.run(&["vm", "storage", "grow", "63"]);
+    assert!(!shrink.status.success(), "{shrink:?}");
+    let scheduled = storage(&["grow", "65"]);
+    assert_eq!(scheduled["growthPending"], true);
+    assert_eq!(scheduled["sizeBytes"], 65 * GIB);
+    assert_eq!(scheduled["filesystemBytes"], 64 * GIB);
+    let backup = Path::new(scheduled["backupPath"].as_str().unwrap());
+    let backup_meta = std::fs::metadata(backup).unwrap();
+    assert_eq!(backup_meta.len(), 64 * GIB);
+    assert_eq!(backup_meta.mode() & 0o777, 0o600);
+
+    mac.ok(&["vm", "start"]);
+    let grown = storage(&[]);
+    assert_eq!(grown["growthPending"], false);
+    assert_eq!(grown["filesystemBytes"], 65 * GIB);
+    let marker = mac.ok(&["volume", "inspect", "storage-marker"]);
+    assert!(marker.contains("retained"), "{marker}");
+    mac.ok(&["volume", "create", "after-growth"]);
+    mac.ok(&["vm", "stop"]);
+
+    std::fs::write(&destination, "do not overwrite").unwrap();
+    let blocked = mac.run(&["vm", "storage", "move", target]);
+    assert!(!blocked.status.success(), "{blocked:?}");
+    assert_eq!(
+        std::fs::read_to_string(&destination).unwrap(),
+        "do not overwrite"
+    );
+    std::fs::remove_file(&destination).unwrap();
+
+    let moved = storage(&["move", target]);
+    let saved = destination.canonicalize().unwrap();
+    assert_eq!(moved["path"], saved.to_str().unwrap());
+    assert_eq!(moved["backupPath"], original.to_str().unwrap());
+    assert_eq!(moved["filesystemBytes"], 65 * GIB);
+    assert!(original.is_file());
+    assert_eq!(
+        std::fs::metadata(&destination).unwrap().mode() & 0o777,
+        0o600
+    );
+    let info: serde_json::Value =
+        serde_json::from_str(&mac.ok(&["vm", "status", "--json"])).unwrap();
+    assert_eq!(info["disk"]["path"], saved.to_str().unwrap());
+
+    // An unplugged destination must not open the old image or create a new empty one.
+    let unavailable = destination.with_extension("unavailable");
+    std::fs::rename(&destination, &unavailable).unwrap();
+    let blocked = mac.run(&["vm", "start"]);
+    assert!(!blocked.status.success(), "{blocked:?}");
+    assert_eq!(storage(&[])["exists"], false);
+    std::fs::rename(&unavailable, &destination).unwrap();
+
+    mac.ok(&["vm", "start"]);
+    assert!(
+        mac.ok(&["volume", "inspect", "storage-marker"])
+            .contains("retained")
+    );
+    assert!(mac.ok(&["volume", "ls"]).contains("after-growth"));
+    assert_eq!(storage(&[])["path"], saved.to_str().unwrap());
+}
+
+#[test]
 fn saved_resources_apply_on_the_next_boot() {
     if !enabled() {
         return;

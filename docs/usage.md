@@ -1796,6 +1796,25 @@ sudo k3s server --container-runtime-endpoint unix:///run/podbag/cri.sock
   `vm status` wakes no VM.
 - Containers cannot reach the VM's agent.
 
+### VM storage on macOS
+
+Open **Settings → VM storage** to see the active disk image, virtual capacity, ext4
+capacity, and the space allocated on the Mac. Stop the VM before editing the disk.
+Start a new VM once to create its data disk.
+
+- **Grow disk** accepts a larger whole-GiB capacity up to 1 TiB. This is Podbag's
+  limit for managed sparse images. Podbag keeps a private recovery copy before
+  extending the disk image. The Linux guest grows ext4 at the next start. The storage
+  panel shows a pending update until that succeeds.
+- **Move disk** takes an absolute filename in an existing directory. The destination
+  must support sparse files and hard links. Podbag verifies and syncs the copy before
+  saving its location. The previous image remains available as a recovery copy.
+- If the configured disk is unavailable, reattach its volume or restore the image
+  at the saved path before starting the VM.
+
+The same controls are available through `podbag vm storage`, `podbag vm storage grow GIB`,
+and `podbag vm storage move PATH`. Each successful change reports its recovery copy path.
+
 ### File sharing
 
 In Podbag Desktop, open **Settings → Virtual machine → Shared folders**. Enter an
