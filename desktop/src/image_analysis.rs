@@ -81,7 +81,26 @@ struct TrivyTarget {
 struct TrivyPackage {
     name: String,
     #[serde(default)]
+    epoch: u64,
+    #[serde(default)]
     version: String,
+    #[serde(default)]
+    release: String,
+}
+
+impl TrivyPackage {
+    /// The installed version as RPM writes it, `epoch:version-release`. Trivy keeps the
+    /// parts apart; its findings already join them this way.
+    fn full_version(&self) -> String {
+        let mut version = self.version.clone();
+        if !self.release.is_empty() {
+            version = format!("{version}-{}", self.release);
+        }
+        if self.epoch != 0 {
+            version = format!("{}:{version}", self.epoch);
+        }
+        version
+    }
 }
 
 #[derive(Deserialize)]
@@ -222,8 +241,8 @@ fn read_report(id: &str, bytes: &[u8]) -> Result<Report, Failure> {
                 .flatten()
                 .map(|package| Package {
                     target: result.target.clone(),
+                    version: package.full_version(),
                     name: package.name,
-                    version: package.version,
                 }),
         );
         findings.extend(
@@ -284,6 +303,32 @@ mod tests {
         assert_eq!(report.findings[0].fixed, "3.0.1");
         assert_eq!(report.findings[1].severity, Severity::Medium);
         assert_eq!(report.findings[1].fixed, "");
+    }
+
+    #[test]
+    fn package_versions_keep_epoch_and_release() {
+        let report = read_report(
+            ID,
+            br#"{"SchemaVersion":2,"ArtifactType":"container_image","Results":[{
+                "Target":"rocky",
+                "Packages":[
+                    {"Name":"openssl-libs","Epoch":1,"Version":"3.0.7","Release":"27.el9"},
+                    {"Name":"openssl-libs","Epoch":1,"Version":"3.0.7","Release":"28.el9"},
+                    {"Name":"bash","Version":"5.1.8","Release":"9.el9"},
+                    {"Name":"musl","Version":"1.2.0"}
+                ]
+            }]}"#,
+        )
+        .unwrap();
+        let versions: Vec<&str> = report
+            .packages
+            .iter()
+            .map(|package| package.version.as_str())
+            .collect();
+        assert_eq!(
+            versions,
+            ["5.1.8-9.el9", "1.2.0", "1:3.0.7-27.el9", "1:3.0.7-28.el9"]
+        );
     }
 
     #[test]
