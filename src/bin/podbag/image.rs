@@ -221,6 +221,25 @@ pub fn system(cmd: SystemCmd) -> i32 {
             }
             Err(e) => report(&e),
         },
+        SystemCmd::RegistryProxy { set } => {
+            use podbag::image::proxy;
+            let result = podbag::paths::dirs().and_then(|dirs| {
+                if set {
+                    let settings = proxy::read_json(std::io::stdin().lock())?;
+                    proxy::save(&dirs, settings)
+                } else {
+                    proxy::load(&dirs)
+                }
+            });
+            match result {
+                Ok(settings) => {
+                    // No credentials or inherited environment values are returned.
+                    println!("{}", serde_json::to_string(&settings).unwrap());
+                    0
+                }
+                Err(error) => report(&error),
+            }
+        }
         SystemCmd::Compression { mode, after, json } => {
             match compression(mode.as_deref(), after.as_deref()) {
                 Ok(c) if json => {

@@ -67,6 +67,11 @@ pub struct Container {
     health: Option<crate::health::HealthSettings>,
     #[serde(default)]
     console_size: Option<(u16, u16)>,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::log_driver::LogConfig::is_default"
+    )]
+    log_config: crate::log_driver::LogConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -158,7 +163,14 @@ impl Container {
             restart: Default::default(),
             health: None,
             console_size: None,
+            log_config: Default::default(),
         }
+    }
+
+    /// Set the logging driver and options.
+    pub fn logging(mut self, config: crate::log_driver::LogConfig) -> Container {
+        self.log_config = config;
+        self
     }
 
     /// A label (`key=value` in `docker run --label`).
@@ -1081,6 +1093,7 @@ mod linux_launch {
                     fixed_addresses: c.fixed_addresses.clone(),
                     namespaces: Default::default(),
                     devices: Vec::new(),
+                    log_config: c.log_config.clone(),
                     cri_log: None,
                     stdin_fifo: None,
                 };
@@ -1126,6 +1139,7 @@ mod linux_launch {
                         fixed_addresses: c.fixed_addresses.clone(),
                         namespaces: Default::default(),
                         devices: Vec::new(),
+                        log_config: c.log_config.clone(),
                         cri_log: None,
                         stdin_fifo: None,
                     })

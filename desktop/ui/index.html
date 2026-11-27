@@ -46,6 +46,7 @@
   <symbol id="i-power" viewBox="0 0 24 24"><path d="M12 3v8m-5-6a8 8 0 1 0 10 0"/></symbol>
   <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><ellipse cx="12" cy="12" rx="4" ry="9"/><path d="M3 12h18"/></symbol>
   <symbol id="i-appearance" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none"/></symbol>
+  <symbol id="i-bell" viewBox="0 0 24 24"><path d="M6 9a6 6 0 0 1 12 0c0 5 2 6 2 8H4c0-2 2-3 2-8m4 11a2 2 0 0 0 4 0"/></symbol>
   <symbol id="i-display" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M12 17v3m-4 0h8"/></symbol>
   <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/></symbol>
   <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20.5 14a8.8 8.8 0 0 1-10.5-10.5A9 9 0 1 0 20.5 14z"/></symbol>
@@ -65,6 +66,7 @@
     <button type="button" class="icon-button" id="nav-back" disabled></button>
     <button type="button" class="icon-button" id="nav-forward" disabled></button>
     <div class="topbar-space"></div>
+    <button type="button" class="icon-button" id="notifications-open" aria-haspopup="dialog" aria-controls="notification-history"></button>
     <div class="topbar-tools" id="topbar-tools" role="toolbar" aria-label="podbag" focusgroup="toolbar wrap"></div>
   </header>
   <nav class="sidebar" id="sidebar" aria-label="podbag">
@@ -73,6 +75,7 @@
     <ul class="nav" id="nav-training"></ul>
     <ul class="nav" id="nav-practice"></ul>
     <ul class="nav" id="nav-kubernetes"></ul>
+    <ul class="nav" id="nav-extensions"></ul>
     <div class="spacer"></div>
     <ul class="nav" id="nav-bottom"></ul>
     <section class="vm-card" id="vm-card" hidden></section>
@@ -109,6 +112,7 @@
 </dialog>
 
 <div id="docker-live" class="visually-hidden" role="status"></div>
+<dialog id="notification-history" aria-labelledby="notification-history-title"></dialog>
 <div id="toasts" class="toasts" role="status" aria-live="polite"></div>
 
 <script src="i18n.js"></script>
@@ -121,6 +125,7 @@
 <script src="builders.js"></script>
 <script src="app.js"></script>
 <script src="run.js"></script>
+<script src="extensions.js"></script>
 <script src="model-runner.js"></script>
 <script src="images.js"></script>
 </body>

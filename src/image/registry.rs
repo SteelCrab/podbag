@@ -82,7 +82,20 @@ impl Registry {
 
     /// A client that logs in with `auth` when the registry asks.
     pub fn with_auth(auth: Option<AuthConfig>) -> Registry {
+        Self::with_proxy(auth, ureq::Proxy::try_from_env())
+    }
+
+    pub(crate) fn for_engine(
+        dirs: &crate::paths::Dirs,
+        auth: Option<AuthConfig>,
+    ) -> Result<Registry> {
+        let proxy = super::proxy::load(dirs)?.proxy()?;
+        Ok(Self::with_proxy(auth, proxy))
+    }
+
+    fn with_proxy(auth: Option<AuthConfig>, proxy: Option<ureq::Proxy>) -> Registry {
         let agent: ureq::Agent = ureq::Agent::config_builder()
+            .proxy(proxy)
             .http_status_as_error(false)
             .user_agent(format!("podbag/{}", env!("CARGO_PKG_VERSION")))
             .timeout_connect(Some(Duration::from_secs(30)))
@@ -588,7 +601,9 @@ pub fn search(term: &str, limit: u32) -> Result<Vec<SearchResult>> {
         scheme(&registry),
         encode(&query)
     );
+    let proxy = super::proxy::load(&crate::paths::dirs()?)?.proxy()?;
     let agent: ureq::Agent = ureq::Agent::config_builder()
+        .proxy(proxy)
         .http_status_as_error(false)
         .user_agent(format!("podbag/{}", env!("CARGO_PKG_VERSION")))
         .timeout_global(Some(Duration::from_secs(60)))
