@@ -26,7 +26,38 @@ fn failure(driver: &str, operation: &str, why: impl ToString) -> Error {
     )
 }
 
+/// Why a driver request failed.
+pub(super) enum Failure {
+    /// The driver did not get the request, or it answered that the request failed.
+    Failed(Error),
+    /// The request may have reached the driver, but its answer was lost or unreadable.
+    Unknown(Error),
+}
+
+impl From<Error> for Failure {
+    fn from(e: Error) -> Failure {
+        Failure::Failed(e)
+    }
+}
+
+impl From<Failure> for Error {
+    fn from(failure: Failure) -> Error {
+        match failure {
+            Failure::Failed(e) | Failure::Unknown(e) => e,
+        }
+    }
+}
+
 fn invoke(dirs: &Dirs, driver: &str, operation: &str, body: Value) -> Result<Value> {
+    request(dirs, driver, operation, body).map_err(Error::from)
+}
+
+fn request(
+    dirs: &Dirs,
+    driver: &str,
+    operation: &str,
+    body: Value,
+) -> std::result::Result<Value, Failure> {
     // SAFETY: geteuid has no preconditions.
     super::require_rootful("external volume drivers", unsafe { libc::geteuid() } != 0)?;
     super::check_driver_name(driver)?;
@@ -43,7 +74,8 @@ fn invoke(dirs: &Dirs, driver: &str, operation: &str, body: Value) -> Result<Val
             driver,
             operation,
             "volume-drivers must be a root-owned directory writable only by root",
-        ));
+        )
+        .into());
     }
     // Pin the directory across validation and connect, even if its parent can be renamed.
     let file = format!("{driver}.sock");
@@ -57,11 +89,24 @@ fn invoke(dirs: &Dirs, driver: &str, operation: &str, body: Value) -> Result<Val
             driver,
             operation,
             format!("{} is not a Unix socket", registry.join(file).display()),
-        ));
+        )
+        .into());
     }
     let stream = connect(&socket, TIMEOUT).map_err(fail)?;
     stream.set_read_timeout(Some(TIMEOUT)).map_err(fail)?;
     stream.set_write_timeout(Some(TIMEOUT)).map_err(fail)?;
+    exchange(stream, driver, operation, &body)
+}
+
+/// Send one request to the driver on `stream` and read its answer.
+fn exchange(
+    stream: UnixStream,
+    driver: &str,
+    operation: &str,
+    body: &Value,
+) -> std::result::Result<Value, Failure> {
+    let failed = |why: &str| Failure::Failed(failure(driver, operation, why));
+    let unknown = |why: String| Failure::Unknown(failure(driver, operation, why));
     let encoded = body.to_string();
     let response = wire::send(
         Box::new(stream),
@@ -70,29 +115,23 @@ fn invoke(dirs: &Dirs, driver: &str, operation: &str, body: Value) -> Result<Val
         &[("Accept", MEDIA_TYPE), ("Content-Type", MEDIA_TYPE)],
         Body::Json(encoded.as_bytes()),
     )
-    .map_err(fail)?;
+    .map_err(|e| unknown(e.to_string()))?;
     if !(200..300).contains(&response.status) {
-        return Err(failure(
-            driver,
-            operation,
-            format!("HTTP status {}", response.status),
-        ));
+        return Err(failed(&format!("HTTP status {}", response.status)));
     }
-    let bytes = response.bytes(64 * 1024).map_err(fail)?;
-    let value: Value = serde_json::from_slice(&bytes).map_err(|e| failure(driver, operation, e))?;
+    let bytes = response
+        .bytes(64 * 1024)
+        .map_err(|e| unknown(e.to_string()))?;
+    let value: Value = serde_json::from_slice(&bytes).map_err(|e| unknown(e.to_string()))?;
     if !value.is_object() {
-        return Err(failure(
-            driver,
-            operation,
-            "the driver response must be a JSON object",
+        return Err(unknown(
+            "the driver response must be a JSON object".to_string(),
         ));
     }
     match value.get("Err") {
-        Some(Value::String(message)) if !message.is_empty() => {
-            Err(failure(driver, operation, message))
-        }
+        Some(Value::String(message)) if !message.is_empty() => Err(failed(message)),
         Some(value) if !value.is_string() && !value.is_null() => {
-            Err(failure(driver, operation, "Err must be a string"))
+            Err(unknown("Err must be a string".to_string()))
         }
         _ => Ok(value),
     }
@@ -131,7 +170,12 @@ fn connect(path: &Path, limit: Duration) -> std::io::Result<UnixStream> {
     Ok(UnixStream::from(socket))
 }
 
-pub(super) fn create(dirs: &Dirs, name: &str, plugin: &DriverVolume) -> Result<()> {
+/// Ask the driver to create volume `name`. `Failure::Unknown`: it may have.
+pub(super) fn create(
+    dirs: &Dirs,
+    name: &str,
+    plugin: &DriverVolume,
+) -> std::result::Result<(), Failure> {
     let active = invoke(dirs, &plugin.name, "Plugin.Activate", json!({}))?;
     if !active["Implements"]
         .as_array()
@@ -141,9 +185,10 @@ pub(super) fn create(dirs: &Dirs, name: &str, plugin: &DriverVolume) -> Result<(
             &plugin.name,
             "Plugin.Activate",
             "the plugin does not implement VolumeDriver",
-        ));
+        )
+        .into());
     }
-    invoke(
+    request(
         dirs,
         &plugin.name,
         "VolumeDriver.Create",
@@ -357,6 +402,53 @@ fn attach(dirs: &Dirs, spec: &mut ContainerSpec) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+
+    /// What `exchange` makes of a driver that answers `reply` (nothing: `None`).
+    fn outcome(reply: Option<&'static str>) -> std::result::Result<Value, Failure> {
+        let (client, mut driver) = UnixStream::pair().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut request = [0; 4096];
+            let _ = driver.read(&mut request);
+            if let Some(body) = reply {
+                let status = if body.is_empty() {
+                    "500 Oops"
+                } else {
+                    "200 OK"
+                };
+                let _ = write!(
+                    driver,
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = driver.read_to_end(&mut Vec::new());
+            }
+        });
+        let result = exchange(
+            client,
+            "store",
+            "VolumeDriver.Create",
+            &json!({"Name": "v"}),
+        );
+        server.join().unwrap();
+        result
+    }
+
+    /// Only a request whose answer is lost may have done its work unseen.
+    #[test]
+    fn a_lost_answer_is_told_apart_from_a_failure() {
+        assert!(outcome(Some(r#"{"Err":""}"#)).is_ok());
+        assert!(matches!(
+            outcome(Some(r#"{"Err":"no space"}"#)),
+            Err(Failure::Failed(_))
+        ));
+        assert!(matches!(outcome(Some("")), Err(Failure::Failed(_))));
+        assert!(matches!(outcome(None), Err(Failure::Unknown(_))));
+        assert!(matches!(
+            outcome(Some("not json")),
+            Err(Failure::Unknown(_))
+        ));
+    }
 
     /// A driver that stops accepting fills its queue of connections; the next connect
     /// must give up instead of waiting for room.

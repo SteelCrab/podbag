@@ -78,7 +78,7 @@ fn serve(listener: UnixListener, shared: Arc<Mutex<Driver>>, backend: PathBuf) {
             response.len()
         )
         .unwrap();
-        if method == "/VolumeDriver.Remove" && reply["Err"] == "" {
+        if method == "/VolumeDriver.Remove" && reply["Err"] == "" && body["Name"] == "durable" {
             return;
         }
     }
@@ -144,6 +144,40 @@ fn volume_driver_lifecycle_uses_a_real_container_mount() {
         std::thread::spawn(move || serve(listener, shared, backend))
     };
     let api = api::Service::start(&sb, &[]);
+    // A lost Create reply for a generated name: the driver may have the volume, so its
+    // record stays, to be seen and removed.
+    driver.lock().unwrap().drop_create_reply = true;
+    let (_, headers) = api::curl(
+        &api.socket,
+        &[
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            r#"{"Driver":"fixture"}"#,
+            "/volumes/create",
+        ],
+    );
+    assert!(headers.contains("500"), "{headers}");
+    let generated = commands(&sb, &["volume", "ls", "-q"]);
+    let generated = generated.trim();
+    assert!(
+        !generated.is_empty() && !generated.contains('\n'),
+        "{generated}"
+    );
+    {
+        let d = driver.lock().unwrap();
+        assert_eq!(d.calls[1].1["Name"], generated);
+    }
+    commands(&sb, &["volume", "rm", generated]);
+    rpc(
+        &driver,
+        &[
+            "/Plugin.Activate",
+            "/VolumeDriver.Create",
+            "/VolumeDriver.Remove",
+        ],
+    );
+    driver.lock().unwrap().calls.clear();
     let create = || {
         api::curl(
             &api.socket,

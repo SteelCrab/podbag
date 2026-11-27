@@ -225,6 +225,7 @@ pub(crate) fn create_with_backend(
         Backend::Nfs(_) => require_rootful("native NFS mounts", rootless())?,
         Backend::Plugin(_) => require_rootful("external volume drivers", rootless())?,
     }
+    let generated = name.is_none();
     let name = match name {
         Some(n) => {
             check_name(n)?;
@@ -236,8 +237,10 @@ pub(crate) fn create_with_backend(
     let parent = volumes_dir(dirs)?;
     #[cfg(target_os = "linux")]
     if let Backend::Plugin(plugin) = &backend {
-        return create_driver_record(dirs, &parent, name, anonymous, labels, plugin);
+        return create_driver_record(dirs, &parent, name, generated, anonymous, labels, plugin);
     }
+    #[cfg(not(target_os = "linux"))]
+    let _ = generated;
     #[cfg(not(target_os = "linux"))]
     let _ = parent;
     match std::fs::create_dir(&dir) {
@@ -295,12 +298,14 @@ fn conflicting_backend(name: &str) -> Error {
 }
 
 /// The exclusive volume lock covers creation, including requests from container create.
-/// A lost Create reply leaves no published directory and can be retried with the same name.
+/// A lost Create reply for a given name leaves no published directory and can be retried
+/// with the same name. For a `generated` name, the record stays: only it knows the name.
 #[cfg(target_os = "linux")]
 fn create_driver_record(
     dirs: &Dirs,
     parent: &std::path::Path,
     name: String,
+    generated: bool,
     anonymous: bool,
     labels: crate::network::Labels,
     driver: &DriverVolume,
@@ -330,10 +335,33 @@ fn create_driver_record(
         .and_then(|()| file.sync_all())
         .and_then(|()| std::fs::File::open(stage.path())?.sync_all())
         .map_err(fail)?;
-    plugin::create(dirs, &meta.name, driver)?;
-    std::fs::rename(stage.path(), dirs.volume_dir(&meta.name))
-        .and_then(|()| std::fs::File::open(parent)?.sync_all())
-        .map_err(fail)?;
+    let publish = || {
+        std::fs::rename(stage.path(), dirs.volume_dir(&meta.name))
+            .and_then(|()| std::fs::File::open(parent)?.sync_all())
+            .map_err(fail)
+    };
+    match plugin::create(dirs, &meta.name, driver) {
+        Ok(()) => {}
+        // The driver may have made the volume: keep its record, so that it can be seen
+        // and removed.
+        Err(plugin::Failure::Unknown(e)) if generated => {
+            publish()?;
+            return Err(Error::new(
+                e.kind,
+                format!(
+                    "volume driver {} may have created volume {}",
+                    driver.name, meta.name
+                ),
+                e.why,
+                format!(
+                    "check the driver, then remove the volume (`podbag volume rm {}`)",
+                    meta.name
+                ),
+            ));
+        }
+        Err(failure) => return Err(failure.into()),
+    }
+    publish()?;
     Ok((volume_of(dirs, meta), true))
 }
 
