@@ -1,10 +1,16 @@
 //! Paths shared at their macOS location in the Linux VM.
 
-use std::path::{Component, Path, PathBuf};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::path::Component;
+use std::path::{Path, PathBuf};
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) const DEFAULT: &str = "/Users";
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) const TAG: &str = "podbag-shares";
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) const CONFIG: &str = "config";
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) const MANIFEST: &str = "paths.json";
 #[cfg(target_os = "linux")]
 pub(crate) const ACTIVE: &str = "/run/podbag-vm-shares.json";
@@ -19,15 +25,18 @@ pub(crate) fn active() -> Option<Vec<PathBuf>> {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn defaults() -> Vec<PathBuf> {
     vec![PathBuf::from(DEFAULT)]
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn entry(index: usize) -> String {
     format!("share-{index}")
 }
 
 /// A share target may only occupy a path outside the guest's system directories.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn valid_target(path: &Path) -> bool {
     let mut parts = path.components();
     if parts.next() != Some(Component::RootDir) {
