@@ -98,17 +98,18 @@ try {
     # A closed local address: the Training view does not sync the live catalog.
     $env:PODBAG_TRAINING_CATALOG = 'http://127.0.0.1:9/training/catalog.json'
     $stderr = Join-Path $env:TEMP "podbag-window-$Arch.log"
-    $app = Start-Process $gui -PassThru -RedirectStandardError $stderr
+    # Not $app: PowerShell names ignore case, and $App above is a [string] parameter.
+    $process = Start-Process $gui -PassThru -RedirectStandardError $stderr
     try {
-        powershell.exe -NoProfile -File "$PSScriptRoot/test-window.ps1" -AppPid $app.Id -OutputFile $Screenshot
+        powershell.exe -NoProfile -File "$PSScriptRoot/test-window.ps1" -AppPid $process.Id -OutputFile $Screenshot
         if ($LASTEXITCODE -ne 0) {
             Get-Content $stderr -ErrorAction SilentlyContinue
-            $app.Refresh()
-            if ($app.HasExited) { throw "Podbag Desktop exited with code $($app.ExitCode)" }
-            throw "Could not verify the installed window (title: '$($app.MainWindowTitle)')"
+            $process.Refresh()
+            if ($process.HasExited) { throw "Podbag Desktop exited with code $($process.ExitCode)" }
+            throw "Could not verify the installed window (title: '$($process.MainWindowTitle)')"
         }
         # Closing the window may keep the app in the notification area.
-        if (!$app.WaitForExit(10000)) { Write-Output 'The app stayed open after its window closed.' }
+        if (!$process.WaitForExit(10000)) { Write-Output 'The app stayed open after its window closed.' }
     } finally {
         Stop-Installed
     }
