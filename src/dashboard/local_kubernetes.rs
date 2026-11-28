@@ -782,6 +782,19 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
+    #[test]
+    fn kind_failure_diagnostics_keep_stderr_and_omit_credentials() {
+        let output = Command::new("/bin/sh")
+            .args(["-c", "printf '%s\n' 'stdout' 'abcdef.0123456789abcdef' '-----BEGIN PRIVATE KEY-----' 'private data' '-----END PRIVATE KEY-----'; printf '%s\n' 'stderr' 'Authorization: Bearer supplied' >&2"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            kind_diagnostic_output(&output),
+            "stdout\n[credential omitted]\n[credential omitted]\nstderr\n[credential omitted]\n"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
     fn kind_diagnostic_text(bytes: &[u8]) -> String {
         let mut text = String::new();
         let mut pem = false;
@@ -927,19 +940,6 @@ mod tests {
                 ),
             }
         }
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn kind_failure_diagnostics_keep_stderr_and_omit_credentials() {
-        let output = Command::new("/bin/sh")
-            .args(["-c", "printf '%s\n' 'stdout' 'abcdef.0123456789abcdef' '-----BEGIN PRIVATE KEY-----' 'private data' '-----END PRIVATE KEY-----'; printf '%s\n' 'stderr' 'Authorization: Bearer supplied' >&2"])
-            .output()
-            .unwrap();
-        assert_eq!(
-            kind_diagnostic_output(&output),
-            "stdout\n[credential omitted]\n[credential omitted]\nstderr\n[credential omitted]\n"
-        );
     }
 
     fn wait_for_kind_ready(
