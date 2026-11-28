@@ -1,5 +1,7 @@
 //! Training: the practice labs and the modules a user installs, and their web guides.
 
+pub use podbag::volume_lesson::course::inspect_command_kind;
+
 /// A practice lab's view: `action` on the lab of the GUI lesson, or with `containers`
 /// the containers lesson, or with `course` the course. On Windows it runs in WSL.
 pub fn practice_volumes(

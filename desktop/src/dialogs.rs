@@ -44,6 +44,12 @@ pub enum Then {
         name: String,
         session: String,
     },
+    /// Do the module `ui` step `action` on `name` in the practice session.
+    PracticeStep {
+        action: String,
+        name: String,
+        session: String,
+    },
     /// Stop synchronizing a share of the macOS VM.
     SyncRemove(String),
     RemoveExtension(String),
@@ -452,6 +458,11 @@ fn finish(d: &mut Desktop, ui: &mut Ui, dlg: Dialog, yes: bool) {
             Then::PracticeRemove { name, session } => {
                 crate::views::practice::act(d, "remove", name, session)
             }
+            Then::PracticeStep {
+                action,
+                name,
+                session,
+            } => crate::views::practice::step(d, action, name, session),
             Then::RemoveBuilder {
                 session,
                 scope,
