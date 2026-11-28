@@ -35,7 +35,6 @@ do {
 } until ([DateTime]::UtcNow -gt $deadline)
 if ($process.MainWindowTitle -ne 'podbag') { throw 'The main Podbag window did not appear' }
 Write-Output "Opened window '$($process.MainWindowTitle)' in session $($process.SessionId)."
-$root = [Windows.Automation.AutomationElement]::FromHandle($window)
 $scope = [Windows.Automation.TreeScope]::Descendants
 
 function Find-Text([string]$Name) {
@@ -74,11 +73,17 @@ function Activate-Button([string]$Name) {
 # becomes visible.
 $deadline = [DateTime]::UtcNow.AddSeconds(90)
 do {
-    Activate-Button 'Skip'
-    Activate-Button 'Not now'
-    Activate-Button 'Training'
     Start-Sleep -Milliseconds 500
-    $heading = Find-Text 'No modules installed.'
+    try {
+        $root = [Windows.Automation.AutomationElement]::FromHandle($window)
+        Activate-Button 'Skip'
+        Activate-Button 'Not now'
+        Activate-Button 'Training'
+        $heading = Find-Text 'No modules installed.'
+    } catch [Windows.Automation.ElementNotAvailableException] {
+        # WebView2 can replace an element between lookup and activation.
+        $heading = $null
+    }
     if ($heading) { break }
 } until ([DateTime]::UtcNow -gt $deadline)
 if (!$heading) { throw 'The installed WebView did not open the English Training view' }
