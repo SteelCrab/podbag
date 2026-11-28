@@ -229,7 +229,12 @@ pub(super) fn attach(
     };
     let connect = || -> Result<()> {
         for (interface, (net, ip)) in addresses.iter().enumerate() {
-            let index = crate::linux::net::prepare_bridge(net)?;
+            let host_bridge = if session.is_none() {
+                crate::network::lock_host_bridges()?
+            } else {
+                None
+            };
+            let index = crate::linux::net::prepare_bridge_with_lock(net, host_bridge)?;
             crate::linux::net::connect(net, index, &spec.id, pid, *ip, interface)?;
         }
         Ok(())

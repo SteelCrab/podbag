@@ -238,11 +238,18 @@ impl AttachmentChange {
         match holder {
             Some(holder) => {
                 linux::net::in_netns_file(&holder, || -> std::io::Result<Result<()>> {
-                    Ok(self.transaction(dirs, network, before, after, &ns))
+                    Ok(self.transaction(dirs, network, before, after, &ns, None))
                 })
                 .map_err(|error| self.io(id, network, error))?
             }
-            None => self.transaction(dirs, network, before, after, &ns),
+            None => {
+                let host_bridge = if matches!(self, Self::Connect { .. }) {
+                    super::lock_host_bridges()?
+                } else {
+                    None
+                };
+                self.transaction(dirs, network, before, after, &ns, host_bridge)
+            }
         }
     }
 
@@ -261,6 +268,7 @@ impl AttachmentChange {
         before: &ContainerSpec,
         after: &ContainerSpec,
         ns: &File,
+        host_bridge: Option<super::HostBridgeLock>,
     ) -> Result<()> {
         let id = &after.id;
         let _networks = super::lock(dirs)?;
@@ -275,7 +283,7 @@ impl AttachmentChange {
                 let target = &changed[0];
                 let network = &target.record.network;
                 let addresses = target.record.containers[id].addresses();
-                let bridge = linux::net::prepare_bridge(network)?;
+                let bridge = linux::net::prepare_bridge_with_lock(network, host_bridge)?;
                 let (existing, vacant) = interfaces(&mut socket, id, bridge).map_err(io)?;
                 if existing.is_some() {
                     return Err(Error::new(

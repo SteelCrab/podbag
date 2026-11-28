@@ -514,6 +514,8 @@ pub(crate) struct HostBridgeLock {
 
 #[cfg(target_os = "linux")]
 const HOST_BRIDGE_LOCK: &str = "/run/podbag-buildkit-bridge.lock";
+#[cfg(target_os = "linux")]
+const BUILDKIT_BRIDGE_PREFIX: &str = "podbag-bk-";
 
 pub(crate) fn lock_host_bridges() -> Result<Option<HostBridgeLock>> {
     #[cfg(target_os = "linux")]
@@ -564,6 +566,44 @@ impl HostBridgeLock {
         })
         .map_err(error)
     }
+
+    /// An inactive network in another store can predate the BuildKit worker's route.
+    /// Keep this guard until the Podbag bridge's own route becomes active.
+    pub(crate) fn check_activation(&self, net: &Network) -> Result<()> {
+        let routes = std::fs::read_to_string("/proc/net/route").map_err(|e| {
+            Error::io(
+                format!("cannot activate network {}", net.name),
+                &e,
+                "check that the host's network routes are readable",
+            )
+        })?;
+        check_buildkit_route(net, &routes)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn check_buildkit_route(net: &Network, routes: &str) -> Result<()> {
+    let subnet = net.cidr();
+    // A network already active on this bridge can be shared by multiple stores.
+    if parse_routes_with(routes, |iface| iface == net.bridge).contains(&subnet) {
+        return Ok(());
+    }
+    if let Some((addr, prefix)) =
+        parse_routes_with(routes, |iface| iface.starts_with(BUILDKIT_BRIDGE_PREFIX))
+            .into_iter()
+            .find(|route| overlaps(*route, subnet))
+    {
+        return Err(Error::new(
+            ErrorKind::Conflict,
+            format!("cannot activate network {}", net.name),
+            format!(
+                "its subnet {} overlaps the active BuildKit bridge route {addr}/{prefix}",
+                net.subnet
+            ),
+            "wait for the build to finish or choose another subnet",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -586,7 +626,7 @@ fn select_buildkit_bridge(
     for (pool, [first, second]) in [[10, 10], [10, 254], [172, 30]].into_iter().enumerate() {
         for slot in 0..=255 {
             let addr = Ipv4Addr::new(first, second, slot, 0);
-            let name = format!("podbag-bk-{pool}-{slot}");
+            let name = format!("{BUILDKIT_BRIDGE_PREFIX}{pool}-{slot}");
             if !blocked.iter().any(|route| overlaps(*route, (addr, 24))) && !device_exists(&name)? {
                 return Ok((name, addr));
             }
@@ -2107,6 +2147,24 @@ mod tests {
                     eth0\t00000000\t0205A8C0\t0003\t0\t0\t200\t00000000\t0\t0\t0\n\
                     eth0\t0005A8C0\t00000000\t0001\t0\t0\t200\t00FFFFFF\t0\t0\t0\n";
         assert_eq!(parse_routes(text), [(Ipv4Addr::new(192, 168, 5, 0), 24)]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn activation_checks_buildkit_routes_only_until_the_bridge_is_active() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = dirs_in(tmp.path());
+        let net = create_in(&dirs, "app", Some("10.254.2.0/23"), &[]).unwrap();
+        let buildkit = "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\n\
+                        podbag-bk-1-3\t0003FE0A\t00000000\t0001\t0\t0\t0\t00FFFFFF\n";
+        let error = check_buildkit_route(&net, buildkit).unwrap_err();
+        assert!(error.why.contains("BuildKit bridge route 10.254.3.0/24"));
+        assert!(check_buildkit_route(&net, &buildkit.replace("podbag-bk-1-3", "eth0")).is_ok());
+        let active = format!(
+            "{buildkit}{}\t0002FE0A\t00000000\t0001\t0\t0\t0\t00FEFFFF\n",
+            net.bridge
+        );
+        assert!(check_buildkit_route(&net, &active).is_ok());
     }
 
     #[test]
