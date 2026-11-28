@@ -9,7 +9,7 @@
 //! step's terminal part.
 
 use crate::training::LessonRecord;
-use podbag::client::{ContainerSummary, Port, VolumeSummary};
+use podbag::client::{ContainerSummary, Kind, Port, VolumeSummary};
 use podbag::dashboard::lab::{Reply, Snapshot};
 use podbag::volume_lesson::course::{self, Check, Ui, UiAction};
 use podbag::volume_lesson::{Installed, Module, Package, catalog, parse_package};
@@ -304,7 +304,13 @@ impl Session {
             }
             let shown = match ui.action {
                 UiAction::Logs => (None, Some(logs(target, check.as_ref()))),
-                UiAction::Inspect => (Some(self.inspect_named(target)), None),
+                UiAction::Inspect => {
+                    let kind = self
+                        .step()
+                        .and_then(|s| s.command.as_deref())
+                        .and_then(course::inspect_command_kind);
+                    (Some(self.inspect_named(target, kind)?), None)
+                }
                 _ => (None, None),
             };
             self.advance();
@@ -330,8 +336,10 @@ impl Session {
             }
             ("show-web", Some(Check::DesktopBrowser { name, .. }))
                 if id_of(self, name)?.0 == target => {}
-            ("inspect", _) if self.volumes.iter().any(|v| v.name == target) => {
-                if matches!(&check, Some(Check::DesktopInspectVolume { name }) if name == target) {
+            ("inspect" | "inspect-volume", _) if self.volumes.iter().any(|v| v.name == target) => {
+                if action == "inspect"
+                    && matches!(&check, Some(Check::DesktopInspectVolume { name }) if name == target)
+                {
                     self.advance();
                 }
                 return Ok((Some(inspect(self, target)), None));
@@ -345,21 +353,28 @@ impl Session {
     }
 
     /// The inspect JSON of `name`: a container, a volume, else a network.
-    fn inspect_named(&self, name: &str) -> Value {
-        if let Some(c) = self.row(name) {
-            return json!({
+    fn inspect_named(&self, name: &str, kind: Option<Kind>) -> Result<Value, String> {
+        if kind.is_none_or(|kind| kind == Kind::Containers)
+            && let Some(c) = self.row(name)
+        {
+            return Ok(json!({
                 "Id": c.id, "Name": format!("/{name}"), "Image": c.image,
                 "State": { "Status": c.state },
-            });
+            }));
         }
-        if self.volumes.iter().any(|v| v.name == name) {
-            return inspect(self, name);
+        if kind.is_none_or(|kind| kind == Kind::Volumes)
+            && self.volumes.iter().any(|v| v.name == name)
+        {
+            return Ok(inspect(self, name));
         }
-        json!({
+        if kind.is_some_and(|kind| kind != Kind::Networks) {
+            return Err("The practice resource was not found.".into());
+        }
+        Ok(json!({
             "Name": name, "Id": format!("{:0>12x}", name.len() * 7919), "Driver": "bridge",
             "Scope": "local",
             "IPAM": { "Config": [{ "Subnet": "10.89.0.0/24", "Gateway": "10.89.0.1" }] },
-        })
+        }))
     }
 }
 

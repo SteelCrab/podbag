@@ -4,6 +4,7 @@
 
 use std::time::{Duration, Instant};
 
+use podbag_desktop_core::{Kind, training::inspect_command_kind};
 use podbag_ui::focus::FocusKind;
 use podbag_ui::ui::Ui;
 use podbag_ui::widgets::button::{self, IconKind, Kind as ButtonKind};
@@ -78,6 +79,61 @@ pub struct PracticeState {
 }
 
 impl PracticeState {
+    fn session(&self) -> Option<&str> {
+        self.state.as_ref().and_then(|s| s["session"].as_str())
+    }
+
+    fn apply_status(&mut self, status: Result<Value, String>) {
+        match status {
+            Ok(next) => self.apply_snapshot(next),
+            // Keep the last successful session so a retry can validate its step output.
+            Err(error) => self.error = error,
+        }
+    }
+
+    fn apply_snapshot(&mut self, next: Value) {
+        let same_session = self.session() == next["session"].as_str();
+        let stage = next["stage"].as_str().unwrap_or_default();
+        let has_container = |id: &str| {
+            next["containers"]
+                .as_array()
+                .is_some_and(|rows| rows.iter().any(|c| c["Id"] == id))
+        };
+        let has_volume = |volume: &Value| {
+            next["volumes"]
+                .as_array()
+                .is_some_and(|rows| rows.iter().any(|v| v["Name"] == volume["Name"]))
+        };
+        if !same_session
+            || self
+                .container
+                .as_deref()
+                .is_some_and(|id| !has_container(id))
+        {
+            self.container = None;
+        }
+        if !same_session || self.volume.as_ref().is_some_and(|v| !has_volume(v)) {
+            self.volume = None;
+        }
+        if !same_session
+            || self
+                .log
+                .as_ref()
+                .is_some_and(|log| log.stage != stage || !has_container(&log.id))
+        {
+            self.log = None;
+        }
+        if !same_session
+            || self.inspected.as_ref().is_some_and(|i| {
+                i.stage != stage || (i.detail["Mountpoint"].is_string() && !has_volume(&i.detail))
+            })
+        {
+            self.inspected = None;
+        }
+        self.state = Some(next);
+        self.error.clear();
+    }
+
     fn finish_action(&mut self, generation: u64) -> bool {
         if self.generation != generation {
             return false;
@@ -125,7 +181,10 @@ fn default_module(flavor: Flavor) -> &'static str {
 
 /// The state, when a session runs.
 fn state(d: &Desktop) -> Option<&Value> {
-    d.practice.state.as_ref().filter(|s| !s.is_null())
+    d.practice
+        .state
+        .as_ref()
+        .filter(|s| !s.is_null() && d.practice.error.is_empty())
 }
 
 fn session(d: &Desktop) -> Option<String> {
@@ -142,6 +201,10 @@ fn step_ui(s: &Value) -> Option<StepUi> {
         .is_string()
         .then(|| StepUi::of(&s["ui"]))
         .flatten()
+}
+
+fn inspect_kind(s: &Value) -> Option<Kind> {
+    s["command"].as_str().and_then(inspect_command_kind)
 }
 
 /// The step's row button on the row named `name`: its action, icon and label.
@@ -186,48 +249,7 @@ pub fn poll(d: &mut Desktop) {
             }
             let p = &mut d.practice;
             p.polling = false;
-            match r {
-                Ok(next) => {
-                    let same = next["session"]
-                        == p.state
-                            .as_ref()
-                            .map_or(Value::Null, |s| s["session"].clone());
-                    if !same {
-                        p.container = None;
-                        p.log = None;
-                        p.inspected = None;
-                    }
-                    let stage = next["stage"].as_str().unwrap_or_default();
-                    if p.inspected.as_ref().is_some_and(|i| i.stage != stage) {
-                        p.inspected = None;
-                    }
-                    let listed = |id: &str| {
-                        next["containers"]
-                            .as_array()
-                            .is_some_and(|a| a.iter().any(|c| c["Id"] == id))
-                    };
-                    if p.log
-                        .as_ref()
-                        .is_some_and(|l| l.stage != stage || !listed(&l.id))
-                    {
-                        p.log = None;
-                    }
-                    let keep = p.volume.as_ref().is_some_and(|v| {
-                        same && next["volumes"]
-                            .as_array()
-                            .is_some_and(|a| a.iter().any(|x| x["Name"] == v["Name"]))
-                    });
-                    if !keep {
-                        p.volume = None;
-                    }
-                    p.state = Some(next);
-                    p.error.clear();
-                }
-                Err(e) => {
-                    p.error = e;
-                    p.state = None;
-                }
-            }
+            p.apply_status(r);
             p.poll_at = Some(Instant::now() + POLL);
         },
     );
@@ -255,12 +277,13 @@ pub fn act(d: &mut Desktop, action: &'static str, name: String, session: String)
     d.practice.busy = true;
     let course = is_course(d);
     let generation = d.practice.generation;
+    let requested_session = session.clone();
     spawn(
         d,
         move |api| {
             api.practice(
                 action,
-                Some(&session),
+                Some(&requested_session),
                 Some(&name),
                 flavor == Flavor::Containers && !course,
                 course,
@@ -270,13 +293,18 @@ pub fn act(d: &mut Desktop, action: &'static str, name: String, session: String)
             if !d.practice.finish_action(generation) {
                 return;
             }
-            match r {
-                Ok(next) if flavor == Flavor::Volumes => {
-                    d.practice.volume = next.get("detail").filter(|v| v.is_object()).cloned();
-                    d.practice.state = Some(next);
+            if d.practice.session() == Some(session.as_str()) {
+                match r {
+                    Ok(next) if next["session"] == session.as_str() => {
+                        let volume = next.get("detail").filter(|v| v.is_object()).cloned();
+                        d.practice.apply_snapshot(next);
+                        if flavor == Flavor::Volumes {
+                            d.practice.volume = volume;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => d.toasts.push(e, true),
                 }
-                Ok(_) => {}
-                Err(e) => d.toasts.push(e, true),
             }
             poll(d);
         },
@@ -331,12 +359,17 @@ pub fn step(d: &mut Desktop, action: String, name: String, session: String) {
     }
     d.practice.busy = true;
     let generation = d.practice.generation;
+    let inspect = state(d).and_then(inspect_kind);
     let (a, n, s) = (action.clone(), name.clone(), session.clone());
     spawn(
         d,
         move |api| api.practice(&a, Some(&s), Some(&n), false, true),
         move |d, r| {
             if !d.practice.finish_action(generation) {
+                return;
+            }
+            if d.practice.session() != Some(session.as_str()) {
+                poll(d);
                 return;
             }
             match r {
@@ -357,12 +390,16 @@ pub fn step(d: &mut Desktop, action: String, name: String, session: String) {
                             text: text.to_string(),
                         });
                         p.container = Some(id);
-                    } else if action == "inspect" && row.is_none() && next["detail"].is_object() {
+                    } else if action == "inspect"
+                        && inspect.map_or(row.is_none(), |kind| kind != Kind::Containers)
+                        && next["detail"].is_object()
+                    {
                         p.inspected = Some(Inspected {
                             stage,
                             detail: next["detail"].clone(),
                         });
                     }
+                    p.apply_snapshot(next);
                 }
                 Ok(_) => {}
                 Err(e) => d.toasts.push(e, true),
@@ -403,7 +440,15 @@ fn step_button(
     let Some((_, icon)) = TOOLBAR_STEPS.iter().find(|(a, _)| *a == step_ui.action) else {
         return 0.;
     };
-    if step_ui.action == "inspect" && rows.contains(&step_ui.name) {
+    let row_kind = if shown(d) == Some(Flavor::Volumes) {
+        Kind::Volumes
+    } else {
+        Kind::Containers
+    };
+    if step_ui.action == "inspect"
+        && inspect_kind(s).is_none_or(|kind| kind == row_kind)
+        && rows.contains(&step_ui.name)
+    {
         return 0.;
     }
     let label = d.tv(
@@ -799,7 +844,12 @@ fn volumes(d: &mut Desktop, ui: &mut Ui, x: f32, y0: f32, w: f32, s: &Value) -> 
         if acted {
             remove(d, name);
         } else if open {
-            act(d, "inspect", name, session.clone());
+            let action = if inspect_kind(s).is_some_and(|kind| kind != Kind::Volumes) {
+                "inspect-volume"
+            } else {
+                "inspect"
+            };
+            act(d, action, name, session.clone());
         }
     }
     y - y0
@@ -860,7 +910,6 @@ fn containers(d: &mut Desktop, ui: &mut Ui, x: f32, y0: f32, w: f32, s: &Value) 
             true,
         ) {
             d.practice.container = None;
-            d.practice.log = None;
             return 0.;
         }
         heading(ui, x + 40., y + 3., w - 90., &name, 16.);
@@ -999,11 +1048,10 @@ fn containers(d: &mut Desktop, ui: &mut Ui, x: f32, y0: f32, w: f32, s: &Value) 
 fn open_container(d: &mut Desktop, s: &Value, c: &Value, session: String) {
     let id = c["Id"].as_str().unwrap_or_default().to_string();
     let name = container_name(c);
-    if d.practice.log.as_ref().is_some_and(|l| l.id != id) {
-        d.practice.log = None;
-    }
     d.practice.container = Some(id.clone());
-    if step_ui(s).is_some_and(|u| u.action == "inspect" && u.name == name) {
+    if step_ui(s).is_some_and(|u| u.action == "inspect" && u.name == name)
+        && inspect_kind(s).is_none_or(|kind| kind == Kind::Containers)
+    {
         step(d, "inspect".into(), name, session);
     } else if s["inspect_container"] == name.as_str() {
         act(d, "inspect-failed", id, session);
@@ -1016,13 +1064,120 @@ mod tests {
     use crate::Options;
     use crate::jobs::Done;
     use podbag_desktop_core::{Backend, mock};
+    use serde_json::json;
 
-    #[test]
-    fn a_late_poll_keeps_the_log_from_a_newer_action() {
+    fn practice() -> Desktop {
         let (api, events) = Backend::mock(mock::Options::default(), || {});
         let mut d = Desktop::new(api, events, Options::inline());
         d.jobs.drain();
         d.page = Page::LabContainers;
+        d
+    }
+
+    // Run only the action completion so the subsequent poll remains unapplied.
+    fn reply(d: &Desktop) -> Box<dyn FnOnce(&mut Desktop) + Send> {
+        let Done::View(reply) = d.jobs.drain().pop().unwrap() else {
+            panic!("expected a practice reply");
+        };
+        reply
+    }
+
+    fn at_logs() -> Desktop {
+        let mut d = practice();
+        let api = d.api.clone();
+        api.practice("start", None, Some("web-service-recovery"), false, false)
+            .unwrap();
+        api.practice("advance", None, None, false, true).unwrap();
+        let status = api.practice("status", None, None, false, true).unwrap();
+        let next = api
+            .practice(
+                "inspect-failed",
+                status["session"].as_str(),
+                status["containers"][0]["Id"].as_str(),
+                false,
+                true,
+            )
+            .unwrap();
+        assert_eq!(next["stage"], "readRecoveryLogs");
+        d.practice.apply_snapshot(next);
+        d
+    }
+
+    #[test]
+    fn a_failed_status_and_recovery_keep_output_for_the_same_session() {
+        let mut d = practice();
+        let next = json!({
+            "session": "practice-1", "stage": "ready",
+            "containers": [{"Id":"web"}], "volumes": [{"Name":"data"}],
+        });
+        d.practice.apply_snapshot(next.clone());
+        let log = StepLog {
+            id: "web".into(),
+            stage: "ready".into(),
+            text: "kept log".into(),
+        };
+        let inspect = Inspected {
+            stage: "ready".into(),
+            detail: json!({"Name":"data", "Mountpoint":"/data"}),
+        };
+        d.practice.log = Some(log.clone());
+        d.practice.inspected = Some(inspect.clone());
+        d.practice
+            .apply_status(Err("temporary status failure".into()));
+        assert!(state(&d).is_none());
+        assert_eq!(d.practice.error, "temporary status failure");
+        d.practice.apply_status(Ok(next.clone()));
+        assert_eq!(d.practice.log.as_ref(), Some(&log));
+        assert_eq!(d.practice.inspected.as_ref(), Some(&inspect));
+
+        let mut missing = next;
+        missing["containers"] = json!([]);
+        missing["volumes"] = json!([]);
+        d.practice.apply_status(Ok(missing));
+        assert!(d.practice.log.is_none());
+        assert!(d.practice.inspected.is_none());
+    }
+
+    #[test]
+    fn a_step_completion_updates_the_stage_before_the_follow_up_poll() {
+        let mut d = at_logs();
+        let session = session(&d).unwrap();
+        step(&mut d, "logs".into(), "lab-web".into(), session);
+        let complete = reply(&d);
+        assert!(d.practice.busy);
+        complete(&mut d);
+        assert!(!d.practice.busy);
+        assert_eq!(state(&d).unwrap()["stage"], "removeFailed");
+        let log = d.practice.log.as_ref().unwrap();
+        assert_eq!(log.stage, "removeFailed");
+        assert!(log.text.contains("SITE_TITLE is required"));
+    }
+
+    #[test]
+    fn a_late_step_reply_cannot_replace_the_new_sessions_output() {
+        let mut d = at_logs();
+        let id = state(&d).unwrap()["containers"][0]["Id"].clone();
+        let old_session = session(&d).unwrap();
+        step(&mut d, "logs".into(), "lab-web".into(), old_session.clone());
+        let complete = reply(&d);
+        let api = d.api.clone();
+        api.practice("start", None, Some("web-service-recovery"), false, false)
+            .unwrap();
+        api.practice("advance", None, None, false, true).unwrap();
+        poll(&mut d);
+        reply(&d)(&mut d);
+        assert_ne!(session(&d).as_deref(), Some(old_session.as_str()));
+        assert_eq!(state(&d).unwrap()["containers"][0]["Id"], id);
+        complete(&mut d);
+        assert!(!d.practice.busy);
+        assert!(d.practice.log.is_none());
+        assert!(d.practice.container.is_none());
+        assert_eq!(state(&d).unwrap()["stage"], "inspectFailed");
+    }
+
+    #[test]
+    fn a_late_poll_keeps_the_log_from_a_newer_action() {
+        let mut d = practice();
         poll(&mut d);
         let Done::View(old_status) = d.jobs.drain().pop().unwrap() else {
             panic!("expected a practice status reply");

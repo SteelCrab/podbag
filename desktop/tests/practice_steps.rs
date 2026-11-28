@@ -144,6 +144,29 @@ fn the_log_goes_when_the_step_moves_on() {
 }
 
 #[test]
+fn recovery_logs_stay_available_after_back_and_opening_another_container() {
+    let mut h = window();
+    at_the_logs_step(&mut h);
+    h.click_id(practice::row_id(0).with("action"));
+    wake(&mut h);
+    assert!(h.shows("SITE_TITLE is required"));
+
+    let snapshot = h.view_mut().app.practice.state.as_mut().unwrap();
+    snapshot["containers"].as_array_mut().unwrap().push(json!({
+         "Id":"other", "Names":["/another-container"], "Image":"busybox",
+         "State":"running", "Status":"Up",
+    }));
+    h.click_id(practice::DETAIL_BACK);
+    assert!(app(&h).practice.log.is_some());
+    h.click_id(practice::row_id(1));
+    assert!(!h.shows("SITE_TITLE is required"));
+    assert!(app(&h).practice.log.is_some());
+    h.click_id(practice::DETAIL_BACK);
+    h.click_id(practice::row_id(0));
+    assert!(h.shows("SITE_TITLE is required"));
+}
+
+#[test]
 fn a_removal_goes_only_to_the_session_the_learner_confirmed() {
     let mut h = window();
     at_the_logs_step(&mut h);
@@ -216,6 +239,40 @@ fn network_module() -> String {
         ],
     })
     .to_string()
+}
+
+#[test]
+fn a_volume_with_the_networks_name_does_not_take_over_network_inspect() {
+    let mut h = window();
+    let mut module: Value = serde_json::from_str(&network_module()).unwrap();
+    module["id"] = json!("same-name-inspect");
+    module["steps"].as_array_mut().unwrap().insert(
+        0,
+        json!({
+            "key": "createVolume", "names": {"en":"Create a volume"},
+            "command": "podbag volume create lab-net",
+            "check": {"kind":"volume-exists","name":"lab-net"},
+        }),
+    );
+    let api = app(&h).api.clone();
+    api.training_modules("install", Some(&module.to_string()), None)
+        .unwrap();
+    start(&h, "same-name-inspect", 1);
+    h.click_id(shell::nav_id(Page::LabVolumes));
+    wake(&mut h);
+    assert_eq!(state(&h)["stage"], "inspectNet");
+    assert!(h.hitbox(practice::STEP).is_some());
+
+    h.click_id(practice::row_id(0));
+    wake(&mut h);
+    assert_eq!(state(&h)["stage"], "inspectNet");
+    assert!(app(&h).practice.volume.as_ref().unwrap()["Mountpoint"].is_string());
+    assert!(app(&h).practice.inspected.is_none());
+
+    h.click_id(practice::STEP);
+    wake(&mut h);
+    assert_eq!(state(&h)["stage"], "removeNet");
+    assert!(h.shows("10.89.0.0/24"));
 }
 
 #[test]
