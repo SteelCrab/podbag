@@ -14,7 +14,7 @@ pub mod registries;
 mod registry_presets;
 mod run;
 pub mod time;
-mod wire;
+pub(crate) mod wire;
 
 pub use choice::{Choice, Target, find_docker_cli, ui_dir};
 pub use create::{PublishedPort, RESTART_POLICIES, RunSpec, VolumeMount};

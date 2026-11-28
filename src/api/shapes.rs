@@ -394,7 +394,22 @@ fn mounts(f: &Facts) -> Vec<Value> {
     f.mounts
         .iter()
         .map(|m| {
+            let plugin = f
+                .spec
+                .mounts
+                .iter()
+                .find_map(|stored| match &stored.source {
+                    crate::volume::MountSource::Driver { driver, .. }
+                        if stored.target == m.target =>
+                    {
+                        Some(driver.as_str())
+                    }
+                    _ => None,
+                });
             let (name, source, driver) = match m.kind.as_str() {
+                "volume" if plugin.is_some() => {
+                    (m.source.clone(), String::new(), plugin.unwrap_or_default())
+                }
                 "volume" => (
                     m.source.clone(),
                     f.volumes.join(&m.source).join("data").display().to_string(),

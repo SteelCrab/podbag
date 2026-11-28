@@ -119,12 +119,42 @@ fn map_create_with(
         }
     }
     let mut targets: Vec<String> = Vec::new();
+    let driver = host["VolumeDriver"].as_str().unwrap_or_default();
+    let external_driver = !matches!(driver, "" | "local");
+    if external_driver {
+        crate::volume::check_driver_name(driver)?;
+    }
+    let anonymous_driver = || {
+        invalid(
+            "cannot use an external driver with an anonymous volume",
+            "the driver requires a volume name",
+            "mount named volumes at all targets or use the local driver",
+        )
+    };
     let mount = |c: Container, targets: &mut Vec<String>, m: MountRequest| {
         targets.push(m.target().to_string());
         c.mount(m)
     };
     for bind in strings(&host["Binds"]) {
-        let (m, warning) = parse_bind(&bind)?;
+        let (mut m, warning) = parse_bind(&bind)?;
+        if external_driver
+            && let MountRequest::Named {
+                name,
+                target,
+                access,
+                ..
+            } = m
+        {
+            m = MountRequest::NamedDriver {
+                name,
+                target,
+                access,
+                plugin: crate::volume::DriverVolume {
+                    name: driver.to_string(),
+                    options: Default::default(),
+                },
+            };
+        }
         warnings.extend(warning);
         c = mount(c, &mut targets, m);
     }
@@ -149,6 +179,9 @@ fn map_create_with(
         for target in volumes.keys() {
             // `-v host:/path` also lists /path here in some clients: the bind wins.
             if !targets.contains(target) {
+                if external_driver {
+                    return Err(anonymous_driver());
+                }
                 c = mount(
                     c,
                     &mut targets,
@@ -159,6 +192,15 @@ fn map_create_with(
                 );
             }
         }
+    }
+    if external_driver
+        && image
+            .config
+            .volumes
+            .iter()
+            .any(|target| !targets.contains(target))
+    {
+        return Err(anonymous_driver());
     }
     let network = network_mode(host["NetworkMode"].as_str().unwrap_or(""))?;
     let ports = port_bindings(&host["PortBindings"])?;
@@ -551,24 +593,45 @@ fn parse_mount(m: &Value) -> Result<(MountRequest, Option<String>)> {
                 access,
             }
         }
-        "volume" if source.is_empty() => MountRequest::Anonymous { target, access },
         "volume" => {
             let driver = m["VolumeOptions"]["DriverConfig"]["Name"]
                 .as_str()
                 .unwrap_or("");
-            if !matches!(driver, "" | "local") {
-                return Err(invalid(
-                    format!("invalid mount {spec}"),
-                    format!("volume driver {driver} is not supported"),
-                    "use local volumes",
-                ));
-            }
-            crate::volume::check_name(source)?;
-            MountRequest::Named {
-                name: source.to_string(),
-                target,
-                access,
-                nocopy: m["VolumeOptions"]["NoCopy"].as_bool().unwrap_or(false),
+            use crate::volume::Backend;
+            let opts =
+                super::objects::driver_options(&m["VolumeOptions"]["DriverConfig"]["Options"])?;
+            let backend = crate::volume::backend(driver, opts)?;
+            if source.is_empty() {
+                if !matches!(backend, Backend::Directory) {
+                    return Err(invalid(
+                        format!("invalid mount {spec}"),
+                        "a mount with a configured driver needs a volume name",
+                        "set a source name for the volume",
+                    ));
+                }
+                MountRequest::Anonymous { target, access }
+            } else {
+                crate::volume::check_name(source)?;
+                match backend {
+                    Backend::Nfs(nfs) => MountRequest::NamedNfs {
+                        name: source.to_string(),
+                        target,
+                        access,
+                        nfs,
+                    },
+                    Backend::Plugin(plugin) => MountRequest::NamedDriver {
+                        name: source.to_string(),
+                        target,
+                        access,
+                        plugin,
+                    },
+                    Backend::Directory | Backend::ExistingOrDirectory => MountRequest::Named {
+                        name: source.to_string(),
+                        target,
+                        access,
+                        nocopy: m["VolumeOptions"]["NoCopy"].as_bool().unwrap_or(false),
+                    },
+                }
             }
         }
         "tmpfs" => {
@@ -964,6 +1027,26 @@ mod tests {
             assert!(mounts.contains(&m), "{m} missing from {mounts:?}");
         }
         assert_eq!(mounts.len(), want.len(), "{mounts:?}");
+    }
+
+    #[test]
+    fn docker_external_driver_mounts_keep_names_and_options() {
+        let (c, _) = create(json!({
+            "VolumeDriver": "fixture",
+            "Binds": ["bare:/a:ro"],
+            "Mounts": [{
+                "Type": "volume", "Source": "structured", "Target": "/b",
+                "VolumeOptions": {"DriverConfig": {"Name":"fixture", "Options":{"pool":"dev"}}}
+            }],
+        }))
+        .unwrap();
+        let f = fields(&c);
+        assert_eq!(f["mounts"][0]["type"], "named_driver");
+        assert_eq!(f["mounts"][0]["access"], "ReadOnly");
+        assert_eq!(f["mounts"][0]["plugin"]["name"], "fixture");
+        assert_eq!(f["mounts"][1]["name"], "structured");
+        assert_eq!(f["mounts"][1]["plugin"]["options"]["pool"], "dev");
+        assert!(create(json!({"Mounts":[{"Type":"volume","Target":"/data", "VolumeOptions":{"DriverConfig":{"Name":"fixture"}}}]})).is_err());
     }
 
     #[test]

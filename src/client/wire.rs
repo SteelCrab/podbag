@@ -83,10 +83,15 @@ pub fn send(
         head.push_str(&format!("{k}: {v}\r\n"));
     }
     match &body {
-        Body::Json(b) => head.push_str(&format!(
-            "Content-Type: application/json\r\nContent-Length: {}\r\n\r\n",
-            b.len()
-        )),
+        Body::Json(b) => {
+            if !headers
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("Content-Type"))
+            {
+                head.push_str("Content-Type: application/json\r\n");
+            }
+            head.push_str(&format!("Content-Length: {}\r\n\r\n", b.len()));
+        }
         Body::Stream(kind, _) => head.push_str(&format!(
             "Content-Type: {kind}\r\nTransfer-Encoding: chunked\r\n\r\n"
         )),
