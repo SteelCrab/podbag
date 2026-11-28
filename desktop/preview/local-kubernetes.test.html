@@ -2,7 +2,8 @@
 <html lang="en">
 <meta charset="utf-8">
 <title>Local Kubernetes lifecycle test</title>
-<iframe src="preview.html?view=pods&amp;lang=en" width="950" height="720" title="Desktop preview"></iframe>
+<iframe id="mac" src="preview.html?view=pods&amp;platform=macos&amp;lang=en" width="950" height="720" title="Desktop preview"></iframe>
+<iframe id="windows" src="preview.html?view=pods&amp;platform=windows&amp;lang=en" hidden title="Windows Desktop preview"></iframe>
 <pre id="result">Running</pre>
 <script>
 "use strict";
@@ -19,7 +20,7 @@ async function until(read, message) {
 }
 
 async function test() {
-  const frame = document.querySelector("iframe");
+  const frame = document.getElementById("mac");
   await until(() => frame.contentDocument?.documentElement?.dataset.ready === "1" &&
     frame.contentDocument.getElementById("local-kube-open"), "Kubernetes did not load");
   const doc = frame.contentDocument;
@@ -43,13 +44,18 @@ async function test() {
   byId("local-kube-open").click();
   const version = await until(() => byId("local-kube-version"), "Local cluster form did not open");
   check(!inDialog("Reset cluster") && !inDialog("Remove"), "An external selection offers no reset or removal");
-  check(dialog().textContent.includes("PODBAG_KUBERNETES_NATIVE=1"), "The dialog shows the Linux opt-in");
+  const provider = byId("local-kube-provider");
+  check(provider?.options.length === 2 && provider.value === "docker",
+    "macOS shows both providers and keeps the existing default");
+  provider.value = "podbag-vm";
   version.value = "v1.35.8";
   byId("local-kube-nodes").value = "3";
   inDialog("Create cluster").click();
   await until(() => select.value === localContext && inDialog("Reset cluster"), "Create did not select the local context");
   check(calls[0][0] === "local_kube_create" && calls[0][1].version === "v1.35.8" &&
-    calls[0][1].nodes === 3, "Create sends the chosen version and node count");
+    calls[0][1].nodes === 3 && calls[0][1].managedVm === true,
+    "Create sends the chosen version, node count and managed VM provider");
+  check(dialog().textContent.includes("Podbag virtual machine"), "Show the recorded provider");
 
   async function confirm(button, accept) {
     const confirmation = byId("confirm");
@@ -79,6 +85,14 @@ async function test() {
     "Remove uses only the managed cluster");
   check(select.value === "staging" && ["dev", "staging", "ocp"].every(name => contexts().includes(name)),
     "Remove preserves all external contexts and the selected external context");
+
+  const windows = document.getElementById("windows");
+  const windowsButton = await until(() => windows.contentDocument?.documentElement?.dataset.ready === "1" &&
+    windows.contentDocument.getElementById("local-kube-open"), "Windows Kubernetes did not load");
+  windowsButton.click();
+  await until(() => windows.contentDocument.getElementById("local-kube-version"), "Windows cluster form did not open");
+  check(!windows.contentDocument.getElementById("local-kube-provider"),
+    "Windows uses the separate local Docker engine");
 }
 
 const result = document.getElementById("result");

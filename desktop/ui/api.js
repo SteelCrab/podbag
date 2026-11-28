@@ -33,7 +33,7 @@ const API = (() => {
     kubeCounts: (context, allNamespaces) => invoke("kube_counts", { context: context || null, allNamespaces }),
     kubeContexts: () => invoke("kube_contexts"),
     localKubeStatus: () => invoke("local_kube_status"),
-    localKubeCreate: (version, nodes) => invoke("local_kube_create", { version: version || null, nodes }),
+    localKubeCreate: (version, nodes, managedVm) => invoke("local_kube_create", { version: version || null, nodes, managedVm }),
     localKubeReset: () => invoke("local_kube_reset"),
     localKubeRemove: () => invoke("local_kube_remove"),
     kubeOpenShift: (context) => invoke("kube_openshift", { context: context || null }),

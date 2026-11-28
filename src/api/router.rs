@@ -74,6 +74,8 @@ pub struct Ctx {
     /// Host paths a bind mount may come from (the macOS VM's shared folders).
     /// None allows any path; an empty list allows no host paths.
     pub binds_under: Option<Vec<std::path::PathBuf>>,
+    /// Only the guest API opened for a Desktop Kind operation allows its kernel mounts.
+    pub(crate) kind_node_binds: bool,
 }
 
 impl Ctx {
@@ -84,6 +86,7 @@ impl Ctx {
             attachments: Default::default(),
             execs: Default::default(),
             binds_under: None,
+            kind_node_binds: false,
         }
     }
 

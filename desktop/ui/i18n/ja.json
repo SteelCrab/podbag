@@ -1,6 +1,10 @@
 {
   "kube.localTitle": "ローカルクラスター",
   "kube.localPrerequisites": "kind と kubectl が必要です。別のローカル Docker エンジンを使ってください。準備済みの Linux ホストでは、Podbag エンジンを root で実行し、PODBAG_KUBERNETES_NATIVE=1 を指定して Desktop を起動できます。",
+  "kube.localPrerequisitesDocker": "kind、kubectl、Docker CLI が必要です。Linux コンテナを実行する別のローカル Docker エンジンを使ってください。",
+  "kube.localPrerequisitesMac": "kind、kubectl、Docker CLI が必要です。Podbag の仮想マシンか、Linux コンテナを実行する別のローカル Docker エンジンを選んでください。",
+  "kube.localPodbagVm": "Podbag の仮想マシン",
+  "kube.localDockerEngine": "別のローカル Docker エンジン",
   "kube.localVersion": "Kubernetes バージョン",
   "kube.localNodes": "ノード数",
   "kube.localDefault": "kind の既定値",

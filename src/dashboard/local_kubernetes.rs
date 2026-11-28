@@ -13,6 +13,7 @@ enum Provider {
     #[default]
     Docker,
     Podbag,
+    PodbagVm,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -40,6 +41,7 @@ pub struct LocalCluster {
     context: String,
     version: Option<String>,
     nodes: u8,
+    provider: Provider,
     ready: bool,
 }
 
@@ -49,6 +51,7 @@ impl From<Record> for LocalCluster {
             context: format!("kind-{}", record.name),
             version: record.version,
             nodes: record.nodes,
+            provider: record.provider,
             ready: record.ready,
         }
     }
@@ -73,8 +76,79 @@ pub fn status() -> Result<Option<LocalCluster>, String> {
 pub fn create(version: Option<String>, nodes: u8) -> Result<LocalCluster, String> {
     let version = version.filter(|v| !v.is_empty());
     check_settings(version.as_deref(), nodes)?;
-    let native = std::env::var("PODBAG_KUBERNETES_NATIVE").as_deref() == Ok("1");
-    create_in(&directory()?, docker_host()?, version, nodes, native, &run)
+    let provider = if std::env::var("PODBAG_KUBERNETES_NATIVE").as_deref() == Ok("1") {
+        Provider::Podbag
+    } else {
+        Provider::Docker
+    };
+    create_in(
+        &directory()?,
+        docker_host()?,
+        version,
+        nodes,
+        provider,
+        &run,
+    )
+}
+
+/// Create using Podbag's own VM, with no dependence on the Docker CLI's context.
+pub fn create_on_vm(version: Option<String>, nodes: u8) -> Result<LocalCluster, String> {
+    let version = version.filter(|v| !v.is_empty());
+    check_settings(version.as_deref(), nodes)?;
+    let (_, endpoint) = managed_vm()?;
+    create_in(
+        &directory()?,
+        endpoint.describe(),
+        version,
+        nodes,
+        Provider::PodbagVm,
+        &run,
+    )
+}
+
+fn managed_vm() -> Result<(PathBuf, crate::client::Endpoint), String> {
+    if !cfg!(target_os = "macos") {
+        return Err("Local Kubernetes in the Podbag VM requires macOS".into());
+    }
+    let podbag = crate::client::podbag_program();
+    let endpoint = crate::client::Endpoint::podbag_default(&podbag)?;
+    Ok((podbag, endpoint))
+}
+
+fn start_managed_vm(host: &str) -> Result<(), String> {
+    let (podbag, endpoint) = managed_vm()?;
+    if host != endpoint.describe() {
+        return Err("The local cluster belongs to a different Podbag VM".into());
+    }
+    endpoint.ensure_running(&podbag, true)
+}
+
+struct KindHost {
+    socket: String,
+    #[cfg(target_os = "macos")]
+    _proxy: Option<crate::macos::kind::Socket>,
+}
+
+impl KindHost {
+    fn open(host: &str, provider: Provider) -> Result<Self, String> {
+        if provider == Provider::PodbagVm {
+            #[cfg(target_os = "macos")]
+            {
+                let proxy = crate::macos::kind::Socket::open()?;
+                return Ok(Self {
+                    socket: proxy.host(),
+                    _proxy: Some(proxy),
+                });
+            }
+            #[cfg(not(target_os = "macos"))]
+            return Err("Local Kubernetes in the Podbag VM requires macOS".into());
+        }
+        Ok(Self {
+            socket: host.into(),
+            #[cfg(target_os = "macos")]
+            _proxy: None,
+        })
+    }
 }
 
 pub fn reset() -> Result<LocalCluster, String> {
@@ -92,10 +166,11 @@ fn reset_in(
     let _lock = operation(dir)?;
     let mut record = owned(dir)?;
     check_engine(&record, run)?;
+    let host = KindHost::open(&record.host, record.provider)?;
     record.ready = false;
     save(dir, &record)?;
-    delete(dir, &record, run)?;
-    provision(dir, record, run)
+    delete(dir, &record, &host, run)?;
+    provision(dir, record, &host, run)
 }
 
 fn remove_in(
@@ -105,7 +180,8 @@ fn remove_in(
     let _lock = operation(dir)?;
     let record = owned(dir)?;
     check_engine(&record, run)?;
-    delete(dir, &record, run)?;
+    let host = KindHost::open(&record.host, record.provider)?;
+    delete(dir, &record, &host, run)?;
     remove_file(&dir.join("kubeconfig"))?;
     remove_file(&dir.join("cluster.json"))
 }
@@ -167,14 +243,18 @@ fn create_in(
     host: String,
     version: Option<String>,
     nodes: u8,
-    allow_native: bool,
+    provider: Provider,
     run: &impl Fn(&mut Command) -> Result<String, String>,
 ) -> Result<LocalCluster, String> {
     let _lock = operation(dir)?;
     if read(dir)?.is_some() {
         return Err("Podbag already manages a local cluster".into());
     }
-    let engine = engine(&host, allow_native, run)?;
+    if provider == Provider::PodbagVm {
+        start_managed_vm(&host)?;
+    }
+    let engine = engine(&host, provider, run)?;
+    let kind_host = KindHost::open(&host, engine.provider)?;
     let name_file = tempfile::Builder::new()
         .prefix("podbag-")
         .rand_bytes(12)
@@ -196,19 +276,20 @@ fn create_in(
         ready: false,
     };
 
-    let clusters = run(kind(&record.host)?.args(["get", "clusters"]))?;
+    let clusters = run(kind(&kind_host.socket)?.args(["get", "clusters"]))?;
     if clusters.lines().any(|line| line.trim() == record.name) {
         return Err("A cluster already has the generated name. Try again.".into());
     }
     // Claim the unique name before starting kind. A failed or interrupted creation
     // can then be reset or removed safely with the same private kubeconfig.
     save(dir, &record)?;
-    provision(dir, record, run)
+    provision(dir, record, &kind_host, run)
 }
 
 fn provision(
     dir: &Path,
     mut record: Record,
+    host: &KindHost,
     run: &impl Fn(&mut Command) -> Result<String, String>,
 ) -> Result<LocalCluster, String> {
     use std::io::Write;
@@ -216,7 +297,7 @@ fn provision(
     config
         .write_all(node_config(record.nodes, record.provider).as_bytes())
         .map_err(|e| e.to_string())?;
-    let mut command = kind(&record.host)?;
+    let mut command = kind(&host.socket)?;
     command.args(["create", "cluster", "--name", &record.name, "--wait", "5m"]);
     command.arg("--config").arg(config.path());
     command.arg("--kubeconfig").arg(dir.join("kubeconfig"));
@@ -236,7 +317,10 @@ fn check_engine(
     record: &Record,
     run: &impl Fn(&mut Command) -> Result<String, String>,
 ) -> Result<(), String> {
-    let current = engine(&record.host, record.provider == Provider::Podbag, run)?;
+    if record.provider == Provider::PodbagVm {
+        start_managed_vm(&record.host)?;
+    }
+    let current = engine(&record.host, record.provider, run)?;
     if current.id != record.engine_id || current.provider != record.provider {
         return Err("The local cluster belongs to a different Docker engine".into());
     }
@@ -246,9 +330,10 @@ fn check_engine(
 fn delete(
     dir: &Path,
     record: &Record,
+    host: &KindHost,
     run: &impl Fn(&mut Command) -> Result<String, String>,
 ) -> Result<(), String> {
-    run(kind(&record.host)?
+    run(kind(&host.socket)?
         .args(["delete", "cluster", "--name", &record.name, "--kubeconfig"])
         .arg(dir.join("kubeconfig")))?;
     Ok(())
@@ -290,7 +375,7 @@ fn node_config(nodes: u8, provider: Provider) -> String {
         } else {
             "- role: worker\n"
         });
-        if provider == Provider::Podbag {
+        if provider != Provider::Docker {
             config.push_str("  extraMounts:\n  - hostPath: /dev/kmsg\n    containerPath: /dev/kmsg\n    readOnly: true\n");
         }
     }
@@ -327,7 +412,7 @@ fn local_host(host: &str) -> bool {
 
 fn engine(
     host: &str,
-    allow_native: bool,
+    requested: Provider,
     run: &impl Fn(&mut Command) -> Result<String, String>,
 ) -> Result<Engine, String> {
     if !local_host(host) {
@@ -344,16 +429,24 @@ fn engine(
     }
     let id = id.unwrap_or_default();
     if id != "podbag" {
+        if requested == Provider::PodbagVm {
+            return Err("The selected VM socket does not belong to Podbag".into());
+        }
         return Ok(Engine {
             provider: Provider::Docker,
             id: id.into(),
         });
     }
-    if !cfg!(target_os = "linux") {
-        return Err("kind needs a separate local Docker engine on this platform".into());
-    }
-    if !allow_native {
-        return Err("Select a separate Docker engine or set PODBAG_KUBERNETES_NATIVE=1 for rootful Linux Podbag".into());
+    match requested {
+        Provider::Podbag if cfg!(target_os = "linux") => {}
+        Provider::PodbagVm if cfg!(target_os = "macos") => {}
+        _ if cfg!(target_os = "linux") => {
+            return Err("Select a separate Docker engine or set PODBAG_KUBERNETES_NATIVE=1 for rootful Linux Podbag".into());
+        }
+        _ if cfg!(target_os = "macos") => {
+            return Err("Select the Podbag VM or a separate local Docker engine".into());
+        }
+        _ => return Err("Select a separate local Docker engine".into()),
     }
     let security = info["security"].as_array();
     if info["cgroup"] != "2"
@@ -370,7 +463,7 @@ fn engine(
         .filter(|s| !s.is_empty())
         .ok_or("Podbag did not report its host name")?;
     Ok(Engine {
-        provider: Provider::Podbag,
+        provider: requested,
         id: serde_json::json!(["podbag", name, root]).to_string(),
     })
 }
@@ -485,7 +578,7 @@ mod tests {
             TEST_HOST.into(),
             Some("v1.35.8".into()),
             3,
-            false,
+            Provider::Docker,
             &run,
         )
         .unwrap();
@@ -534,9 +627,16 @@ mod tests {
             other => panic!("unexpected operation {other}"),
         };
         assert_eq!(
-            create_in(dir.path(), TEST_HOST.into(), None, 1, false, &run)
-                .err()
-                .as_deref(),
+            create_in(
+                dir.path(),
+                TEST_HOST.into(),
+                None,
+                1,
+                Provider::Docker,
+                &run
+            )
+            .err()
+            .as_deref(),
             Some("kind exited")
         );
         let record = owned(dir.path()).unwrap();
@@ -563,15 +663,15 @@ mod tests {
             "cgroup":"2", "security":["name=cgroupns"],
         });
         let query = |_: &mut Command| Ok(info.to_string());
-        assert!(engine(TEST_HOST, false, &query).is_err());
+        assert!(engine(TEST_HOST, Provider::Docker, &query).is_err());
         let mut rootless = info.clone();
         rootless["security"] = serde_json::json!(["name=rootless"]);
-        assert!(engine(TEST_HOST, true, &|_| Ok(rootless.to_string())).is_err());
+        assert!(engine(TEST_HOST, Provider::Podbag, &|_| Ok(rootless.to_string())).is_err());
         let mut old_cgroup = info.clone();
         old_cgroup["cgroup"] = "1".into();
-        assert!(engine(TEST_HOST, true, &|_| Ok(old_cgroup.to_string())).is_err());
+        assert!(engine(TEST_HOST, Provider::Podbag, &|_| Ok(old_cgroup.to_string())).is_err());
         if cfg!(target_os = "linux") {
-            let native = engine(TEST_HOST, true, &query).unwrap();
+            let native = engine(TEST_HOST, Provider::Podbag, &query).unwrap();
             assert_eq!(native.provider, Provider::Podbag);
             assert_eq!(native.id, r#"["podbag","test-guest","/srv/podbag"]"#);
         }
@@ -580,6 +680,13 @@ mod tests {
         assert_eq!(native.matches("readOnly: true").count(), 2);
         assert!(native.contains("protectKernelDefaults: true"));
         assert!(!node_config(2, Provider::Docker).contains("/dev/kmsg"));
+        let vm = node_config(1, Provider::PodbagVm);
+        assert_eq!(vm.matches("hostPath: /dev/kmsg").count(), 1);
+        assert!(!vm.contains("protectKernelDefaults"));
+        if !cfg!(target_os = "macos") {
+            let failure = create_on_vm(None, 1).unwrap_err();
+            assert!(failure.contains("requires macOS"));
+        }
     }
 
     #[test]
@@ -590,7 +697,14 @@ mod tests {
         check_settings(Some(&version), 2).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let result = (|| -> Result<(), String> {
-            let cluster = create_in(dir.path(), docker_host()?, Some(version), 2, false, &run)?;
+            let cluster = create_in(
+                dir.path(),
+                docker_host()?,
+                Some(version),
+                2,
+                Provider::Docker,
+                &run,
+            )?;
             let config = dir.path().join("kubeconfig");
             let nodes = || -> Result<usize, String> {
                 let output = run(host_command("kubectl")?
@@ -617,6 +731,73 @@ mod tests {
         assert!(read(dir.path()).unwrap().is_none());
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "boots an isolated Podbag VM and needs kind, kubectl, and the Docker CLI"]
+    fn macos_desktop_manages_kind_in_its_private_vm() {
+        let home =
+            PathBuf::from(std::env::var_os("PODBAG_MAC_HOME").expect("use a private VM home"));
+        let standard_home = PathBuf::from(std::env::var_os("HOME").unwrap()).join(".podbag");
+        assert_ne!(
+            home.canonicalize().unwrap(),
+            standard_home.canonicalize().unwrap_or(standard_home)
+        );
+        assert!(std::env::var_os("PODBAG_UI_DIR").is_some_and(|value| !value.is_empty()));
+        let external = PathBuf::from(
+            std::env::var_os("KUBECONFIG").expect("use a private external kubeconfig"),
+        );
+        let original = fs::read(&external).unwrap();
+        assert!(status().unwrap().is_none());
+        let verify = |context: &str| -> Result<(), String> {
+            let config = kubeconfig().ok_or("the cluster did not create a private kubeconfig")?;
+            let kubectl = |args: &[&str]| {
+                run(host_command("kubectl")?
+                    .arg("--kubeconfig")
+                    .arg(&config)
+                    .args(args))
+            };
+            kubectl(&[
+                "wait",
+                "--for=condition=Ready",
+                "node",
+                "--all",
+                "--timeout=60s",
+            ])?;
+            let nodes = kubectl(&["get", "nodes", "-o", "name"])?;
+            if nodes.lines().count() != 2 || kubectl(&["get", "--raw=/readyz"])?.trim() != "ok" {
+                return Err("the two-node VM cluster did not become ready".into());
+            }
+            if !super::super::kubernetes::kube_contexts()?
+                .iter()
+                .any(|name| name == context)
+            {
+                return Err("Desktop could not discover the managed context".into());
+            }
+            println!("{}", kubectl(&["get", "nodes", "-o", "wide"])?.trim());
+            Ok(())
+        };
+        let result = (|| -> Result<(), String> {
+            let created = create_on_vm(Some("v1.35.8".into()), 2)?;
+            assert_eq!(created.provider, Provider::PodbagVm);
+            verify(&created.context)?;
+            println!("Desktop created the two-node cluster in its own VM.");
+            let reset = reset()?;
+            assert_eq!(reset.context, created.context);
+            verify(&reset.context)?;
+            println!("Desktop reset the same cluster.");
+            Ok(())
+        })();
+        let cleanup = status().unwrap().map(|_| remove());
+        if let Some(cleanup) = cleanup {
+            cleanup.unwrap();
+        }
+        result.unwrap();
+        assert!(status().unwrap().is_none());
+        assert!(!directory().unwrap().join("kubeconfig").exists());
+        assert_eq!(fs::read(external).unwrap(), original);
+        println!("Desktop removed the cluster and preserved the external kubeconfig.");
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     #[ignore = "requires a prepared rootful Podbag engine, kind, and a private PODBAG_UI_DIR"]
@@ -627,7 +808,7 @@ mod tests {
             Ok("1")
         );
         assert_eq!(
-            engine(&docker_host().unwrap(), true, &run)
+            engine(&docker_host().unwrap(), Provider::Podbag, &run)
                 .unwrap()
                 .provider,
             Provider::Podbag

@@ -7,7 +7,14 @@ pub fn local_kube_status() -> Result<Option<LocalCluster>, String> {
 }
 
 #[tauri::command(async)]
-pub fn local_kube_create(version: Option<String>, nodes: u8) -> Result<LocalCluster, String> {
+pub fn local_kube_create(
+    version: Option<String>,
+    nodes: u8,
+    managed_vm: Option<bool>,
+) -> Result<LocalCluster, String> {
+    if managed_vm == Some(true) {
+        return local_kubernetes::create_on_vm(version, nodes);
+    }
     local_kubernetes::create(version, nodes)
 }
 

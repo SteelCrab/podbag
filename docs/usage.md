@@ -1447,9 +1447,9 @@ podbag lab remove container-network
 
 #### Local development cluster
 
-- Install [kind](https://kind.sigs.k8s.io/docs/user/quick-start/) and `kubectl` on the
-  desktop host. Point the Docker CLI at a separate local Docker engine that runs Linux
-  containers, or opt in to the rootful Linux Podbag provider below.
+- Install [kind](https://kind.sigs.k8s.io/docs/user/quick-start/), `kubectl`, and the
+  Docker CLI on the desktop host. To use a separate Docker engine, select a local Docker
+  context that runs Linux containers.
 - Open **Kubernetes → Local cluster**. Enter a Kubernetes release tag supported by your
   kind version, or keep the kind default. Choose the node count and select **Create
   cluster**. The first node is the control plane, and the remaining nodes are workers.
@@ -1458,7 +1458,18 @@ podbag lab remove container-network
   normal kubeconfig and its current context are left alone.
 - **Reset cluster** deletes the Podbag-managed cluster and recreates it with the same
   settings. **Remove** deletes it and its private kubeconfig. Both erase the local
-  workloads and data. Podbag checks the original Docker engine before deleting anything.
+  workloads and data. Podbag checks the original engine before deleting anything.
+
+**Podbag VM on macOS**
+
+- Choose **Podbag virtual machine** in the **Local cluster** form. Desktop starts its
+  VM and uses a private Docker socket for the Kind operation. The Kubernetes API is
+  available on the Mac's loopback address. The Docker CLI is required for Kind.
+- Use an updated Podbag build and VM guest. The guest exposes its kernel modules
+  directory and `/dev/kmsg` as read-only mounts to the Kind nodes. The ordinary Docker
+  socket keeps its Mac folder-sharing rules.
+- On Windows, use a separate local Docker engine. The Podbag app's WSL transport
+  does not expose a Docker socket for Kind.
 
 **Rootful Linux Podbag provider**
 
@@ -1471,7 +1482,6 @@ podbag lab remove container-network
   checks these settings during startup.
 - The engine host must provide `/dev/kmsg`. Each Kind node receives a read-only mount of
   this device. The Kubernetes pods use the containerd bundled in the Kind nodes.
-- On macOS and Windows, use a separate local Docker engine.
 
 #### Image security analysis
 

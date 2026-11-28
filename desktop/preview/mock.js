@@ -303,8 +303,9 @@
     contexts: () => ["desktop-linux", "orbstack"],
     kube_contexts: () => ["dev", "staging", "ocp", ...(localCluster ? [localCluster.context] : [])],
     local_kube_status: () => localCluster,
-    local_kube_create: ({ version, nodes }) => {
-      localCluster = { context: "kind-podbag-demo123456", version, nodes, ready: true };
+    local_kube_create: ({ version, nodes, managedVm }) => {
+      localCluster = { context: "kind-podbag-demo123456", version, nodes,
+        provider: managedVm ? "podbagVm" : "docker", ready: true };
       return localCluster;
     },
     local_kube_reset: () => localCluster,
@@ -635,9 +636,12 @@
     await app.ready;
     const scenes = {
       pods: () => app.go("kubernetes"),
-      "local-kube": () => {
+      "local-kube": async () => {
         app.go("kubernetes");
         document.getElementById("local-kube-open").click();
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const provider = document.getElementById("local-kube-provider");
+        if (provider) provider.value = "podbag-vm";
       },
       claims: () => app.go("kubernetes", "claims"),
       services: () => app.go("kubernetes", "services"),

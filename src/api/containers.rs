@@ -163,12 +163,10 @@ fn create(req: &Request, ctx: &Ctx) -> Reply {
         Ok(b) => b,
         Err(e) => return message(400, format!("{e:?}")),
     };
-    if let Some(roots) = &ctx.binds_under {
-        for source in ok_or_reply!(super::create::bind_sources(&body)) {
-            if let Err(error) = super::create::check_shared_bind(&source, roots) {
-                return error;
-            }
-        }
+    if let Some(roots) = &ctx.binds_under
+        && let Err(error) = super::create::check_container_binds(&body, roots, ctx.kind_node_binds)
+    {
+        return error;
     }
     let (c, warnings) = ok_or_reply!(container_from_create(&body, name));
     let handle = ok_or_reply!(c.create());

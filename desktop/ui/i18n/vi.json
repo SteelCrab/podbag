@@ -1,6 +1,10 @@
 {
   "kube.localTitle": "Cụm cục bộ",
   "kube.localPrerequisites": "Cần kind và kubectl. Hãy dùng một Docker engine cục bộ riêng. Trên máy Linux đã được chuẩn bị, bạn có thể dùng Podbag engine chạy với quyền root và khởi động Desktop với PODBAG_KUBERNETES_NATIVE=1.",
+  "kube.localPrerequisitesDocker": "Cần kind, kubectl và Docker CLI. Dùng một Docker engine cục bộ riêng chạy container Linux.",
+  "kube.localPrerequisitesMac": "Cần kind, kubectl và Docker CLI. Chọn máy ảo Podbag hoặc một Docker engine cục bộ riêng chạy container Linux.",
+  "kube.localPodbagVm": "Máy ảo Podbag",
+  "kube.localDockerEngine": "Docker engine cục bộ riêng",
   "kube.localVersion": "Phiên bản Kubernetes",
   "kube.localNodes": "Số nút",
   "kube.localDefault": "Mặc định của kind",

@@ -66,12 +66,16 @@ function inspectKubeObject(item, context) {
 }
 
 function openLocalCluster(onChange) {
+  const platform = S.engine?.platform;
+  const managedVmAvailable = platform === "macos";
+  const prerequisites = managedVmAvailable ? "kube.localPrerequisitesMac"
+    : platform === "linux" ? "kube.localPrerequisites" : "kube.localPrerequisitesDocker";
   const section = h("div", { "aria-live": "polite" });
   const message = h("p", { class: "local-kube-message secondary-text", "aria-live": "polite" });
   const close = h("button", { type: "button", class: "button", text: t("action.back") });
   const dialog = h("dialog", { class: "local-kube", "aria-labelledby": "local-kube-title" },
     h("h2", { id: "local-kube-title", text: t("kube.localTitle") }),
-    h("p", { text: t("kube.localPrerequisites") }),
+    h("p", { text: t(prerequisites) }),
     section,
     message,
     h("div", { class: "buttons" }, close));
@@ -97,8 +101,11 @@ function openLocalCluster(onChange) {
           }, cluster.context);
         }
       });
+      const provider = cluster.provider === "podbagVm" ? t("kube.localPodbagVm")
+        : cluster.provider === "podbag" ? "Podbag" : t("kube.localDockerEngine");
       section.replaceChildren(h("dl", { class: "fields" },
         field(t("kube.cluster"), cluster.context, "mono"),
+        field(t("settings.engine"), provider),
         field(t("kube.localVersion"), cluster.version || t("kube.localDefault")),
         field(t("kube.localNodes"), cluster.nodes),
         field(t("settings.vmState"), t(cluster.ready ? "kube.localProvisioned" : "kube.localIncomplete"))),
@@ -110,13 +117,18 @@ function openLocalCluster(onChange) {
       pattern: "v1[.][0-9]{1,3}[.][0-9]{1,3}", title: "v1.35.0",
     });
     const nodes = h("input", { id: "local-kube-nodes", name: "nodes", type: "number", min: "1", max: "255", step: "1", value: "1", required: true });
+    const provider = managedVmAvailable ? h("select", { id: "local-kube-provider" },
+      h("option", { value: "docker", text: t("kube.localDockerEngine") }),
+      h("option", { value: "podbag-vm", text: t("kube.localPodbagVm") })) : null;
     const form = h("form", { class: "local-kube-form" },
+      provider && h("label", { for: provider.id }, t("settings.engine"), provider),
       h("label", { for: "local-kube-version" }, t("kube.localVersion"), version),
       h("label", { for: "local-kube-nodes" }, t("kube.localNodes"), nodes),
       h("button", { type: "submit", class: "button primary", text: t("kube.localCreate") }));
     form.addEventListener("submit", (event) => {
       event.preventDefault();
-      perform(t("kube.localCreating"), () => API.localKubeCreate(version.value.trim(), nodes.valueAsNumber));
+      perform(t("kube.localCreating"), () => API.localKubeCreate(
+        version.value.trim(), nodes.valueAsNumber, provider?.value === "podbag-vm"));
     });
     section.replaceChildren(form);
     if (dialog.open && !busy) version.focus();
@@ -126,7 +138,7 @@ function openLocalCluster(onChange) {
     if (busy) return;
     busy = true;
     close.disabled = true;
-    section.querySelectorAll("button, input").forEach((el) => { el.disabled = true; });
+    section.querySelectorAll("button, input, select").forEach((el) => { el.disabled = true; });
     message.classList.remove("error-text");
     message.textContent = label;
     try {
@@ -141,7 +153,7 @@ function openLocalCluster(onChange) {
     } finally {
       busy = false;
       close.disabled = false;
-      section.querySelectorAll("button, input").forEach((el) => { el.disabled = false; });
+      section.querySelectorAll("button, input, select").forEach((el) => { el.disabled = false; });
     }
   }
 

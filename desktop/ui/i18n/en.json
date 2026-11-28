@@ -1,6 +1,10 @@
 {
   "kube.localTitle": "Local cluster",
   "kube.localPrerequisites": "Requires kind and kubectl. Use a separate local Docker engine. On prepared Linux hosts, you can use a rootful Podbag engine and start Desktop with PODBAG_KUBERNETES_NATIVE=1.",
+  "kube.localPrerequisitesDocker": "Requires kind, kubectl, and the Docker CLI. Use a separate local Docker engine running Linux containers.",
+  "kube.localPrerequisitesMac": "Requires kind, kubectl, and the Docker CLI. Choose the Podbag virtual machine or a separate local Docker engine running Linux containers.",
+  "kube.localPodbagVm": "Podbag virtual machine",
+  "kube.localDockerEngine": "Separate local Docker engine",
   "kube.localVersion": "Kubernetes version",
   "kube.localNodes": "Node count",
   "kube.localDefault": "kind default",
