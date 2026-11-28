@@ -108,13 +108,14 @@ fn run_build(a: BuildArgs) -> podbag::Result<()> {
     if a.buildkit {
         return crate::buildkit::run(
             &opts,
-            crate::buildkit::Options {
+            podbag::build::managed::Options {
                 platform: a.platform.as_deref(),
                 output: a.output.as_deref(),
                 secrets: &a.secret,
                 ssh: &a.ssh,
                 cache_from: &a.cache_from,
                 cache_to: &a.cache_to,
+                ..Default::default()
             },
         );
     }

@@ -42,7 +42,7 @@ pub struct ServeOptions {
     pub timeout: Option<Duration>,
     /// The listening socket from systemd socket activation.
     pub activated: Option<OwnedFd>,
-    /// Run a private BuildKit worker for the optional Buildx Engine driver.
+    /// Enable managed BuildKit for Docker Buildx and HTTP v2 builds.
     pub managed_buildkit: bool,
 }
 

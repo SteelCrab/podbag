@@ -189,7 +189,7 @@ pub fn route(req: &Request, ctx: &Ctx) -> Reply {
             Some(worker) => super::buildkit::upgrade(req, worker, *endpoint == "session"),
             None => message(404, "page not found"),
         },
-        // Builder-Version 1: the classic builder (`POST /build`), not BuildKit.
+        // Keep the classic builder as the default recommendation. BuildKit is opt-in.
         ("GET" | "HEAD", ["_ping"]) => Reply::Headed(
             vec![("Builder-Version", "1".to_string())],
             Box::new(Reply::Text(200, "OK".to_string())),
@@ -214,7 +214,7 @@ pub fn route(req: &Request, ctx: &Ctx) -> Reply {
             super::exec::route(req, ctx, rest).unwrap_or_else(|| message(404, "page not found"))
         }
         ("POST", ["commit"]) => super::build::commit(req),
-        ("POST", ["build"]) => super::build::build(req),
+        ("POST", ["build"]) => super::build::build(req, ctx),
         ("POST", ["build", "prune"]) => super::build::prune_cache(ctx),
         (_, ["build", ..]) => not_supported(
             "BuildKit's build API",

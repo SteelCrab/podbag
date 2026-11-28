@@ -10,6 +10,9 @@ pub mod ignore;
 pub mod layer;
 #[cfg(target_os = "linux")]
 #[doc(hidden)]
+pub mod managed;
+#[cfg(target_os = "linux")]
+#[doc(hidden)]
 pub mod managed_worker;
 pub mod plan;
 pub mod shell;

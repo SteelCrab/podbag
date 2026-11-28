@@ -202,6 +202,17 @@ fn worker_exports_oci_platforms_and_reuses_external_cache() {
     }
     assert!(architectures.contains("amd64") && architectures.contains("arm64"));
 
+    let busybox = std::env::var_os("PODBAG_TEST_BUSYBOX").unwrap_or("/usr/bin/busybox".into());
+    std::fs::copy(busybox, context.join("busybox")).unwrap();
+    std::fs::write(
+        context.join("Dockerfile"),
+        r#"FROM scratch
+COPY busybox /bin/busybox
+COPY note /note
+RUN ["/bin/busybox", "sh", "-c", "/bin/busybox head -c 32 /dev/urandom > /cache-proof"]
+"#,
+    )
+    .unwrap();
     let cache = sb.tmp.path().join("cache");
     let first = sb.tmp.path().join("first");
     let second = sb.tmp.path().join("second");
@@ -215,7 +226,7 @@ fn worker_exports_oci_platforms_and_reuses_external_cache() {
             &format!("type=local,dest={},mode=max", cache.display()),
         ],
     );
-    let reused = build(
+    build(
         &sb,
         &context,
         &[
@@ -225,7 +236,10 @@ fn worker_exports_oci_platforms_and_reuses_external_cache() {
             &format!("type=local,src={}", cache.display()),
         ],
     );
-    assert!(stderr(&reused).contains("CACHED"), "{}", stderr(&reused));
+    // Compare the RUN result. A remote cache hit may log downloads instead of CACHED.
+    let cached = read(&first.join("cache-proof"));
+    assert_eq!(cached.len(), 32);
+    assert_eq!(read(&second.join("cache-proof")), cached);
     assert_eq!(
         read(&second.join("note")),
         b"from an actual BuildKit worker\n"
@@ -287,6 +301,179 @@ fn interrupting_the_client_stops_the_worker_and_removes_its_state() {
     }
     clean(&sb);
     println!("PASS: interrupting BuildKit stops the private worker and removes its state");
+}
+
+#[test]
+fn engine_v2_requires_an_opt_in_service() {
+    let sb = Sandbox::new();
+    let service = Service::start(&sb, &["--timeout", "0"]);
+    let (response, headers) = curl(&service.socket, &["--request", "POST", "/build?version=2"]);
+    assert!(headers.starts_with("HTTP/1.1 501 "), "{headers} {response}");
+    assert!(response.contains("system service --buildkit"), "{response}");
+}
+
+fn v2_build(service: &Service, context: &[u8], query: &str, headers: &[&str]) -> String {
+    use std::io::Write;
+    let mut archive = tempfile::NamedTempFile::new().unwrap();
+    archive.write_all(context).unwrap();
+    let mut args = vec![
+        "--max-time",
+        "25",
+        "--request",
+        "POST",
+        "--header",
+        "Content-Type: application/x-tar",
+    ];
+    let body = format!("@{}", archive.path().display());
+    args.extend(["--data-binary", &body]);
+    args.extend_from_slice(headers);
+    let url = format!("/build?version=2&{query}");
+    args.push(&url);
+    let (body, headers) = curl(&service.socket, &args);
+    assert!(headers.starts_with("HTTP/1.1 200 "), "{headers} {body}");
+    body
+}
+
+fn build_message(body: &str) -> Vec<serde_json::Value> {
+    body.lines()
+        .map(|line| serde_json::from_str(line).unwrap_or_else(|e| panic!("{e}: {body}")))
+        .collect()
+}
+
+#[test]
+fn engine_v2_loads_a_tar_build_and_reports_progress_and_errors() {
+    use common::registry::{TarEntry, gzip, layer};
+    if !enabled() {
+        return;
+    }
+    let sb = Sandbox::new();
+    let service = Service::start(&sb, &["--buildkit", "--timeout", "0"]);
+    let (_, ping) = curl(&service.socket, &["/_ping"]);
+    assert!(ping.contains("Builder-Version: 1"), "{ping}");
+    let (body, headers) = curl(
+        &service.socket,
+        &[
+            "--request",
+            "POST",
+            "/build?version=2&outputs=%5B%7B%22type%22%3A%22local%22%7D%5D",
+        ],
+    );
+    assert!(headers.starts_with("HTTP/1.1 501 "), "{headers} {body}");
+    assert!(body.contains("custom build outputs"), "{body}");
+
+    let archive = gzip(&layer(&[
+        TarEntry::file(
+            "Containerfile",
+            b"FROM scratch AS actual\nARG LABEL_VALUE\nLABEL hello=$LABEL_VALUE\nCOPY note /note\nFROM scratch AS other\n",
+        ),
+        TarEntry::file("note", b"Docker Engine v2 context\n"),
+    ]));
+    let body = v2_build(
+        &service,
+        &archive,
+        "t=managed-v2%3Afirst&t=managed-v2%3Asecond&dockerfile=Containerfile&target=actual&buildargs=%7B%22LABEL_VALUE%22%3A%22engine%22%7D&networkmode=none",
+        &[],
+    );
+    let messages = build_message(&body);
+    assert!(
+        messages.iter().any(|item| item.get("stream").is_some()),
+        "{body}"
+    );
+    assert!(
+        messages.iter().all(|item| item.get("error").is_none()),
+        "{body}"
+    );
+    let id = messages.last().unwrap()["aux"]["ID"].as_str().unwrap();
+    assert!(id.starts_with("sha256:"), "{body}");
+    let inspected = checked(docker_out(
+        &sb,
+        &service,
+        &[
+            "image",
+            "inspect",
+            "--format",
+            r#"{{ .Id }} {{ index .Config.Labels "hello" }}"#,
+            "managed-v2:second",
+        ],
+    ));
+    assert_eq!(stdout(&inspected), format!("{id} engine"));
+
+    let archive = layer(&[TarEntry::file(
+        "Dockerfile",
+        b"FROM scratch\nCOPY missing /file\n",
+    )]);
+    let body = v2_build(&service, &archive, "t=managed-v2%3Ainvalid&q=true", &[]);
+    let messages = build_message(&body);
+    assert_eq!(messages.len(), 1, "{body}");
+    assert!(
+        messages[0]["error"].as_str().unwrap().contains("missing"),
+        "{body}"
+    );
+    clean(&sb);
+    println!("PASS: Docker Engine HTTP v2 tar build, tags, streamed progress, and errors");
+}
+
+#[test]
+fn engine_v2_uses_the_requests_registry_credentials() {
+    use common::registry::{Auth, FakeRegistry, TarEntry, TestImage, base64, layer};
+    if !enabled() || !root_mode() {
+        return;
+    }
+    let sb = Sandbox::new();
+    let service = Service::start(&sb, &["--buildkit", "--timeout", "0"]);
+    let secret = "engine-build-fixture-token";
+    let registry = FakeRegistry::start_with(Auth::basic("builder", secret));
+    registry.push(
+        "protected/base",
+        "test",
+        &TestImage {
+            layers: vec![layer(&[TarEntry::file(
+                "private-note",
+                b"access granted\n",
+            )])],
+            config: serde_json::json!({}),
+        },
+    );
+    let dockerfile = format!(
+        "FROM {}/protected/base:test\nLABEL private=verified\n",
+        registry.host
+    );
+    let archive = layer(&[TarEntry::file("Dockerfile", dockerfile.as_bytes())]);
+
+    let body = v2_build(&service, &archive, "pull=true&q=true", &[]);
+    let messages = build_message(&body);
+    assert!(messages.last().unwrap().get("error").is_some(), "{body}");
+
+    let credentials =
+        serde_json::json!({registry.host: {"username": "builder", "password": secret}});
+    let header = format!(
+        "X-Registry-Config: {}",
+        base64(credentials.to_string().as_bytes())
+    );
+    let body = v2_build(
+        &service,
+        &archive,
+        "pull=true&q=true&t=managed-v2%3Aprivate",
+        &["--header", &header],
+    );
+    assert!(!body.contains(secret), "{body}");
+    let messages = build_message(&body);
+    assert_eq!(messages.len(), 1, "{body}");
+    assert!(messages[0]["aux"]["ID"].is_string(), "{body}");
+    let inspected = checked(docker_out(
+        &sb,
+        &service,
+        &[
+            "image",
+            "inspect",
+            "--format",
+            r#"{{ index .Config.Labels "private" }}"#,
+            "managed-v2:private",
+        ],
+    ));
+    assert_eq!(stdout(&inspected), "verified");
+    clean(&sb);
+    println!("PASS: Docker Engine HTTP v2 uses only the supplied registry credentials");
 }
 
 /// Set PODBAG_TEST_BUILDX to an executable Docker Buildx plugin to enable this test.

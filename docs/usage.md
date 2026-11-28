@@ -937,9 +937,8 @@ podbag system docker restore    # back to the context you had (Docker Desktop, â
   `--link`, port ranges, other network or volume drivers.
 - Accepted with a warning, because ignoring them is safe: ulimits, unsupported log drivers, fixed
   addresses.
-- Answered with 501 and what to do instead: `POST /build?version=2` and plugins.
-  For BuildKit builds, use the [Buildx Engine driver](#buildx-engine-driver)
-  or the `docker-container` driver.
+- Unsupported build options and plugins return 501. To use BuildKit, start the
+  service with `--buildkit` or use a `docker-container` builder.
 - Swarm mode works on one node. See [Swarm mode](#swarm-mode).
 
 ### cp, save and load
@@ -998,6 +997,25 @@ docker compose build
 - Use the [Buildx Engine driver](#buildx-engine-driver) or select the `docker-container`
   driver for `docker buildx build`.
 - The build works as `podbag build` does: see [Builds](#builds).
+
+### BuildKit over the build API
+
+On Linux, start `podbag system service --buildkit` to accept `POST /build?version=2`.
+Send a local context as a tar archive, optionally compressed with gzip or zstd.
+The service loads the image for the host's platform and returns its image ID in
+the JSON response. The classic builder remains the default.
+
+```sh
+tar -czf context.tar.gz Dockerfile src
+curl --unix-socket "$XDG_RUNTIME_DIR/podbag/docker.sock" \
+  --header 'Content-Type: application/x-tar' --data-binary @context.tar.gz \
+  'http://localhost/build?version=2&t=myapp'
+```
+
+The endpoint supports tags, build arguments, labels, a target stage, the
+`X-Registry-Config` header and the `pull`, `nocache` and `q` options. It has
+no remote context, client session, external cancellation, cache import, or custom exporter.
+Use [Buildx](#buildx) for those build workflows.
 
 ### buildx
 
