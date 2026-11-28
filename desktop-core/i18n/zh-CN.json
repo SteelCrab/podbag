@@ -77,6 +77,7 @@
   "nav.volumes": "卷",
   "nav.networks": "网络",
   "nav.extensions": "扩展",
+  "extensions.manifestPath": "清单文件路径",
   "extensions.install": "安装清单",
   "extensions.loading": "正在加载扩展…",
   "extensions.empty": "安装本地 Podbag 扩展清单以开始使用。",

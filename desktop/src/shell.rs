@@ -252,20 +252,23 @@ fn sidebar_items(d: &mut Desktop, ui: &mut Ui, side: Rect) -> f32 {
             d.go(page);
         }
     }
-    // The local models.
-    let r = item(&mut y, item_h);
-    let label = d.t("nav.models");
-    if nav_item(
-        ui,
-        r,
-        nav_id(Page::Models),
-        Icon::Vm,
-        &label,
-        None,
-        d.page == Page::Models,
-        collapsed,
-    ) {
-        d.go(Page::Models);
+    for (page, icon, key) in [
+        (Page::Models, Icon::Vm, "nav.models"),
+        (Page::Extensions, Icon::Extensions, "nav.extensions"),
+    ] {
+        let r = item(&mut y, item_h);
+        if nav_item(
+            ui,
+            r,
+            nav_id(page),
+            icon,
+            &d.t(key),
+            None,
+            d.page == page,
+            collapsed,
+        ) {
+            d.go(page);
+        }
     }
     y += 4.;
     views::training::nav(d, ui, inner, &mut y, collapsed);

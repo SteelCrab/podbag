@@ -282,6 +282,7 @@ struct State {
     logs_following: bool,
     update_found: bool,
     compression: Compression,
+    extensions: Vec<crate::extensions::Installed>,
     builders: BTreeMap<String, PreviewBuilders>,
     disk: crate::DiskStorage,
     config_text: Option<String>,
@@ -866,6 +867,7 @@ impl Mock {
                 }),
                 after: Some(opts.compression.after),
             },
+            extensions: Vec::new(),
             builders: BTreeMap::new(),
             disk: crate::DiskStorage {
                 path: "/Users/me/.podbag/vm/disk.img".into(),
@@ -1610,6 +1612,18 @@ impl Api for Mock {
             _ if o.broken => Ok(Compression::default()),
             _ => Ok(state),
         }
+    }
+
+    fn extensions(
+        &self,
+        action: crate::extensions::Action,
+    ) -> Result<Vec<crate::extensions::Installed>, crate::extensions::Failure> {
+        let mut state = self.st();
+        crate::extensions::update(&mut state.extensions, action)?;
+        state.extensions.sort_by(|a, b| {
+            (&a.manifest.name, &a.manifest.id).cmp(&(&b.manifest.name, &b.manifest.id))
+        });
+        Ok(state.extensions.clone())
     }
 
     fn builder_list(&self, session: u64) -> Result<builders::Catalog, String> {

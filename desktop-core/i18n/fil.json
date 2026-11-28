@@ -77,6 +77,7 @@
   "nav.volumes": "Mga volume",
   "nav.networks": "Mga network",
   "nav.extensions": "Mga extension",
+  "extensions.manifestPath": "Path ng manifest file",
   "extensions.install": "I-install ang manifest",
   "extensions.loading": "Nilo-load ang mga extension…",
   "extensions.empty": "Mag-install ng lokal na manifest ng Podbag extension para magsimula.",

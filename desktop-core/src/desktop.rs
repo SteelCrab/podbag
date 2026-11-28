@@ -131,6 +131,22 @@ impl Desktop {
         *lock(&self.data_dir) = Some(dir.to_path_buf());
     }
 
+    pub(crate) fn update_extensions(
+        &self,
+        action: crate::extensions::Action,
+    ) -> Result<Vec<crate::extensions::Installed>, crate::extensions::Failure> {
+        let dir = lock(&self.data_dir)
+            .as_ref()
+            .map(|d| d.join("extensions"))
+            .ok_or_else(|| {
+                crate::extensions::Failure::detail(
+                    "storage",
+                    "The app data directory is unavailable",
+                )
+            })?;
+        crate::extensions::apply(&dir, action)
+    }
+
     pub fn events(&self) -> &Events {
         &self.events
     }

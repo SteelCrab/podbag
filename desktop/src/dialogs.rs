@@ -46,6 +46,7 @@ pub enum Then {
     },
     /// Stop synchronizing a share of the macOS VM.
     SyncRemove(String),
+    RemoveExtension(String),
     RemoveBuilder {
         session: u64,
         scope: String,
@@ -464,6 +465,7 @@ fn finish(d: &mut Desktop, ui: &mut Ui, dlg: Dialog, yes: bool) {
                     );
                 }
             }
+            Then::RemoveExtension(id) => crate::views::extensions::remove(d, id),
             Then::SyncRemove(name) => {
                 crate::views::sync_shares::act(d, podbag_desktop_core::vm::SyncAction::Remove(name))
             }

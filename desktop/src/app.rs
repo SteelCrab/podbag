@@ -48,6 +48,7 @@ pub enum Page {
     Networks,
     /// The local model runner.
     Models,
+    Extensions,
     Training,
     /// The practice session's containers and volumes (Training).
     LabContainers,
@@ -57,13 +58,14 @@ pub enum Page {
 }
 
 impl Page {
-    pub const ALL: [Page; 11] = [
+    pub const ALL: [Page; 12] = [
         Page::Migrate,
         Page::Containers,
         Page::Images,
         Page::Volumes,
         Page::Networks,
         Page::Models,
+        Page::Extensions,
         Page::Training,
         Page::LabContainers,
         Page::LabVolumes,
@@ -98,6 +100,7 @@ impl Page {
             Page::Volumes => "volumes",
             Page::Networks => "networks",
             Page::Models => "models",
+            Page::Extensions => "extensions",
             Page::Training => "training",
             Page::LabContainers => "lab-containers",
             Page::LabVolumes => "lab-volumes",
@@ -334,6 +337,7 @@ pub struct Desktop {
     pub update: views::updates::UpdateState,
     pub notices: views::notices::Notices,
     pub compression: views::compression::CompressionState,
+    pub extensions: views::extensions::PageState,
     pub builders: views::builders::Form,
     pub vm_storage: views::vm_storage::Form,
     pub engine_config: views::engine_config::Form,
@@ -451,6 +455,7 @@ impl Desktop {
             update: views::updates::UpdateState::default(),
             notices: views::notices::Notices::default(),
             compression: views::compression::CompressionState::default(),
+            extensions: views::extensions::PageState::default(),
             builders: views::builders::Form::default(),
             vm_storage: views::vm_storage::Form::default(),
             engine_config: views::engine_config::Form::default(),

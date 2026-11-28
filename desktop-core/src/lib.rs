@@ -14,6 +14,7 @@ pub mod desktop;
 pub mod dockercmd;
 pub mod engine;
 pub mod events;
+pub mod extensions;
 pub mod images;
 pub mod kubernetes;
 pub mod migration;

@@ -77,6 +77,7 @@
   "nav.volumes": "볼륨",
   "nav.networks": "네트워크",
   "nav.extensions": "확장 기능",
+  "extensions.manifestPath": "매니페스트 파일 경로",
   "extensions.install": "매니페스트 설치",
   "extensions.loading": "확장 기능을 불러오는 중…",
   "extensions.empty": "로컬 Podbag 확장 기능 매니페스트를 설치하세요.",

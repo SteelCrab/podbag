@@ -14,6 +14,7 @@ use crate::desktop::{Connection, Desktop};
 use crate::dockercmd::DockerCommand;
 use crate::engine::{EngineStatus, List};
 use crate::events::{Event, Events};
+use crate::extensions;
 use crate::images::{self, ImportImage, LocationInfo, Search};
 use crate::kubernetes::{self, Resource, Snapshot};
 use crate::migration::{self, Listing, Request};
@@ -134,6 +135,10 @@ pub trait Api: Send + Sync {
     /// it runs in the VM, which it starts when it is stopped. Slow.
     fn compression(&self, mode: Option<compression::Mode>) -> Result<Compression, String>;
 
+    fn extensions(
+        &self,
+        action: extensions::Action,
+    ) -> Result<Vec<extensions::Installed>, extensions::Failure>;
     fn builder_list(&self, session: u64) -> Result<builders::Catalog, String>;
     fn builder_inspect(
         &self,
@@ -433,6 +438,13 @@ impl Api for Desktop {
             .current()
             .compression(mode.map(compression::Mode::as_str))?;
         Ok(Compression::from_json(&reply))
+    }
+
+    fn extensions(
+        &self,
+        action: extensions::Action,
+    ) -> Result<Vec<extensions::Installed>, extensions::Failure> {
+        self.update_extensions(action)
     }
 
     fn builder_list(&self, session: u64) -> Result<builders::Catalog, String> {

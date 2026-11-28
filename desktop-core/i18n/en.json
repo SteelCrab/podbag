@@ -77,6 +77,7 @@
   "nav.volumes": "Volumes",
   "nav.networks": "Networks",
   "nav.extensions": "Extensions",
+  "extensions.manifestPath": "Manifest file path",
   "extensions.install": "Install manifest",
   "extensions.loading": "Loading extensions…",
   "extensions.empty": "Install a local Podbag extension manifest to get started.",

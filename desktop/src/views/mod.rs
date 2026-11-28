@@ -6,6 +6,7 @@ pub mod builders;
 pub mod compression;
 pub mod detail;
 pub mod engine_config;
+pub mod extensions;
 pub mod import;
 pub mod kubernetes;
 pub mod login;
@@ -43,6 +44,7 @@ pub fn paint_main(d: &mut Desktop, ui: &mut Ui, r: Rect) {
         Page::LabContainers | Page::LabVolumes => practice::paint(d, ui, r),
         Page::Migrate => migrate::paint(d, ui, r),
         Page::Models => models::paint(d, ui, r),
+        Page::Extensions => extensions::paint(d, ui, r),
         page => {
             let Some(kind) = page.kind() else { return };
             if d.engine.as_ref().is_some_and(|e| !e.reachable) {
@@ -69,6 +71,7 @@ pub fn entered(d: &mut Desktop) {
         Page::LabContainers | Page::LabVolumes => practice::entered(d),
         Page::Migrate => migrate::reload(d),
         Page::Models => models::entered(d),
+        Page::Extensions => extensions::refresh(d),
         Page::Settings => compression::read(d),
         _ => {}
     }

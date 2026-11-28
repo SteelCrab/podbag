@@ -63,6 +63,7 @@ const VIEW_SHOTS: &[(&str, &[&str], f32)] = &[
         &["nav settings", "section engine"],
         1200.,
     ),
+    ("extensions", &["nav extensions"], 1200.),
     ("settings-notifications", &["section notifications"], 1200.),
     ("settings-builders", &["section builders"], 1200.),
     ("settings-storage", &["section vmStorage"], 1200.),
@@ -435,6 +436,24 @@ fn views(out: &Path, filter: &str, scale: f32) {
             let app = Desktop::new(backend, events, Options::inline());
             let width = wide.unwrap_or(*width);
             let mut h = Harness::with_fonts(UiView::new(app), width, height, load_fonts());
+            if *shot == "extensions" {
+                use podbag_desktop_core::extensions::Action;
+                let api = &h.view().app.api;
+                api.extensions(Action::Install {
+                    source: include_str!("../tests/fixtures/workspace-checklist.json").into(),
+                })
+                .unwrap();
+                api.extensions(Action::SetEnabled {
+                    id: "workspace.checklist".into(),
+                    enabled: true,
+                })
+                .unwrap();
+                api.extensions(Action::SetEngineSummary {
+                    id: "workspace.checklist".into(),
+                    allow: true,
+                })
+                .unwrap();
+            }
             for c in [format!("theme {theme}"), format!("lang {lang}")] {
                 h.view_mut().app.command(&c);
             }

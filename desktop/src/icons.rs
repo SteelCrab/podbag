@@ -56,6 +56,7 @@ pub enum Icon {
     KubeRoutes,
     Plus,
     Bell,
+    Extensions,
 }
 
 impl Icon {
@@ -232,6 +233,7 @@ pub fn install() {
         s(
             "M5 16c1.5-1.5 1.5-3 1.5-6a5.5 5.5 0 0 1 11 0c0 3 0 4.5 1.5 6l1 1.5H4zM10 20a2.3 2.3 0 0 0 4 0",
         ),
+        s("M4 5h5a2.5 2.5 0 1 1 5 0h5v5a2.5 2.5 0 1 1 0 5v5h-6a2.5 2.5 0 1 0-5 0H4z"),
     ];
     register(icons);
 }
