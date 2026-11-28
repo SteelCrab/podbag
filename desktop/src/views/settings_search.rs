@@ -128,6 +128,17 @@ fn entries(d: &Desktop) -> Vec<Entry> {
             id,
         ));
     }
+    if d.connection.local {
+        out.push(section("network", &["settings.search.terms.network"]));
+        out.extend(crate::views::network_settings::FIELDS.map(|(key, id)| {
+            entry(
+                key,
+                &[],
+                Some("network"),
+                d.network_settings.enabled(id).then_some(id),
+            )
+        }));
+    }
     if let Some(vm) = d.vm.as_ref().filter(|_| d.has_vm()) {
         out.push(section("vm", &["settings.search.terms.vm"]));
         if vm.resources_editable {
@@ -196,6 +207,7 @@ fn entries(d: &Desktop) -> Vec<Entry> {
 fn section_key(key: &'static str) -> &'static str {
     match key {
         "engine" => "settings.engine",
+        "network" => "settings.network",
         "vm" => "settings.vm",
         "syncShares" => "settings.syncShares",
         "updates" => "settings.updates",

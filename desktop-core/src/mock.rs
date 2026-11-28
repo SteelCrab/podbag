@@ -32,6 +32,7 @@ use crate::updates::{Check, Updates, Upgraded};
 use crate::vm::{
     SharedPaths, SyncAction, SyncShare, VmDisk, VmLimits, VmSettings, VmStatus, VmValues,
 };
+use crate::{NetworkPreferences, NetworkSettings};
 use podbag::client::{
     Choice, CompressionSizes, ContainerSummary, Features, ImageSummary, Ipam, IpamConfig, Kind,
     NetworkSummary, Port, Pruned, RunSpec, SearchResult, VolumeSummary,
@@ -247,6 +248,7 @@ struct State {
     logs_following: bool,
     update_found: bool,
     compression: Compression,
+    network_settings: NetworkSettings,
     /// The local model runner runs, and the models it has.
     model_runner: bool,
     models: Vec<Model>,
@@ -825,6 +827,18 @@ impl Mock {
                     Mode::Off
                 }),
                 after: Some(opts.compression.after),
+            },
+            network_settings: NetworkSettings {
+                preferences: NetworkPreferences {
+                    default_subnet: "10.77.0.0/16".into(),
+                    default_ipv6_subnet: None,
+                    embedded_dns: false,
+                    dns_filter: crate::DnsFilter::None,
+                },
+                revision: "0".into(),
+                active_subnet: Some("10.77.0.0/16".into()),
+                active_ipv6_subnet: None,
+                overrides: Vec::new(),
             },
             model_runner: opts.models.running,
             models: if opts.models.running {
@@ -1543,6 +1557,28 @@ impl Api for Mock {
             _ if o.broken => Ok(Compression::default()),
             _ => Ok(state),
         }
+    }
+
+    fn network_settings(
+        &self,
+        session: u64,
+        edit: Option<(&NetworkPreferences, &str)>,
+    ) -> Result<NetworkSettings, String> {
+        let mut state = self.st();
+        if state.token != session || state.selected != "podbag" {
+            return Err("Network settings require the local podbag engine".into());
+        }
+        let settings = &mut state.network_settings;
+        if let Some((values, revision)) = edit {
+            if settings.revision != revision {
+                return Err("Network settings changed after they were opened".into());
+            }
+            if settings.preferences != *values {
+                settings.preferences = values.clone();
+                settings.revision = (revision.parse::<u64>().unwrap() + 1).to_string();
+            }
+        }
+        Ok(settings.clone())
     }
 
     fn vm_set(&self, change: &VmSettings) -> Result<String, String> {

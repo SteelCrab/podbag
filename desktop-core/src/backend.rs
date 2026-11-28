@@ -23,6 +23,7 @@ use crate::training;
 use crate::tray::TrayModel;
 use crate::updates::{self, Check, Updates, Upgraded};
 use crate::vm::{SyncAction, SyncShare, VmSettings, VmStatus};
+use crate::{NetworkPreferences, NetworkSettings};
 use podbag::client::{
     ContainerSummary, Features, ImageSummary, Kind, NetworkSummary, Pruned, RunSpec, VolumeSummary,
 };
@@ -129,6 +130,13 @@ pub trait Api: Send + Sync {
     /// Image compression (podbag only): read it (None) or set it. On a Mac or Windows
     /// it runs in the VM, which it starts when it is stopped. Slow.
     fn compression(&self, mode: Option<compression::Mode>) -> Result<Compression, String>;
+
+    /// Read or save the settings of this local Podbag connection.
+    fn network_settings(
+        &self,
+        session: u64,
+        edit: Option<(&NetworkPreferences, &str)>,
+    ) -> Result<NetworkSettings, String>;
     /// Read the engine's state again ([`Event::VmStatus`] when the VM changed). `asked`:
     /// also ask the API while the window is hidden.
     fn refresh(&self, asked: bool);
@@ -390,6 +398,22 @@ impl Api for Desktop {
             .current()
             .compression(mode.map(compression::Mode::as_str))?;
         Ok(Compression::from_json(&reply))
+    }
+
+    fn network_settings(
+        &self,
+        session: u64,
+        edit: Option<(&NetworkPreferences, &str)>,
+    ) -> Result<NetworkSettings, String> {
+        if self.session(session)?.target.choice != podbag::client::Choice::Podbag {
+            return Err("Network settings require the local podbag engine".into());
+        }
+        let reply = podbag::dashboard::cli::network_settings(
+            self.podbag(),
+            edit.map(|(settings, _)| settings.clone()),
+            edit.map(|(_, revision)| revision),
+        )?;
+        serde_json::from_value(reply).map_err(|e| e.to_string())
     }
 
     fn refresh(&self, asked: bool) {

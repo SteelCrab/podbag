@@ -334,6 +334,7 @@ pub struct Desktop {
     pub update: views::updates::UpdateState,
     pub notices: views::notices::Notices,
     pub compression: views::compression::CompressionState,
+    pub network_settings: views::network_settings::Form,
     pub run: views::run::RunState,
     pub models: views::models::ModelsState,
     pub settings_search: views::settings_search::SettingsSearch,
@@ -446,6 +447,7 @@ impl Desktop {
             update: views::updates::UpdateState::default(),
             notices: views::notices::Notices::default(),
             compression: views::compression::CompressionState::default(),
+            network_settings: views::network_settings::Form::default(),
             run: views::run::RunState::default(),
             models: views::models::ModelsState::default(),
             settings_search: views::settings_search::SettingsSearch::default(),
@@ -541,6 +543,7 @@ impl Desktop {
         self.loaded = false;
         self.lists = Lists::default();
         views::compression::reset(self);
+        self.network_settings = views::network_settings::Form::default();
         self.close_detail_quiet();
         self.connect(false);
     }
@@ -1844,6 +1847,7 @@ impl Desktop {
             Some("section") => {
                 for key in [
                     "engine",
+                    "network",
                     "vm",
                     "syncShares",
                     "updates",

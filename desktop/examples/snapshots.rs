@@ -62,6 +62,11 @@ const VIEW_SHOTS: &[(&str, &[&str], f32)] = &[
     // The same in Korean.
     ("settings-search-vm", &["search 가상 머신"], 1200.),
     ("settings-search-none", &["search does not exist"], 1200.),
+    (
+        "settings-network",
+        &["nav settings", "section network"],
+        1200.,
+    ),
     ("settings-shares", &["nav settings", "section vm"], 1200.),
     (
         "settings-sync",

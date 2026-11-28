@@ -21,6 +21,7 @@ pub mod mock;
 #[cfg(feature = "mock")]
 mod mock_training;
 pub mod model_runner;
+pub mod network_settings;
 pub mod run;
 pub mod session;
 pub mod settings;
@@ -42,12 +43,15 @@ pub use session::Session;
 pub use settings::{Settings, ThemePreference};
 pub use tray::{EngineState, TrayModel};
 
+pub use network_settings::NetworkSettings;
 /// The engine's types, as the API gives them.
 pub use podbag::client::{
     CompressionSizes, ContainerSummary, Features, ImageSummary, Kind, NetworkSummary, Port, Pruned,
     PublishedPort, RESTART_POLICIES, RunSpec, SearchResult, VolumeMount, VolumeSummary,
 };
+pub use podbag::config::DnsFilter;
 pub use podbag::dashboard::lab;
+pub use podbag::network::NetworkPreferences;
 
 use std::sync::{Mutex, MutexGuard};
 

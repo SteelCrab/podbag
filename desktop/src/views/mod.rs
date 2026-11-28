@@ -9,6 +9,7 @@ pub mod kubernetes;
 pub mod login;
 pub mod migrate;
 pub mod models;
+pub mod network_settings;
 pub mod notices;
 pub mod practice;
 pub mod pull;

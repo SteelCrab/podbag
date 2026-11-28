@@ -271,6 +271,14 @@ fn second_card(d: &mut Desktop, ui: &mut Ui, x: f32, y0: f32, w: f32) -> f32 {
     if open {
         y += engine_body(d, ui, bx, y, bw) + 18.;
     }
+    if d.connection.local {
+        separator(ui, x, y, w);
+        let (h, open) = section(d, ui, x, y, w, "network", Icon::Networks, "");
+        y += h;
+        if open {
+            y += crate::views::network_settings::body(d, ui, bx, y, bw) + 18.;
+        }
+    }
     // The VM, for podbag on macOS and Windows.
     if let Some(vm) = d.vm.clone().filter(|_| d.has_vm()) {
         separator(ui, x, y, w);
