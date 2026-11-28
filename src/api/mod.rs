@@ -149,7 +149,7 @@ pub fn serve(opts: ServeOptions) -> Result<()> {
     #[cfg(target_os = "linux")]
     let worker = opts
         .managed_buildkit
-        .then(|| buildkit::Owner::start(dirs.data.clone()))
+        .then(|| buildkit::Owner::start(dirs.clone()))
         .transpose()?;
     let on_demand = opts.timeout.is_some() || opts.activated.is_some();
     let program = on_demand.then(crate::upgrade::ProgramWatch::new).flatten();

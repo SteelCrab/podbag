@@ -112,7 +112,7 @@ pub fn run(
             ));
         }
     };
-    let workspace = Workspace::new(&crate::paths::dirs()?.data)?;
+    let workspace = Workspace::new(&crate::paths::dirs()?)?;
     let work = workspace.path();
     let archive = work.join("image.tar");
     let staging = match export {

@@ -1,7 +1,7 @@
 use crate::build::managed_worker::{Process, Workspace};
+use crate::paths::Dirs;
 use crate::{Error, Result};
 use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -36,13 +36,13 @@ struct Running {
 }
 
 impl Owner {
-    pub(in crate::api) fn start(data: PathBuf) -> Result<Self> {
+    pub(in crate::api) fn start(dirs: Dirs) -> Result<Self> {
         let (requests, next) = mpsc::channel();
         // Linux ties the worker's parent-death signal to the spawning thread.
         // Use one owner so closing an Engine connection cannot stop another build.
         let thread = thread::Builder::new()
             .name("buildkit-worker".into())
-            .spawn(move || serve(next, &data))
+            .spawn(move || serve(next, &dirs))
             .map_err(|error| worker_error(&error))?;
         Ok(Self {
             requests,
@@ -80,7 +80,7 @@ impl Client {
     }
 }
 
-fn serve(requests: mpsc::Receiver<Request>, data: &Path) {
+fn serve(requests: mpsc::Receiver<Request>, dirs: &Dirs) {
     let mut worker: Option<Running> = None;
     loop {
         let request = if let Some(running) = &mut worker {
@@ -99,14 +99,14 @@ fn serve(requests: mpsc::Receiver<Request>, data: &Path) {
         };
         match request {
             Some(Request::Connect(reply)) => {
-                let _ = reply.send(connect(&mut worker, data));
+                let _ = reply.send(connect(&mut worker, dirs));
             }
             None | Some(Request::Shutdown) => return,
         }
     }
 }
 
-fn connect(worker: &mut Option<Running>, data: &Path) -> Result<Connection> {
+fn connect(worker: &mut Option<Running>, dirs: &Dirs) -> Result<Connection> {
     if let Some(running) = worker
         && running
             .process
@@ -116,7 +116,7 @@ fn connect(worker: &mut Option<Running>, data: &Path) -> Result<Connection> {
         return running.connect().map_err(|error| worker_error(&error));
     }
     *worker = None;
-    let work = Workspace::new(data)?;
+    let work = Workspace::new(dirs)?;
     let process = work.start()?;
     let mut running = Running {
         process,

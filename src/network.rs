@@ -314,7 +314,14 @@ impl Network {
 
     /// Create a network with labels.
     pub fn create_with(name: &str, subnet: Option<&str>, labels: Labels) -> Result<Network> {
-        create_labeled_in(&crate::paths::dirs()?, name, subnet, labels, &host_routes())
+        create_configured_in(
+            &crate::paths::dirs()?,
+            name,
+            subnet,
+            None,
+            labels,
+            host_routes,
+        )
     }
 
     /// Create a dual-stack bridge; when no IPv6 subnet is given, derive a ULA /64.
@@ -347,7 +354,7 @@ impl Network {
             subnet,
             Some(ipv6),
             labels,
-            &host_routes(),
+            host_routes,
         )
     }
 
@@ -499,21 +506,88 @@ fn parse_routes(text: &str) -> Vec<(Ipv4Addr, u8)> {
     })
 }
 
-/// A generated BuildKit bridge also has to avoid the Podbag routes, since it is
-/// managed by a separate network provider on the same host.
+/// Serialize rootful subnet reservation with BuildKit bridge installation. Take
+/// this lock before a store's network lock or configuration lock.
+pub(crate) struct HostBridgeLock {
+    _file: std::fs::File,
+}
+
 #[cfg(target_os = "linux")]
-pub(crate) fn buildkit_bridge() -> std::io::Result<(String, Ipv4Addr)> {
-    let text = std::fs::read_to_string("/proc/net/route")?;
-    let routes = parse_routes_with(&text, |_| true);
+const HOST_BRIDGE_LOCK: &str = "/run/podbag-buildkit-bridge.lock";
+
+pub(crate) fn lock_host_bridges() -> Result<Option<HostBridgeLock>> {
+    #[cfg(target_os = "linux")]
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let error = |e| {
+            Error::io(
+                "cannot lock host bridge allocation",
+                &e,
+                "check /run permissions",
+            )
+        };
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(HOST_BRIDGE_LOCK)
+            .map_err(error)?;
+        file.lock().map_err(error)?;
+        return Ok(Some(HostBridgeLock { _file: file }));
+    }
+    Ok(None)
+}
+
+#[cfg(target_os = "linux")]
+impl HostBridgeLock {
+    /// Keep this guard until the worker's connected route has been installed.
+    pub(crate) fn buildkit_bridge(&self, dirs: &Dirs) -> Result<(String, Ipv4Addr)> {
+        let error = |e| {
+            Error::io(
+                "cannot allocate a private BuildKit bridge",
+                &e,
+                "check the host routes and free a non-overlapping subnet",
+            )
+        };
+        let text = std::fs::read_to_string("/proc/net/route").map_err(error)?;
+        let mut blocked = parse_routes_with(&text, |_| true);
+        blocked.extend(buildkit_reservations(dirs)?);
+        select_buildkit_bridge(&blocked, |name| {
+            std::path::Path::new("/sys/class/net")
+                .join(name)
+                .try_exists()
+        })
+        .map_err(error)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn buildkit_reservations(dirs: &Dirs) -> Result<Vec<(Ipv4Addr, u8)>> {
+    let _lock = lock(dirs)?;
+    let mut subnets = all_records(dirs)?
+        .into_iter()
+        .map(|record| parse_cidr(&record.network.subnet))
+        .collect::<Result<Vec<_>>>()?;
+    // The configured default may be different from the already initialized default.
+    subnets.push(parse_cidr(&crate::config::load(dirs)?.default_subnet)?);
+    Ok(subnets)
+}
+
+#[cfg(target_os = "linux")]
+fn select_buildkit_bridge(
+    blocked: &[(Ipv4Addr, u8)],
+    device_exists: impl Fn(&str) -> std::io::Result<bool>,
+) -> std::io::Result<(String, Ipv4Addr)> {
     for (pool, [first, second]) in [[10, 10], [10, 254], [172, 30]].into_iter().enumerate() {
         for slot in 0..=255 {
             let addr = Ipv4Addr::new(first, second, slot, 0);
             let name = format!("podbag-bk-{pool}-{slot}");
-            if !routes.iter().any(|route| overlaps(*route, (addr, 24)))
-                && !std::path::Path::new("/sys/class/net")
-                    .join(&name)
-                    .try_exists()?
-            {
+            if !blocked.iter().any(|route| overlaps(*route, (addr, 24))) && !device_exists(&name)? {
                 return Ok((name, addr));
             }
         }
@@ -771,6 +845,7 @@ pub fn save_settings(
         .transpose()?;
     let subnet = format!("{addr}/{prefix}");
     let ipv6_text = ipv6.map(|subnet| subnet.to_string());
+    let _host_lock = lock_host_bridges()?;
     let _network_lock = lock(dirs)?;
     let _config_lock = crate::config::lock_config(dirs)?;
     let current = settings(dirs)?;
@@ -979,6 +1054,7 @@ pub(crate) fn create_in(
 }
 
 /// As `create_in`, with the network's labels.
+#[cfg(test)]
 pub(crate) fn create_labeled_in(
     dirs: &Dirs,
     name: &str,
@@ -986,7 +1062,7 @@ pub(crate) fn create_labeled_in(
     labels: Labels,
     host_routes: &[(Ipv4Addr, u8)],
 ) -> Result<Network> {
-    create_configured_in(dirs, name, subnet, None, labels, host_routes)
+    create_configured_in(dirs, name, subnet, None, labels, || host_routes.to_vec())
 }
 
 fn create_configured_in(
@@ -995,7 +1071,7 @@ fn create_configured_in(
     subnet: Option<&str>,
     ipv6: Option<Ipv6Subnet>,
     labels: Labels,
-    host_routes: &[(Ipv4Addr, u8)],
+    routes: impl FnOnce() -> Vec<(Ipv4Addr, u8)>,
 ) -> Result<Network> {
     check_name(name)?;
     if matches!(name, "bridge" | "host" | "none" | "default") {
@@ -1005,7 +1081,9 @@ fn create_configured_in(
             "choose another name",
         ));
     }
+    let _host_lock = lock_host_bridges()?;
     let _lock = lock(dirs)?;
+    let host_routes = routes();
     if read_record(dirs, name)?.is_some() {
         return Err(Error::new(
             ErrorKind::Conflict,
@@ -1015,7 +1093,7 @@ fn create_configured_in(
         ));
     }
     // The default network counts even before its first use.
-    load_with(dirs, DEFAULT, host_routes)?;
+    load_with(dirs, DEFAULT, &host_routes)?;
     let others: Vec<Network> = all_records(dirs)?.into_iter().map(|r| r.network).collect();
     if let Some(ipv6) = ipv6
         && let Some(other) = others
@@ -1956,6 +2034,71 @@ mod tests {
             .map(|n| n.name)
             .collect();
         assert_eq!(names, ["app", "bridge", "db", "own"]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn buildkit_skips_inactive_networks_and_both_default_subnets() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = dirs_in(tmp.path());
+        crate::config::set_value(&dirs, "default_subnet", "10.10.2.0/24").unwrap();
+        let initial = buildkit_reservations(&dirs).unwrap();
+        assert_eq!(initial, [(Ipv4Addr::new(10, 10, 2, 0), 24)]);
+        assert!(read_record(&dirs, DEFAULT).unwrap().is_none());
+
+        create_in(&dirs, "inactive", Some("10.10.0.0/24"), &[]).unwrap();
+        crate::config::set_value(&dirs, "default_subnet", "10.10.1.0/24").unwrap();
+        let reserved = buildkit_reservations(&dirs).unwrap();
+        assert_eq!(reserved.len(), 3);
+        for slot in 0..=2 {
+            assert!(reserved.contains(&(Ipv4Addr::new(10, 10, slot, 0), 24)));
+        }
+        assert_eq!(
+            select_buildkit_bridge(&reserved, |_| Ok(false)).unwrap(),
+            ("podbag-bk-0-3".into(), Ipv4Addr::new(10, 10, 3, 0))
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn network_creation_reads_routes_after_taking_the_allocation_locks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = dirs_in(tmp.path());
+        let subnet = Ipv4Addr::new(10, 10, 3, 0);
+        let error = create_configured_in(
+            &dirs,
+            "app",
+            Some("10.10.3.0/24"),
+            None,
+            Labels::new(),
+            || {
+                let file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(dirs.data.join("networks/.lock"))
+                    .unwrap();
+                assert!(matches!(
+                    file.try_lock(),
+                    Err(std::fs::TryLockError::WouldBlock)
+                ));
+                // SAFETY: geteuid has no preconditions.
+                if unsafe { libc::geteuid() } == 0 {
+                    let host = std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(HOST_BRIDGE_LOCK)
+                        .unwrap();
+                    assert!(matches!(
+                        host.try_lock(),
+                        Err(std::fs::TryLockError::WouldBlock)
+                    ));
+                } else {
+                    assert!(lock_host_bridges().unwrap().is_none());
+                }
+                vec![(subnet, 24)]
+            },
+        )
+        .unwrap_err();
+        assert!(error.why.contains("host route 10.10.3.0/24"), "{error}");
+        assert!(read_record(&dirs, "app").unwrap().is_none());
     }
 
     #[test]

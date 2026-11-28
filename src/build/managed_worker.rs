@@ -1,23 +1,26 @@
 //! A private BuildKit worker shared by CLI builds and the opt-in Engine API.
 
+use crate::paths::Dirs;
 use crate::{Error, ErrorKind, Result};
 use std::fs::{self, File};
 use std::io::{self, Seek, SeekFrom};
-use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
+use std::net::Ipv4Addr;
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 pub struct Workspace {
+    dirs: Dirs,
     work: tempfile::TempDir,
     socket_dir: tempfile::TempDir,
     socket: PathBuf,
 }
 
 impl Workspace {
-    pub fn new(data: &Path) -> Result<Self> {
-        let builds = data.join("builds");
+    pub fn new(dirs: &Dirs) -> Result<Self> {
+        let builds = dirs.data.join("builds");
         fs::create_dir_all(&builds).map_err(|e| io_error("create the build directory", e))?;
         let work = tempfile::Builder::new()
             .prefix("buildkit-")
@@ -31,6 +34,7 @@ impl Workspace {
             .map_err(|e| io_error("create the private BuildKit socket directory", e))?;
         let socket = socket_dir.path().join("buildkit.sock");
         Ok(Self {
+            dirs: dirs.clone(),
             work,
             socket_dir,
             socket,
@@ -51,32 +55,19 @@ impl Workspace {
 
     pub fn start(&self) -> Result<Process> {
         let log = self.work.path().join("buildkitd.log");
-        // SAFETY: geteuid has no pointer arguments or side effects.
-        let rootless = unsafe { libc::geteuid() } != 0;
-        // BuildKit installs a connected route while initializing its bridge, before
-        // opening the control socket. Serialize selection and that initialization.
-        let _bridge_lock = if rootless {
-            None
-        } else {
-            let file = fs::OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .read(true)
-                .write(true)
-                .mode(0o600)
-                .custom_flags(libc::O_NOFOLLOW)
-                .open("/run/podbag-buildkit-bridge.lock")
-                .map_err(|e| io_error("open the BuildKit bridge lock", e))?;
-            file.lock()
-                .map_err(|e| io_error("lock BuildKit bridge allocation", e))?;
-            Some(file)
-        };
+        // The host guard lives through socket readiness, when the rootful worker
+        // has installed the bridge's connected route.
+        let host_lock = crate::network::lock_host_bridges()?;
+        let bridge = host_lock
+            .as_ref()
+            .map(|guard| guard.buildkit_bridge(&self.dirs))
+            .transpose()?;
         let mut daemon = start_daemon(
             self.work.path(),
             &self.address(),
             self.socket_dir.path(),
             &log,
-            rootless,
+            bridge,
         )?;
         wait_for_socket(&mut daemon, &self.socket, &log)?;
         Ok(daemon)
@@ -115,16 +106,15 @@ fn start_daemon(
     addr: &str,
     socket_dir: &Path,
     log: &Path,
-    rootless: bool,
+    bridge: Option<(String, Ipv4Addr)>,
 ) -> Result<Process> {
     let config = work.join("buildkitd.toml");
-    let settings = if rootless {
-        String::new()
-    } else {
-        let (bridge, addr) = crate::network::buildkit_bridge()
-            .map_err(|e| io_error("allocate a private BuildKit bridge", e))?;
-        format!("[worker.oci]\nbridgeName = \"{bridge}\"\nbridgeSubnet = \"{addr}/24\"\n")
-    };
+    let rootless = bridge.is_none();
+    let settings = bridge
+        .map(|(name, subnet)| {
+            format!("[worker.oci]\nbridgeName = \"{name}\"\nbridgeSubnet = \"{subnet}/24\"\n")
+        })
+        .unwrap_or_default();
     fs::write(&config, settings).map_err(|e| io_error("create the private BuildKit config", e))?;
     let mut command = if rootless {
         let mut cmd = Command::new("rootlesskit");
@@ -301,7 +291,12 @@ mod tests {
     #[test]
     fn both_worker_directories_are_private() {
         let data = tempfile::tempdir().unwrap();
-        let workspace = Workspace::new(data.path()).unwrap();
+        let dirs = Dirs {
+            data: data.path().join("data"),
+            runtime: data.path().join("run"),
+            config: data.path().join("config"),
+        };
+        let workspace = Workspace::new(&dirs).unwrap();
         for dir in [workspace.path(), workspace.socket_dir.path()] {
             assert_eq!(dir.metadata().unwrap().permissions().mode() & 0o777, 0o700);
         }
