@@ -213,6 +213,7 @@ fn managed_build(
             fcntl_setfl(log.get_ref(), OFlags::NONBLOCK).map_err(|e| error(e.into()))?;
         }
         let mut line = Vec::new();
+        let mut exit_status = None;
         loop {
             if active.stopping() {
                 return Err(error(stopped()));
@@ -225,16 +226,21 @@ fn managed_build(
                         line.clear();
                         continue;
                     }
-                    Err(e)
-                        if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) => {}
+                    Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                    Err(e) if e.kind() == ErrorKind::WouldBlock => {}
                     Err(e) => return Err(error(e)),
                 }
             }
-            if let Some(status) = child.try_wait().map_err(error)? {
+            if let Some(status) = exit_status {
                 if !line.is_empty() {
                     progress(&String::from_utf8_lossy(&line));
                 }
                 return Ok(status);
+            }
+            exit_status = child.try_wait().map_err(error)?;
+            if exit_status.is_some() {
+                // buildctl may have written its final error just before exit.
+                continue;
             }
             if let Some(log) = &log {
                 super::wait_readable(log.get_ref().as_raw_fd(), 100);

@@ -550,6 +550,18 @@ fn engine_v2_loads_a_tar_build_and_reports_progress_and_errors() {
         messages[0]["error"].as_str().unwrap().contains("missing"),
         "{body}"
     );
+    let body = v2_build(&service, &archive, "t=managed-v2%3Ainvalid", &[]);
+    let messages = build_message(&body);
+    assert!(messages.last().unwrap()["error"].is_string(), "{body}");
+    let final_progress = messages
+        .iter()
+        .filter_map(|message| message["stream"].as_str())
+        .next_back()
+        .expect("buildctl reports the failed instruction");
+    assert!(
+        final_progress.contains("failed to solve") && final_progress.contains("missing"),
+        "{body}"
+    );
     clean(&sb);
     println!("PASS: Docker Engine HTTP v2 tar build, tags, streamed progress, and errors");
 }
