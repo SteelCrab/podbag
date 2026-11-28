@@ -243,7 +243,14 @@ impl Session {
         };
         match check {
             Check::ContainerPublished { name, .. } => self.run(&name, "running", Some(self.port)),
-            Check::ContainerRunning { name } => self.run(&name, "running", None),
+            Check::ContainerRunning { name } => {
+                if let Some(row) = self.containers.iter_mut().find(|row| row.name() == name) {
+                    row.state = "running".into();
+                    row.status = "Up 5 seconds".into();
+                } else {
+                    self.run(&name, "running", None);
+                }
+            }
             Check::ContainerPaused { name } => {
                 self.set_state(&name, "paused", "Up 5 seconds (Paused)".into());
             }
@@ -820,7 +827,7 @@ mod tests {
     }
 
     #[test]
-    fn pausing_a_course_container_updates_its_state_and_preserves_its_ports() {
+    fn pausing_and_resuming_a_published_container_preserve_its_ports() {
         let mut t = Training::default();
         t.start("web-basics").unwrap();
         let before = t.practice("advance", None, None, false, true).unwrap();
@@ -833,6 +840,14 @@ mod tests {
             action: UiAction::Pause,
             name: "lab-web".into(),
         });
+        let resume = &mut session.steps[session.at + 1];
+        resume.check = Some(Check::ContainerRunning {
+            name: "lab-web".into(),
+        });
+        resume.ui = Some(Ui {
+            action: UiAction::Resume,
+            name: "lab-web".into(),
+        });
         let after = t
             .practice(
                 "pause",
@@ -843,11 +858,22 @@ mod tests {
             )
             .unwrap();
         assert_eq!(before["containers"][0]["State"], "running");
+        assert_eq!(before["containers"][0]["Ports"][0]["PublicPort"], PORT);
         assert_eq!(after["containers"][0]["State"], "paused");
         assert_eq!(
             after["containers"][0]["Ports"],
             before["containers"][0]["Ports"]
         );
+        let resumed = t
+            .practice(
+                "resume",
+                after["session"].as_str(),
+                Some("lab-web"),
+                false,
+                true,
+            )
+            .unwrap();
+        assert_eq!(resumed["containers"], before["containers"]);
     }
 
     #[test]
