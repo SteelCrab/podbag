@@ -330,7 +330,7 @@ fn provision(
     let created = run(&mut command);
     #[cfg(all(test, target_os = "macos"))]
     if capture && created.is_err() {
-        tests::report_failed_control_plane(&host.socket, &record.name);
+        tests::report_failed_kind_cluster(&host.socket, &record.name, record.nodes);
     }
     created?;
     if !dir.join("kubeconfig").is_file() {
@@ -782,39 +782,164 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
-    pub(super) fn report_failed_control_plane(host: &str, name: &str) {
-        let node = format!("{name}-control-plane");
-        let exec = |args: &[&str]| {
-            run(docker_command("docker", host)?
-                .args(["exec", "--privileged", &node])
-                .args(args))
+    fn kind_diagnostic_text(bytes: &[u8]) -> String {
+        let mut text = String::new();
+        let mut pem = false;
+        for line in String::from_utf8_lossy(bytes).lines() {
+            if line.contains("-----BEGIN ") {
+                pem = true;
+                text.push_str("[credential omitted]\n");
+            }
+            if pem {
+                pem = !line.contains("-----END ");
+                continue;
+            }
+            let lower = line.to_ascii_lowercase().replace('"', "");
+            let bootstrap_token = line
+                .split(|c: char| !c.is_ascii_alphanumeric() && c != '.')
+                .any(|word| {
+                    word.trim_matches('.')
+                        .split_once('.')
+                        .is_some_and(|(id, secret)| {
+                            id.len() == 6
+                                && secret.len() == 16
+                                && id
+                                    .bytes()
+                                    .chain(secret.bytes())
+                                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+                        })
+                });
+            if bootstrap_token
+                || [
+                    "authorization:",
+                    "authorization=",
+                    "bearer ",
+                    "client-key-data:",
+                    "client-key-data=",
+                    "token:",
+                    "token=",
+                ]
+                .iter()
+                .any(|field| lower.contains(field))
+            {
+                text.push_str("[credential omitted]\n");
+            } else {
+                text.push_str(line);
+                text.push('\n');
+            }
+        }
+        text
+    }
+
+    #[cfg(target_os = "macos")]
+    fn kind_diagnostic_output(output: &std::process::Output) -> String {
+        [
+            kind_diagnostic_text(&output.stdout),
+            kind_diagnostic_text(&output.stderr),
+        ]
+        .concat()
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn report_failed_kind_cluster(host: &str, name: &str, nodes: u8) {
+        let control = format!("{name}-control-plane");
+        let command = |node: &str, args: &[&str]| -> Result<Command, String> {
+            let mut cmd = docker_command("docker", host)?;
+            cmd.args(["exec", "--privileged", node]).args(args);
+            Ok(cmd)
         };
-        let report = |args: &[&str]| {
+        let report = |node: &str, args: &[&str]| {
             eprintln!("== {} on {node}", args.join(" "));
-            match exec(args) {
-                Ok(output) => eprintln!("{}", output.trim_end()),
-                Err(error) => eprintln!("{error}"),
+            match command(node, args).and_then(|mut cmd| cmd.output().map_err(|e| e.to_string())) {
+                Ok(output) => {
+                    eprintln!("{}", kind_diagnostic_output(&output).trim_end());
+                    if !output.status.success() {
+                        eprintln!("diagnostic command failed ({})", output.status);
+                    }
+                }
+                Err(error) => eprintln!("{}", kind_diagnostic_text(error.as_bytes()).trim_end()),
             }
         };
 
-        report(&[
-            "journalctl",
-            "--no-pager",
-            "--lines=100",
-            "--unit=kubelet",
-            "--unit=containerd",
-        ]);
-        report(&["crictl", "ps", "--all"]);
-        for component in ["etcd", "kube-apiserver"] {
-            match exec(&["crictl", "ps", "--all", "--name", component, "--quiet"]) {
+        report(
+            &control,
+            &[
+                "journalctl",
+                "--no-pager",
+                "--lines=100",
+                "--unit=kubelet",
+                "--unit=containerd",
+            ],
+        );
+        if nodes > 1 {
+            report(
+                &format!("{name}-worker"),
+                &["journalctl", "--no-pager", "--lines=80", "--unit=kubelet"],
+            );
+        }
+        report(&control, &["crictl", "ps", "--all"]);
+        report(
+            &control,
+            &[
+                "kubectl",
+                "--kubeconfig=/etc/kubernetes/admin.conf",
+                "--request-timeout=3s",
+                "get",
+                "csr",
+                "--no-headers",
+                "--output=custom-columns=APPROVAL:.status.conditions[*].type,REASON:.status.conditions[*].reason",
+            ],
+        );
+        report(
+            &control,
+            &[
+                "cat",
+                "/proc/pressure/cpu",
+                "/proc/pressure/memory",
+                "/proc/pressure/io",
+            ],
+        );
+        report(
+            &control,
+            &["df", "-h", "/var/lib/containerd", "/var/lib/kubelet"],
+        );
+        for component in [
+            "kube-controller-manager",
+            "kube-scheduler",
+            "etcd",
+            "kube-apiserver",
+        ] {
+            let ids = command(
+                &control,
+                &["crictl", "ps", "--all", "--name", component, "--quiet"],
+            )
+            .and_then(|mut cmd| run(&mut cmd));
+            match ids {
                 Ok(ids) => {
                     for id in ids.lines().take(2) {
-                        report(&["crictl", "logs", "--tail=60", id]);
+                        eprintln!("== {component}");
+                        report(&control, &["crictl", "logs", "--tail=60", id]);
                     }
                 }
-                Err(error) => eprintln!("{component} logs: {error}"),
+                Err(error) => eprintln!(
+                    "{component} logs: {}",
+                    kind_diagnostic_text(error.as_bytes()).trim_end()
+                ),
             }
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn kind_failure_diagnostics_keep_stderr_and_omit_credentials() {
+        let output = Command::new("/bin/sh")
+            .args(["-c", "printf '%s\n' 'stdout' 'abcdef.0123456789abcdef' '-----BEGIN PRIVATE KEY-----' 'private data' '-----END PRIVATE KEY-----'; printf '%s\n' 'stderr' 'Authorization: Bearer supplied' >&2"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            kind_diagnostic_output(&output),
+            "stdout\n[credential omitted]\n[credential omitted]\nstderr\n[credential omitted]\n"
+        );
     }
 
     fn wait_for_kind_ready(
