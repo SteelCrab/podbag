@@ -12,7 +12,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState};
+use ratatui::widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
 
 const ACCENT: Color = Color::Blue;
 
@@ -30,6 +30,17 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     .areas(f.area());
     draw_header(f, app, header);
     draw_tabs(f, app, tabs);
+    let body = match training_parts(app) {
+        Some(parts) => {
+            // As tall as the wrapped hint needs, but the lists keep 3 rows.
+            let height = parts.height(body.width).min(body.height.saturating_sub(3));
+            let [body, panel] =
+                Layout::vertical([Constraint::Min(3), Constraint::Length(height)]).areas(body);
+            parts.draw(f, panel);
+            body
+        }
+        None => body,
+    };
     let body = if app.appearance.sidebar && body.width >= 56 {
         let width = app
             .appearance
@@ -65,6 +76,96 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Mode::Pull(form) => draw_pull(f, app, &form),
         _ => {}
     }
+}
+
+/// The training panel: the step before, the current step, what to press (wrapped, so
+/// the key at its end and a long command show whole), and the next step.
+struct TrainingParts<'a> {
+    title: String,
+    above: Vec<Line<'a>>,
+    hint: Paragraph<'a>,
+    below: Vec<Line<'a>>,
+}
+
+impl TrainingParts<'_> {
+    /// The hint is indented by 2 inside the borders.
+    const INDENT: u16 = 2;
+
+    fn hint_rows(&self, inner_width: u16) -> u16 {
+        let width = inner_width.saturating_sub(Self::INDENT).max(1);
+        u16::try_from(self.hint.line_count(width)).unwrap_or(u16::MAX)
+    }
+
+    /// The rows the whole panel needs at WIDTH, borders included.
+    fn height(&self, width: u16) -> u16 {
+        let lines = self.above.len() + self.below.len();
+        (2 + lines as u16).saturating_add(self.hint_rows(width.saturating_sub(2)))
+    }
+
+    /// Row by row from the top: in a short AREA the next step goes first, then the hint's end.
+    fn draw(self, f: &mut Frame, area: Rect) {
+        let block = Block::bordered().title(self.title.clone());
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        let rows = self.hint_rows(inner.width);
+        let mut y = inner.y;
+        let mut row = |f: &mut Frame, height: u16, indent: u16, widget: Paragraph| {
+            let rect = Rect::new(
+                inner.x + indent,
+                y,
+                inner.width.saturating_sub(indent),
+                height,
+            );
+            f.render_widget(widget, rect.intersection(inner));
+            y = y.saturating_add(height);
+        };
+        for line in self.above {
+            row(f, 1, 0, Paragraph::new(line));
+        }
+        row(f, rows, Self::INDENT, self.hint);
+        for line in self.below {
+            row(f, 1, 0, Paragraph::new(line));
+        }
+    }
+}
+
+fn training_parts(app: &App) -> Option<TrainingParts<'static>> {
+    let panel = app.training.as_ref()?;
+    let look = &app.appearance;
+    let lang = look.lang();
+    let mut above = Vec::new();
+    if let Some(index) = panel.current.checked_sub(1) {
+        above.push(Line::styled(
+            format!("✓ {}", panel.name(index, lang)),
+            Style::new().fg(Color::Green),
+        ));
+    }
+    above.push(Line::styled(
+        format!(
+            "▶ {}/{} {}",
+            panel.current + 1,
+            panel.steps.len(),
+            panel.name(panel.current, lang)
+        ),
+        Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+    ));
+    let below = if panel.current + 1 < panel.steps.len() {
+        vec![Line::styled(
+            format!("○ {}", panel.name(panel.current + 1, lang)),
+            Style::new().fg(Color::DarkGray),
+        )]
+    } else {
+        Vec::new()
+    };
+    let hint = Paragraph::new(super::training::hint(look, panel, &app.lists))
+        .style(Style::new().fg(Color::Yellow))
+        .wrap(Wrap { trim: true });
+    Some(TrainingParts {
+        title: format!(" {} · {} ", look.text("training.title"), panel.title),
+        above,
+        hint,
+        below,
+    })
 }
 
 /// Spans in a row from `area`'s left: where each one is.
@@ -386,7 +487,9 @@ fn draw_details(f: &mut Frame, app: &App, id: &str, name: &str, area: Rect) {
             ]
         }
         Kind::Images => {
-            let Some(i) = app.lists.images.iter().find(|i| i.id == id) else {
+            // A training-mode row's ID is one of the image's tags.
+            let tagged = |i: &&podbag::client::ImageSummary| i.repo_tags.iter().any(|t| t == id);
+            let Some(i) = app.lists.images.iter().find(|i| i.id == id || tagged(i)) else {
                 return;
             };
             vec![
@@ -518,9 +621,37 @@ fn draw_message(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(line), area);
 }
 
+/// The hints that fit WIDTH columns. `? help` and `q quit` stay at the end: the middle
+/// hints go first, from the end of the middle, then the first hint.
+fn fit_hints(mut hints: Vec<(&'static str, String)>, width: usize) -> Vec<(&'static str, String)> {
+    let wide = |hints: &[(&str, String)]| {
+        let words: usize = hints
+            .iter()
+            .map(|(k, what)| Span::raw(*k).width() + 1 + Span::raw(what.as_str()).width())
+            .sum();
+        words + hints.len().saturating_sub(1)
+    };
+    let tail = hints
+        .iter()
+        .rev()
+        .take_while(|(k, _)| matches!(*k, "?" | "q"))
+        .count();
+    // The last hint before the tail: the end of the middle, and at last the first hint.
+    while wide(&hints) > width && hints.len() > tail {
+        hints.remove(hints.len() - tail - 1);
+    }
+    hints
+}
+
 fn draw_keys(f: &mut Frame, app: &mut App, area: Rect) {
     let mut spans = Vec::new();
-    let hints = app.key_help();
+    let hints = fit_hints(
+        app.key_help()
+            .into_iter()
+            .map(|(k, what)| (k, app.appearance.hint(what)))
+            .collect(),
+        usize::from(area.width),
+    );
     for (n, (k, what)) in hints.iter().enumerate() {
         if n > 0 {
             spans.push(Span::raw(" "));
@@ -529,7 +660,7 @@ fn draw_keys(f: &mut Frame, app: &mut App, area: Rect) {
             *k,
             Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
         ));
-        spans.push(Span::raw(format!(" {}", app.appearance.hint(what))));
+        spans.push(Span::raw(format!(" {what}")));
     }
     let places = place(area, &spans);
     // Each hint is a gap (but the first), its key and its words.
@@ -802,6 +933,40 @@ mod tests {
         let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
         t.draw(|f| draw(f, app)).unwrap();
         buffer_text(t.backend().buffer())
+    }
+
+    #[test]
+    fn hints_that_do_not_fit_go_from_the_middle() {
+        let hints = |v: &[(&'static str, &str)]| -> Vec<(&'static str, String)> {
+            v.iter().map(|(k, w)| (*k, w.to_string())).collect()
+        };
+        let (a, t, s, x) = (
+            ("a", "actions"),
+            (":", "training"),
+            ("s", "start"),
+            ("x", "stop"),
+        );
+        let (help, quit) = (("?", "help"), ("q", "quit"));
+        let all = hints(&[a, t, s, x, help, quit]);
+        // 49 columns in all.
+        assert_eq!(fit_hints(all.clone(), 49), all);
+        assert_eq!(fit_hints(all.clone(), 48), hints(&[a, t, s, help, quit]));
+        assert_eq!(fit_hints(all.clone(), 41), hints(&[a, t, help, quit]));
+        assert_eq!(fit_hints(all.clone(), 33), hints(&[a, help, quit]));
+        // Help and quit always stay.
+        assert_eq!(fit_hints(all.clone(), 22), hints(&[help, quit]));
+        assert_eq!(fit_hints(all.clone(), 5), hints(&[help, quit]));
+        // Wide letters count twice.
+        let wide = hints(&[("a", "작업"), help, quit]);
+        assert_eq!(fit_hints(wide.clone(), 20), wide);
+        assert_eq!(fit_hints(wide.clone(), 19), hints(&[help, quit]));
+        // Without help and quit (search): the end of the line goes first.
+        let search = hints(&[("Enter", "done"), ("Esc", "clear"), ("↑↓", "move")]);
+        assert_eq!(fit_hints(search.clone(), 28), search);
+        assert_eq!(
+            fit_hints(search.clone(), 27),
+            hints(&[("Enter", "done"), ("Esc", "clear")])
+        );
     }
 
     #[test]

@@ -109,12 +109,22 @@ fn run_build(a: BuildArgs) -> podbag::Result<()> {
     result.map(drop)
 }
 
-pub fn commit(container: &str, image: Option<String>, changes: Vec<String>) -> i32 {
+pub fn commit(
+    container: &str,
+    image: Option<String>,
+    changes: Vec<String>,
+    author: &str,
+    message: &str,
+) -> i32 {
     let made = ContainerHandle::get(container).and_then(|c| {
-        c.commit(&podbag::build::CommitOptions {
-            name: image,
-            changes,
-        })
+        c.commit_with_metadata(
+            &podbag::build::CommitOptions {
+                name: image,
+                changes,
+            },
+            author,
+            message,
+        )
     });
     match made {
         Ok(built) => {

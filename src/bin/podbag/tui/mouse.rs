@@ -57,6 +57,7 @@ fn char_key(c: char) -> KeyEvent {
 impl App {
     /// A mouse event; `at`: when it came (for double clicks).
     pub fn on_mouse(&mut self, m: MouseEvent, at: Instant) -> Effect {
+        self.acted();
         match m.kind {
             MouseEventKind::ScrollDown => self.wheel(true),
             MouseEventKind::ScrollUp => self.wheel(false),

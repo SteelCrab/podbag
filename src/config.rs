@@ -3,6 +3,8 @@
 use crate::cgroup::{Budget, parse_budget};
 use crate::paths::Dirs;
 use crate::{Error, ErrorKind, Result};
+use std::fs::File;
+use std::path::Path;
 
 /// The default image store limit.
 pub const DEFAULT_STORE_LIMIT: u64 = 10 << 30;
@@ -15,8 +17,10 @@ pub struct Config {
     pub memory_budget: Budget,
     /// The default network's subnet.
     pub default_subnet: String,
+    pub default_ipv6_subnet: Option<crate::network::Ipv6Subnet>,
     /// Use a private DNS resolver in each bridge container.
     pub embedded_dns: bool,
+    pub dns_filter: DnsFilter,
     /// How root mode mounts images.
     pub image_mount: ImageMount,
     /// One keeper process watches the detached containers; without it each
@@ -35,6 +39,34 @@ pub const DEFAULT_COMPRESS_IDLE_AFTER: u64 = 7 * 24 * 3600;
 
 /// Whether the keeper is used when nothing says otherwise.
 pub const KEEPER_DEFAULT: bool = true;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DnsFilter {
+    #[default]
+    None,
+    Ipv4,
+    Ipv6,
+}
+
+impl DnsFilter {
+    fn parse(text: &str) -> std::result::Result<Self, String> {
+        match text {
+            "none" => Ok(Self::None),
+            "ipv4" => Ok(Self::Ipv4),
+            "ipv6" => Ok(Self::Ipv6),
+            _ => Err("dns_filter must be none, ipv4 or ipv6".into()),
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Ipv4 => "ipv4",
+            Self::Ipv6 => "ipv6",
+        }
+    }
+}
 
 /// `image_mount`: `auto` uses composefs when podbag runs as root and the kernel passes
 /// the probe, hard-link trees otherwise; `hardlink` always uses hard-link trees.
@@ -91,7 +123,9 @@ impl Default for Config {
             store_limit: DEFAULT_STORE_LIMIT,
             memory_budget: Budget::default(),
             default_subnet: "10.77.0.0/16".to_string(),
+            default_ipv6_subnet: None,
             embedded_dns: false,
+            dns_filter: DnsFilter::None,
             image_mount: ImageMount::Auto,
             keeper: KEEPER_DEFAULT,
             keeper_linger_ms: 10_000,
@@ -132,28 +166,33 @@ fn parse_age(text: &str) -> std::result::Result<u64, String> {
 }
 
 /// Read `<config>/config.toml` (missing file = defaults). `PODBAG_STORE_LIMIT`,
-/// `PODBAG_MEMORY_BUDGET`, `PODBAG_DEFAULT_SUBNET`, `PODBAG_EMBEDDED_DNS`, `PODBAG_IMAGE_MOUNT`,
-/// `PODBAG_KEEPER`,
-/// `PODBAG_KEEPER_LINGER_MS`, `PODBAG_IMAGE_COMPRESSION` and `PODBAG_COMPRESS_IDLE_AFTER`
+/// `PODBAG_MEMORY_BUDGET`, `PODBAG_DEFAULT_SUBNET`, `PODBAG_DEFAULT_IPV6_SUBNET`,
+/// `PODBAG_EMBEDDED_DNS`, `PODBAG_DNS_FILTER`, `PODBAG_IMAGE_MOUNT`,
+/// `PODBAG_KEEPER`, `PODBAG_KEEPER_LINGER_MS`, `PODBAG_IMAGE_COMPRESSION` and `PODBAG_COMPRESS_IDLE_AFTER`
 /// override it.
 pub fn load(dirs: &Dirs) -> Result<Config> {
     let path = dirs.config.join("config.toml");
-    let mut config = match std::fs::read_to_string(&path) {
-        Ok(text) => parse(&text).map_err(|mut e| {
+    let mut config = match read_text(&path)? {
+        Some(text) => parse(&text).map_err(|mut e| {
             e.what = format!("invalid settings in {}", path.display());
             e
         })?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Config::default(),
-        Err(e) => {
-            return Err(Error::io(
-                format!("cannot read {}", path.display()),
-                &e,
-                "check the file permissions",
-            ));
-        }
+        None => Config::default(),
     };
     apply_overrides(&mut config, |k| std::env::var(k).ok())?;
     Ok(config)
+}
+
+fn read_text(path: &Path) -> Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(Error::io(
+            format!("cannot read {}", path.display()),
+            &e,
+            "check the file permissions",
+        )),
+    }
 }
 
 /// Set `key = "value"` in `<config>/config.toml`, which is made when missing. The line that
@@ -161,64 +200,99 @@ pub fn load(dirs: &Dirs) -> Result<Config> {
 /// end; every other line stays as it is. A value [`parse`] refuses changes nothing. The
 /// file is replaced at once: a reader sees the old text or the new one.
 pub fn set_value(dirs: &Dirs, key: &str, value: &str) -> Result<()> {
+    let _lock = lock_config(dirs)?;
+    set_values_locked(dirs, &[(key, value)])
+}
+
+pub(crate) fn lock_config(dirs: &Dirs) -> Result<File> {
+    let result = || -> std::io::Result<File> {
+        std::fs::create_dir_all(&dirs.config)?;
+        let file = File::options()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(dirs.config.join("config.lock"))?;
+        file.lock()?;
+        Ok(file)
+    };
+    result().map_err(|e| {
+        Error::io(
+            "cannot lock the engine configuration",
+            &e,
+            "check the configuration directory permissions",
+        )
+    })
+}
+
+/// Replace related settings in a single write while the caller holds config.lock.
+pub(crate) fn set_values_locked(dirs: &Dirs, values: &[(&str, &str)]) -> Result<()> {
+    if values.is_empty() {
+        return Ok(());
+    }
+    let mut settings: Vec<_> = values
+        .iter()
+        .map(|(key, value)| {
+            let setting = format!("{key} = \"{value}\"");
+            parse(&setting).map_err(|e| {
+                Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("invalid {key}"),
+                    e.why.trim_start_matches("line 1: "),
+                    "use a valid value",
+                )
+            })?;
+            Ok((*key, setting, false))
+        })
+        .collect::<Result<_>>()?;
     let path = dirs.config.join("config.toml");
-    let old = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => {
-            return Err(Error::io(
-                format!("cannot read {}", path.display()),
-                &e,
-                "check the file permissions",
-            ));
-        }
-    };
-    let setting = format!("{key} = \"{value}\"");
-    let sets_key = |line: &str| {
-        strip_comment(line)
-            .split_once('=')
-            .is_some_and(|(k, _)| k.trim() == key)
-    };
-    let mut found = false;
+    let old = read_text(&path)?.unwrap_or_default();
     let mut text = String::new();
     for line in old.lines() {
-        if sets_key(line) {
-            found = true;
-            text.push_str(&setting);
+        let key = strip_comment(line).split_once('=').map(|(k, _)| k.trim());
+        if let Some((_, setting, found)) = settings.iter_mut().find(|(k, _, _)| key == Some(*k)) {
+            *found = true;
+            text.push_str(setting);
         } else {
             text.push_str(line);
         }
         text.push('\n');
     }
-    if !found {
-        text.push_str(&setting);
-        text.push('\n');
+    for (_, setting, found) in settings {
+        if !found {
+            text.push_str(&setting);
+            text.push('\n');
+        }
     }
-    // The value alone first, so its error does not point at a line of the file.
-    parse(&setting).map_err(|e| {
-        Error::new(
-            ErrorKind::InvalidInput,
-            format!("invalid {key}"),
-            e.why.trim_start_matches("line 1: "),
-            "use a valid value",
-        )
-    })?;
     parse(&text).map_err(|mut e| {
         e.what = format!("invalid settings in {}", path.display());
         e
     })?;
+    write_text(&path, &text)
+}
+
+fn write_text(path: &Path, text: &str) -> Result<()> {
     let write = || -> std::io::Result<()> {
-        std::fs::create_dir_all(&dirs.config)?;
+        let resolved = if path
+            .symlink_metadata()
+            .is_ok_and(|metadata| metadata.is_symlink())
+        {
+            Some(path.canonicalize()?)
+        } else {
+            None
+        };
+        let path = resolved.as_deref().unwrap_or(path);
+        let dir = path.parent().expect("a config file has a directory");
         // A new file gets the mode any new file gets (the umask applies), not 0600.
         #[cfg(unix)]
         let mut tmp = tempfile::Builder::new()
             .permissions(std::os::unix::fs::PermissionsExt::from_mode(0o666))
-            .tempfile_in(&dirs.config)?;
+            .tempfile_in(dir)?;
         #[cfg(not(unix))]
-        let mut tmp = tempfile::NamedTempFile::new_in(&dirs.config)?;
+        let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
         std::io::Write::write_all(&mut tmp, text.as_bytes())?;
         // The file keeps the mode it had: this replaces the user's whole file.
-        match std::fs::metadata(&path) {
+        match std::fs::metadata(path) {
             Ok(old) => tmp.as_file().set_permissions(old.permissions())?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e),
@@ -226,7 +300,7 @@ pub fn set_value(dirs: &Dirs, key: &str, value: &str) -> Result<()> {
         // On disk before it takes the old file's place: after a crash an empty file would
         // read as all defaults, and every other setting would be lost without an error.
         tmp.as_file().sync_all()?;
-        tmp.persist(&path)?;
+        tmp.persist(path)?;
         Ok(())
     };
     write().map_err(|e| {
@@ -258,8 +332,11 @@ fn apply_overrides(config: &mut Config, var: impl Fn(&str) -> Option<String>) ->
         config.memory_budget = parse_budget(&v)?;
     }
     if let Some(v) = var("PODBAG_DEFAULT_SUBNET") {
-        crate::network::parse_cidr(&v)?;
-        config.default_subnet = v;
+        let (address, prefix) = crate::network::parse_cidr(&v)?;
+        config.default_subnet = format!("{address}/{prefix}");
+    }
+    if let Some(v) = var("PODBAG_DEFAULT_IPV6_SUBNET") {
+        config.default_ipv6_subnet = ipv6_subnet(&v)?;
     }
     if let Some(v) = var("PODBAG_IMAGE_MOUNT") {
         config.image_mount = ImageMount::parse(&v).map_err(|why| {
@@ -303,6 +380,16 @@ fn apply_overrides(config: &mut Config, var: impl Fn(&str) -> Option<String>) ->
         config.embedded_dns =
             parse_switch(&v).map_err(|why| invalid("PODBAG_EMBEDDED_DNS", why))?;
     }
+    if let Some(v) = var("PODBAG_DNS_FILTER") {
+        config.dns_filter = DnsFilter::parse(&v).map_err(|why| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                "invalid PODBAG_DNS_FILTER",
+                why,
+                "set it to none, ipv4 or ipv6, or unset it",
+            )
+        })?;
+    }
     if let Some(v) = var("PODBAG_KEEPER") {
         config.keeper = parse_switch(&v).map_err(|why| invalid("PODBAG_KEEPER", why))?;
     }
@@ -343,8 +430,12 @@ pub fn parse(text: &str) -> Result<Config> {
                 config.memory_budget = parse_budget(value).map_err(|e| bad(e.why))?
             }
             "default_subnet" => {
-                crate::network::parse_cidr(value).map_err(|e| bad(e.why))?;
-                config.default_subnet = value.to_string();
+                let (address, prefix) =
+                    crate::network::parse_cidr(value).map_err(|e| bad(e.why))?;
+                config.default_subnet = format!("{address}/{prefix}");
+            }
+            "default_ipv6_subnet" => {
+                config.default_ipv6_subnet = ipv6_subnet(value).map_err(|e| bad(e.why))?
             }
             "image_mount" => config.image_mount = ImageMount::parse(value).map_err(bad)?,
             "image_compression" => {
@@ -352,6 +443,7 @@ pub fn parse(text: &str) -> Result<Config> {
             }
             "compress_idle_after" => config.compress_idle_after = parse_age(value).map_err(bad)?,
             "embedded_dns" => config.embedded_dns = parse_switch(value).map_err(bad)?,
+            "dns_filter" => config.dns_filter = DnsFilter::parse(value).map_err(bad)?,
             "keeper" => config.keeper = parse_switch(value).map_err(bad)?,
             "keeper_linger" => {
                 config.keeper_linger_ms = value
@@ -362,6 +454,10 @@ pub fn parse(text: &str) -> Result<Config> {
         }
     }
     Ok(config)
+}
+
+fn ipv6_subnet(text: &str) -> Result<Option<crate::network::Ipv6Subnet>> {
+    (!text.is_empty()).then(|| text.parse()).transpose()
 }
 
 fn strip_comment(line: &str) -> &str {
@@ -405,10 +501,107 @@ pub fn parse_size(s: &str) -> Result<u64> {
     Ok((value * multiplier as f64).round() as u64)
 }
 
+#[derive(Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct Document {
+    pub path: std::path::PathBuf,
+    /// None means the configuration file has not been created.
+    pub text: Option<String>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+pub struct Edit {
+    pub original: Option<String>,
+    pub text: String,
+}
+
+pub fn document(dirs: &Dirs) -> Result<Document> {
+    let path = dirs.config.join("config.toml");
+    let text = read_text(&path)?;
+    Ok(Document { path, text })
+}
+
+pub fn apply_edit(dirs: &Dirs, edit: Edit) -> Result<Document> {
+    parse(&edit.text)?;
+    let _lock = lock_config(dirs)?;
+    let current = document(dirs)?;
+    if current.text != edit.original {
+        return Err(Error::new(
+            ErrorKind::Conflict,
+            "cannot save the engine configuration",
+            "config.toml changed after it was opened",
+            "reload the file and apply your edits again",
+        ));
+    }
+    write_text(&current.path, &edit.text)?;
+    Ok(Document {
+        path: current.path,
+        text: Some(edit.text),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ErrorKind;
+
+    fn isolated_config(directory: &Path) -> Dirs {
+        Dirs {
+            config: directory.join("conf"),
+            data: directory.join("data"),
+            runtime: directory.join("run"),
+        }
+    }
+
+    #[test]
+    fn an_engine_config_edit_keeps_its_text_and_refuses_stale_or_invalid_input() {
+        let temp = tempfile::tempdir().unwrap();
+        let dirs = isolated_config(temp.path());
+        let expected = "# Keep this comment\r\n\r\nembedded_dns = true\r\n";
+        assert!(document(&dirs).unwrap().text.is_none());
+        let edit = |original: Option<&str>, text: &str| Edit {
+            original: original.map(str::to_owned),
+            text: text.to_owned(),
+        };
+        let created = apply_edit(&dirs, edit(None, expected)).unwrap();
+        assert_eq!(created.text.as_deref(), Some(expected));
+        assert_eq!(document(&dirs).unwrap(), created);
+        let invalid =
+            apply_edit(&dirs, edit(Some(expected), "embedded_dns = invalid")).unwrap_err();
+        assert_eq!(invalid.kind, ErrorKind::InvalidInput);
+        assert_eq!(document(&dirs).unwrap(), created);
+
+        set_value(&dirs, "keeper", "false").unwrap();
+        let concurrent = document(&dirs).unwrap();
+        let stale = apply_edit(&dirs, edit(Some(expected), "embedded_dns = false")).unwrap_err();
+        assert_eq!(stale.kind, ErrorKind::Conflict);
+        assert_eq!(document(&dirs).unwrap(), concurrent);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn saving_a_symlinked_config_keeps_the_link() {
+        let temp = tempfile::tempdir().unwrap();
+        let dirs = isolated_config(temp.path());
+        std::fs::create_dir(&dirs.config).unwrap();
+        let target = temp.path().join("settings.toml");
+        std::fs::write(&target, "# existing file\n").unwrap();
+        let link = dirs.config.join("config.toml");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let saved = apply_edit(
+            &dirs,
+            Edit {
+                original: Some("# existing file\n".into()),
+                text: "keeper = false\n".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(saved.path, link);
+        assert_eq!(std::fs::read_link(&link).unwrap(), target);
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "keeper = false\n"
+        );
+    }
 
     #[test]
     fn parses_sizes() {

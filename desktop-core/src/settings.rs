@@ -2,6 +2,7 @@
 //! `settings.json` in the app's config folder.
 
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::path::Path;
 
 /// The sidebar's width: the default and the limits, in CSS pixels.
@@ -28,6 +29,8 @@ pub struct Settings {
     pub sidebar_width: u32,
     /// The user collapsed the sidebar to a rail of icons.
     pub sidebar_collapsed: bool,
+    /// Show popups for routine task messages. Errors are always shown.
+    pub status_notifications: bool,
     /// The user answered "Not now" to installing the `podbag` command.
     pub cli_notice_dismissed: bool,
     /// The app version for which the user answered "Not now" to updating the terminal's
@@ -45,6 +48,7 @@ impl Default for Settings {
             theme: ThemePreference::System,
             sidebar_width: SIDEBAR_WIDTH,
             sidebar_collapsed: false,
+            status_notifications: true,
             cli_notice_dismissed: false,
             cli_update_dismissed: None,
             compression_prompt_seen: false,
@@ -74,11 +78,20 @@ impl Settings {
     }
 
     pub fn save(&self, file: &Path) -> Result<(), String> {
-        if let Some(dir) = file.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        }
+        let dir = file
+            .parent()
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let json = serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(file, json).map_err(|e| format!("{}: {e}", file.display()))
+        let write = || -> std::io::Result<()> {
+            let mut temp = tempfile::NamedTempFile::new_in(dir)?;
+            temp.write_all(&json)?;
+            temp.as_file().sync_all()?;
+            temp.persist(file)?;
+            Ok(())
+        };
+        write().map_err(|e| format!("{}: {e}", file.display()))
     }
 
     /// Fall back to the system language and clamp the sidebar width.
@@ -121,7 +134,21 @@ mod tests {
         let file = dir.path().join("settings.json");
         std::fs::write(&file, r#"{"language":"ko"}"#).unwrap();
         assert!(!take_star_prompt(dir.path(), &dir.path().join("webview")));
-        assert_eq!(Settings::load(&file).language, "ko");
+        let old = Settings::load(&file);
+        assert_eq!(old.language, "ko");
+        assert!(old.status_notifications);
+    }
+
+    #[test]
+    fn saves_disabled_status_notifications() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("settings.json");
+        let settings = Settings {
+            status_notifications: false,
+            ..Settings::default()
+        };
+        settings.save(&file).unwrap();
+        assert!(!Settings::load(&file).status_notifications);
     }
 
     #[test]

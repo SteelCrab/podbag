@@ -90,7 +90,7 @@ impl Store {
             }
             let mut diff_ids = base.to_vec();
             diff_ids.push(diff_id.clone());
-            let image = self.record_image(config, diff_ids, created, false)?;
+            let image = self.record_image(config, diff_ids, created, false, Vec::new())?;
             Ok(Committed { image, diff_id })
         })();
         let _ = remove_tree(&scratch);
@@ -106,16 +106,28 @@ impl Store {
         created: u64,
         artifact: bool,
     ) -> Result<String> {
-        let _shared = self.lock(false)?;
-        self.record_image(config, diff_ids, created, artifact)
+        self.create_image_with_history(config, diff_ids, created, artifact, Vec::new())
     }
 
-    fn record_image(
+    pub(super) fn create_image_with_history(
         &self,
         config: ImageConfig,
         diff_ids: Vec<String>,
         created: u64,
         artifact: bool,
+        history: Vec<manifest::HistoryEntry>,
+    ) -> Result<String> {
+        let _shared = self.lock(false)?;
+        self.record_image(config, diff_ids, created, artifact, history)
+    }
+
+    pub(super) fn record_image(
+        &self,
+        config: ImageConfig,
+        diff_ids: Vec<String>,
+        created: u64,
+        artifact: bool,
+        history: Vec<manifest::HistoryEntry>,
     ) -> Result<String> {
         for id in &diff_ids {
             if !self.layer_path(id).exists() {
@@ -127,7 +139,7 @@ impl Store {
                 ));
             }
         }
-        let json = manifest::config_json(&config, &diff_ids, created);
+        let json = manifest::config_json(&config, &diff_ids, created, &history);
         let digest = format!("sha256:{}", crate::image::registry::sha256_hex(&json));
         if self.has_image(&digest) {
             // The build cache made it again: a use, so an image built often stays plain.
@@ -139,14 +151,18 @@ impl Store {
                 self.ensure_artifact(&digest)?;
             }
         } else {
-            self.assemble_at(
-                &digest,
-                config,
-                diff_ids,
-                Some(digest.clone()),
-                false,
+            self.assemble(
+                super::ImageRecord {
+                    digest: digest.clone(),
+                    config_digest: Some(digest.clone()),
+                    config,
+                    diff_ids,
+                    history,
+                    created,
+                    size: 0,
+                    oci: false,
+                },
                 artifact,
-                created,
             )?;
         }
         Ok(digest)

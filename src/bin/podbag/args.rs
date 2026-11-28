@@ -87,6 +87,11 @@ pub enum Cmd {
         #[arg(short, long)]
         quiet: bool,
     },
+    /// Import a root filesystem or inspect an image's history
+    Image {
+        #[command(subcommand)]
+        cmd: ImageCmd,
+    },
     /// Save images to an archive (`docker save` format) on stdout or a file
     Save {
         /// Write to this file instead of stdout
@@ -107,10 +112,10 @@ pub enum Cmd {
         /// A Dockerfile instruction for the image's config (CMD, ENV, EXPOSE, …)
         #[arg(short, long = "change")]
         change: Vec<String>,
-        /// Ignored: podbag keeps no image history
+        /// Set the history comment
         #[arg(short, long)]
         message: Option<String>,
-        /// Ignored: podbag keeps no image history
+        /// Set the history author
         #[arg(short, long)]
         author: Option<String>,
         container: String,
@@ -332,6 +337,29 @@ pub enum Cmd {
 }
 
 #[derive(Subcommand)]
+pub enum ImageCmd {
+    /// Import a root filesystem tar from a file, URL, or stdin (-)
+    Import {
+        /// Set the image configuration with a Dockerfile instruction
+        #[arg(short, long)]
+        change: Vec<String>,
+        /// Set the history comment
+        #[arg(short, long)]
+        message: Option<String>,
+        source: String,
+        /// REPOSITORY[:TAG] to give the new image
+        image: Option<String>,
+    },
+    /// Show the history of an image
+    History {
+        /// Print full image IDs and commands
+        #[arg(long)]
+        no_trunc: bool,
+        image: String,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum NetworkCmd {
     /// Create a bridge network
     Create {
@@ -407,6 +435,9 @@ pub enum LabCmd {
         lang: Option<String>,
         #[arg(long, hide = true)]
         library: Option<std::path::PathBuf>,
+        /// Do the module in podbag tui instead of the training shell
+        #[arg(long)]
+        tui: bool,
     },
     /// Remove the installed module and its progress
     Remove { module: Option<String> },
@@ -469,6 +500,11 @@ pub enum CgroupDriverArg {
 
 #[derive(Subcommand)]
 pub enum SystemCmd {
+    /// View, check, or apply the local engine settings file
+    Config {
+        #[command(subcommand)]
+        cmd: ConfigCmd,
+    },
     /// Show disk use
     Df,
     /// Remove every image that no container uses
@@ -505,6 +541,21 @@ pub enum SystemCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Read or update the local engine's registry proxy settings as JSON
+    RegistryProxy {
+        /// Read new settings as JSON from standard input
+        #[arg(long)]
+        set: bool,
+    },
+    /// Read or save default bridge and embedded DNS settings as JSON
+    NetworkSettings {
+        /// Save the supplied network preferences
+        #[arg(long, value_name = "JSON")]
+        set: Option<String>,
+        /// Save only if the network settings still match this revision
+        #[arg(long, value_name = "REVISION", requires = "set")]
+        expect_revision: Option<String>,
+    },
     /// Serve the Docker Engine API on a Unix socket, for the docker CLI
     ///
     /// Point the CLI at it with DOCKER_HOST=unix://<socket>. Containers do not depend on
@@ -534,6 +585,16 @@ pub enum SystemCmd {
         #[command(subcommand)]
         cmd: DockerCmd,
     },
+}
+
+#[derive(Subcommand)]
+pub enum ConfigCmd {
+    /// Read the file as JSON, including its path and original text
+    Show,
+    /// Check config.toml text read from stdin
+    Check,
+    /// Apply a JSON edit read from stdin and reject a changed original
+    Apply,
 }
 
 #[derive(Subcommand)]
@@ -655,6 +716,12 @@ pub struct RunArgs {
     /// cgroup (inside the user namespace when rootless)
     #[arg(long)]
     pub privileged: bool,
+    /// Logging driver (json-file, syslog, journald)
+    #[arg(long)]
+    pub log_driver: Option<String>,
+    /// Logging driver option, repeatable
+    #[arg(long, value_name = "KEY=VALUE")]
+    pub log_opt: Vec<String>,
     /// Start it again after it ends: no, always, unless-stopped, on-failure[:max]
     #[arg(long, value_name = "POLICY")]
     pub restart: Option<String>,

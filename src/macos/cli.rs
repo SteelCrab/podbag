@@ -40,7 +40,9 @@ const SETTINGS: &[&str] = &[
     "PODBAG_STORE_LIMIT",
     "PODBAG_MEMORY_BUDGET",
     "PODBAG_DEFAULT_SUBNET",
+    "PODBAG_DEFAULT_IPV6_SUBNET",
     "PODBAG_EMBEDDED_DNS",
+    "PODBAG_DNS_FILTER",
     "PODBAG_IMAGE_COMPRESSION",
     "PODBAG_COMPRESS_IDLE_AFTER",
 ];
@@ -148,11 +150,14 @@ fn error_since(log: &Path, at: u64) -> String {
     }
 }
 
+const STORAGE_USAGE: &str = "usage: podbag vm storage [grow GIB|move PATH]";
+
 const SYNC_USAGE: &str = "usage: podbag vm sync list|add NAME PATH|now NAME|remove NAME";
 
 const VM_USAGE: &str = "usage: podbag vm start|stop|restart [--yes]|status [--json]|logs|resources [CPUS MEMORY_MIB]\n       \
                         podbag vm set [--cpus N] [--memory SIZE] [--idle TIME] [--share PATH]... [--no-shares] [--restart] [--yes]\n       \
-                        podbag vm sync list|add NAME PATH|now NAME|remove NAME";
+                        podbag vm sync list|add NAME PATH|now NAME|remove NAME\n       \
+                        podbag vm storage [grow GIB|move PATH]";
 
 /// `podbag vm start|stop|restart|status|set|logs|resources`.
 pub fn vm_command(args: &[String]) -> i32 {
@@ -173,6 +178,7 @@ pub fn vm_command(args: &[String]) -> i32 {
         Some("status") if rest.iter().any(|a| a == "--json") => {
             paths().map(|p| println!("{}", status_json(&p)))
         }
+        Some("storage") => paths().and_then(|p| storage_command(&p, rest)),
         Some("resources") => {
             super::host::home().and_then(|home| super::resources::command(&home, &args[1..]))
         }
@@ -198,6 +204,31 @@ pub fn vm_command(args: &[String]) -> i32 {
             1
         }
     }
+}
+
+fn storage_command(p: &Paths, args: &[String]) -> Result<(), String> {
+    use super::disk;
+    let mut answer = match args {
+        [] => disk::status(p)?,
+        [cmd, value] if cmd == "grow" => {
+            let gib = value
+                .parse()
+                .map_err(|_| "give the capacity in whole GiB")?;
+            disk::grow(p, gib)?
+        }
+        [cmd, value] if cmd == "move" => disk::relocate(p, Path::new(value))?,
+        [help] if matches!(help.as_str(), "-h" | "--help" | "help") => {
+            println!("{STORAGE_USAGE}");
+            return Ok(());
+        }
+        _ => return Err(STORAGE_USAGE.into()),
+    };
+    answer.editable = state(p) == "stopped";
+    println!(
+        "{}",
+        serde_json::to_string(&answer).map_err(|error| error.to_string())?
+    );
+    Ok(())
 }
 
 fn sync_command(args: &[String]) -> i32 {
@@ -287,7 +318,6 @@ pub fn running_containers(p: &Paths) -> u64 {
 /// next start, the limits of this Mac, the disk, and what the running VM does. It reads
 /// files only: it wakes no VM and keeps none up.
 pub fn status_json(p: &Paths) -> serde_json::Value {
-    use std::os::unix::fs::MetadataExt;
     let mac = settings::Mac::this();
     let saved = settings::load(&p.home);
     let env = |k: &str| std::env::var(k).ok();
@@ -298,13 +328,7 @@ pub fn status_json(p: &Paths) -> serde_json::Value {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
-    let disk = std::fs::metadata(&p.disk).ok().map(|m| {
-        serde_json::json!({
-            "path": p.disk,
-            "allocatedBytes": m.blocks() * 512,
-            "sizeBytes": m.len(),
-        })
-    });
+    let disk = super::disk::status(p).ok().filter(|info| info.exists);
     let shared_next = saved.shared_paths();
     let shared_in_use = info
         .as_ref()

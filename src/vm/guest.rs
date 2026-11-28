@@ -266,7 +266,31 @@ fn setup() -> Vec<Error> {
             }),
     );
     need(share_folders(&cmdline));
+    if problems.is_empty()
+        && let Err(error) = grow_data_disk()
+    {
+        // The mounted filesystem can still serve its existing data. Leave the
+        // extra capacity pending, report the error, and retry on the next boot.
+        eprintln!("podbag: cannot grow the VM data filesystem: {error}");
+    }
     problems
+}
+
+fn grow_data_disk() -> std::io::Result<()> {
+    use std::fs::File;
+    let sectors: u64 = std::fs::read_to_string("/sys/class/block/vda/size")?
+        .trim()
+        .parse()
+        .map_err(std::io::Error::other)?;
+    let device_bytes = sectors
+        .checked_mul(512)
+        .ok_or(std::io::ErrorKind::InvalidData)?;
+    let device = File::open("/dev/vda")?;
+    let mounted = File::open(DATA_DIR)?;
+    if let Some((before, after)) = super::ext4::grow_mounted(&device, &mounted, device_bytes)? {
+        eprintln!("podbag: VM data filesystem grew from {before} to {after} bytes");
+    }
+    Ok(())
 }
 
 fn share_folders(cmdline: &str) -> Result<()> {

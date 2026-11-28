@@ -484,7 +484,13 @@ pub(super) fn run(
     let mut attach = |pid: u32| {
         super::net::attach(spec, &addresses, session, pid)?;
         if let Some(upstream) = dns_upstream.take() {
-            resolver = Some(super::dns::Resolver::start(dirs, id, pid, upstream)?);
+            resolver = Some(super::dns::Resolver::start(
+                dirs,
+                id,
+                pid,
+                upstream,
+                config.dns_filter,
+            )?);
         }
         Ok(())
     };

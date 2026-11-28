@@ -6,6 +6,7 @@ The [README](../README.md) shows how to install podbag. This page shows what it 
 
 - [Commands](#commands)
 - [How containers run](#how-containers-run)
+  - [Forward container logs](#forward-container-logs)
   - [No daemon](#no-daemon)
   - [The keeper](#the-keeper)
   - [Isolation](#isolation)
@@ -18,6 +19,7 @@ The [README](../README.md) shows how to install podbag. This page shows what it 
   - [Damaged files](#damaged-files)
   - [Choose the method](#choose-the-method)
   - [Compression](#compression)
+  - [Import and history](#import-and-history)
 - [Registries](#registries)
   - [Log in and out](#log-in-and-out)
   - [Pull and push](#pull-and-push)
@@ -153,6 +155,41 @@ podbag upgrade                               # install the latest release
 ```
 
 ## How containers run
+
+### Forward container logs
+
+Podbag's Linux engine keeps a rotating local log. Both `podbag logs` and `docker logs`
+read that copy. Set `--log-driver` on `run` or `create` to forward new lines as well.
+The engine connects to the destination from its own host or VM.
+
+```sh
+podbag run --log-driver=syslog --log-opt syslog-address=udp://127.0.0.1:5514 \
+  --log-opt syslog-facility=local0 --log-opt syslog-format=rfc5424 \
+  --log-opt 'tag={{.Name}}' --name web alpine echo hello
+
+docker run --log-driver=journald --log-opt 'tag={{.Name}}' --name worker alpine echo hello
+journalctl SYSLOG_IDENTIFIER=worker
+```
+
+- `json-file` is the default driver.
+- `syslog` accepts `syslog-address` over UDP, TCP, Unix stream or Unix datagram.
+  Use IPv4, bracketed IPv6 or `localhost` for UDP and TCP. The default port is `514`.
+  With a Unix socket, use an absolute path. The default socket is `/dev/log`.
+  `syslog-facility` accepts names such as `daemon` (the default) and `local0`, or a number
+  from `0` to `23`. `syslog-format` accepts `rfc3164`, `rfc5424` and `rfc5424micro`.
+- `journald` sends to `/run/systemd/journal/socket`. Use the engine's Linux host or VM
+  to read entries with `journalctl`. Entries include the container ID, name, image,
+  tag, original timestamp and priority.
+- Both drivers accept a literal `tag` or a tag with `{{.ID}}`, `{{.FullID}}`,
+  `{{.Name}}`, `{{.ImageName}}`, `{{.ImageID}}` and `{{.ImageFullID}}`.
+  The default tag is the short container ID.
+
+The engine preserves the local log if the destination is busy, missing or inaccessible.
+It counts lines it could not send and waits a second before attempting the next delivery.
+UDP delivery remains best effort after the kernel accepts a datagram. The raw Engine API
+inspect response includes `PodbagLogDelivery.Dropped` and `PodbagLogDelivery.LastError`
+once a delivery error occurs. You can read the same values from `log-delivery.json`
+beside the container's local log. The counter includes dropped lines across restarts.
 
 ### No daemon
 
@@ -324,6 +361,19 @@ podbag system decompress myapp:1      # decompress now: the next container start
   files without decompressing them on disk.
 - `dev/bench/compress.sh` measures all of this.
 
+### Import and history
+
+```sh
+podbag image import -m "Initial filesystem" -c 'CMD ["/bin/sh"]' rootfs.tar.gz local/rootfs:1
+podbag image history --no-trunc local/rootfs:1
+```
+
+- Import reads a root filesystem tar from a file, standard input (`-`), or an HTTP(S)
+  URL. It accepts plain, gzip and zstd tar archives.
+- Builds, commits and imports record their history. Pull and load preserve history
+  from the image config. For images stored before this change, the history lists
+  layer sizes and shows commands when the original config has been pulled or loaded again.
+
 ## Registries
 
 ### Log in and out
@@ -343,6 +393,26 @@ podbag logout ghcr.io
   `0600`), but the password is not encrypted.
 - When the registry gives a token for the login (an identity token), podbag keeps the
   token, not the password.
+
+### Registry proxies
+
+Open **Settings → Registry proxies** in Podbag Desktop on Linux or macOS with the local
+Podbag engine selected. The saved choice applies to new engine registry requests,
+including pulls, pushes, search, and registry authentication. The engine reads it from
+`registry-proxy.json` in its configuration directory.
+
+- **Use engine environment** is the default. It uses the engine's proxy environment
+  variables, including `ALL_PROXY`, `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY`.
+- **Connect directly** opens registry connections without a proxy.
+- **Manual proxy** uses an HTTP or HTTPS proxy URL, such as
+  `http://proxy.example.com:3128`. The URL must omit credentials. Enter bypass rules
+  separated by commas. Use exact hosts or IP addresses, `.example.com` or
+  `*.example.com` for subdomains, and `*` for every host.
+
+On macOS this configures the Linux VM's engine. Opening the form can start a stopped VM.
+The proxy address must be reachable from that VM. Inherited mode uses the engine
+environment inside the VM. Docker contexts, container applications, and BuildKit use
+their own proxy settings.
 
 ### Pull and push
 
@@ -447,7 +517,6 @@ podbag build -t myapp - < Dockerfile               # only a Dockerfile, no conte
   Git repository, heredocs in `COPY` and `ADD`. podbag stops with a message; build such
   Dockerfiles with buildx (see [buildx](#buildx)).
 - `ADD` of bzip2 or xz archives.
-- Image history (`docker history`).
 - Changes that a `RUN` makes in a `VOLUME` path stay in the image (Docker drops them).
 
 ## Checks
@@ -652,6 +721,27 @@ podbag build -t myapp - < Dockerfile               # only a Dockerfile, no conte
   applies to later starts. The primary bridge and its default route stay in place.
   Containers using host, none or a shared network namespace cannot join another bridge.
 
+### Desktop network settings
+
+Open **Settings → Network** with the local podbag engine selected. Set the default
+IPv4 subnet and choose IPv4-only or IPv4 and IPv6. Dual stack requires a free IPv6
+subnet. The Desktop shows both the saved defaults and any initialized bridge subnets.
+Subnet defaults apply when the default bridge is first created. Saving never
+readdresses an initialized bridge or any other existing network. IPv6 addresses
+reach peers on the bridge. External routing and published ports use IPv4.
+
+Enable embedded DNS or filter direct IPv4 (A) or IPv6 (AAAA) queries. The resolver
+returns an empty successful answer for the filtered query type and omits that
+address family from local ANY responses. DNS settings apply the next time an
+eligible bridge container starts. Running containers retain their resolver settings.
+Explicit DNS servers and a custom `/etc/resolv.conf` bypass the embedded resolver.
+
+The matching settings in `config.toml` are `default_subnet`, `default_ipv6_subnet`
+(an empty string selects IPv4-only), `embedded_dns` and `dns_filter`
+(`none`, `ipv4` or `ipv6`). The corresponding `PODBAG_DEFAULT_SUBNET`,
+`PODBAG_DEFAULT_IPV6_SUBNET`, `PODBAG_EMBEDDED_DNS` and `PODBAG_DNS_FILTER`
+environment variables take precedence.
+
 ### Extra hosts and DNS
 
 - `--add-host` lines come after `localhost` and before the container's own line, as in
@@ -747,7 +837,7 @@ podbag system docker restore    # back to the context you had (Docker Desktop, �
 
 - System: `version`, `info`, `system df`, `events` (live only; there is no history).
 - Images: `pull`, `push`, `images`, `image inspect`, `tag`, `rmi`, `image prune`, `save`,
-  `load`, `search`, `build` with the classic builder (see
+  `load`, `import`, `history`, `search`, `build` with the classic builder (see
   [Builds with the docker CLI](#builds-with-the-docker-cli)), `builder prune`.
 - Registries: `login` (the docker CLI keeps the login; podbag checks it), and private
   pulls, pushes and build base images with the login the docker CLI sends.
@@ -762,10 +852,10 @@ podbag system docker restore    # back to the context you had (Docker Desktop, �
 
 - Refused, with the reason: devices, `--read-only`, `--pid host`, `--volumes-from`,
   `--link`, port ranges, other network or volume drivers.
-- Accepted with a warning, because ignoring them is safe: ulimits, log drivers, fixed
+- Accepted with a warning, because ignoring them is safe: ulimits, unsupported log drivers, fixed
   addresses.
 - Answered with 501 and what to do instead: BuildKit's build API (use buildx with the
-  `docker-container` driver), `image history` and plugins.
+  `docker-container` driver) and plugins.
 - Swarm mode works on one node. See [Swarm mode](#swarm-mode).
 
 ### cp, save and load
@@ -780,8 +870,7 @@ podbag system docker restore    # back to the context you had (Docker Desktop, �
   - the store keeps files, not layer archives, so the saved layers (and the image ID) get
     new digests,
   - it keeps the image's command, environment, user, working folder, volumes, health
-    check, labels, exposed ports and stop signal, but not its history (images stored
-    before podbag kept labels have none).
+    check, labels, exposed ports, stop signal and recorded history.
 - `docker load` reads `docker save` archives and OCI image layouts, plain or gzip:
   - it checks every digest,
   - it refuses an archive that is larger than the store limit.
@@ -1047,9 +1136,13 @@ printf '%s\n' \
 ```sh
 podbag lab list                        # refresh, then list the modules
 podbag lab start container-network     # open the practice shell
+podbag lab start container-network --tui   # do it in podbag tui
 podbag lab install my-module.podbag    # a local module file
 podbag lab remove container-network
 ```
+
+- The TUI track (`--tui`, course modules only) opens `podbag tui` on the practice engine.
+  `:` opens the training shell for CLI steps. `q` ends the session.
 
 - `PODBAG_TRAINING_CATALOG` reads another catalog, for example a local copy of the site
   at `http://127.0.0.1:8000/training/catalog.json`. Other addresses must use HTTPS.
@@ -1080,6 +1173,38 @@ podbag lab remove container-network
 | `desktop-ports`, `desktop-browser` | `name` (`page` for the browser) | Desktop showed the ports / opened the page |
 | `desktop-stop` | `name` | Desktop stopped the container |
 | `desktop-inspect-volume`, `desktop-delete-volume` | `name` | Desktop opened / deleted the volume |
+
+- A step may add `"ui": {"action": …, "name": …}`: how to do the step in a UI (Podbag
+  Desktop or the TUI) instead of the command. The step keeps its `command`.
+  - Released apps ignore `ui`, so a module with `ui` keeps its format.
+  - The app ignores a `ui` it does not know (an unknown action, or a check the action
+    cannot complete). The step then stays a command step.
+  - `name` is the object: a container, image, volume or network name, with no spaces,
+    at most 200 bytes. `{port}` needs the module's `port`. For `prune` it is one of
+    `containers`, `images`, `volumes`, `networks`.
+  - The action must fit the step's check:
+
+| Action | Object | Checks it may complete |
+|---|---|---|
+| `start` | container | `container-running` |
+| `stop` | container | `container-stopped`, `container-exited` |
+| `restart` | container | `container-restarted`, `container-running` |
+| `pause` | container | `container-paused` |
+| `resume` | container | `container-running`, `container-published` |
+| `remove` | container | `container-absent` |
+| `logs` | container | `output-has-line`, `output-contains` |
+| `inspect` | container, volume or network | `output-contains`, `output-has-line` |
+| `pull` | image | `image-exists` |
+| `remove-image` | image | `image-absent` |
+| `create-volume` | volume | `volume-exists` |
+| `remove-volume` | volume | `volume-absent` |
+| `remove-network` | network | `network-absent` |
+| `prune` | `containers`, `images`, `volumes` or `networks` | `containers-empty`, `volumes-empty`, `image-absent`, `network-absent` |
+
+  - `desktop-*` steps need no `ui`. Their UI form is fixed: `desktop-inspect-exited`,
+    `desktop-ports` and `desktop-inspect-volume` are `inspect`; `desktop-stop` is `stop`;
+    `desktop-delete-volume` is `remove-volume`; `desktop-browser` opens the page in the
+    browser.
 
 ##### Version 2 (`podbag-course-v2`)
 
@@ -1270,6 +1395,74 @@ podbag lab remove container-network
 - Languages: English, 한국어, 日本語, 简体中文, Filipino, Español and Tiếng Việt. The app
   follows the system language. Settings can change it.
 
+#### Image security analysis
+
+Open an image's **Security** tab and select **Scan image** to see installed packages and
+known vulnerabilities by severity. Install [Trivy](https://trivy.dev/docs/latest/getting-started/installation/)
+and make its executable available to Podbag Desktop.
+
+Podbag exports the selected image by its full ID to a temporary archive and gives the archive
+to local Trivy. The scan uses the image already on the selected engine and uses no registry
+credentials. Podbag removes the temporary archive and report after the scan. If the engine
+sends no data for 2 minutes during the export, the scan stops with an error.
+
+Trivy keeps its databases in a `trivy` folder in Podbag Desktop's cache folder:
+`~/Library/Caches/io.github.steelcrab.podbag/trivy` on macOS,
+`~/.cache/io.github.steelcrab.podbag/trivy` on Linux (or under `$XDG_CACHE_HOME`) and
+`%LOCALAPPDATA%\io.github.steelcrab.podbag\trivy` on Windows. Podbag does not pass your
+Trivy environment variables or settings, so Trivy uses only this folder.
+
+- The first scan downloads the vulnerability database, so it needs network access.
+- Each database has a next-update time, at most a day after it was built. After that time,
+  the next scan downloads the database again. Before that time, a scan works without
+  network access.
+- An image with Java archives also needs the Java database. Trivy downloads it on the first
+  such scan and keeps it for 3 days.
+- Desktop runs Trivy with `--offline-scan`. This only stops online lookups of dependencies.
+  It does not stop the database downloads.
+- If a needed database is missing or out of date and Trivy cannot download it, the scan
+  fails and shows no results. Desktop shows "Trivy could not scan this image." Connect to
+  the network and scan again.
+
+#### Desktop extensions
+
+Open **Extensions** and select **Install manifest** to install a local UTF-8 JSON file.
+New extensions are disabled. Use **Enable** to show a view, **Disable** to hide it, or
+**Remove** to delete the installed copy. The original file stays in place.
+
+Podbag supports its own manifest version 1. Save this example as a JSON file and install it.
+
+```json
+{
+  "apiVersion": 1,
+  "id": "example.workspace-checklist",
+  "name": "Workspace checklist",
+  "version": "1.0.0",
+  "description": "Review local resources before changing the workspace.",
+  "permissions": ["engineSummary"],
+  "content": [
+    { "type": "heading", "text": "Before you change a workspace" },
+    { "type": "text", "text": "Review your current containers and volumes." },
+    { "type": "list", "items": ["Stop the containers you intend to replace.", "Check which volumes contain data to keep."] },
+    { "type": "code", "text": "podbag ps" },
+    { "type": "engineSummary" }
+  ]
+}
+```
+
+- The ID starts with a lowercase letter and uses up to 64 lowercase letters, digits,
+  periods or hyphens. IDs are unique. Remove an installed manifest before replacing it.
+- The name fits in 120 characters, the version in 40, and the description in 2,000.
+  Files can be up to 128 KiB and contain 1 to 40 blocks. The app keeps up to 64 extensions.
+- Heading blocks accept up to 120 characters. Text and code blocks accept up to 8,000.
+  List blocks have 1 to 40 items of up to 1,000 characters each.
+- The optional `engineSummary` permission authorizes a single matching block. After
+  enabling an extension, explicitly allow summary access to display only the current
+  counts of containers, images, volumes and networks. Disabling clears that grant.
+- The host renders text, code, lists and counted summaries directly. Extending the app
+  with scripts, HTML, external links, files, commands or network requests is unsupported.
+  Docker Desktop extension bundles and manifests use a different format.
+
 #### Local models
 
 Install [Ollama](https://docs.ollama.com/) and make its executable available to Podbag Desktop.
@@ -1332,6 +1525,14 @@ in each Desktop session.
   with `Ctrl+,` elsewhere.
 - Search settings by name or a related term. Use the arrow keys to move through results,
   Enter to open a setting, and Escape to clear the search.
+- In **Notifications**, choose whether routine tasks show popups. Errors always show.
+  The toolbar bell opens the latest 50 messages from this session. Clear the list
+  from the history dialog.
+- In **Engine**, open **Engine configuration** to read or edit the selected local
+  Podbag engine's `config.toml`. **Validate** checks the text without saving. **Apply**
+  validates and saves the file. If it changed since it was opened, the editor keeps
+  your draft and reports a conflict. Environment variables still take precedence.
+  Opening the editor can start the VM on macOS or Windows.
 - Virtual machine (podbag on macOS): the state, the settings in use, uptime and disk use.
   Start, Stop and Restart. CPUs, memory and the idle power-off time (0 = never). Apply
   saves them with `podbag vm set`.
@@ -1664,6 +1865,25 @@ sudo k3s server --container-runtime-endpoint unix:///run/podbag/cri.sock
 - `podbag vm start`, `vm restart` and `vm status` start it, restart it and show its state.
   `vm status` wakes no VM.
 - Containers cannot reach the VM's agent.
+
+### VM storage on macOS
+
+Open **Settings → VM storage** to see the active disk image, virtual capacity, ext4
+capacity, and the space allocated on the Mac. Stop the VM before editing the disk.
+Start a new VM once to create its data disk.
+
+- **Grow disk** accepts a larger whole-GiB capacity up to 1 TiB. This is Podbag's
+  limit for managed sparse images. Podbag keeps a private recovery copy before
+  extending the disk image. The Linux guest grows ext4 at the next start. The storage
+  panel shows a pending update until that succeeds.
+- **Move disk** takes an absolute filename in an existing directory. The destination
+  must support sparse files and hard links. Podbag verifies and syncs the copy before
+  saving its location. The previous image remains available as a recovery copy.
+- If the configured disk is unavailable, reattach its volume or restore the image
+  at the saved path before starting the VM.
+
+The same controls are available through `podbag vm storage`, `podbag vm storage grow GIB`,
+and `podbag vm storage move PATH`. Each successful change reports its recovery copy path.
 
 ### File sharing
 

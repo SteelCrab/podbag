@@ -30,7 +30,7 @@ jobs:
     env:
       TARGET: ${{ matrix.arch }}-unknown-linux-musl
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Test the release installer
         run: sh tests/install.sh
       - uses: dtolnay/rust-toolchain@stable
@@ -66,7 +66,7 @@ jobs:
           sudo podbag run --rm -v "$PWD:/src:ro" "$img" cat /src/Cargo.toml > /dev/null
           export XDG_RUNTIME_DIR="$(mktemp -d)"
           podbag run --rm --network none "$img" echo rootless
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: podbag-${{ matrix.arch }}-linux
           path: target/${{ env.TARGET }}/release/podbag
@@ -78,7 +78,7 @@ jobs:
     env:
       TARGET: aarch64-linux-android
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ env.TARGET }}
@@ -87,7 +87,7 @@ jobs:
           export PATH="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
           cargo build --locked --release --target "$TARGET" --bin podbag
           file "target/$TARGET/release/podbag" | grep -F 'interpreter /system/bin/linker64'
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: podbag-aarch64-android
           path: target/${{ env.TARGET }}/release/podbag
@@ -108,7 +108,7 @@ jobs:
       PODBAG_TEST_ROOT: ${{ matrix.mode == 'root' && '1' || '' }}
       PODBAG_TEST_ROOTFS: ${{ github.workspace }}/../alpine
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Packages
         run: dev/ci/setup.sh
@@ -136,8 +136,8 @@ jobs:
     env:
       PODBAG_E2E_ROOT: ${{ matrix.mode == 'root' && '1' || '' }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           name: podbag-${{ matrix.arch }}-linux
           path: bin
@@ -161,8 +161,8 @@ jobs:
     env:
       PODBAG_E2E_ROOT: ${{ matrix.mode == 'root' && '1' || '' }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           name: podbag-${{ matrix.arch }}-linux
           path: bin
@@ -184,7 +184,7 @@ jobs:
           - { arch: x86_64, runner: windows-2025 }
           - { arch: aarch64, runner: windows-11-arm }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Clang for ring
         shell: pwsh
@@ -195,7 +195,7 @@ jobs:
               Select-Object -First 1
             if ($clang) { Add-Content $env:GITHUB_PATH $clang.DirectoryName }
           }
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: podbag-${{ matrix.arch }}-linux
           path: linux
@@ -207,7 +207,7 @@ jobs:
           $env:PODBAG_LINUX_BIN = Join-Path $PWD "linux\podbag"
           cargo build --release --features embed-linux
           ./target/release/podbag.exe --version
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: podbag-${{ matrix.arch }}-windows
           path: target/release/podbag.exe
@@ -227,7 +227,7 @@ jobs:
       - name: Package Windows desktop
         shell: pwsh
         run: ./desktop/windows/build-msi.ps1 -Arch ${{ matrix.arch }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: podbag-desktop-${{ matrix.arch }}-windows
           path: target/msi/podbag-desktop-${{ matrix.arch }}-windows.msi
@@ -246,7 +246,7 @@ jobs:
           ./desktop/windows/test-installed.ps1 -Installer target/msi/podbag-desktop-${{ matrix.arch }}-windows.msi -Arch ${{ matrix.arch }} `
             -Previous target/previous/podbag-desktop-${{ matrix.arch }}-windows.msi `
             -Screenshot target/podbag-desktop-${{ matrix.arch }}-upgrade.png
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: podbag-desktop-${{ matrix.arch }}-windows-screenshot
@@ -263,7 +263,7 @@ jobs:
           - { arch: aarch64, runner: macos-15 }
           - { arch: x86_64, runner: macos-15-intel }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Test the release installer
         run: sh tests/install.sh
       - uses: dtolnay/rust-toolchain@stable
@@ -280,14 +280,14 @@ jobs:
           - { arch: x86_64, runner: ubuntu-26.04 }
           - { arch: aarch64, runner: ubuntu-26.04-arm }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.arch }}-unknown-linux-musl
       - run: sudo apt-get update
       - name: Build the guest
         run: dev/macos/build-guest.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: podbag-vm-guest-${{ matrix.arch }}
           path: |
@@ -310,9 +310,9 @@ jobs:
       # The runner is a 4-CPU VM itself: VMs with all its CPUs starve it.
       PODBAG_VM_CPUS: 2
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: podbag-vm-guest-x86_64
           path: target/vm
@@ -355,12 +355,12 @@ jobs:
         run: |
           dev/macos/release-files.sh
           dev/macos/check-dmg.sh target/release-files/podbag-desktop-x86_64-macos.dmg
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: podbag-x86_64-macos
           path: target/release-files/podbag-x86_64-macos
           if-no-files-found: error
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: podbag-desktop-x86_64-macos
           path: |
@@ -375,9 +375,9 @@ jobs:
     needs: macos-guest
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: podbag-vm-guest-aarch64
           path: target/vm
@@ -389,12 +389,12 @@ jobs:
           codesign -d --entitlements - target/release-files/podbag-aarch64-macos |
             grep -F com.apple.security.virtualization
           dev/macos/check-dmg.sh target/release-files/podbag-desktop-aarch64-macos.dmg
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: podbag-aarch64-macos
           path: target/release-files/podbag-aarch64-macos
           if-no-files-found: error
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: podbag-desktop-aarch64-macos
           path: |
@@ -412,7 +412,7 @@ jobs:
       matrix:
         os: [ubuntu-26.04, macos-15, windows-2025]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
