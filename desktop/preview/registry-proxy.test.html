@@ -21,7 +21,7 @@ async function until(predicate, message) {
 async function test() {
   const frames = ["podbag", "docker", "windows"].map(id => document.getElementById(id));
   await Promise.all(frames.map(frame => until(
-    () => frame.contentDocument.documentElement.dataset.ready === "1" &&
+    () => frame.contentDocument?.documentElement?.dataset.ready === "1" &&
       frame.contentDocument.querySelector("#settings-search"),
     `Settings did not load for ${frame.id}`,
   )));
