@@ -515,6 +515,8 @@ fn engine_driver_transfers_context_secret_and_image_and_reaps_its_worker() {
             "build",
             "--builder",
             "default",
+            "--progress",
+            "plain",
             "--network",
             "none",
             "--secret",
@@ -526,7 +528,9 @@ fn engine_driver_transfers_context_secret_and_image_and_reaps_its_worker() {
             context.to_str().unwrap(),
         ],
     ));
-    assert!(!stdout(&output).contains(marker) && !stderr(&output).contains(marker));
+    let progress = stderr(&output);
+    assert!(progress.contains(" using docker driver"), "{progress}");
+    assert!(!stdout(&output).contains(marker) && !progress.contains(marker));
     assert!(
         !read(&archive)
             .windows(marker.len())
