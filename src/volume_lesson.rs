@@ -354,8 +354,9 @@ pub fn parse_package(text: &str) -> io::Result<Package> {
     if text.len() > LIMIT {
         return Err(io::Error::other("The module is too large."));
     }
-    let package: Package = serde_json::from_str(text)?;
+    let mut package: Package = serde_json::from_str(text)?;
     if course::is_course(&package.format) {
+        course::drop_foreign_ui(&mut package);
         course::validate(&package)?;
     } else {
         Module::of(&package)?;

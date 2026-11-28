@@ -145,6 +145,7 @@
         "vi": "Xóa container trong CLI"
       },
       "command": "podbag rm web",
+      "ui": { "action": "remove", "name": "web" },
       "check": {
         "kind": "container-absent",
         "name": "web"
@@ -162,6 +163,7 @@
         "vi": "Xóa máy chủ api trong CLI"
       },
       "command": "podbag rm -f api",
+      "ui": { "action": "remove", "name": "api" },
       "check": {
         "kind": "container-absent",
         "name": "api"
@@ -179,6 +181,7 @@
         "vi": "Xóa mạng trong CLI"
       },
       "command": "podbag network rm lab-net",
+      "ui": { "action": "remove-network", "name": "lab-net" },
       "check": {
         "kind": "network-absent",
         "name": "lab-net"

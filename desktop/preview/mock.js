@@ -236,6 +236,8 @@
     ? { mode: "manual", url: "http://proxy.example.com:3128", bypass: "localhost, .example.com" }
     : { mode: "inherited", url: "", bypass: "" };
   const practiceModules = new Map();
+  window.practiceUi = { action: "remove-image", name: "my-busybox:1" };
+  window.practiceCalls = [];
   const checklist = {
     apiVersion: 1, id: "example.workspace-checklist", name: "Workspace checklist", version: "1.0.0",
     description: "Review local resources before changing the workspace.", permissions: ["engineSummary"],
@@ -517,7 +519,26 @@
     },
     open_repository: () => null,
     open_training_guide: () => null,
-    practice_volumes: () => null,
+    // practice-tracks: a course session at a module `ui` step. A test sets window.practiceUi to
+    // switch the step (window.practiceStage, window.practiceContainers and window.practiceSession
+    // change the stage, the containers and the session), and reads window.practiceCalls:
+    // [action, session, name] of each request. An inspect of a name other than the volume's
+    // shows a network. window.practiceAfterCall runs after a request is recorded (the reply
+    // keeps the state from before it).
+    practice_volumes: ({ action, session, name, course }) => {
+      if (view !== "practice-tracks" || !course) return null;
+      const volume = { Name: "data", Driver: "local", Mountpoint: "/var/lib/podbag/volumes/data/_data", CreatedAt: new Date(now * 1000).toISOString() };
+      const state = {
+        module: "image-basics", session: window.practiceSession ?? "podbag-container-abc", stage: window.practiceStage ?? "removeTag", command: "podbag rmi my-busybox:1",
+        containers: window.practiceContainers ?? [{ Id: "c1", Names: ["/web"], Image: "busybox:1.37.0", Command: "httpd -f", Created: now, State: "running", Status: "Up 1 minute", Ports: [] }],
+        volumes: [volume], ui: window.practiceUi, text: null, detail: null,
+      };
+      if (action === "status") return state;
+      window.practiceCalls.push([action, session, name]);
+      window.practiceAfterCall?.();
+      const network = { Name: name, Id: "n1", Driver: "bridge", Scope: "local", IPAM: { Config: [{ Subnet: "10.89.0.0/24", Gateway: "10.89.0.1" }] } };
+      return { ...state, text: action === "logs" ? "hello from web\n" : null, detail: action === "inspect" ? (name === volume.Name ? volume : network) : null };
+    },
     volume_tools_lab: ({ action, package: file, id }) => {
       if (action === "install") {
         const pack = JSON.parse(file);
@@ -530,6 +551,22 @@
         practiceModules.set(key, { id: key, package: pack, completed: false });
       }
       if (action === "remove") practiceModules.delete(id);
+      // practice-tracks: a course whose steps carry the module default `ui` (the course's port).
+      if (view === "practice-tracks" && !practiceModules.size) {
+        const words = { title: "Podbag Training · Image basics", goal: "", guide: "" };
+        const names = (en) => ({ en });
+        practiceModules.set("image-basics", { id: "image-basics", completed: false,
+          package: { format: "podbag-image-basics-v1", translations: { en: words } },
+          steps: [
+            { key: "pullImage", command: "podbag pull busybox:1.37.0", names: names("Pull the image"),
+              ui: { action: "pull", name: "busybox:1.37.0" } },
+            { key: "removeTag", command: "podbag rmi my-busybox:1", names: names("Remove the tag"),
+              ui: { action: "remove-image", name: "my-busybox:old" } },
+            { key: "stopWeb", command: "podbag stop web", names: names("Stop the server"),
+              ui: { action: "stop", name: "web" } },
+            { key: "checkList", command: "podbag ps -a", names: names("Check the list") },
+          ] });
+      }
       return [...practiceModules.values()].filter(record => action !== "summary" || !id || record.id === id);
     },
     tutorial_lab: ({ action }) => {
@@ -625,6 +662,7 @@
       banner: () => {},
       "settings-docker": () => app.openSettingsSection("engine-settings"),
       import: async () => { app.go("images"); await app.importFromDocker(); },
+      "practice-tracks": () => app.go("lab-containers"),
       "empty-volumes": () => app.go("volumes"),
       // The run form, filled in, with the options open.
       "run-container": () => {
