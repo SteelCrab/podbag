@@ -19,6 +19,7 @@ The [README](../README.md) shows how to install podbag. This page shows what it 
   - [Damaged files](#damaged-files)
   - [Choose the method](#choose-the-method)
   - [Compression](#compression)
+  - [Import and history](#import-and-history)
 - [Registries](#registries)
   - [Log in and out](#log-in-and-out)
   - [Pull and push](#pull-and-push)
@@ -360,6 +361,19 @@ podbag system decompress myapp:1      # decompress now: the next container start
   files without decompressing them on disk.
 - `dev/bench/compress.sh` measures all of this.
 
+### Import and history
+
+```sh
+podbag image import -m "Initial filesystem" -c 'CMD ["/bin/sh"]' rootfs.tar.gz local/rootfs:1
+podbag image history --no-trunc local/rootfs:1
+```
+
+- Import reads a root filesystem tar from a file, standard input (`-`), or an HTTP(S)
+  URL. It accepts plain, gzip and zstd tar archives.
+- Builds, commits and imports record their history. Pull and load preserve history
+  from the image config. For images stored before this change, the history lists
+  layer sizes and shows commands when the original config has been pulled or loaded again.
+
 ## Registries
 
 ### Log in and out
@@ -503,7 +517,6 @@ podbag build -t myapp - < Dockerfile               # only a Dockerfile, no conte
   Git repository, heredocs in `COPY` and `ADD`. podbag stops with a message; build such
   Dockerfiles with buildx (see [buildx](#buildx)).
 - `ADD` of bzip2 or xz archives.
-- Image history (`docker history`).
 - Changes that a `RUN` makes in a `VOLUME` path stay in the image (Docker drops them).
 
 ## Checks
@@ -824,7 +837,7 @@ podbag system docker restore    # back to the context you had (Docker Desktop, â
 
 - System: `version`, `info`, `system df`, `events` (live only; there is no history).
 - Images: `pull`, `push`, `images`, `image inspect`, `tag`, `rmi`, `image prune`, `save`,
-  `load`, `search`, `build` with the classic builder (see
+  `load`, `import`, `history`, `search`, `build` with the classic builder (see
   [Builds with the docker CLI](#builds-with-the-docker-cli)), `builder prune`.
 - Registries: `login` (the docker CLI keeps the login; podbag checks it), and private
   pulls, pushes and build base images with the login the docker CLI sends.
@@ -842,7 +855,7 @@ podbag system docker restore    # back to the context you had (Docker Desktop, â
 - Accepted with a warning, because ignoring them is safe: ulimits, unsupported log drivers, fixed
   addresses.
 - Answered with 501 and what to do instead: BuildKit's build API (use buildx with the
-  `docker-container` driver), `image history` and plugins.
+  `docker-container` driver) and plugins.
 - Swarm mode works on one node. See [Swarm mode](#swarm-mode).
 
 ### cp, save and load
@@ -857,8 +870,7 @@ podbag system docker restore    # back to the context you had (Docker Desktop, â
   - the store keeps files, not layer archives, so the saved layers (and the image ID) get
     new digests,
   - it keeps the image's command, environment, user, working folder, volumes, health
-    check, labels, exposed ports and stop signal, but not its history (images stored
-    before podbag kept labels have none).
+    check, labels, exposed ports, stop signal and recorded history.
 - `docker load` reads `docker save` archives and OCI image layouts, plain or gzip:
   - it checks every digest,
   - it refuses an archive that is larger than the store limit.

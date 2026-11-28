@@ -183,6 +183,8 @@ mod tests {
         );
         assert_eq!(epoch_of("1970-01-01T00:00:00Z"), Some(0.0));
         assert_eq!(epoch_of("2024-02-29T12:00:00Z"), Some(1_709_208_000.0));
+        assert_eq!(epoch_of("2024-02-29T12:00:00+02:30"), Some(1_709_199_000.0));
+        assert_eq!(epoch_of("900000000000000000-01-01T00:00:00Z"), None);
         assert_eq!(epoch_of("nonsense"), None);
     }
 }

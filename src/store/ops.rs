@@ -52,6 +52,10 @@ pub enum StoreOp {
     },
     /// Store the images of the archive on stdin (`docker load`).
     Load,
+    /// Store a root filesystem tar on stdin as one image (`docker import`).
+    Import {
+        options: crate::image::ImportOptions,
+    },
     /// Write the images `names` as an archive on stdout (`docker save`).
     Save {
         names: Vec<String>,
@@ -75,6 +79,8 @@ pub enum StoreOp {
         diff_ids: Vec<String>,
         created: u64,
         artifact: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        history: Vec<crate::image::manifest::HistoryEntry>,
     },
     /// Build what containers of the image need, if it is missing.
     EnsureArtifact {
@@ -268,8 +274,18 @@ mod linux_ops {
                 let config = config::load(dirs)?;
                 store.use_mount_method(rootless, config.image_mount);
                 store.use_compression(config.image_compression, config.compress_idle_after);
-                let mut input = std::io::stdin().lock();
+                let mut input = crate::helper::FramedInput::new(std::io::stdin().lock());
                 to_json(&store.load(&mut input, config.store_limit, &|| images_in_use(dirs))?)
+            }
+            StoreOp::Import { options } => {
+                let mut store = Store::open(dirs, !rootless)?;
+                let config = config::load(dirs)?;
+                store.use_mount_method(rootless, config.image_mount);
+                store.use_compression(config.image_compression, config.compress_idle_after);
+                let mut input = crate::helper::FramedInput::new(std::io::stdin().lock());
+                to_json(&store.import(&mut input, options, config.store_limit, &|| {
+                    images_in_use(dirs)
+                })?)
             }
             StoreOp::Save { names } => {
                 let store = Store::open_existing(dirs)
@@ -296,7 +312,7 @@ mod linux_ops {
                 created,
             } => {
                 let store = open_for_change(dirs, rootless)?;
-                let mut input = std::io::stdin().lock();
+                let mut input = crate::helper::FramedInput::new(std::io::stdin().lock());
                 to_json(&store.commit_layer(
                     &base,
                     &mut |w| crate::store::copy_all(&mut input, w, "the layer"),
@@ -310,15 +326,17 @@ mod linux_ops {
                 created,
             } => {
                 let store = open_for_change(dirs, rootless)?;
-                let plan: Vec<crate::build::plan::PlanEntry> =
-                    serde_json::from_reader(std::io::stdin().lock()).map_err(|e| {
-                        crate::Error::new(
-                            crate::ErrorKind::Internal,
-                            "cannot read a copy plan",
-                            e.to_string(),
-                            "report this bug",
-                        )
-                    })?;
+                let plan: Vec<crate::build::plan::PlanEntry> = serde_json::from_reader(
+                    crate::helper::FramedInput::new(std::io::stdin().lock()),
+                )
+                .map_err(|e| {
+                    crate::Error::new(
+                        crate::ErrorKind::Internal,
+                        "cannot read a copy plan",
+                        e.to_string(),
+                        "report this bug",
+                    )
+                })?;
                 to_json(&store.commit_layer(
                     &base,
                     &mut |w| crate::build::plan::write_plan(&plan, w),
@@ -331,12 +349,16 @@ mod linux_ops {
                 diff_ids,
                 created,
                 artifact,
+                history,
             } => {
                 let mut store = Store::open(dirs, !rootless)?;
                 let settings = config::load(dirs)?;
                 store.use_mount_method(rootless, settings.image_mount);
                 store.use_compression(settings.image_compression, settings.compress_idle_after);
-                to_json(&store.create_image(config, diff_ids, created, artifact)?)
+                to_json(
+                    &store
+                        .create_image_with_history(config, diff_ids, created, artifact, history)?,
+                )
             }
             StoreOp::EnsureArtifact { digest } => {
                 let mut store = Store::open(dirs, !rootless)?;
