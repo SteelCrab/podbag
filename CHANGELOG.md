@@ -83,6 +83,9 @@
 
 - Attach and detach networks on running containers. Set static addresses on bridge
   networks and use the embedded DNS service for container names.
+- Rootful network changes and managed BuildKit can use a read-only `/run` with a
+  writable `PODBAG_RUNTIME_DIR`. Bridge allocation stays coordinated across Podbag
+  stores in the same Linux network namespace.
 - `podbag run` and `podbag create` take `--add-host NAME:IP`, `--dns`, `--dns-search` and
   `--dns-option`, as Docker does. `host-gateway` stands for the host.
 - The Docker API applies `ExtraHosts`, `Dns`, `DnsSearch` and `DnsOptions`, and inspect
