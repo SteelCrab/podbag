@@ -2,9 +2,12 @@
 //! Tests against the installed BuildKit and OCI worker, without pulling build images.
 
 mod common;
+use common::api::{Service, curl, docker_out, wait_for};
 use common::{Sandbox, root_mode, stderr, stdout};
+use std::ffi::OsString;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
+use std::time::Duration;
 
 fn enabled() -> bool {
     if std::env::var_os("PODBAG_TEST_BUILDKIT").as_deref() != Some(std::ffi::OsStr::new("1")) {
@@ -45,14 +48,18 @@ fn build(sb: &Sandbox, context: &Path, options: &[&str]) -> Output {
     )
 }
 
-fn clean(sb: &Sandbox) {
-    let builds = sb.data().join("builds");
-    let leftovers: Vec<_> = builds
+fn workers(sb: &Sandbox) -> Vec<OsString> {
+    sb.data()
+        .join("builds")
         .read_dir()
         .unwrap()
         .filter_map(|entry| entry.ok().map(|e| e.file_name()))
         .filter(|name| name.to_string_lossy().starts_with("buildkit-"))
-        .collect();
+        .collect()
+}
+
+fn clean(sb: &Sandbox) {
+    let leftovers = workers(sb);
     assert!(
         leftovers.is_empty(),
         "leftover BuildKit state: {leftovers:?}"
@@ -280,6 +287,78 @@ fn interrupting_the_client_stops_the_worker_and_removes_its_state() {
     }
     clean(&sb);
     println!("PASS: interrupting BuildKit stops the private worker and removes its state");
+}
+
+/// Set PODBAG_TEST_BUILDX to an executable Docker Buildx plugin to enable this test.
+#[test]
+fn engine_driver_transfers_context_secret_and_image_and_reaps_its_worker() {
+    let Some(buildx) = std::env::var_os("PODBAG_TEST_BUILDX") else {
+        eprintln!("PODBAG_TEST_BUILDX is unset: skipped");
+        return;
+    };
+    let buildx = std::fs::canonicalize(buildx).unwrap();
+    let sb = Sandbox::new();
+    let plugins = sb.tmp.path().join("docker-config/cli-plugins");
+    std::fs::create_dir_all(&plugins).unwrap();
+    std::os::unix::fs::symlink(buildx, plugins.join("docker-buildx")).unwrap();
+
+    let context = sb.tmp.path().join("context");
+    std::fs::create_dir(&context).unwrap();
+    let busybox = std::env::var_os("PODBAG_TEST_BUSYBOX").unwrap_or("/usr/bin/busybox".into());
+    std::fs::copy(busybox, context.join("busybox")).unwrap();
+    std::fs::write(context.join("note"), "engine build\n").unwrap();
+    std::fs::write(
+        context.join("Dockerfile"),
+        "FROM scratch\nCOPY busybox /bin/busybox\nCOPY note /note\nRUN --mount=type=secret,id=fixture,required=true [\"/bin/busybox\", \"test\", \"-s\", \"/run/secrets/fixture\"]\nCMD [\"/bin/busybox\", \"cat\", \"/note\"]\n",
+    )
+    .unwrap();
+    let secret = sb.tmp.path().join("secret");
+    let marker = "podbag-test-engine-secret-do-not-copy";
+    std::fs::write(&secret, marker).unwrap();
+
+    let service = Service::start(&sb, &["--buildkit", "--timeout", "0"]);
+    let (_, ping) = curl(&service.socket, &["/_ping"]);
+    assert!(ping.contains("Builder-Version: 1"), "{ping}");
+    let archive = sb.tmp.path().join("image.tar");
+    let output = checked(docker_out(
+        &sb,
+        &service,
+        &[
+            "buildx",
+            "build",
+            "--builder",
+            "default",
+            "--network",
+            "none",
+            "--secret",
+            &format!("id=fixture,src={}", secret.display()),
+            "--tag",
+            "engine-kit:verified",
+            "--output",
+            &format!("type=docker,dest={}", archive.display()),
+            context.to_str().unwrap(),
+        ],
+    ));
+    assert!(!stdout(&output).contains(marker) && !stderr(&output).contains(marker));
+    assert!(
+        !read(&archive)
+            .windows(marker.len())
+            .any(|part| part == marker.as_bytes())
+    );
+    checked(docker_out(
+        &sb,
+        &service,
+        &["load", "--input", archive.to_str().unwrap()],
+    ));
+    let ran = checked(
+        sb.podbag()
+            .args(["run", "--rm", "--network", "none", "engine-kit:verified"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(stdout(&ran), "engine build");
+    assert!(wait_for(Duration::from_secs(25), || workers(&sb).is_empty()));
+    println!("PASS: stock Buildx session, archive import, and idle-worker cleanup");
 }
 
 #[test]
