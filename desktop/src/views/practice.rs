@@ -72,9 +72,22 @@ pub struct PracticeState {
     pub busy: bool,
     polling: bool,
     poll_at: Option<Instant>,
-    /// Polls of an earlier page do not count.
+    /// Discard replies from a previous page or from before the latest action finished.
     generation: u64,
     pub scroll: ScrollState,
+}
+
+impl PracticeState {
+    fn finish_action(&mut self, generation: u64) -> bool {
+        if self.generation != generation {
+            return false;
+        }
+        self.busy = false;
+        // The next poll must read the state after this action.
+        self.generation += 1;
+        self.polling = false;
+        true
+    }
 }
 
 /// The text of a logs step: shown only under the container `id`, and dropped when the
@@ -254,8 +267,7 @@ pub fn act(d: &mut Desktop, action: &'static str, name: String, session: String)
             )
         },
         move |d, r| {
-            d.practice.busy = false;
-            if generation != d.practice.generation {
+            if !d.practice.finish_action(generation) {
                 return;
             }
             match r {
@@ -266,7 +278,6 @@ pub fn act(d: &mut Desktop, action: &'static str, name: String, session: String)
                 Ok(_) => {}
                 Err(e) => d.toasts.push(e, true),
             }
-            d.practice.polling = false;
             poll(d);
         },
     );
@@ -325,8 +336,7 @@ pub fn step(d: &mut Desktop, action: String, name: String, session: String) {
         d,
         move |api| api.practice(&a, Some(&s), Some(&n), false, true),
         move |d, r| {
-            d.practice.busy = false;
-            if generation != d.practice.generation {
+            if !d.practice.finish_action(generation) {
                 return;
             }
             match r {
@@ -357,7 +367,6 @@ pub fn step(d: &mut Desktop, action: String, name: String, session: String) {
                 Ok(_) => {}
                 Err(e) => d.toasts.push(e, true),
             }
-            d.practice.polling = false;
             poll(d);
         },
     );
@@ -998,5 +1007,39 @@ fn open_container(d: &mut Desktop, s: &Value, c: &Value, session: String) {
         step(d, "inspect".into(), name, session);
     } else if s["inspect_container"] == name.as_str() {
         act(d, "inspect-failed", id, session);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Options;
+    use crate::jobs::Done;
+    use podbag_desktop_core::{Backend, mock};
+
+    #[test]
+    fn a_late_poll_keeps_the_log_from_a_newer_action() {
+        let (api, events) = Backend::mock(mock::Options::default(), || {});
+        let mut d = Desktop::new(api, events, Options::inline());
+        d.jobs.drain();
+        d.page = Page::LabContainers;
+        poll(&mut d);
+        let Done::View(old_status) = d.jobs.drain().pop().unwrap() else {
+            panic!("expected a practice status reply");
+        };
+        let generation = d.practice.generation;
+        d.practice.busy = true;
+        assert!(d.practice.finish_action(generation));
+        d.practice.log = Some(StepLog {
+            id: "web".into(),
+            stage: "read".into(),
+            text: "ready".into(),
+        });
+        old_status(&mut d);
+        assert_eq!(d.practice.log.as_ref().unwrap().text, "ready");
+
+        d.practice.busy = true;
+        assert!(!d.practice.finish_action(generation));
+        assert!(d.practice.busy);
     }
 }

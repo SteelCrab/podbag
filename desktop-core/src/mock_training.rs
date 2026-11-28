@@ -244,6 +244,9 @@ impl Session {
         match check {
             Check::ContainerPublished { name, .. } => self.run(&name, "running", Some(self.port)),
             Check::ContainerRunning { name } => self.run(&name, "running", None),
+            Check::ContainerPaused { name } => {
+                self.set_state(&name, "paused", "Up 5 seconds (Paused)".into());
+            }
             Check::ContainerCreated { name } => self.run(&name, "created", None),
             Check::ContainerExited { name, code } => {
                 self.run(&name, "exited", None);
@@ -814,6 +817,37 @@ mod tests {
             .unwrap();
         assert_eq!(stage(&s), "readRecoveryLogs");
         assert!(s["inspect_container"].is_null());
+    }
+
+    #[test]
+    fn pausing_a_course_container_updates_its_state_and_preserves_its_ports() {
+        let mut t = Training::default();
+        t.start("web-basics").unwrap();
+        let before = t.practice("advance", None, None, false, true).unwrap();
+        let session = t.session.as_mut().unwrap();
+        let step = &mut session.steps[session.at];
+        step.check = Some(Check::ContainerPaused {
+            name: "lab-web".into(),
+        });
+        step.ui = Some(Ui {
+            action: UiAction::Pause,
+            name: "lab-web".into(),
+        });
+        let after = t
+            .practice(
+                "pause",
+                before["session"].as_str(),
+                Some("lab-web"),
+                false,
+                true,
+            )
+            .unwrap();
+        assert_eq!(before["containers"][0]["State"], "running");
+        assert_eq!(after["containers"][0]["State"], "paused");
+        assert_eq!(
+            after["containers"][0]["Ports"],
+            before["containers"][0]["Ports"]
+        );
     }
 
     #[test]
