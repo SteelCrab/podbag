@@ -137,7 +137,7 @@ jobs:
           export XDG_RUNTIME_DIR
           trap 'rm -rf "$XDG_RUNTIME_DIR"' EXIT
           export PODBAG_TEST_BUILDX="$fixtures/buildx"
-          cargo test --locked --test managed_buildkit -- --nocapture --test-threads=1
+          cargo test --locked --test managed_buildkit --test managed_buildkit_cli -- --nocapture --test-threads=1
       - name: Library tests as root
         if: matrix.mode == 'root'
         timeout-minutes: 15
