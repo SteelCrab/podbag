@@ -123,7 +123,7 @@ pub fn build(req: &Request, ctx: &Ctx) -> Reply {
             Ok(c) => c,
             Err(e) => return reply_error(&e),
         };
-        let (text, ignore) = match engine::read_dockerfile(&context.dir, &dockerfile) {
+        let (text, ignore) = match engine::read_archive_dockerfile(&context.dir, &dockerfile) {
             Ok(found) => found,
             Err(e) => return reply_error(&e),
         };

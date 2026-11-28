@@ -37,6 +37,44 @@ fn read(path: &Path) -> Vec<u8> {
     }
 }
 
+/// Read the exported layers named by the Docker archive's manifest.
+fn decoded_docker_layers(bytes: &[u8]) -> Vec<Vec<u8>> {
+    use podbag::build::plan::{Packing, packing};
+    use std::collections::BTreeMap;
+    use std::io::Read;
+
+    let mut files = BTreeMap::new();
+    for entry in tar::Archive::new(bytes).entries().unwrap() {
+        let mut entry = entry.unwrap();
+        if entry.header().entry_type().is_file() {
+            let name = entry.path().unwrap().into_owned();
+            let mut data = Vec::new();
+            entry.read_to_end(&mut data).unwrap();
+            files.insert(name, data);
+        }
+    }
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&files[Path::new("manifest.json")]).unwrap();
+    manifest[0]["Layers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|layer| {
+            let data = &files[Path::new(layer.as_str().unwrap())];
+            let mut reader: Box<dyn Read> = match packing(data) {
+                Packing::Gzip => Box::new(flate2::read::MultiGzDecoder::new(data.as_slice())),
+                Packing::Zstd => Box::new(podbag::store::zstd::ZstdFrames::new(data.as_slice())),
+                Packing::Tar => Box::new(data.as_slice()),
+                Packing::None if data.iter().all(|&b| b == 0) => Box::new(data.as_slice()),
+                other => panic!("unexpected layer format {other:?}"),
+            };
+            let mut decoded = Vec::new();
+            reader.read_to_end(&mut decoded).unwrap();
+            decoded
+        })
+        .collect()
+}
+
 fn build(sb: &Sandbox, context: &Path, options: &[&str]) -> Output {
     checked(
         sb.podbag()
@@ -541,10 +579,19 @@ fn engine_driver_transfers_context_secret_and_image_and_reaps_its_worker() {
     let progress = stderr(&output);
     assert!(progress.contains(" using docker driver"), "{progress}");
     assert!(!stdout(&output).contains(marker) && !progress.contains(marker));
+    let layers = decoded_docker_layers(&read(&archive));
+    let contains = |needle: &[u8]| {
+        layers
+            .iter()
+            .any(|layer| layer.windows(needle.len()).any(|bytes| bytes == needle))
+    };
     assert!(
-        !read(&archive)
-            .windows(marker.len())
-            .any(|part| part == marker.as_bytes())
+        contains(b"engine build\n"),
+        "the exported note must be present"
+    );
+    assert!(
+        !contains(marker.as_bytes()),
+        "the secret appeared in a decoded image layer"
     );
     checked(docker_out(
         &sb,

@@ -69,9 +69,10 @@ fn run_build(a: BuildArgs) -> podbag::Result<()> {
     };
     let (dockerfile, name, ignore) = match (&stdin_dockerfile, &a.file) {
         (Some(text), _) => (text.clone(), "Dockerfile".to_string(), String::new()),
-        (None, Some(f)) if unpacked.is_some() => {
-            let (text, ignore) = engine::read_dockerfile(&context, f)?;
-            (text, f.clone(), ignore)
+        (None, file) if unpacked.is_some() => {
+            let name = file.as_deref().unwrap_or("Dockerfile");
+            let (text, ignore) = engine::read_archive_dockerfile(&context, name)?;
+            (text, name.to_owned(), ignore)
         }
         (None, Some(f)) => {
             let path = PathBuf::from(f);

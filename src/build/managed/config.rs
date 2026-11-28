@@ -21,7 +21,9 @@ pub(super) fn configure(
     let fd = file.as_raw_fd();
     std::os::unix::fs::symlink(format!("/proc/self/fd/{fd}"), workspace.join("config.json"))
         .map_err(config_error)?;
-    command.env("DOCKER_CONFIG", workspace);
+    command
+        .env_remove("DOCKER_AUTH_CONFIG")
+        .env("DOCKER_CONFIG", workspace);
     // SAFETY: fcntl is async-signal-safe. Only this child gets the descriptor across exec.
     unsafe {
         command.pre_exec(move || {
@@ -63,4 +65,25 @@ fn config_error(error: io::Error) -> Error {
         &error,
         "check the Linux process filesystem and build workspace",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_client_uses_only_its_own_registry_config() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mut client = Command::new("sh");
+        client.env("DOCKER_AUTH_CONFIG", "service-fixture");
+        let _config = configure(&mut client, workspace.path(), &[]).unwrap();
+        let status = client
+            .args([
+                "-c",
+                r#"test -z "${DOCKER_AUTH_CONFIG+x}" && test -r "$DOCKER_CONFIG/config.json""#,
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
 }

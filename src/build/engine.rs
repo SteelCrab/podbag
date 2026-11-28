@@ -918,6 +918,29 @@ pub fn unpack_context(input: &mut dyn std::io::Read) -> Result<UnpackedContext> 
 
 /// The Dockerfile and `.dockerignore` of a context directory: `name` relative to it.
 pub fn read_dockerfile(context: &Path, name: &str) -> Result<(String, String)> {
+    context_files(context, name, read_ignore)
+}
+
+/// Read the Dockerfile and ignore rules from an unpacked archive.
+pub fn read_archive_dockerfile(context: &Path, name: &str) -> Result<(String, String)> {
+    context_files(context, name, |context, dockerfile| {
+        let root = std::fs::canonicalize(context).ok();
+        ignore_paths(context, dockerfile)
+            .into_iter()
+            .filter_map(|path| path.canonicalize().ok())
+            .filter(|path| {
+                root.as_ref().is_some_and(|root| path.starts_with(root)) && path.is_file()
+            })
+            .find_map(|path| std::fs::read_to_string(path).ok())
+            .unwrap_or_default()
+    })
+}
+
+fn context_files(
+    context: &Path,
+    name: &str,
+    ignore: fn(&Path, &Path) -> String,
+) -> Result<(String, String)> {
     let inside = super::ignore::clean(&format!("/{name}"));
     let path = context.join(inside.trim_start_matches('/'));
     // Through links too, it must stay in the context.
@@ -940,14 +963,7 @@ pub fn read_dockerfile(context: &Path, name: &str) -> Result<(String, String)> {
             "check its name (-f) and the build context",
         )
     })?;
-    let root = std::fs::canonicalize(context).ok();
-    let ignore = ignore_paths(context, &path)
-        .into_iter()
-        .filter_map(|path| path.canonicalize().ok())
-        .filter(|path| root.as_ref().is_some_and(|root| path.starts_with(root)) && path.is_file())
-        .find_map(|path| std::fs::read_to_string(path).ok())
-        .unwrap_or_default();
-    Ok((text, ignore))
+    Ok((text, ignore(context, &path)))
 }
 
 /// `<Dockerfile>.dockerignore` next to the Dockerfile, else `.dockerignore` in the context.
@@ -989,8 +1005,10 @@ mod tests {
         std::fs::write(ctx.join(".dockerignore"), "*.log").unwrap();
         std::os::unix::fs::symlink("../secret", ctx.join("link")).unwrap();
         std::os::unix::fs::symlink("../secret", ctx.join("Dockerfile.dockerignore")).unwrap();
-        let (text, ignore) = read_dockerfile(&ctx, "Dockerfile").unwrap();
+        let (text, ignore) = read_archive_dockerfile(&ctx, "Dockerfile").unwrap();
         assert_eq!((text.as_str(), ignore.as_str()), ("FROM a", "*.log"));
+        std::fs::write(tmp.path().join("secret"), "*.tmp").unwrap();
+        assert_eq!(read_dockerfile(&ctx, "Dockerfile").unwrap().1, "*.tmp");
         assert!(read_dockerfile(&ctx, "link").is_err());
         assert!(read_dockerfile(&ctx, "../secret").is_err());
     }
