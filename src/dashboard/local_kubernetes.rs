@@ -410,6 +410,13 @@ fn node_config(nodes: u8, provider: Provider) -> String {
     if provider == Provider::Podbag {
         config.push_str("kubeadmConfigPatches:\n- |\n  kind: KubeletConfiguration\n  protectKernelDefaults: true\n");
     }
+    if provider == Provider::PodbagVm {
+        // Nested VM startup can exceed kubeadm's one-minute API bootstrap budget.
+        // Kind skips the versioned patch when it generates an older kubeadm config.
+        config.push_str(
+            "kubeadmConfigPatches:\n- |\n  apiVersion: kubeadm.k8s.io/v1beta4\n  kind: InitConfiguration\n  timeouts:\n    kubernetesAPICall: 4m0s\n",
+        );
+    }
     config
 }
 
@@ -723,6 +730,16 @@ mod tests {
     }
 
     #[test]
+    fn only_managed_kind_uses_the_v1beta4_api_bootstrap_timeout() {
+        let config = node_config(2, Provider::PodbagVm);
+        assert!(config.contains(
+            "apiVersion: kubeadm.k8s.io/v1beta4\n  kind: InitConfiguration\n  timeouts:\n    kubernetesAPICall: 4m0s"
+        ));
+        assert!(!node_config(2, Provider::Podbag).contains("kubernetesAPICall"));
+        assert!(!node_config(2, Provider::Docker).contains("kubernetesAPICall"));
+    }
+
+    #[test]
     fn kind_creates_and_resets_a_real_cluster() {
         let Ok(version) = std::env::var("PODBAG_TEST_KIND_VERSION") else {
             return;
@@ -846,8 +863,24 @@ mod tests {
             Ok(())
         };
         let result = (|| -> Result<(), String> {
-            let created = create_on_vm(Some("v1.35.8".into()), 2)?;
+            let created = create_on_vm(Some("v1.36.4".into()), 2)?;
             assert_eq!(created.provider, Provider::PodbagVm);
+            let record = owned(&directory()?, Some(&created.context))?;
+            let node = format!("{}-control-plane", record.name);
+            let socket = KindHost::open(&record.host, record.provider)?;
+            let kubeadm = run(docker_command("docker", &socket.socket)?.args([
+                "exec",
+                &node,
+                "cat",
+                "/kind/kubeadm.conf",
+            ]))?;
+            if !kubeadm
+                .lines()
+                .any(|line| line.trim() == "kubernetesAPICall: 4m0s")
+            {
+                return Err("Kind did not apply the extended API bootstrap timeout".into());
+            }
+            println!("Kind applied the four-minute Kubernetes API bootstrap timeout.");
             verify(&created.context)?;
             println!("Desktop created the two-node cluster in its own VM.");
             let reset = reset()?;

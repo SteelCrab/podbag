@@ -12,14 +12,14 @@ case "$(uname -sm)" in
     arch=amd64
     docker_arch=x86_64
     kind_sha=5a99f26f57246dc9319dd294803313197a0f34d33c525b3ea8b655db5916ece0
-    kubectl_sha=35c964c16432ea65eda6600d6ff4fea040d5eafcb6ad410297ba67d49b618148
+    kubectl_sha=71a3aa7c2ee2c974d9fbb462cba0c5c04a4df2e8d85eee94714fd819ea3c4e63
     docker_sha=f7d8f835391cd0a8c676d9a8d2547f909da6a2d029595943b0ce8d5f169abe47
     ;;
   "Darwin arm64")
     arch=arm64
     docker_arch=aarch64
     kind_sha=0c8c7dbe5e23594a198b786c4bc13dacc101fa6196b0cb0b23a1ca44e61f4b4f
-    kubectl_sha=b8be50ae0c6665b646fb009f904a52cad30806deee19ab3b4fe5af2d68bd82eb
+    kubectl_sha=c9e4f713d6fee0043a3d835cca13077cda2bc0973840eb9779360df0b5bdfc69
     docker_sha=79145e169bca0b9571d02de8e1cd311a36e0e8fdb4599b6661a87b1bb3afbe13
     ;;
   *)
@@ -73,7 +73,7 @@ download() {
 }
 
 kind_version=v0.33.0
-kubectl_version=v1.35.8
+kubectl_version=v1.36.4
 docker_version=29.9.3
 download "https://github.com/kubernetes-sigs/kind/releases/download/$kind_version/kind-darwin-$arch" "$scratch/bin/kind" "$kind_sha"
 download "https://dl.k8s.io/release/$kubectl_version/bin/darwin/$arch/kubectl" "$scratch/bin/kubectl" "$kubectl_sha"
