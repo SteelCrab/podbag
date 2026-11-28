@@ -817,6 +817,155 @@ mod tests {
         }
     }
 
+    fn wait_for_kind_ready(
+        count: u8,
+        timeout: std::time::Duration,
+        kubectl: impl Fn(&[&str]) -> Result<String, String>,
+    ) -> Result<(), String> {
+        use std::time::{Duration, Instant};
+
+        let deadline = Instant::now() + timeout;
+        let get = |path: &str| {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(None);
+            }
+            let request_timeout = remaining.min(Duration::from_secs(3)).as_millis().max(1);
+            kubectl(&[
+                "get",
+                &format!("--raw={path}"),
+                &format!("--request-timeout={request_timeout}ms"),
+            ])
+            .map(Some)
+            .map_err(|error| format!("{path}: {error}"))
+        };
+        let check = || {
+            let Some(response) = get("/api/v1/nodes")? else {
+                return Ok(None);
+            };
+            let value: serde_json::Value = serde_json::from_str(&response)
+                .map_err(|error| format!("invalid Kubernetes node list: {error}"))?;
+            let nodes = value["items"]
+                .as_array()
+                .ok_or("the Kubernetes node list is missing items")?;
+            if nodes.len() != usize::from(count) {
+                return Err(format!(
+                    "found {} Kubernetes nodes, expected {count}",
+                    nodes.len()
+                ));
+            }
+            let mut ready = Vec::with_capacity(nodes.len());
+            for node in nodes {
+                let name = node["metadata"]["name"]
+                    .as_str()
+                    .ok_or("a Kubernetes node is missing its name")?;
+                if !node["status"]["conditions"]
+                    .as_array()
+                    .is_some_and(|conditions| {
+                        conditions.iter().any(|condition| {
+                            condition["type"] == "Ready" && condition["status"] == "True"
+                        })
+                    })
+                {
+                    return Err(format!("Kubernetes node {name} is not Ready"));
+                }
+                ready.push(name);
+            }
+            let Some(response) = get("/readyz")? else {
+                return Ok(None);
+            };
+            if response.trim() != "ok" {
+                return Err(format!("/readyz returned {response:?}"));
+            }
+            Ok(Some(ready.join(", ")))
+        };
+
+        let mut last = "no probe completed before the deadline".into();
+        while Instant::now() < deadline {
+            match check() {
+                Ok(Some(nodes)) if Instant::now() < deadline => {
+                    println!("Kubernetes API and all {count} nodes Ready: {nodes}");
+                    return Ok(());
+                }
+                Ok(_) => break,
+                Err(error) => last = error,
+            }
+            std::thread::sleep(
+                Duration::from_millis(250).min(deadline.saturating_duration_since(Instant::now())),
+            );
+        }
+        Err(format!(
+            "Kubernetes readiness timed out after {timeout:?}: {last}"
+        ))
+    }
+
+    fn kind_nodes(ready: &[bool]) -> String {
+        let items: Vec<_> = ready
+            .iter()
+            .enumerate()
+            .map(|(index, ready)| {
+                serde_json::json!({
+                    "metadata": {"name": format!("node-{index}")},
+                    "status": {"conditions": [
+                        {"type": "Ready", "status": if *ready { "True" } else { "False" }}
+                    ]}
+                })
+            })
+            .collect();
+        serde_json::json!({ "items": items }).to_string()
+    }
+
+    #[test]
+    fn kind_readiness_waits_for_both_nodes_and_recovers_after_api_failure() {
+        let nodes = Cell::new(0);
+        let api = Cell::new(0);
+        wait_for_kind_ready(2, std::time::Duration::from_secs(5), |args| {
+            assert_eq!(args[0], "get");
+            let request_timeout: u64 = args[2]
+                .strip_prefix("--request-timeout=")
+                .unwrap()
+                .strip_suffix("ms")
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert!((1..=3000).contains(&request_timeout));
+            match args[1] {
+                "--raw=/api/v1/nodes" => {
+                    let attempt = nodes.replace(nodes.get() + 1);
+                    Ok(kind_nodes(match attempt {
+                        0 => &[true],
+                        1 => &[true, false],
+                        _ => &[true, true],
+                    }))
+                }
+                "--raw=/readyz" if api.replace(api.get() + 1) == 0 => {
+                    Err("kubectl: HTTP 500: etcd failed".into())
+                }
+                "--raw=/readyz" => Ok("ok\n".into()),
+                _ => panic!("unexpected kubectl request: {args:?}"),
+            }
+        })
+        .unwrap();
+        assert_eq!((nodes.get(), api.get()), (4, 2));
+    }
+
+    #[test]
+    fn kind_readiness_times_out_and_keeps_the_api_error() {
+        let error = wait_for_kind_ready(2, std::time::Duration::from_millis(80), |args| match args
+            [1]
+        {
+            "--raw=/api/v1/nodes" => Ok(kind_nodes(&[true, true])),
+            "--raw=/readyz" => Err("kubectl: HTTP 500: etcd failed".into()),
+            _ => panic!("unexpected kubectl request: {args:?}"),
+        })
+        .unwrap_err();
+        assert!(error.contains("readiness timed out"), "{error}");
+        assert!(
+            error.contains("/readyz: kubectl: HTTP 500: etcd failed"),
+            "{error}"
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     #[ignore = "boots an isolated Podbag VM and needs kind, kubectl, and the Docker CLI"]
@@ -842,24 +991,13 @@ mod tests {
                     .arg(&config)
                     .args(args))
             };
-            kubectl(&[
-                "wait",
-                "--for=condition=Ready",
-                "node",
-                "--all",
-                "--timeout=60s",
-            ])?;
-            let nodes = kubectl(&["get", "nodes", "-o", "name"])?;
-            if nodes.lines().count() != 2 || kubectl(&["get", "--raw=/readyz"])?.trim() != "ok" {
-                return Err("the two-node VM cluster did not become ready".into());
-            }
+            wait_for_kind_ready(2, std::time::Duration::from_secs(60), kubectl)?;
             if !super::super::kubernetes::kube_contexts()?
                 .iter()
                 .any(|name| name == context)
             {
                 return Err("Desktop could not discover the managed context".into());
             }
-            println!("{}", kubectl(&["get", "nodes", "-o", "wide"])?.trim());
             Ok(())
         };
         let result = (|| -> Result<(), String> {
@@ -921,7 +1059,7 @@ mod tests {
         let count = std::env::var("PODBAG_TEST_KIND_NODES")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(1);
+            .unwrap_or(2);
         let result = (|| -> Result<(), String> {
             let created = create(Some(version), count)?;
             let config = kubeconfig().ok_or("the cluster did not create a private kubeconfig")?;
@@ -931,23 +1069,7 @@ mod tests {
                     .arg(&config)
                     .args(args))
             };
-            let verify = || -> Result<(), String> {
-                kubectl(&[
-                    "wait",
-                    "--for=condition=Ready",
-                    "node",
-                    "--all",
-                    "--timeout=60s",
-                ])?;
-                if kubectl(&["get", "nodes", "-o", "name"])?.lines().count() != usize::from(count) {
-                    return Err("the provisioned node count does not match the request".into());
-                }
-                if kubectl(&["get", "--raw=/readyz"])?.trim() != "ok" {
-                    return Err("the Kubernetes API is not ready".into());
-                }
-                println!("{}", kubectl(&["get", "nodes", "-o", "wide"])?.trim());
-                Ok(())
-            };
+            let verify = || wait_for_kind_ready(count, std::time::Duration::from_secs(60), kubectl);
             verify()?;
             println!("Desktop created a cluster on the native Podbag socket.");
             if reset()?.context != created.context {
