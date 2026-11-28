@@ -119,7 +119,7 @@ pub fn build(req: &Request, ctx: &Ctx) -> Reply {
         ..BuildOptions::default()
     };
     let http_builds = buildkit.then(|| ctx.http_builds.clone());
-    Reply::WithBody(Box::new(move |body| {
+    let run = Box::new(move |body: &mut dyn std::io::Read| {
         let context = match engine::unpack_context(body) {
             Ok(c) => c,
             Err(e) => return reply_error(&e),
@@ -138,21 +138,12 @@ pub fn build(req: &Request, ctx: &Ctx) -> Reply {
         Reply::Stream {
             content_type: "application/json",
             body: Box::new(move |w| {
-                let active = http_builds
-                    .as_ref()
-                    .map(|builds| builds.enter(w))
-                    .transpose();
                 let mut progress = |text: &str| send(w, &json!({"stream": text}));
-                let result = match &active {
-                    Ok(Some(build)) => {
-                        managed_build(&options, platform.as_deref(), build, &mut progress)
+                let result = match &http_builds {
+                    Some(builds) => {
+                        managed_build(&options, platform.as_deref(), builds, &mut progress)
                     }
-                    Ok(None) => engine::build(&options, &mut progress),
-                    Err(error) => Err(crate::Error::io(
-                        "cannot start a BuildKit build",
-                        error,
-                        "retry after the API service restarts",
-                    )),
+                    None => engine::build(&options, &mut progress),
                 };
                 match result {
                     Ok(built) => {
@@ -171,14 +162,19 @@ pub fn build(req: &Request, ctx: &Ctx) -> Reply {
                 Ok(())
             }),
         }
-    }))
+    });
+    if buildkit {
+        Reply::WithManagedBuild(run)
+    } else {
+        Reply::WithBody(run)
+    }
 }
 
 #[cfg(target_os = "linux")]
 fn managed_build(
     build: &crate::build::BuildOptions,
     platform: Option<&str>,
-    active: &super::HttpBuild<'_>,
+    builds: &super::HttpBuilds,
     progress: &mut dyn FnMut(&str),
 ) -> crate::Result<crate::build::Built> {
     use crate::build::managed::{Options, RegistryConfig, ResultOutput, run};
@@ -203,7 +199,7 @@ fn managed_build(
         if !build.quiet {
             command.stderr(Stdio::piped());
         }
-        if active.stopping() {
+        if builds.stopping() {
             return Err(error(stopped()));
         }
         let mut process = Process::new(spawn(command).map_err(error)?);
@@ -215,7 +211,7 @@ fn managed_build(
         let mut line = Vec::new();
         let mut exit_status = None;
         loop {
-            if active.stopping() {
+            if builds.stopping() {
                 return Err(error(stopped()));
             }
             if let Some(reader) = &mut log {

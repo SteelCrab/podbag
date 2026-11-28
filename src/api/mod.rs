@@ -282,7 +282,7 @@ impl HttpBuilds {
     fn stop(&self) {
         let mut active = self.active.lock().unwrap_or_else(|p| p.into_inner());
         active.stopping = true;
-        // Unblock writes from a build whose client stopped reading its progress.
+        // Unblock both context uploads and writes to clients who stopped reading progress.
         for client in active.clients.values() {
             let _ = client.shutdown(std::net::Shutdown::Both);
         }
@@ -292,13 +292,9 @@ impl HttpBuilds {
                 .unwrap_or_else(|p| p.into_inner()),
         );
     }
-}
 
-#[cfg(target_os = "linux")]
-impl HttpBuild<'_> {
     fn stopping(&self) -> bool {
-        self.builds
-            .active
+        self.active
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .stopping
@@ -425,7 +421,28 @@ pub(crate) fn handle_connection(stream: UnixStream, ctx: &Ctx) {
             }
         };
         let head_only = req.method == "HEAD";
+        // Drop any extracted context in the reply before allowing shutdown to finish.
+        #[cfg(target_os = "linux")]
+        let _build;
         let mut reply = router::route(&req, ctx);
+        #[cfg(target_os = "linux")]
+        if let Reply::WithManagedBuild(run) = reply {
+            _build = match ctx.http_builds.enter(&writer) {
+                Ok(build) => build,
+                Err(error) => {
+                    let reply =
+                        router::message(503, format!("cannot start a BuildKit build: {error}"));
+                    let _ = write_fixed(
+                        &mut writer,
+                        head_only,
+                        reply,
+                        &[("Connection", "close".into())],
+                    );
+                    return;
+                }
+            };
+            reply = Reply::WithBody(run);
+        }
         // A body left unread for its handler: the handler reads it (an empty one when the
         // request gives no length), or it is skipped. What follows it cannot be told from a
         // new request, so the connection then closes.
@@ -530,6 +547,8 @@ fn write_fixed(
         | Reply::Hijack { .. }
         | Reply::Headed(..)
         | Reply::WithBody(_) => unreachable!("handled by the caller"),
+        #[cfg(target_os = "linux")]
+        Reply::WithManagedBuild(_) => unreachable!("handled by the caller"),
     };
     let mut extra: Vec<(&str, String)> = headers.to_vec();
     if let Some(ct) = content_type {

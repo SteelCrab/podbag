@@ -415,15 +415,8 @@ fn interrupting_the_client_stops_the_worker_and_removes_its_state() {
     println!("PASS: interrupting BuildKit stops the private worker and removes its state");
 }
 
-#[test]
-fn terminating_the_service_cancels_an_active_http_build() {
-    use common::registry::{TarEntry, layer};
-    if !enabled() {
-        return;
-    }
-    let sb = Sandbox::new();
-    let socket = sb.tmp.path().join("docker.sock");
-    let mut service = Agent(
+fn start_http_build_service(sb: &Sandbox, socket: &Path) -> Agent {
+    let service = Agent(
         sb.podbag()
             .args([
                 "system",
@@ -433,15 +426,45 @@ fn terminating_the_service_cancels_an_active_http_build() {
                 "0",
                 "--socket",
             ])
-            .arg(&socket)
+            .arg(socket)
             .spawn()
             .unwrap(),
     );
     assert!(wait_for(Duration::from_secs(10), || curl(
-        &socket,
+        socket,
         &["/_ping"]
     )
     .0 == "OK"));
+    service
+}
+
+fn terminate_http_build_service(service: &mut Agent) {
+    // SAFETY: this is the service child we started and have not yet reaped.
+    assert_eq!(
+        unsafe { libc::kill(service.0.id() as i32, libc::SIGTERM) },
+        0
+    );
+    assert!(
+        wait_for(Duration::from_secs(30), || {
+            service
+                .0
+                .try_wait()
+                .unwrap()
+                .is_some_and(|status| status.success())
+        }),
+        "the service did not stop cleanly"
+    );
+}
+
+#[test]
+fn terminating_the_service_cancels_an_active_http_build() {
+    use common::registry::{TarEntry, layer};
+    if !enabled() {
+        return;
+    }
+    let sb = Sandbox::new();
+    let socket = sb.tmp.path().join("docker.sock");
+    let mut service = start_http_build_service(&sb, &socket);
 
     let busybox = std::env::var_os("PODBAG_TEST_BUSYBOX").unwrap_or("/usr/bin/busybox".into());
     let busybox = std::fs::read(busybox).unwrap();
@@ -496,23 +519,73 @@ fn terminating_the_service_cancels_an_active_http_build() {
     );
     assert_eq!(workers(&sb).len(), 1);
 
-    // SAFETY: this is the service child we started and have not yet reaped.
-    assert_eq!(
-        unsafe { libc::kill(service.0.id() as i32, libc::SIGTERM) },
-        0
-    );
-    assert!(
-        wait_for(Duration::from_secs(30), || {
-            service
-                .0
-                .try_wait()
-                .unwrap()
-                .is_some_and(|status| status.success())
-        }),
-        "the service did not stop cleanly"
-    );
+    terminate_http_build_service(&mut service);
     clean(&sb);
     assert!(!std::fs::read_to_string(log.path()).unwrap().contains("aux"));
+}
+
+#[test]
+fn terminating_the_service_removes_an_incomplete_http_build_context() {
+    use common::registry::{TarEntry, layer};
+    use std::io::Write;
+
+    if !enabled() {
+        return;
+    }
+    let sb = Sandbox::new();
+    let socket = sb.tmp.path().join("docker.sock");
+    let mut service = start_http_build_service(&sb, &socket);
+    let mut curl = if root_mode() {
+        let mut cmd = Command::new("sudo");
+        cmd.args(["-n", "curl"]);
+        cmd
+    } else {
+        Command::new("curl")
+    };
+    let mut upload = Agent(
+        curl.args(["--silent", "--max-time", "45", "--unix-socket"])
+            .arg(&socket)
+            .args([
+                "--request",
+                "POST",
+                "--upload-file",
+                "-",
+                "http://localhost/v1.47/build?version=2",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let tar = layer(&[TarEntry::file("Dockerfile", b"FROM scratch\n")]);
+    // Send only the tar header and leave stdin open so the service waits for its payload.
+    upload
+        .0
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(&tar[..512])
+        .unwrap();
+    let builds = sb.data().join("builds");
+    assert!(
+        wait_for(Duration::from_secs(10), || {
+            std::fs::read_dir(&builds)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .any(|entry| {
+                    entry.file_name().to_string_lossy().starts_with("context-")
+                        && entry.path().join("Dockerfile").is_file()
+                })
+        }),
+        "the service did not start extracting the partial context"
+    );
+
+    terminate_http_build_service(&mut service);
+    assert!(
+        builds.read_dir().unwrap().next().is_none(),
+        "leftover build context"
+    );
 }
 
 #[test]

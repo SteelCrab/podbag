@@ -10,6 +10,8 @@ pub const API_VERSION: &str = "1.47";
 /// The oldest version a client may ask for.
 pub const MIN_API_VERSION: &str = "1.24";
 
+type ReadBody = Box<dyn FnOnce(&mut dyn std::io::Read) -> Reply + Send>;
+
 /// What a handler answers.
 pub enum Reply {
     Json(u16, serde_json::Value),
@@ -42,7 +44,10 @@ pub enum Reply {
     Headed(Vec<(&'static str, String)>, Box<Reply>),
     /// The handler reads the request body as it arrives ([`streams_body`] left it unread)
     /// and then gives the reply. The connection closes afterwards.
-    WithBody(Box<dyn FnOnce(&mut dyn std::io::Read) -> Reply + Send>),
+    WithBody(ReadBody),
+    /// A managed BuildKit request body tracked through shutdown.
+    #[cfg(target_os = "linux")]
+    WithManagedBuild(ReadBody),
 }
 
 /// The response head of a hijacked connection.
