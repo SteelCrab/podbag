@@ -340,6 +340,8 @@ jobs:
           only_paths_under_users_reach_the_vm
           synchronized_share_moves_edits_across_the_vm_restart
           configured_mac_folder_reaches_cli_and_docker_after_restart
+          desktop_settings_round_trip_through_the_guest
+          storage_grows_the_filesystem_and_relocates_the_saved_disk
           a_stopped_host_keeps_what_was_written
           a_bare_env_name_takes_the_macs_value
           the_sockets_stay_while_the_vm_is_off
