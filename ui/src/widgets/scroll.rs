@@ -13,6 +13,11 @@ pub struct ScrollState {
 }
 
 impl ScrollState {
+    /// The content height measured on the last frame.
+    pub fn content_height(&self) -> f32 {
+        self.content
+    }
+
     pub fn to_top(&mut self) {
         self.offset = 0.;
     }

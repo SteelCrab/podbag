@@ -28,6 +28,11 @@ impl Toasts {
         });
     }
 
+    /// Dismiss routine messages while keeping errors on screen.
+    pub fn dismiss_routine(&mut self) {
+        self.items.retain(|item| item.error);
+    }
+
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }

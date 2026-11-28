@@ -63,6 +63,7 @@ const VIEW_SHOTS: &[(&str, &[&str], f32)] = &[
         &["nav settings", "section engine"],
         1200.,
     ),
+    ("settings-notifications", &["section notifications"], 1200.),
     ("settings-builders", &["section builders"], 1200.),
     ("settings-storage", &["section vmStorage"], 1200.),
     ("settings-search", &["search Virtual machine"], 1200.),

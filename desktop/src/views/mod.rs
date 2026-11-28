@@ -13,6 +13,7 @@ pub mod migrate;
 pub mod models;
 pub mod network_settings;
 pub mod notices;
+pub mod notifications;
 pub mod practice;
 pub mod pull;
 pub mod registry_proxy;

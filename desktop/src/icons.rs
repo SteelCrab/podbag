@@ -55,6 +55,7 @@ pub enum Icon {
     Compress,
     KubeRoutes,
     Plus,
+    Bell,
 }
 
 impl Icon {
@@ -228,6 +229,9 @@ pub fn install() {
             p("M7.5 19H10a3 3 0 0 0 3-3V8a3 3 0 0 1 3-3h5m-3-3 3 3-3 3"),
         ]),
         s("M12 5v14M5 12h14"),
+        s(
+            "M5 16c1.5-1.5 1.5-3 1.5-6a5.5 5.5 0 0 1 11 0c0 3 0 4.5 1.5 6l1 1.5H4zM10 20a2.3 2.3 0 0 0 4 0",
+        ),
     ];
     register(icons);
 }

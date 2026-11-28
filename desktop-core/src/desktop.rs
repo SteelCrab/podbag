@@ -487,12 +487,14 @@ impl Desktop {
     /// Keep and save `settings` (checked first).
     pub fn set_settings(&self, settings: Settings) -> Result<(), String> {
         let settings = settings.checked();
-        *lock(&self.settings) = settings.clone();
-        self.status_changed();
-        match lock(&self.settings_file).as_ref() {
-            Some(file) => settings.save(file),
-            None => Ok(()),
+        let mut current = lock(&self.settings);
+        if let Some(file) = lock(&self.settings_file).as_ref() {
+            settings.save(file)?;
         }
+        *current = settings;
+        drop(current);
+        self.status_changed();
+        Ok(())
     }
 
     /// The language to show: the setting, or the system's.
@@ -725,6 +727,18 @@ mod tests {
         );
         assert_eq!(session.vm_status(), Ok(None));
         assert!(engine.requests().is_empty());
+    }
+
+    #[test]
+    fn failed_settings_write_keeps_the_saved_notification_preference() {
+        let dir = tempfile::tempdir().unwrap();
+        let desktop = Desktop::new("0.0.0", Events::none());
+        desktop.load_config(dir.path(), None);
+        std::fs::create_dir(dir.path().join("settings.json")).unwrap();
+        let mut edit = desktop.settings();
+        edit.status_notifications = false;
+        assert!(desktop.set_settings(edit).is_err());
+        assert!(desktop.settings().status_notifications);
     }
 
     #[test]

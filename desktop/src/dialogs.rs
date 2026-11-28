@@ -63,6 +63,7 @@ pub enum AskFor {
 }
 
 pub enum Dialog {
+    Notifications(podbag_ui::widgets::scroll::ScrollState),
     Confirm {
         title: String,
         text: String,
@@ -172,6 +173,7 @@ pub fn paint(d: &mut Desktop, ui: &mut Ui) {
     let mut outcome = Outcome::Open;
     let mut submit = None;
     let escape = match &mut dlg {
+        Dialog::Notifications(scroll) => crate::views::notifications::history(d, ui, scroll),
         Dialog::Migration(m) => {
             if crate::views::migrate::paint_dialog(d, ui, m) {
                 outcome = Outcome::Close;
@@ -413,6 +415,9 @@ pub fn paint(d: &mut Desktop, ui: &mut Ui) {
         Outcome::Close if matches!(dlg, Dialog::Compression) => {
             crate::views::compression::answer(d, false)
         }
+        Outcome::Close if matches!(dlg, Dialog::Notifications(_)) => {
+            d.focus_next = Some(crate::views::notifications::OPEN)
+        }
         Outcome::Close => {}
         Outcome::Yes | Outcome::Later => finish(d, ui, dlg, matches!(outcome, Outcome::Yes)),
     }
@@ -470,6 +475,7 @@ fn finish(d: &mut Desktop, ui: &mut Ui, dlg: Dialog, yes: bool) {
             d.save_vm(change);
         }
         Dialog::Ask { .. }
+        | Dialog::Notifications(_)
         | Dialog::KubeObject { .. }
         | Dialog::Migration(_)
         | Dialog::Import(_)

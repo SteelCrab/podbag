@@ -336,6 +336,12 @@ fn second_card(d: &mut Desktop, ui: &mut Ui, x: f32, y0: f32, w: f32) -> f32 {
             crate::views::sync_shares::closed(d);
         }
     }
+    separator(ui, x, y, w);
+    let (h, open) = section(d, ui, x, y, w, "notifications", Icon::Bell, "");
+    y += h;
+    if open {
+        y += super::notifications::settings(d, ui, bx, y, bw) + 12.;
+    }
     // Updates: the versions, a check, and Update.
     separator(ui, x, y, w);
     let value = crate::views::updates::value(d);

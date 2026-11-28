@@ -60,7 +60,7 @@ pub fn paint(d: &mut Desktop, ui: &mut Ui) {
         dialogs::paint(d, ui);
     }
     views::notices::paint(d, ui);
-    d.toasts.paint(ui);
+    d.toasts.popups.paint(ui);
 }
 
 fn topbar(d: &mut Desktop, ui: &mut Ui, top: Rect) {
@@ -110,6 +110,17 @@ fn topbar(d: &mut Desktop, ui: &mut Ui, top: Rect) {
         }
     }
     let settings = row.right_h(30., 30.);
+    if button::icon_button(
+        ui,
+        views::notifications::OPEN,
+        row.right_h(30., 30.),
+        Icon::Bell.id(),
+        &d.t("notifications.history"),
+        IconKind::Plain,
+        true,
+    ) {
+        d.open_dialog(dialogs::Dialog::Notifications(Default::default()));
+    }
     if d.page == Page::Settings {
         ui.p.rounded(settings, 7., t.accent_soft);
     }

@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::views::notifications::Notifications;
 use podbag_desktop_core::dockercmd::DockerCommand;
 use podbag_desktop_core::kubernetes::Resource;
 use podbag_desktop_core::updates::{Check, Updates};
@@ -17,7 +18,6 @@ use podbag_desktop_core::{
 use podbag_ui::ui::{Theme, Ui, UiApp};
 use podbag_ui::widgets::logs::LogView;
 use podbag_ui::widgets::scroll::ScrollState;
-use podbag_ui::widgets::toast::Toasts;
 use podbag_ui::winit::keyboard::{Key, NamedKey};
 use podbag_ui::{Color, Cx, Id, KeyPress, NavButton, TextInput, TextStyle, VirtualList};
 use serde_json::Value;
@@ -304,7 +304,7 @@ pub struct Desktop {
     pub dialog: Option<Dialog>,
     pub pull: Option<PullPanel>,
     pub pull_hosts: Vec<(String, String)>,
-    pub toasts: Toasts,
+    pub toasts: Notifications,
     pub sidebar_drag: Option<SidebarDrag>,
     pub expanded_in_narrow: bool,
     pub narrow: bool,
@@ -426,7 +426,7 @@ impl Desktop {
             dialog: None,
             pull: None,
             pull_hosts: Vec::new(),
-            toasts: Toasts::default(),
+            toasts: Notifications::new(settings.status_notifications),
             sidebar_drag: None,
             expanded_in_narrow: false,
             narrow: false,
@@ -1863,6 +1863,7 @@ impl Desktop {
                     "registryProxy",
                     "vmStorage",
                     "builders",
+                    "notifications",
                     "vm",
                     "syncShares",
                     "updates",
@@ -1944,7 +1945,7 @@ impl UiApp for Desktop {
     fn tick(&mut self, cx: &mut Cx) -> bool {
         let changed = self.pump();
         cx.wake_at(self.next_due());
-        changed || self.toasts.expire()
+        changed || self.toasts.popups.expire()
     }
 
     fn theme(&self, system_dark: bool) -> Theme {

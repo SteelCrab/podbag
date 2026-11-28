@@ -119,6 +119,13 @@ fn entries(d: &Desktop) -> Vec<Entry> {
         ),
         section("engine", &["settings.search.terms.engine"]),
         section("builders", &["settings.search.terms.builders"]),
+        section("notifications", &["settings.search.terms.notifications"]),
+        entry(
+            "notifications.status",
+            &["settings.search.terms.notifications"],
+            Some("notifications"),
+            Some(super::notifications::STATUS),
+        ),
     ];
     if d.connection.local {
         out.push(entry(
@@ -225,6 +232,7 @@ fn section_key(key: &'static str) -> &'static str {
         "engine" => "settings.engine",
         "network" => "settings.network",
         "registryProxy" => "settings.registryProxy",
+        "notifications" => "settings.notifications",
         "builders" => "settings.builders",
         "vmStorage" => "settings.vmStorage",
         "vm" => "settings.vm",
