@@ -1087,3 +1087,71 @@ fn malformed_secret_options_are_rejected_without_echoing_the_value() {
     assert!(!stderr(&out).contains(marker));
     clean(&sb);
 }
+
+#[test]
+fn rootful_network_creation_shares_the_lock_across_read_only_run_mounts() {
+    if !root_mode() {
+        return;
+    }
+    let sb = Sandbox::new();
+    // The parent and the first child share a network namespace, but the child
+    // mounts its own procfs and an empty, read-only /run.
+    let script = r#"
+bin=$1
+scratch=$2
+export PODBAG_DATA_DIR="$scratch/data" PODBAG_RUNTIME_DIR="$scratch/runtime"
+export PODBAG_CONFIG_DIR="$scratch/config"
+exec 9</proc/thread-self/ns/net
+flock -x 9
+unshare --mount --pid --fork --kill-child --mount-proc sh -eu -c '
+    mount -t tmpfs -o ro,nosuid,nodev,size=4k tmpfs /run
+    test ! -e /run/podbag-buildkit-bridge.lock
+    exec 8</proc/thread-self/ns/net
+    if flock -n 8; then
+        echo "a separate proc mount got a separate lock" >&2
+        exit 1
+    fi
+    exec 8<&-
+    touch "$2/ready"
+    exec "$1" network create --subnet 10.97.6.0/24 read-only-run
+' _ "$bin" "$scratch" 9<&- >"$scratch/network.log" 2>&1 &
+child=$!
+trap 'kill "$child" 2>/dev/null || :; wait "$child" 2>/dev/null || :; cat "$scratch/network.log"' EXIT
+for attempt in $(seq 1 100); do
+    test ! -e "$scratch/ready" || break
+    kill -0 "$child"
+    sleep 0.05
+done
+test -e "$scratch/ready"
+
+# A separate network namespace has no reason to wait for the parent's lock.
+PODBAG_DATA_DIR="$scratch/other-data" PODBAG_RUNTIME_DIR="$scratch/other-runtime" \
+    timeout 5 unshare --net "$bin" network create --subnet 10.97.6.0/24 other-namespace 9<&-
+kill -0 "$child"
+test ! -e "$scratch/data/networks/read-only-run.json"
+flock -u 9
+wait "$child"
+test -f "$scratch/data/networks/read-only-run.json"
+trap - EXIT
+"#;
+    checked(
+        Command::new("sudo")
+            .args([
+                "-n",
+                "unshare",
+                "--mount",
+                "--propagation",
+                "private",
+                "--net",
+                "sh",
+                "-eu",
+                "-c",
+                script,
+                "_",
+                common::BIN,
+            ])
+            .arg(sb.tmp.path())
+            .output()
+            .unwrap(),
+    );
+}

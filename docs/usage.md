@@ -522,6 +522,11 @@ on your `PATH`. The worker initializes its bridge even for `--network none`.
 For rootless builds, also install RootlessKit and pasta. Set up subordinate user
 and group IDs for RootlessKit.
 
+Rootful builds and network changes share a lock on the current Linux network
+namespace. It works with a read-only `/run` when `PODBAG_RUNTIME_DIR` points to a
+writable location. Any user who can open their own namespace descriptor can
+hold the same lock. Podbag reports a conflict after waiting 30 seconds.
+
 ```sh
 podbag build --buildkit -t app .
 podbag build --buildkit --secret id=config,src=/path/to/config --ssh default -t app .

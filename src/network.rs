@@ -519,7 +519,7 @@ pub(crate) struct HostBridgeLock {
 }
 
 #[cfg(target_os = "linux")]
-const HOST_BRIDGE_LOCK: &str = "/run/podbag-buildkit-bridge.lock";
+const NETWORK_NAMESPACE: &str = "/proc/thread-self/ns/net";
 #[cfg(target_os = "linux")]
 const BUILDKIT_BRIDGE_PREFIX: &str = "podbag-bk-";
 
@@ -527,28 +527,51 @@ pub(crate) fn lock_host_bridges() -> Result<Option<HostBridgeLock>> {
     #[cfg(target_os = "linux")]
     // SAFETY: geteuid has no preconditions.
     if unsafe { libc::geteuid() } == 0 {
-        use std::os::unix::fs::OpenOptionsExt;
-
-        let error = |e| {
+        // nsfs identifies the actual routing domain across mount and PID namespaces.
+        // Locking a file under /run or a store can split that lock across mounts.
+        let file = std::fs::File::open(NETWORK_NAMESPACE).map_err(|e| {
             Error::io(
-                "cannot lock host bridge allocation",
+                "cannot open the host network namespace",
                 &e,
-                "check /run permissions",
+                "check that /proc/thread-self/ns/net is readable",
             )
-        };
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(HOST_BRIDGE_LOCK)
-            .map_err(error)?;
-        file.lock().map_err(error)?;
+        })?;
+        wait_for_bridge_lock(&file, std::time::Duration::from_secs(30))?;
         return Ok(Some(HostBridgeLock { _file: file }));
     }
     Ok(None)
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_bridge_lock(file: &std::fs::File, timeout: std::time::Duration) -> Result<()> {
+    use std::fs::TryLockError;
+    use std::time::{Duration, Instant};
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(()),
+            Err(TryLockError::WouldBlock) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(Error::new(
+                        ErrorKind::Conflict,
+                        "cannot lock host bridge allocation",
+                        "another process holds the network namespace lock",
+                        "wait for its network operation to finish and retry",
+                    ));
+                }
+                std::thread::sleep(remaining.min(Duration::from_millis(25)));
+            }
+            Err(TryLockError::Error(error)) => {
+                return Err(Error::io(
+                    "cannot lock host bridge allocation",
+                    &error,
+                    "check that file locks are supported by the network namespace",
+                ));
+            }
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -2128,14 +2151,14 @@ mod tests {
                 ));
                 // SAFETY: geteuid has no preconditions.
                 if unsafe { libc::geteuid() } == 0 {
-                    let host = std::fs::OpenOptions::new()
-                        .write(true)
-                        .open(HOST_BRIDGE_LOCK)
-                        .unwrap();
+                    let host = std::fs::File::open(NETWORK_NAMESPACE).unwrap();
                     assert!(matches!(
                         host.try_lock(),
                         Err(std::fs::TryLockError::WouldBlock)
                     ));
+                    let error = wait_for_bridge_lock(&host, std::time::Duration::ZERO).unwrap_err();
+                    assert_eq!(error.kind, ErrorKind::Conflict);
+                    assert!(error.why.contains("another process holds"));
                 } else {
                     assert!(lock_host_bridges().unwrap().is_none());
                 }
