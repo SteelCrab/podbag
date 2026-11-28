@@ -139,6 +139,12 @@ fn entries(d: &Desktop) -> Vec<Entry> {
             )
         }));
     }
+    if crate::views::registry_proxy::shown(d) {
+        out.push(section(
+            "registryProxy",
+            &["settings.search.terms.registryProxy"],
+        ));
+    }
     if let Some(vm) = d.vm.as_ref().filter(|_| d.has_vm()) {
         out.push(section("vm", &["settings.search.terms.vm"]));
         if vm.resources_editable {
@@ -208,6 +214,7 @@ fn section_key(key: &'static str) -> &'static str {
     match key {
         "engine" => "settings.engine",
         "network" => "settings.network",
+        "registryProxy" => "settings.registryProxy",
         "vm" => "settings.vm",
         "syncShares" => "settings.syncShares",
         "updates" => "settings.updates",

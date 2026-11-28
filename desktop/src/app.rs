@@ -335,6 +335,7 @@ pub struct Desktop {
     pub notices: views::notices::Notices,
     pub compression: views::compression::CompressionState,
     pub network_settings: views::network_settings::Form,
+    pub registry_proxy: views::registry_proxy::Form,
     pub run: views::run::RunState,
     pub models: views::models::ModelsState,
     pub settings_search: views::settings_search::SettingsSearch,
@@ -448,6 +449,7 @@ impl Desktop {
             notices: views::notices::Notices::default(),
             compression: views::compression::CompressionState::default(),
             network_settings: views::network_settings::Form::default(),
+            registry_proxy: views::registry_proxy::Form::default(),
             run: views::run::RunState::default(),
             models: views::models::ModelsState::default(),
             settings_search: views::settings_search::SettingsSearch::default(),
@@ -544,6 +546,7 @@ impl Desktop {
         self.lists = Lists::default();
         views::compression::reset(self);
         self.network_settings = views::network_settings::Form::default();
+        self.registry_proxy = views::registry_proxy::Form::default();
         self.close_detail_quiet();
         self.connect(false);
     }
@@ -1848,6 +1851,7 @@ impl Desktop {
                 for key in [
                     "engine",
                     "network",
+                    "registryProxy",
                     "vm",
                     "syncShares",
                     "updates",

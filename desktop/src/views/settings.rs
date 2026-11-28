@@ -102,6 +102,14 @@ fn separator(ui: &mut Ui, x: f32, y: f32, w: f32) {
     ui.p.fill(Rect::new(x, y, w, 1.), line);
 }
 
+pub(super) fn form_field(ui: &mut Ui, x: f32, y: &mut f32, w: f32, label: &str) -> Rect {
+    let t = ui.theme;
+    *y += ui.paragraph(x, *y, w, label, ui.style(), t.ink) + 4.;
+    let rect = Rect::new(x, *y, w.min(350.), 34.);
+    *y += 43.;
+    rect
+}
+
 fn first_card(d: &mut Desktop, ui: &mut Ui, x: f32, y0: f32, w: f32) -> f32 {
     let mut y = y0;
     // Startup: launch at login. A failed read shows the error and Retry.
@@ -277,6 +285,17 @@ fn second_card(d: &mut Desktop, ui: &mut Ui, x: f32, y0: f32, w: f32) -> f32 {
         y += h;
         if open {
             y += crate::views::network_settings::body(d, ui, bx, y, bw) + 18.;
+        }
+    }
+    if crate::views::registry_proxy::shown(d) {
+        separator(ui, x, y, w);
+        let value = crate::views::registry_proxy::summary(d);
+        let (h, open) = section(d, ui, x, y, w, "registryProxy", Icon::Globe, &value);
+        y += h;
+        if open {
+            y += crate::views::registry_proxy::body(d, ui, bx, y, bw) + 18.;
+        } else {
+            crate::views::registry_proxy::closed(d);
         }
     }
     // The VM, for podbag on macOS and Windows.

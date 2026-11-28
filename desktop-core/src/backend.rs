@@ -23,7 +23,7 @@ use crate::training;
 use crate::tray::TrayModel;
 use crate::updates::{self, Check, Updates, Upgraded};
 use crate::vm::{SyncAction, SyncShare, VmSettings, VmStatus};
-use crate::{NetworkPreferences, NetworkSettings};
+use crate::{NetworkPreferences, NetworkSettings, RegistryProxySettings};
 use podbag::client::{
     ContainerSummary, Features, ImageSummary, Kind, NetworkSummary, Pruned, RunSpec, VolumeSummary,
 };
@@ -137,6 +137,12 @@ pub trait Api: Send + Sync {
         session: u64,
         edit: Option<(&NetworkPreferences, &str)>,
     ) -> Result<NetworkSettings, String>;
+    /// Read or save the local engine's proxy for image registries.
+    fn registry_proxy(
+        &self,
+        session: u64,
+        edit: Option<RegistryProxySettings>,
+    ) -> Result<RegistryProxySettings, String>;
     /// Read the engine's state again ([`Event::VmStatus`] when the VM changed). `asked`:
     /// also ask the API while the window is hidden.
     fn refresh(&self, asked: bool);
@@ -414,6 +420,19 @@ impl Api for Desktop {
             edit.map(|(_, revision)| revision),
         )?;
         serde_json::from_value(reply).map_err(|e| e.to_string())
+    }
+
+    fn registry_proxy(
+        &self,
+        session: u64,
+        edit: Option<RegistryProxySettings>,
+    ) -> Result<RegistryProxySettings, String> {
+        if !cfg!(any(target_os = "linux", target_os = "macos"))
+            || self.session(session)?.target.choice != podbag::client::Choice::Podbag
+        {
+            return Err("Registry proxy settings require the local Podbag engine".into());
+        }
+        podbag::dashboard::cli::registry_proxy(self.podbag(), edit)
     }
 
     fn refresh(&self, asked: bool) {

@@ -32,7 +32,7 @@ use crate::updates::{Check, Updates, Upgraded};
 use crate::vm::{
     SharedPaths, SyncAction, SyncShare, VmDisk, VmLimits, VmSettings, VmStatus, VmValues,
 };
-use crate::{NetworkPreferences, NetworkSettings};
+use crate::{NetworkPreferences, NetworkSettings, RegistryProxySettings};
 use podbag::client::{
     Choice, CompressionSizes, ContainerSummary, Features, ImageSummary, Ipam, IpamConfig, Kind,
     NetworkSummary, Port, Pruned, RunSpec, SearchResult, VolumeSummary,
@@ -249,6 +249,7 @@ struct State {
     update_found: bool,
     compression: Compression,
     network_settings: NetworkSettings,
+    registry_proxy: RegistryProxySettings,
     /// The local model runner runs, and the models it has.
     model_runner: bool,
     models: Vec<Model>,
@@ -840,6 +841,7 @@ impl Mock {
                 active_ipv6_subnet: None,
                 overrides: Vec::new(),
             },
+            registry_proxy: RegistryProxySettings::default(),
             model_runner: opts.models.running,
             models: if opts.models.running {
                 vec![Model {
@@ -1579,6 +1581,26 @@ impl Api for Mock {
             }
         }
         Ok(settings.clone())
+    }
+
+    fn registry_proxy(
+        &self,
+        session: u64,
+        edit: Option<RegistryProxySettings>,
+    ) -> Result<RegistryProxySettings, String> {
+        let mut state = self.st();
+        if state.token != session
+            || state.selected != "podbag"
+            || !matches!(state.engine.platform, "linux" | "macos")
+        {
+            return Err("Registry proxy settings require the local Podbag engine".into());
+        }
+        if let Some(edit) = edit {
+            let bytes = serde_json::to_vec(&edit).map_err(|_| "Cannot encode proxy settings")?;
+            state.registry_proxy =
+                podbag::image::proxy::read_json(bytes.as_slice()).map_err(|error| error.why)?;
+        }
+        Ok(state.registry_proxy.clone())
     }
 
     fn vm_set(&self, change: &VmSettings) -> Result<String, String> {

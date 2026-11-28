@@ -67,6 +67,11 @@ const VIEW_SHOTS: &[(&str, &[&str], f32)] = &[
         &["nav settings", "section network"],
         1200.,
     ),
+    (
+        "settings-registry-proxy",
+        &["nav settings", "section registryProxy"],
+        1200.,
+    ),
     ("settings-shares", &["nav settings", "section vm"], 1200.),
     (
         "settings-sync",

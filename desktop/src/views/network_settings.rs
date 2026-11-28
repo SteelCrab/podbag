@@ -9,6 +9,7 @@ use podbag_ui::{Id, Rect, TextInput};
 
 use crate::app::Desktop;
 use crate::views::blocks::{input, spawn};
+use crate::views::settings::form_field;
 
 const IPV4: Id = Id(0x6e65740001);
 const MODE: Id = Id(0x6e65740002);
@@ -136,14 +137,6 @@ fn request(d: &mut Desktop, edit: Option<(NetworkPreferences, String)>) {
     );
 }
 
-fn field(ui: &mut Ui, x: f32, y: &mut f32, w: f32, label: &str) -> Rect {
-    let t = ui.theme;
-    *y += ui.paragraph(x, *y, w, label, ui.style(), t.ink) + 4.;
-    let rect = Rect::new(x, *y, w.min(350.), 34.);
-    *y += 43.;
-    rect
-}
-
 pub fn body(d: &mut Desktop, ui: &mut Ui, x: f32, y0: f32, w: f32) -> f32 {
     if d.network_settings.saved.is_none() && matches!(d.network_settings.status, Status::Idle) {
         request(d, None);
@@ -154,10 +147,10 @@ pub fn body(d: &mut Desktop, ui: &mut Ui, x: f32, y0: f32, w: f32) -> f32 {
     let mut y = y0;
     let mut edit = None;
     if form.saved.is_some() {
-        let ipv4 = field(ui, x, &mut y, w, &tr.t(FIELDS[0].0));
+        let ipv4 = form_field(ui, x, &mut y, w, &tr.t(FIELDS[0].0));
         let enabled = form.enabled(IPV4);
         text_field(ui, &mut form.ipv4, ipv4, None, enabled);
-        let mode = field(ui, x, &mut y, w, &tr.t(FIELDS[1].0));
+        let mode = form_field(ui, x, &mut y, w, &tr.t(FIELDS[1].0));
         let ipv4_only = tr.t("networkSettings.ipv4Only");
         let dual_stack = tr.t("networkSettings.dualStack");
         if let Some(i) = select(
@@ -171,7 +164,7 @@ pub fn body(d: &mut Desktop, ui: &mut Ui, x: f32, y0: f32, w: f32) -> f32 {
             form.dual = i == 1;
         }
         if form.dual {
-            let ipv6 = field(ui, x, &mut y, w, &tr.t(FIELDS[2].0));
+            let ipv6 = form_field(ui, x, &mut y, w, &tr.t(FIELDS[2].0));
             let enabled = form.enabled(IPV6);
             text_field(ui, &mut form.ipv6, ipv6, None, enabled);
         }
@@ -210,7 +203,7 @@ pub fn body(d: &mut Desktop, ui: &mut Ui, x: f32, y0: f32, w: f32) -> f32 {
             enabled,
         );
         y += 36.;
-        let filter = field(ui, x, &mut y, w, &tr.t(FIELDS[4].0));
+        let filter = form_field(ui, x, &mut y, w, &tr.t(FIELDS[4].0));
         let options = [
             (DnsFilter::None, tr.t("networkSettings.filterNone")),
             (DnsFilter::Ipv4, tr.t("networkSettings.filterA")),

@@ -13,6 +13,7 @@ pub mod network_settings;
 pub mod notices;
 pub mod practice;
 pub mod pull;
+pub mod registry_proxy;
 pub mod resources;
 pub mod run;
 pub mod settings;

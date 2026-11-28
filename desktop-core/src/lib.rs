@@ -51,6 +51,7 @@ pub use podbag::client::{
 };
 pub use podbag::config::DnsFilter;
 pub use podbag::dashboard::lab;
+pub use podbag::image::proxy::{Mode as RegistryProxyMode, Settings as RegistryProxySettings};
 pub use podbag::network::NetworkPreferences;
 
 use std::sync::{Mutex, MutexGuard};
