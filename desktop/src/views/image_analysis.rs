@@ -219,8 +219,7 @@ fn report_panel(
             y,
             tr,
             FINDINGS_MORE,
-            report.findings.len(),
-            limit,
+            report.findings.len() > limit,
             findings_more,
         );
     }
@@ -265,8 +264,7 @@ fn report_panel(
             y,
             tr,
             PACKAGES_MORE,
-            report.packages.len(),
-            limit,
+            report.packages.len() > limit,
             packages_more,
         );
     }
@@ -340,17 +338,8 @@ fn cells(
     ROW
 }
 
-fn more(
-    ui: &mut Ui,
-    area: Rect,
-    y: f32,
-    tr: Tr,
-    id: Id,
-    total: usize,
-    limit: usize,
-    page: &mut usize,
-) -> f32 {
-    if total <= limit {
+fn more(ui: &mut Ui, area: Rect, y: f32, tr: Tr, id: Id, has_more: bool, page: &mut usize) -> f32 {
+    if !has_more {
         return 0.;
     }
     let label = tr.t("analysis.more");

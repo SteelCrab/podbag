@@ -480,13 +480,13 @@ mod tests {
             let read = AtomicU32::new(0);
             FakeEngine::start(move |_method, path| {
                 if path == format!("/images/{ID}/json") {
-                    if read.fetch_add(1, Ordering::Relaxed) > 0 {
-                        if let Some(next) = change {
-                            return match next {
-                                Some(id) => json(200, json!({"Id":id})),
-                                None => json(404, json!({"message":"No such image"})),
-                            };
-                        }
+                    if read.fetch_add(1, Ordering::Relaxed) > 0
+                        && let Some(next) = change
+                    {
+                        return match next {
+                            Some(id) => json(200, json!({"Id":id})),
+                            None => json(404, json!({"message":"No such image"})),
+                        };
                     }
                     return json(200, json!({"Id":ID}));
                 }
