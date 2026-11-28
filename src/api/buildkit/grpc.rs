@@ -196,59 +196,78 @@ mod tests {
     #[tokio::test]
     async fn cancelling_an_idle_response_resets_the_upstream_subscription() {
         let (worker_socket, proxy_upstream) = duplex(4096);
+        let (observed, reset) = oneshot::channel();
         let worker = tokio::spawn(async move {
             let mut connection = h2::server::handshake(worker_socket).await.unwrap();
             let (_, mut reply) = connection.accept().await.unwrap().unwrap();
             let mut stream = reply.send_response(Response::new(()), false).unwrap();
-            tokio::select! {
+            let (_, mut reply) = connection.accept().await.unwrap().unwrap();
+            let mut other = reply.send_response(Response::new(()), false).unwrap();
+            let reason = tokio::select! {
                 reset = poll_fn(|context| stream.poll_reset(context)) => reset.unwrap(),
                 _ = poll_fn(|context| connection.poll_closed(context)) => {
                     panic!("the worker connection closed before the subscription reset")
                 }
-            }
+            };
+            observed.send(reason).unwrap();
+
+            other
+                .send_data(Bytes::from_static(b"history event"), false)
+                .unwrap();
+            let mut trailers = HeaderMap::new();
+            trailers.insert("grpc-status", HeaderValue::from_static("0"));
+            other.send_trailers(trailers).unwrap();
+            let _ = poll_fn(|context| connection.poll_closed(context)).await;
         });
         let sender = upstream(proxy_upstream).await.unwrap();
         let (proxy_socket, client_socket) = duplex(4096);
         let proxy = tokio::spawn(async move {
             let mut connection = h2::server::handshake(proxy_socket).await.unwrap();
-            let (request, reply) = connection.accept().await.unwrap().unwrap();
-            tokio::select! {
-                result = forward(sender, request, reply) => result.unwrap(),
-                _ = poll_fn(|context| connection.poll_closed(context)) => {
-                    panic!("the client connection closed before the subscription reset")
-                }
+            // As in the service, keep the upstream sender for the connection's lifetime.
+            while let Some(request) = connection.accept().await {
+                let (request, reply) = request.unwrap();
+                let sender = sender.clone();
+                tokio::spawn(async move { forward(sender, request, reply).await.unwrap() });
             }
-            // Keep the connection open after the individual RPC exits.
-            let _ = poll_fn(|context| connection.poll_closed(context)).await;
         });
         let (sender, connection) = h2::client::handshake(client_socket).await.unwrap();
         let client = tokio::spawn(connection);
-        let request = Request::builder()
-            .uri("http://buildkit/moby.buildkit.v1.Control/ListenBuildHistory")
-            .body(())
-            .unwrap();
-        let (response, mut send) = sender
-            .ready()
-            .await
-            .unwrap()
-            .send_request(request, true)
-            .unwrap();
+        let request = || {
+            Request::builder()
+                .uri("http://buildkit/moby.buildkit.v1.Control/ListenBuildHistory")
+                .body(())
+                .unwrap()
+        };
         let (fail, deadline) = oneshot::channel();
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_secs(5));
             let _ = fail.send(());
         });
         tokio::select! {
-            _ = deadline => panic!("the idle subscription did not reset"),
-            completed = async {
+            _ = deadline => panic!("the idle subscription did not reset or the second subscription stalled"),
+            _ = async {
+                let mut subscription = sender.clone().ready().await.unwrap();
+                let (response, mut send) = subscription.send_request(request(), true).unwrap();
                 let response = response.await.unwrap();
                 assert!(!response.body().is_end_stream());
+
+                // Wait until both subscriptions have response headers before cancelling one.
+                let mut subscription = sender.clone().ready().await.unwrap();
+                let (other, _) = subscription.send_request(request(), true).unwrap();
+                let mut other = other.await.unwrap().into_body();
                 send.send_reset(Reason::CANCEL);
-                worker.await.unwrap()
-            } => assert_eq!(completed, Reason::CANCEL)
+
+                assert_eq!(reset.await.unwrap(), Reason::CANCEL);
+                assert_eq!(other.data().await.unwrap().unwrap(), "history event");
+                assert!(other.data().await.is_none());
+                assert_eq!(other.trailers().await.unwrap().unwrap()["grpc-status"], "0");
+            } => {}
         }
         assert!(!client.is_finished());
+        assert!(!proxy.is_finished());
+        drop(sender);
         proxy.abort();
         client.abort();
+        worker.abort();
     }
 }
