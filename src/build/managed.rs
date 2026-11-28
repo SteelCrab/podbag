@@ -131,8 +131,9 @@ pub fn run(
         Output::Local(_) => export_args("local", staging.as_ref().unwrap().path(), None),
     }?;
     let mut ignore = build.ignore.clone();
+    exclude_build_directory(&mut ignore, &build.context, work)?;
     if let Some(staging) = &staging {
-        exclude_staging(&mut ignore, &build.context, staging.path())?;
+        exclude_build_directory(&mut ignore, &build.context, staging.path())?;
     }
     let sources = work.join("dockerfile");
     fs::create_dir(&sources).map_err(|e| io_error("stage the Dockerfile", e))?;
@@ -378,9 +379,7 @@ fn is_load_platform(platform: &str) -> bool {
     if platform.contains(',') {
         return false;
     }
-    let Some((os, target)) = platform.split_once('/') else {
-        return false;
-    };
+    let (os, target) = platform.split_once('/').unwrap_or(("linux", platform));
     let arch = target.split('/').next().unwrap_or_default();
     // BuildKit accepts the containerd platform aliases as well as OCI architecture names.
     let arch = match arch {
@@ -393,14 +392,14 @@ fn is_load_platform(platform: &str) -> bool {
     super::steps::is_this_platform(&format!("{os}/{arch}"))
 }
 
-fn exclude_staging(ignore: &mut String, context: &Path, staging: &Path) -> Result<()> {
+fn exclude_build_directory(ignore: &mut String, context: &Path, directory: &Path) -> Result<()> {
     let context = context
         .canonicalize()
         .map_err(|e| io_error("resolve the BuildKit context directory", e))?;
-    let staging = staging
+    let directory = directory
         .canonicalize()
-        .map_err(|e| io_error("resolve the local BuildKit staging directory", e))?;
-    let Ok(relative) = staging.strip_prefix(context) else {
+        .map_err(|e| io_error("resolve the private BuildKit directory", e))?;
+    let Ok(relative) = directory.strip_prefix(context) else {
         return Ok(());
     };
     let path = relative
@@ -408,7 +407,7 @@ fn exclude_staging(ignore: &mut String, context: &Path, staging: &Path) -> Resul
         .filter(|path| !path.contains(['\r', '\n']))
         .ok_or_else(|| {
             invalid(
-                "the local BuildKit staging path cannot be excluded from the context",
+                "the private BuildKit directory cannot be excluded from the context",
                 "use a directory outside the context or a UTF-8 path without line breaks",
             )
         })?;

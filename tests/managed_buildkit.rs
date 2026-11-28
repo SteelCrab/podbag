@@ -5,7 +5,7 @@ mod common;
 use common::api::{Service, curl, docker_out, wait_for};
 use common::{Sandbox, root_mode, stderr, stdout};
 use std::ffi::OsString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::Duration;
 
@@ -73,6 +73,52 @@ fn decoded_docker_layers(bytes: &[u8]) -> Vec<Vec<u8>> {
             decoded
         })
         .collect()
+}
+
+fn oci_image_platforms(archive: &[u8]) -> std::collections::BTreeSet<String> {
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::io::Read;
+
+    let mut files = BTreeMap::new();
+    for entry in tar::Archive::new(archive).entries().unwrap() {
+        let mut entry = entry.unwrap();
+        if entry.header().entry_type().is_file() {
+            let path = entry.path().unwrap().into_owned();
+            let mut contents = Vec::new();
+            entry.read_to_end(&mut contents).unwrap();
+            assert!(files.insert(path, contents).is_none());
+        }
+    }
+    let blob = |descriptor: &serde_json::Value| {
+        let digest = descriptor["digest"].as_str().unwrap();
+        let (algorithm, hash) = digest.split_once(':').unwrap();
+        &files[&PathBuf::from("blobs").join(algorithm).join(hash)]
+    };
+    let root: serde_json::Value = serde_json::from_slice(&files[Path::new("index.json")]).unwrap();
+    let mut pending = root["manifests"].as_array().unwrap().clone();
+    let mut visited = BTreeSet::new();
+    let mut platforms = BTreeSet::new();
+    while let Some(descriptor) = pending.pop() {
+        if !visited.insert(descriptor["digest"].as_str().unwrap().to_owned()) {
+            continue;
+        }
+        let document: serde_json::Value = serde_json::from_slice(blob(&descriptor)).unwrap();
+        if let Some(manifests) = document["manifests"].as_array() {
+            pending.extend(manifests.iter().cloned());
+        } else {
+            let config: serde_json::Value =
+                serde_json::from_slice(blob(&document["config"])).unwrap();
+            if config["os"] == "linux" {
+                let layers = document["layers"].as_array().unwrap();
+                assert!(!layers.is_empty());
+                for layer in layers {
+                    assert!(!blob(layer).is_empty());
+                }
+                platforms.insert(config["architecture"].as_str().unwrap().to_owned());
+            }
+        }
+    }
+    platforms
 }
 
 fn build(sb: &Sandbox, context: &Path, options: &[&str]) -> Output {
@@ -224,21 +270,10 @@ fn worker_exports_oci_platforms_and_reuses_external_cache() {
             &format!("type=oci,dest={}", archive.display()),
         ],
     );
-    let archive = read(&archive);
-    let mut archive = tar::Archive::new(&archive[..]);
-    let mut architectures = std::collections::BTreeSet::new();
-    for entry in archive.entries().unwrap() {
-        let entry = entry.unwrap();
-        let Ok(value) = serde_json::from_reader::<_, serde_json::Value>(entry) else {
-            continue;
-        };
-        for manifest in value["manifests"].as_array().iter().flat_map(|m| m.iter()) {
-            if let Some(arch) = manifest["platform"]["architecture"].as_str() {
-                architectures.insert(arch.to_owned());
-            }
-        }
-    }
-    assert!(architectures.contains("amd64") && architectures.contains("arm64"));
+    assert_eq!(
+        oci_image_platforms(&read(&archive)),
+        ["amd64".to_owned(), "arm64".to_owned()].into()
+    );
 
     let busybox = std::env::var_os("PODBAG_TEST_BUSYBOX").unwrap_or("/usr/bin/busybox".into());
     std::fs::copy(busybox, context.join("busybox")).unwrap();
@@ -284,6 +319,42 @@ RUN ["/bin/busybox", "sh", "-c", "/bin/busybox head -c 32 /dev/urandom > /cache-
     );
     clean(&sb);
     println!("PASS: BuildKit multi-platform OCI archive, local exporter, cache export and import");
+}
+
+#[test]
+fn the_image_export_does_not_copy_its_active_build_workspace() {
+    if !enabled() {
+        return;
+    }
+    let mut sb = Sandbox::new();
+    let context = sb.tmp.path().join("context");
+    std::fs::create_dir(&context).unwrap();
+    let data = context.join("podbag [data]");
+    sb.env
+        .push(("PODBAG_DATA_DIR".into(), data.to_str().unwrap().into()));
+    std::fs::write(context.join("Dockerfile"), "FROM scratch\nCOPY . /\n").unwrap();
+    std::fs::write(context.join("note"), "from the context").unwrap();
+    std::fs::write(context.join(".dockerignore"), "!**\n").unwrap();
+    build(&sb, &context, &["-t", "build-context:private"]);
+    let image = checked(
+        sb.podbag()
+            .args(["save", "build-context:private"])
+            .output()
+            .unwrap(),
+    );
+    let mut found_note = false;
+    for layer in decoded_docker_layers(&image.stdout) {
+        for entry in tar::Archive::new(layer.as_slice()).entries().unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path().unwrap();
+            assert!(
+                !path.to_string_lossy().contains("/builds/buildkit-"),
+                "the image contains private BuildKit files at {path:?}"
+            );
+            found_note |= path == Path::new("note");
+        }
+    }
+    assert!(found_note, "the image includes the ordinary context file");
 }
 
 const CANCELLATION_DOCKERFILE: &str = r#"FROM scratch
@@ -509,12 +580,15 @@ fn engine_v2_loads_a_tar_build_and_reports_progress_and_errors() {
         ),
         TarEntry::file("note", b"Docker Engine v2 context\n"),
     ]));
-    let body = v2_build(
-        &service,
-        &archive,
-        "t=managed-v2%3Afirst&t=managed-v2%3Asecond&dockerfile=Containerfile&target=actual&buildargs=%7B%22LABEL_VALUE%22%3A%22engine%22%7D&networkmode=none",
-        &[],
+    let native_arch = match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        other => panic!("no BuildKit fixture for {other}"),
+    };
+    let query = format!(
+        "t=managed-v2%3Afirst&t=managed-v2%3Asecond&dockerfile=Containerfile&target=actual&buildargs=%7B%22LABEL_VALUE%22%3A%22engine%22%7D&networkmode=none&platform={native_arch}"
     );
+    let body = v2_build(&service, &archive, &query, &[]);
     let messages = build_message(&body);
     assert!(
         messages.iter().any(|item| item.get("stream").is_some()),
