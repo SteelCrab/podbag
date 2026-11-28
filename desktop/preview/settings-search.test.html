@@ -17,8 +17,8 @@ const check = (condition, message) => { if (!condition) throw Error(message); };
 async function preview(id) {
   const frame = document.getElementById(id);
   const deadline = performance.now() + 5000;
-  while (!frame.contentDocument.querySelector("#settings-search") ||
-         frame.contentDocument.documentElement.dataset.ready !== "1") {
+  while (!frame.contentDocument?.querySelector("#settings-search") ||
+         frame.contentDocument.documentElement?.dataset.ready !== "1") {
     check(performance.now() < deadline, `Settings preview did not load: ${id}`);
     await new Promise((resolve) => setTimeout(resolve, 20));
   }

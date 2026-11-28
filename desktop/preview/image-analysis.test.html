@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Image security analysis test</title>
+<iframe id="result-mode" src="preview.html?view=analysis&amp;lang=en" width="900" height="560" title="Security scan"></iframe>
+<iframe id="missing" src="preview.html?view=analysis&amp;scan=missing&amp;lang=en" width="900" height="560" title="Missing scanner"></iframe>
+<iframe id="empty" src="preview.html?view=analysis&amp;scan=empty&amp;lang=en" width="900" height="560" title="Empty scan"></iframe>
+<pre id="result">Running</pre>
+<script>
+"use strict";
+
+const check = (ok, message) => { if (!ok) throw Error(message); };
+
+async function until(predicate, message) {
+  const deadline = performance.now() + 5000;
+  while (!predicate()) {
+    check(performance.now() < deadline, message);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
+async function preview(id) {
+  const frame = document.getElementById(id);
+  const doc = () => frame.contentDocument;
+  await until(() => doc().querySelector(".image-analysis .primary"), "Security tab did not open");
+  return {
+    doc: doc(), win: frame.contentWindow,
+    click: () => doc().querySelector(".image-analysis .primary").click(),
+  };
+}
+
+async function test() {
+  const [sample, missing, empty] = await Promise.all(["result-mode", "missing", "empty"].map(preview));
+
+  check(!sample.win.previewScans, "Never scan just by opening the tab");
+  sample.click();
+  await until(() => sample.doc.querySelector("#analysis-findings-title"), "The scan report did not appear");
+  const request = sample.win.previewScans[0];
+  check(request.id === "sha256:" + "1".repeat(64) && request.token === 1, "Scope the scan to the selected engine and full image ID");
+  check(sample.doc.querySelector(".analysis-level.high dd").textContent === "1", "Summarize severity");
+  check(sample.doc.querySelector('[aria-labelledby="analysis-findings-title"] tbody').textContent.includes("DEMO-2026-0001"), "Show the finding and its advisory ID");
+  check(sample.doc.querySelector('[aria-labelledby="analysis-packages-title"] tbody').textContent.includes("musl"), "Show the installed package inventory");
+
+  missing.click();
+  await until(() => missing.doc.querySelector('[role="alert"]')?.textContent.includes("Trivy was not found"), "Explain how to fix a missing scanner");
+  check(!missing.doc.querySelector(".image-analysis .primary").disabled, "Allow retry after a scan failure");
+
+  empty.click();
+  await until(() => empty.doc.querySelector(".analysis-report")?.textContent.includes("Trivy reported no known vulnerabilities."), "Explain an empty report");
+
+  const invoke = sample.win.__TAURI__.core.invoke;
+  let finish;
+  sample.win.__TAURI__.core.invoke = (cmd, args) => cmd === "analyze_image"
+    ? new Promise((resolve) => { finish = resolve; }) : invoke(cmd, args);
+  sample.click();
+  check(sample.doc.querySelector(".image-analysis .primary").disabled, "Prevent overlapping scans from the same panel");
+  sample.win.podbag.openDetail("images", "sha256:" + "2".repeat(64), "analysis");
+  finish({ imageId: request.id, packages: [], findings: [] });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  check(!sample.doc.querySelector(".analysis-report"), "Do not show a result on a different image");
+}
+
+const result = document.getElementById("result");
+test().then(() => { result.textContent = "PASS"; },
+  (error) => { result.textContent = "FAIL: " + error.message; });
+</script>
+</html>

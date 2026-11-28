@@ -469,6 +469,11 @@ pub enum CgroupDriverArg {
 
 #[derive(Subcommand)]
 pub enum SystemCmd {
+    /// View, check, or apply the local engine settings file
+    Config {
+        #[command(subcommand)]
+        cmd: ConfigCmd,
+    },
     /// Show disk use
     Df,
     /// Remove every image that no container uses
@@ -511,6 +516,15 @@ pub enum SystemCmd {
         #[arg(long)]
         set: bool,
     },
+    /// Read or save default bridge and embedded DNS settings as JSON
+    NetworkSettings {
+        /// Save the supplied network preferences
+        #[arg(long, value_name = "JSON")]
+        set: Option<String>,
+        /// Save only if the network settings still match this revision
+        #[arg(long, value_name = "REVISION", requires = "set")]
+        expect_revision: Option<String>,
+    },
     /// Serve the Docker Engine API on a Unix socket, for the docker CLI
     ///
     /// Point the CLI at it with DOCKER_HOST=unix://<socket>. Containers do not depend on
@@ -540,6 +554,16 @@ pub enum SystemCmd {
         #[command(subcommand)]
         cmd: DockerCmd,
     },
+}
+
+#[derive(Subcommand)]
+pub enum ConfigCmd {
+    /// Read the file as JSON, including its path and original text
+    Show,
+    /// Check config.toml text read from stdin
+    Check,
+    /// Apply a JSON edit read from stdin and reject a changed original
+    Apply,
 }
 
 #[derive(Subcommand)]

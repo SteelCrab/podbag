@@ -1337,7 +1337,8 @@ function renderDetail(main, fresh) {
     return;
   }
   const name = objectName(d.kind, o);
-  const tabs = d.kind === "containers" ? ["info", "logs", "inspect"] : ["info", "inspect"];
+  const tabs = d.kind === "containers" ? ["info", "logs", "inspect"]
+    : d.kind === "images" ? ["info", "inspect", "analysis"] : ["info", "inspect"];
   const actions = d.kind === "containers" ? [
     ...[...rowActions(d.kind, o).children].filter((b) => b.getAttribute("aria-label") !== t("action.logs")),
     S.features.rename ? iconButton("rename", t("action.rename"), () => rename(o)) : null,
@@ -1361,6 +1362,7 @@ function renderDetail(main, fresh) {
   let panel;
   if (d.tab === "info") panel = infoPanel(d.kind, o);
   else if (d.tab === "logs") panel = logsPanel(o);
+  else if (d.tab === "analysis") panel = imageAnalysisPanel(d, o);
   else panel = inspectPanel(d.kind, d.id);
   main.replaceChildren(header, tablist, panel);
 }
@@ -1485,6 +1487,108 @@ function settingDetails(id, key, symbol, value, ...body) {
     h("div", { class: "setting-body" }, body));
 }
 
+function vmStorageSetting() {
+  if (!isPodbag() || S.engine?.platform !== "macos") return null;
+  const key = (suffix, data) => t(`settings.vmStorage${suffix}`, data);
+  const gib = 2 ** 30;
+  const units = new Intl.NumberFormat(I18N.lang, { maximumFractionDigits: 2 });
+  const capacityText = bytes => `${units.format(bytes / gib)} GiB`;
+  const data = h("dl", { class: "fields" });
+  const unavailable = h("p", { class: "hint" });
+  const status = h("p", { id: "vm-storage-status", role: "status", class: "vm-storage-status" });
+  const capacity = h("input", { id: "vm-storage-capacity", type: "number", inputmode: "numeric", step: 1, required: true });
+  const path = h("input", { id: "vm-storage-path", type: "text", required: true, spellcheck: "false", autocomplete: "off", placeholder: "/Volumes/Work/podbag.img" });
+  const control = (label, field, id, action, edit) => h("form", {
+    class: "vm-storage-action", onsubmit: (event) => {
+      event.preventDefault();
+      change(edit());
+    },
+  }, h("label", { for: field.id }, h("span", { text: key(label) }), field),
+  h("button", { id, type: "submit", class: "button", text: key(action) }));
+  const actions = h("fieldset", { class: "vm-storage-actions", disabled: true },
+    control("NewCapacity", capacity, "vm-storage-grow", "Grow", () => ({ action: "grow", gib: capacity.valueAsNumber })),
+    control("NewPath", path, "vm-storage-move", "Move", () => ({ action: "move", path: path.value.trim() })));
+  const section = settingDetails("vm-storage-settings", "vmStorage", "volumes", null,
+    data, unavailable, actions, status);
+  let busy = false, info, lastState = S.vm?.state;
+  const canEdit = () => info?.editable && info.exists && info.filesystemBytes != null;
+  function refreshControls() {
+    actions.disabled = busy || !canEdit();
+    const reason = !info ? "" : !info.editable ? key("Stop")
+      : !info.exists ? key(info.configured ? "Missing" : "Initialize") : info.filesystemBytes == null ? key("Unreadable") : "";
+    unavailable.textContent = reason;
+    unavailable.hidden = !reason;
+  }
+  function show(result) {
+    info = result;
+    const label = capacityText(result.sizeBytes);
+    section.querySelector(".setting-value").textContent = result.exists ? label : "";
+    put(data,
+      field(key("Location"), result.path, "mono"),
+      result.exists ? field(key("Capacity"), label) : [],
+      result.filesystemBytes != null ? field(key("Filesystem"), capacityText(result.filesystemBytes)) : [],
+      result.exists ? field(key("Allocated"), size(result.allocatedBytes)) : [],
+      result.growthPending ? field(key("Growth"), key("Pending")) : []);
+    if (result.exists) {
+      capacity.min = Math.floor(result.sizeBytes / gib) + 1;
+      capacity.max = result.maxSizeGib;
+      capacity.placeholder = String(capacity.min);
+    }
+    refreshControls();
+  }
+  async function read() {
+    if (!section.open || busy) return;
+    busy = true;
+    refreshControls();
+    try {
+      show(await API.vmStorage());
+      if (status.classList.contains("error-text")) {
+        status.textContent = "";
+        status.classList.remove("error-text");
+      }
+    } catch (error) {
+      info = undefined;
+      data.replaceChildren();
+      section.querySelector(".setting-value").textContent = "";
+      status.textContent = String(error);
+      status.classList.add("error-text");
+    } finally {
+      busy = false;
+      refreshControls();
+    }
+  }
+  async function change(edit) {
+    if (busy || !canEdit()) return;
+    busy = true;
+    refreshControls();
+    status.textContent = key("Working");
+    status.classList.remove("error-text");
+    try {
+      const updated = await API.vmStorage(edit);
+      show(updated);
+      capacity.value = "";
+      path.value = "";
+      status.textContent = updated.backupPath
+        ? key("Backup", { path: updated.backupPath })
+        : key("Saved");
+    } catch (error) {
+      status.textContent = String(error);
+      status.classList.add("error-text");
+    } finally {
+      busy = false;
+      refreshControls();
+    }
+  }
+  section.addEventListener("toggle", read);
+  section.addEventListener("vm-state-change", () => {
+    if (lastState === S.vm?.state) return;
+    lastState = S.vm?.state;
+    read();
+  });
+  refreshControls();
+  return section;
+}
+
 function registryProxySetting() {
   if (!isPodbag() || !["linux", "macos"].includes(S.engine?.platform)) return null;
   const key = name => t(`settings.registryProxy${name}`);
@@ -1596,6 +1700,85 @@ function startupSettings() {
     h("label", { class: "check" }, toggle, t("settings.launchAtLogin")), status);
 }
 
+function engineConfigurationSetting() {
+  if (!S.connection?.local || !isPodbag()) return null;
+  const edit = button("inspect", t("engineConfig.edit"), openEngineConfiguration);
+  edit.id = "edit-engine-configuration";
+  return h("div", { class: "setting-row", ...searchableSetting("engineConfig.title", "settings.search.terms.engineConfig") },
+    h("div", {}, h("span", { text: t("engineConfig.title") }),
+      h("p", { class: "hint", text: t("engineConfig.localHint") })), edit);
+}
+
+function openEngineConfiguration() {
+  const heading = h("h2", { id: "engine-config-heading", text: t("engineConfig.title") });
+  const dialog = h("dialog", { id: "engine-config-editor", "aria-labelledby": heading.id });
+  const path = h("p", { class: "mono", hidden: true });
+  const status = h("p", { class: "engine-config-status", role: "status", text: t("engineConfig.loading") });
+  const editor = h("textarea", { id: "engine-config-text", rows: 12, spellcheck: "false", disabled: true });
+  const endpoint = S.engine?.endpoint;
+  let original = null;
+  let loaded = false;
+  let busy = true;
+  let saved = "";
+  const close = button(null, t("engineConfig.close"), () => dialog.close());
+  const validate = button(null, t("engineConfig.check"), () => perform("check"));
+  const save = h("button", { type: "submit", class: "button primary", text: t("settings.apply") });
+
+  function controls() {
+    editor.disabled = busy || !loaded;
+    validate.disabled = editor.disabled;
+    save.disabled = editor.disabled || editor.value === saved;
+  }
+
+  function setStatus(text, error = false) {
+    status.textContent = text;
+    status.classList.toggle("error-text", error);
+  }
+
+  async function perform(action) {
+    if (action !== "read" && (busy || !loaded)) return;
+    if (!S.connection?.local || !isPodbag() || S.engine?.endpoint !== endpoint) {
+      setStatus(t("engineConfig.connectionChanged"), true);
+      return;
+    }
+    const text = editor.value;
+    // Textareas display LF. Keep CRLF for existing files that use it consistently.
+    const contents = original?.includes("\r\n") && !original.replaceAll("\r\n", "").includes("\n")
+      ? text.replaceAll("\n", "\r\n") : text;
+    const request = action === "save" ? { action, edit: { original, text: contents } }
+      : action === "check" ? { action, text: contents } : { action };
+    busy = true;
+    controls();
+    setStatus(t("engineConfig.loading"));
+    try {
+      const document = await API.engineConfig(request);
+      if (document) {
+        original = document.text;
+        editor.value = original ?? "";
+        saved = editor.value;
+        path.textContent = document.path;
+        path.hidden = false;
+        loaded = true;
+      }
+      setStatus(action === "save" ? t("engineConfig.saved") : action === "check" ? t("engineConfig.valid") : "");
+    } catch (error) {
+      setStatus(String(error), true);
+    } finally {
+      busy = false;
+      controls();
+    }
+  }
+
+  editor.oninput = controls;
+  dialog.append(h("form", { onsubmit: (event) => { event.preventDefault(); perform("save"); } },
+    heading, path, h("label", { for: editor.id, text: t("engineConfig.contents") }), editor, status,
+    h("div", { class: "buttons" }, close, validate, save)));
+  dialog.addEventListener("close", () => dialog.remove(), { once: true });
+  document.body.append(dialog);
+  dialog.showModal();
+  perform("read");
+}
+
 function notificationSettings() {
   const toggle = h("input", { id: "status-notifications", type: "checkbox", checked: S.settings.statusNotifications });
   toggle.onchange = async () => {
@@ -1656,12 +1839,15 @@ async function renderSettings(main) {
         h("p", { class: "hint", text: t("settings.engineNote") }),
         h("dl", { class: "fields" },
           field(t("settings.socket"), e.endpoint, "mono"), field(t("settings.version"), e.version)),
+        engineConfigurationSetting(),
         dockerSettings(),
         compressionSetting()),
       builderSettings(),
       registryProxySetting(),
       settingDetails("vm-settings", "vm", "vm"),
       settingDetails("sync-settings", "syncShares", "volumes"),
+      vmStorageSetting(),
+      isPodbag() && networkSettings(),
       settingDetails("updates", "updates", "update"),
       settingDetails("terminal-command", "terminalCommand", "shell"),
       notificationSettings(),
@@ -1674,7 +1860,104 @@ async function renderSettings(main) {
   renderUpdates();
   renderTerminalCommand();
   readCompressionSwitch();
-  for (const id of openSections) document.getElementById(id).open = true;
+  for (const id of openSections) {
+    const section = document.getElementById(id);
+    if (section) section.open = true;
+  }
+}
+
+function networkSettings() {
+  const setting = (key) => t(`networkSettings.${key}`);
+  const subnet = (id, placeholder) => h("input", {
+    id, type: "text", placeholder, required: true, autocomplete: "off", spellcheck: "false",
+  });
+  const select = (id, pairs) => h("select", { id }, pairs.map(([value, label]) =>
+    h("option", { value, text: setting(label) })));
+  const control = (key, input) => h("div", {
+    class: "form-field", ...searchableSetting(`networkSettings.${key}`),
+  }, h("label", { for: input.id, text: setting(key) }), input);
+
+  const ipv4 = subnet("default-ipv4-subnet", "10.77.0.0/16");
+  const ipMode = select("default-ip-mode", [["ipv4", "ipv4Only"], ["dual", "dualStack"]]);
+  const ipv6 = subnet("default-ipv6-subnet", "fd77:706f:6462::/64");
+  const ipv6Field = control("ipv6Subnet", ipv6);
+  const embedded = h("input", { id: "embedded-dns", type: "checkbox" });
+  const filter = select("dns-filter", [["none", "filterNone"], ["ipv4", "filterA"], ["ipv6", "filterAAAA"]]);
+  const active = h("p", { class: "hint", id: "active-bridge-subnets" });
+  const overrideNote = h("p", { class: "hint", hidden: true });
+  const status = h("div", { class: "network-settings-status", role: "status" });
+  const submit = h("button", { type: "submit", class: "button primary", text: t("action.save"), disabled: true });
+  const fields = h("fieldset", { class: "network-settings-fields", disabled: true },
+    h("div", { class: "network-settings-grid" },
+      control("ipv4Subnet", ipv4), control("ipMode", ipMode), ipv6Field),
+    active, h("p", { class: "hint", text: setting("bridgeHint") }),
+    h("label", { class: "check", ...searchableSetting("networkSettings.embeddedDns") },
+      embedded, setting("embeddedDns")),
+    control("dnsFilter", filter), h("p", { class: "hint", text: setting("dnsHint") }), overrideNote);
+  const form = h("form", { class: "network-settings-form" }, fields, submit, status);
+  const section = settingDetails("network-settings", "network", "networks", null, form);
+  let saved;
+  let busy = false;
+
+  function synchronizeControls() {
+    const overrides = saved?.overrides || [];
+    ipv4.disabled = overrides.includes("PODBAG_DEFAULT_SUBNET");
+    ipMode.disabled = overrides.includes("PODBAG_DEFAULT_IPV6_SUBNET");
+    ipv6Field.hidden = ipMode.value !== "dual";
+    ipv6.disabled = ipMode.disabled || ipv6Field.hidden;
+    embedded.disabled = overrides.includes("PODBAG_EMBEDDED_DNS");
+    filter.disabled = !embedded.checked || overrides.includes("PODBAG_DNS_FILTER");
+  }
+
+  function fill(current) {
+    saved = current;
+    ipv4.value = current.preferences.defaultSubnet;
+    ipMode.value = current.preferences.defaultIpv6Subnet ? "dual" : "ipv4";
+    ipv6.value = current.preferences.defaultIpv6Subnet || "";
+    embedded.checked = current.preferences.embeddedDns;
+    filter.value = current.preferences.dnsFilter;
+    const subnets = [current.activeSubnet, current.activeIpv6Subnet].filter(Boolean);
+    active.textContent = subnets.length ? t("networkSettings.activeBridge", { subnets: subnets.join(", ") }) : setting("noActiveBridge");
+    overrideNote.hidden = !current.overrides.length;
+    overrideNote.textContent = t("networkSettings.overridden", { variables: current.overrides.join(", ") });
+    synchronizeControls();
+  }
+
+  async function apply(values) {
+    if (busy) return;
+    busy = true;
+    fields.disabled = submit.disabled = true;
+    put(status, h("p", { class: "hint", text: setting(values ? "saving" : "loading") }));
+    try {
+      const result = await API.networkSettings(values, values && saved?.revision);
+      if (!form.isConnected) return;
+      fill(result);
+      put(status, values && h("p", { class: "hint", text: setting("saved") }));
+    } catch (error) {
+      if (!form.isConnected) return;
+      put(status, h("p", { class: "error-text", text: t("networkSettings.failed", { error: String(error) }) }),
+        button(null, saved ? setting("reloadSaved") : t("action.retry"), () => apply()));
+    } finally {
+      busy = false;
+      fields.disabled = submit.disabled = !saved;
+    }
+  }
+
+  form.addEventListener("change", synchronizeControls);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    apply({
+      defaultSubnet: ipv4.value.trim(),
+      defaultIpv6Subnet: ipMode.value === "dual" ? ipv6.value.trim() : null,
+      embeddedDns: embedded.checked,
+      dnsFilter: filter.value,
+    });
+  });
+  section.addEventListener("toggle", () => {
+    if (section.open && !saved) apply();
+  });
+  synchronizeControls();
+  return section;
 }
 
 // The parts of the docker command's settings (filled in when known).
@@ -1782,6 +2065,7 @@ let vmFormDirty = false;
 // so what the user types stays).
 function renderVmSettings(fresh) {
   renderSyncSettings(fresh);
+  document.getElementById("vm-storage-settings")?.dispatchEvent(new Event("vm-state-change"));
   const section = document.getElementById("vm-settings");
   if (!section) return;
   const box = section.querySelector(".setting-body");

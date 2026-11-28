@@ -10,8 +10,8 @@
 //! connection starts a VM again. When asked (`podbag vm stop`: SIGTERM, or `STOP`), and
 //! on SIGTERM, SIGINT or SIGHUP (a logout), it powers the VM off and ends.
 
-use super::settings;
 use super::vm::{Vm, VmSpec};
+use super::{disk, settings};
 use crate::network::Proto;
 use crate::vm::proto::{API_PORT, CLI_PORT, CliRequest, FORWARD_PORT, Frame};
 use crate::vm::{shares, udp};
@@ -31,6 +31,7 @@ pub struct Paths {
     pub run: PathBuf,
     /// The guest: `Image`, `initramfs.gz`, `disk.zst`.
     pub guest: PathBuf,
+    /// The default data image when no other location is configured.
     pub disk: PathBuf,
     pub console: PathBuf,
     pub vm_sock: PathBuf,
@@ -58,9 +59,12 @@ pub(super) fn home() -> Result<PathBuf, String> {
 }
 
 pub fn paths() -> Result<Paths, String> {
-    let home = home()?;
+    home().map(paths_in)
+}
+
+pub(super) fn paths_in(home: PathBuf) -> Paths {
     let run = home.join("run");
-    Ok(Paths {
+    Paths {
         guest: guest_dir(&home),
         disk: home.join("disk.img"),
         console: home.join("console.log"),
@@ -73,7 +77,7 @@ pub fn paths() -> Result<Paths, String> {
         running: run.join("vm.json"),
         run,
         home,
-    })
+    }
 }
 
 /// Where the guest files are: `PODBAG_VM_GUEST`, then the guest this binary carries
@@ -300,8 +304,7 @@ fn run() -> Result<(), String> {
         // SAFETY: the standby handed over these descriptors, which nothing else owns.
         Some(fds) => unsafe { std::fs::File::from_raw_fd(fds.lock) },
         None => {
-            let lock =
-                std::fs::File::create(&p.lock).map_err(|e| format!("{}: {e}", p.lock.display()))?;
+            let lock = disk::open_host_lock(&p)?;
             if !take_lock(&lock) {
                 // Another host runs (or starts, or stops): the CLI waits for it.
                 return Ok(());
@@ -391,7 +394,7 @@ fn serve_vm(p: &Paths, lock: &std::fs::File, inherited: Option<&Inherited>) -> R
         }
     }
     super::cpu::check_guest(&p.guest.join("Image"))?;
-    make_disk(p)?;
+    let disk = disk::for_boot(p)?;
     let env = |k: &str| std::env::var(k).ok();
     let saved = settings::read(&p.home)?;
     let (resources, _) = settings::effective(&saved, &env, &settings::Mac::this());
@@ -425,7 +428,7 @@ fn serve_vm(p: &Paths, lock: &std::fs::File, inherited: Option<&Inherited>) -> R
     let spec = VmSpec {
         kernel: p.guest.join("Image"),
         initrd: p.guest.join("initramfs.gz"),
-        disk: p.disk.clone(),
+        disk,
         console: p.console.clone(),
         cpus: resources.cpus as usize,
         memory,
@@ -621,24 +624,6 @@ fn wait_for(signals: &[i32]) -> i32 {
         libc::sigwait(&set, &mut sig);
         sig
     }
-}
-
-/// The data disk, from the template when there is none: written beside it, flushed,
-/// then renamed, so a host that dies meanwhile leaves no half disk behind.
-fn make_disk(p: &Paths) -> Result<(), String> {
-    if p.disk.exists() {
-        return Ok(());
-    }
-    let template = p.guest.join("disk.zst");
-    let part = p.disk.with_extension("img.part");
-    let _ = std::fs::remove_file(&part);
-    let err = |path: &Path, e: std::io::Error| format!("{}: {e}", path.display());
-    let mut t = std::fs::File::open(&template).map_err(|e| err(&template, e))?;
-    crate::vm::template::expand(&mut t, &part).map_err(|e| e.to_string())?;
-    std::fs::File::open(&part)
-        .and_then(|f| f.sync_all())
-        .map_err(|e| err(&part, e))?;
-    std::fs::rename(&part, &p.disk).map_err(|e| err(&p.disk, e))
 }
 
 /// What the running VM started with and what it does, in `run/vm.json` for

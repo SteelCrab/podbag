@@ -11,6 +11,7 @@ mod builders;
 mod commands;
 mod dockercmd;
 mod extensions;
+mod image_analysis;
 mod images;
 mod kubernetes;
 use podbag::dashboard::lab;
@@ -66,6 +67,7 @@ struct TrayItems {
 struct AppState {
     migration: Mutex<()>,
     builder_work: Mutex<()>,
+    image_analysis: Mutex<()>,
     models: model_runner::ModelRunner,
     /// The engine this window uses, and its client.
     session: Mutex<Arc<Session>>,
@@ -122,6 +124,7 @@ impl AppState {
         AppState {
             migration: Mutex::new(()),
             builder_work: Mutex::new(()),
+            image_analysis: Mutex::new(()),
             models: model_runner::ModelRunner::default(),
             session: Mutex::new(Arc::new(Session::new(1, target))),
             podbag,
@@ -367,6 +370,22 @@ fn inspect(
 ) -> Result<Value, String> {
     let session = state.session(token)?;
     commands::inspect(&session.client, &kind, &id)
+}
+
+#[tauri::command(async)]
+fn analyze_image(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    token: u64,
+    id: String,
+) -> Result<image_analysis::Report, image_analysis::Failure> {
+    use image_analysis::Failure;
+    let session = state.session(token).map_err(|_| Failure::EngineChanged)?;
+    let _running = state.image_analysis.try_lock().map_err(|_| Failure::Busy)?;
+    let cache = app.path().app_cache_dir().map_err(|_| Failure::Workspace)?;
+    let result = image_analysis::analyze(&session.client, &id, &cache.join("trivy"));
+    state.session(token).map_err(|_| Failure::EngineChanged)?;
+    result
 }
 
 #[tauri::command(async)]
@@ -728,6 +747,20 @@ fn vm_resources(
     serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())
 }
 
+/// Read or edit the local macOS VM disk through the companion CLI.
+#[tauri::command(async)]
+fn vm_storage(
+    state: State<'_, AppState>,
+    token: u64,
+    edit: Option<cli::VmStorageEdit>,
+) -> Result<Value, String> {
+    let session = state.session(token)?;
+    if !cfg!(target_os = "macos") || session.target.choice != Choice::Podbag {
+        return Err("VM storage requires the local macOS engine".into());
+    }
+    cli::vm_storage(&state.podbag, edit)
+}
+
 /// `podbag system compression [idle|off] --json`: `{"mode", "after"}`. With no mode it
 /// only reads. On macOS the command runs in the VM (it starts the VM when none runs).
 #[tauri::command(async)]
@@ -740,6 +773,19 @@ fn compression(
         return Err("Image compression requires the podbag engine".into());
     }
     cli::compression(&state.podbag, mode.as_deref())
+}
+
+#[tauri::command(async)]
+fn network_settings(
+    state: State<'_, AppState>,
+    token: u64,
+    values: Option<podbag::network::NetworkPreferences>,
+    expected_revision: Option<String>,
+) -> Result<Value, String> {
+    if state.session(token)?.target.choice != Choice::Podbag {
+        return Err("Network settings require the local podbag engine".into());
+    }
+    cli::network_settings(&state.podbag, values, expected_revision.as_deref())
 }
 
 #[tauri::command(async)]
@@ -1003,6 +1049,18 @@ fn open_training_guide(id: &str, lang: &str) -> Result<(), String> {
     }
     .ok_or("The module has no web guide.")?;
     open::that_detached(url).map_err(|e| e.to_string())
+}
+
+#[tauri::command(async)]
+fn engine_config(
+    state: State<'_, AppState>,
+    token: u64,
+    request: cli::EngineConfigRequest,
+) -> Result<Option<podbag::config::Document>, String> {
+    if state.session(token)?.target.choice != Choice::Podbag {
+        return Err("Engine configuration requires the local Podbag engine".into());
+    }
+    cli::engine_config(&state.podbag, request)
 }
 
 #[tauri::command]
@@ -1507,6 +1565,7 @@ fn main() {
             contexts,
             create_volume,
             inspect,
+            analyze_image,
             act,
             remove,
             prune,
@@ -1537,13 +1596,16 @@ fn main() {
             docker_images,
             import_images,
             vm_resources,
+            vm_storage,
             compression,
             registry_proxy,
+            network_settings,
             take_star_prompt,
             terminal_command,
             install_terminal_command,
             open_repository,
             open_training_guide,
+            engine_config,
             get_settings,
             set_settings,
         ])
