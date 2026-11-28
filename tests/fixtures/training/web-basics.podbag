@@ -93,6 +93,7 @@
         "vi": "Xóa container trong CLI"
       },
       "command": "podbag rm lab-web",
+      "ui": { "action": "remove", "name": "lab-web" },
       "check": {
         "kind": "container-absent",
         "name": "lab-web"

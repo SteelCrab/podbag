@@ -48,6 +48,7 @@ impl Appearance {
             "move" | "choose" => "pull.keyMove",
             "yes" => "terminal.yes",
             "no" => "terminal.no",
+            "training" => "training.title",
             _ => return name.to_owned(),
         };
         if self.lang() == "en" {
@@ -114,4 +115,46 @@ pub fn startup(screen: &mut Screen, exe: &Path) -> Result<()> {
         preferences::startup(exe, Some(!enabled))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `{name}`, `{n}`, … in a text, sorted (as desktop/src/strings.rs).
+    fn placeholders(s: &str) -> Vec<&str> {
+        let mut out: Vec<&str> = s
+            .split('{')
+            .skip(1)
+            .filter_map(|rest| rest.split_once('}').map(|(name, _)| name))
+            .collect();
+        out.sort_unstable();
+        out
+    }
+
+    #[test]
+    fn every_label_has_seven_languages() {
+        let table: serde_json::Map<String, Value> =
+            serde_json::from_str(include_str!("labels.json")).unwrap();
+        for (key, words) in &table {
+            let words = words.as_array().unwrap();
+            assert_eq!(words.len(), 7, "{key}");
+            let en = placeholders(words[0].as_str().unwrap());
+            for w in words {
+                let w = w.as_str().unwrap();
+                assert!(!w.trim().is_empty(), "{key}");
+                assert_eq!(placeholders(w), en, "{key}: {w}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_training_hint_names_the_panel() {
+        let ko = Appearance {
+            language: "ko".into(),
+            ..Default::default()
+        };
+        assert_eq!(ko.hint("training"), ko.text("training.title"));
+        assert_ne!(ko.text("training.title"), "training.title");
+    }
 }

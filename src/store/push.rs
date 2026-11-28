@@ -90,7 +90,8 @@ impl Store {
         // Zstd layers need OCI's format.
         let oci = record.oci || layers.iter().any(|l| l.media_type.ends_with("+zstd"));
         let diff_ids: Vec<String> = layers.iter().map(|l| l.diff_id.clone()).collect();
-        let config = manifest::config_json(&record.config, &diff_ids, record.created);
+        let config =
+            manifest::config_json(&record.config, &diff_ids, record.created, &record.history);
         let config_digest = format!("sha256:{}", sha256_hex(&config));
         if !registry.blob_exists(r, &config_digest)? {
             registry.upload_blob(r, &config_digest, Blob::Bytes(&config))?;

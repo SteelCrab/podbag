@@ -186,6 +186,46 @@ pub fn compression(podbag: &Path, mode: Option<&str>) -> Result<Value, String> {
     serde_json::from_str(out.trim()).map_err(|e| format!("podbag system compression --json: {e}"))
 }
 
+/// An offline change to the local macOS VM data disk.
+#[derive(serde::Deserialize)]
+#[serde(tag = "action", rename_all = "lowercase")]
+pub enum VmStorageEdit {
+    Grow { gib: u64 },
+    Move { path: String },
+}
+
+/// Read or edit the storage of the macOS VM without connecting to the guest.
+pub fn vm_storage(podbag: &Path, edit: Option<VmStorageEdit>) -> Result<Value, String> {
+    let base = ["vm", "storage"];
+    let output = match edit {
+        None => run_ok(podbag, &base)?,
+        Some(VmStorageEdit::Grow { gib }) => {
+            run_ok(podbag, &[base[0], base[1], "grow", &gib.to_string()])?
+        }
+        Some(VmStorageEdit::Move { path }) => run_ok(podbag, &[base[0], base[1], "move", &path])?,
+    };
+    serde_json::from_str(output.trim()).map_err(|e| format!("podbag vm storage: {e}"))
+}
+
+/// Read or save network preferences using the companion CLI on the engine's host.
+pub fn network_settings(
+    podbag: &Path,
+    values: Option<crate::network::NetworkPreferences>,
+    expected_revision: Option<&str>,
+) -> Result<Value, String> {
+    let mut args = vec!["system", "network-settings"];
+    let json;
+    if let Some(values) = values {
+        json = serde_json::to_string(&values).map_err(|e| e.to_string())?;
+        let revision = expected_revision
+            .filter(|revision| !revision.is_empty())
+            .ok_or("Reload Network settings before saving changes")?;
+        args.extend(["--set", &json, "--expect-revision", revision]);
+    }
+    let out = run_ok(podbag, &args)?;
+    serde_json::from_str(out.trim()).map_err(|e| format!("podbag system network-settings: {e}"))
+}
+
 /// Query the local engine's settings through the companion CLI, including the macOS VM.
 pub fn registry_proxy(
     podbag: &Path,
@@ -211,6 +251,38 @@ pub fn engine_version(podbag: &Path) -> Option<String> {
     let out = run_ok(podbag, &["--version"]).ok()?;
     let v = out.split_whitespace().nth(1)?.trim_start_matches('v');
     crate::upgrade::Version::parse(v).map(|v| v.to_string())
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case", tag = "action")]
+pub enum EngineConfigRequest {
+    Read,
+    Check { text: String },
+    Save { edit: crate::config::Edit },
+}
+
+pub fn engine_config(
+    podbag: &Path,
+    request: EngineConfigRequest,
+) -> Result<Option<crate::config::Document>, String> {
+    let (action, input) = match request {
+        EngineConfigRequest::Read => ("show", None),
+        EngineConfigRequest::Check { text } => ("check", Some(text.into_bytes())),
+        EngineConfigRequest::Save { edit } => (
+            "apply",
+            Some(serde_json::to_vec(&edit).map_err(|e| e.to_string())?),
+        ),
+    };
+    let call = run_with_input(podbag, &["system", "config", action], input.as_deref())?;
+    if call.code != 0 {
+        return Err(call.error());
+    }
+    if action == "check" {
+        return Ok(None);
+    }
+    serde_json::from_str(&call.stdout)
+        .map(Some)
+        .map_err(|e| format!("podbag system config {action}: {e}"))
 }
 
 /// `latest` is newer than `current`.

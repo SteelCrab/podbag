@@ -261,14 +261,35 @@ impl Course {
 
     /// Opens the page: httpd starts a moment after its container, so the learner can
     /// press Open again.
+    fn try_open_page(&self, session: Option<&str>, container: &str) -> Result<(), String> {
+        self.retry(|| self.try_view("open-web", session, container).map(drop))
+    }
+
     fn open_page(&self, session: Option<&str>, container: &str) {
+        self.try_open_page(session, container).unwrap();
+    }
+
+    /// The TUI's check of ACTION on NAME. open-web is retried like the page in Desktop.
+    fn ui_action(&self, action: &str, name: &str) -> Result<(), String> {
+        let check = || podbag::volume_lesson::course::ui_action(&self.root, action, name).map(drop);
+        if action == podbag::volume_lesson::course::OPEN_WEB {
+            self.retry(check)
+        } else {
+            check().map_err(|why| why.to_string())
+        }
+    }
+
+    /// Does CHECK until it succeeds, for 10 seconds.
+    fn retry(&self, check: impl Fn() -> std::io::Result<()>) -> Result<(), String> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while self.try_view("open-web", session, container).is_err() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the page never matched"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(200));
+        loop {
+            match check() {
+                Ok(()) => return Ok(()),
+                Err(why) if std::time::Instant::now() >= deadline => {
+                    return Err(format!("the page never matched: {why}"));
+                }
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(200)),
+            }
         }
     }
 
@@ -383,18 +404,127 @@ fn the_network_training_reaches_api_by_name() {
     course.finish();
 }
 
+/// The tracks a module runs in, from PODBAG_TRAINING_TRACKS (comma-separated; none set:
+/// all three). An unknown track is an error.
+fn tracks(list: Option<&str>) -> Result<Vec<&'static str>, String> {
+    const ALL: [&str; 3] = ["cli", "desktop", "tui"];
+    let Some(list) = list else {
+        return Ok(ALL.to_vec());
+    };
+    list.split(',')
+        .map(|name| {
+            let name = name.trim();
+            ALL.into_iter().find(|track| *track == name).ok_or_else(|| {
+                format!("unknown track {name:?} in PODBAG_TRAINING_TRACKS (cli, desktop, tui)")
+            })
+        })
+        .collect()
+}
+
+/// One module in one track, from its first step to `exit`, the way a learner does it. A
+/// step with no UI form (or any step in the cli track) runs its command in the practice
+/// shell. The desktop track does a step's UI action through the action Desktop sends
+/// (`view`), the tui track through the engine call and check the TUI makes.
+#[cfg(target_os = "linux")]
+fn run_track(course: &podbag::volume_lesson::course::Course, track: &str) -> Result<(), String> {
+    use podbag::volume_lesson::containers;
+    use podbag::volume_lesson::course::{Attempt, Check, StepDef, perform};
+
+    /// The command of STEP, in the practice shell. It must succeed and advance the step.
+    fn command(
+        session: &Course,
+        snapshot: &serde_json::Value,
+        step: &StepDef,
+    ) -> Result<(), String> {
+        let stage = snapshot["stage"].as_str().unwrap();
+        let output = if step.is_docker() {
+            session.docker(snapshot)
+        } else {
+            session.cli(snapshot)
+        };
+        let after = session.view("status", None, "");
+        if !output.status.success() || after["stage"] == stage {
+            return Err(format!(
+                "step {stage}: {}\n--- stdout\n{}--- stderr\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        Ok(())
+    }
+
+    let session = Course::start_course(course);
+    let result = (|| -> Result<(), String> {
+        for _ in 0..=course.steps.len() {
+            let snapshot = session.view("status", None, "");
+            let stage = snapshot["stage"].as_str().unwrap().to_owned();
+            let step = course.steps.iter().find(|s| s.key == stage).unwrap();
+            let id = snapshot["session"].as_str().unwrap().to_owned();
+            let id = Some(id.as_str());
+            let container = |name: &str| id_of(&snapshot, name);
+            let at = |why: &dyn std::fmt::Display| format!("step {stage}: {why}");
+            let port = Attempt::read(&session.root).map_err(|why| at(&why))?.port;
+            let ui = step.ui_form(port);
+            if matches!(step.check, Check::Finish) {
+                return Ok(());
+            }
+            match (track, ui) {
+                ("tui", Some((action, name))) => {
+                    let client = containers::client(&session.root);
+                    perform(&client, action, &name).map_err(|why| at(&why))?;
+                    session
+                        .ui_action(action, &name)
+                        .map_err(|why| at(&format!("{action} {name}: {why}")))?;
+                }
+                ("desktop", Some((action, name))) if step.ui.is_some() => {
+                    session
+                        .try_view(action, id, &name)
+                        .map_err(|why| at(&format!("{action} {name}: {why}")))?;
+                }
+                ("cli" | "desktop", _) => match &step.check {
+                    Check::DesktopPorts { name } => {
+                        session.view("ports", id, &container(name));
+                    }
+                    Check::DesktopBrowser { name, .. } => session
+                        .try_open_page(id, &container(name))
+                        .map_err(|why| at(&why))?,
+                    Check::DesktopStop { name } => {
+                        session.view("stop", id, &container(name));
+                    }
+                    Check::DesktopInspectExited { name } => {
+                        session.view("inspect-failed", id, &container(name));
+                    }
+                    Check::DesktopInspectVolume { name } => {
+                        session.view("inspect", id, name);
+                    }
+                    Check::DesktopDeleteVolume { name } => {
+                        session.view("remove", id, name);
+                    }
+                    _ => command(&session, &snapshot, step)?,
+                },
+                _ => command(&session, &snapshot, step)?,
+            }
+        }
+        Err("the steps never reached finish".into())
+    })();
+    session.finish();
+    result.map_err(|why| format!("{track} {}: {why}", course.id))
+}
+
 /// Every module file in PODBAG_TRAINING_MODULES (default: tests/fixtures/training) from its
-/// first step to `exit`, the way a learner does it: each CLI step's command in the practice
-/// shell, each Desktop step through the action Desktop sends. PODBAG_TRAINING_ONLY limits it
-/// to some ids (comma-separated). Pulls images: runs only with PODBAG_TEST_NETWORK=1.
+/// first step to `exit`, in each track of PODBAG_TRAINING_TRACKS (cli, desktop, tui; default
+/// all three), one practice session per module and track. PODBAG_TRAINING_ONLY limits it to
+/// some ids (comma-separated). Pulls images: runs only with PODBAG_TEST_NETWORK=1.
 #[cfg(target_os = "linux")]
 #[test]
 fn every_training_module_runs_start_to_finish() {
-    use podbag::volume_lesson::{course::Check, parse_package};
+    use podbag::volume_lesson::parse_package;
     if std::env::var("PODBAG_TEST_NETWORK").as_deref() != Ok("1") {
         eprintln!("PODBAG_TEST_NETWORK is not 1: skipped");
         return;
     }
+    let tracks = tracks(std::env::var("PODBAG_TRAINING_TRACKS").ok().as_deref()).unwrap();
     let folder = std::env::var_os("PODBAG_TRAINING_MODULES")
         .map(PathBuf::from)
         .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/training"));
@@ -421,58 +551,22 @@ fn every_training_module_runs_start_to_finish() {
             continue;
         }
         ran += 1;
-        let session = Course::start_course(&course);
-        let result = (|| -> Result<(), String> {
-            for _ in 0..=course.steps.len() {
-                let snapshot = session.view("status", None, "");
-                let stage = snapshot["stage"].as_str().unwrap().to_owned();
-                let step = course.steps.iter().find(|s| s.key == stage).unwrap();
-                let id = snapshot["session"].as_str().unwrap().to_owned();
-                let id = Some(id.as_str());
-                let container = |name: &str| id_of(&snapshot, name);
-                match &step.check {
-                    Check::Finish => return Ok(()),
-                    Check::DesktopPorts { name } => {
-                        session.view("ports", id, &container(name));
-                    }
-                    Check::DesktopBrowser { name, .. } => session.open_page(id, &container(name)),
-                    Check::DesktopStop { name } => {
-                        session.view("stop", id, &container(name));
-                    }
-                    Check::DesktopInspectExited { name } => {
-                        session.view("inspect-failed", id, &container(name));
-                    }
-                    Check::DesktopInspectVolume { name } => {
-                        session.view("inspect", id, name);
-                    }
-                    Check::DesktopDeleteVolume { name } => {
-                        session.view("remove", id, name);
-                    }
-                    _ => {
-                        let output = if step.is_docker() {
-                            session.docker(&snapshot)
-                        } else {
-                            session.cli(&snapshot)
-                        };
-                        let after = session.view("status", None, "");
-                        if !output.status.success() || after["stage"] == stage.as_str() {
-                            return Err(format!(
-                                "step {stage}: {}\n--- stdout\n{}--- stderr\n{}",
-                                output.status,
-                                String::from_utf8_lossy(&output.stdout),
-                                String::from_utf8_lossy(&output.stderr)
-                            ));
-                        }
-                    }
-                }
+        for track in &tracks {
+            if let Err(why) = run_track(&course, track) {
+                failures.push(why);
             }
-            Err("the steps never reached finish".into())
-        })();
-        if let Err(why) = result {
-            failures.push(format!("{}: {why}", course.id));
         }
-        session.finish();
     }
     assert!(ran > 0, "no course modules in {}", folder.display());
     assert!(failures.is_empty(), "\n{}", failures.join("\n\n"));
+}
+
+#[test]
+fn the_track_list_picks_cli_desktop_and_tui() {
+    assert_eq!(tracks(None).unwrap(), ["cli", "desktop", "tui"]);
+    assert_eq!(tracks(Some("tui")).unwrap(), ["tui"]);
+    assert_eq!(tracks(Some("tui, cli")).unwrap(), ["tui", "cli"]);
+    assert!(tracks(Some("gui")).unwrap_err().contains("gui"));
+    assert!(tracks(Some("cli,")).is_err());
+    assert!(tracks(Some("")).is_err());
 }

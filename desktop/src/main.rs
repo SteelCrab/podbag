@@ -7,9 +7,11 @@
 use podbag::dashboard::app_update::{self, Installer};
 use podbag::dashboard::cli;
 use podbag::dashboard::cluster_migration;
+mod builders;
 mod commands;
 mod dockercmd;
 mod extensions;
+mod image_analysis;
 mod images;
 mod kubernetes;
 use podbag::dashboard::lab;
@@ -64,6 +66,8 @@ struct TrayItems {
 
 struct AppState {
     migration: Mutex<()>,
+    builder_work: Mutex<()>,
+    image_analysis: Mutex<()>,
     models: model_runner::ModelRunner,
     /// The engine this window uses, and its client.
     session: Mutex<Arc<Session>>,
@@ -119,6 +123,8 @@ impl AppState {
         });
         AppState {
             migration: Mutex::new(()),
+            builder_work: Mutex::new(()),
+            image_analysis: Mutex::new(()),
             models: model_runner::ModelRunner::default(),
             session: Mutex::new(Arc::new(Session::new(1, target))),
             podbag,
@@ -259,6 +265,36 @@ fn connection(state: State<'_, AppState>) -> (u64, String, bool) {
 }
 
 #[tauri::command(async)]
+fn builder_list(state: State<'_, AppState>, token: u64) -> Result<builders::Catalog, String> {
+    let session = state.session(token)?;
+    builders::list(&session.target)
+}
+
+#[tauri::command(async)]
+fn builder_inspect(
+    state: State<'_, AppState>,
+    token: u64,
+    scope: String,
+    name: String,
+) -> Result<builders::Inspection, String> {
+    let session = state.session(token)?;
+    builders::inspect(&session.target, &scope, &name)
+}
+
+#[tauri::command(async)]
+fn builder_action(
+    state: State<'_, AppState>,
+    token: u64,
+    scope: String,
+    name: String,
+    action: builders::Action,
+) -> Result<(), String> {
+    let _work = lock(&state.builder_work);
+    let session = state.session(token)?;
+    builders::act(&session.target, &scope, &name, action)
+}
+
+#[tauri::command(async)]
 fn contexts() -> Vec<String> {
     podbag::client::choice::docker_contexts()
 }
@@ -334,6 +370,22 @@ fn inspect(
 ) -> Result<Value, String> {
     let session = state.session(token)?;
     commands::inspect(&session.client, &kind, &id)
+}
+
+#[tauri::command(async)]
+fn analyze_image(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    token: u64,
+    id: String,
+) -> Result<image_analysis::Report, image_analysis::Failure> {
+    use image_analysis::Failure;
+    let session = state.session(token).map_err(|_| Failure::EngineChanged)?;
+    let _running = state.image_analysis.try_lock().map_err(|_| Failure::Busy)?;
+    let cache = app.path().app_cache_dir().map_err(|_| Failure::Workspace)?;
+    let result = image_analysis::analyze(&session.client, &id, &cache.join("trivy"));
+    state.session(token).map_err(|_| Failure::EngineChanged)?;
+    result
 }
 
 #[tauri::command(async)]
@@ -695,6 +747,20 @@ fn vm_resources(
     serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())
 }
 
+/// Read or edit the local macOS VM disk through the companion CLI.
+#[tauri::command(async)]
+fn vm_storage(
+    state: State<'_, AppState>,
+    token: u64,
+    edit: Option<cli::VmStorageEdit>,
+) -> Result<Value, String> {
+    let session = state.session(token)?;
+    if !cfg!(target_os = "macos") || session.target.choice != Choice::Podbag {
+        return Err("VM storage requires the local macOS engine".into());
+    }
+    cli::vm_storage(&state.podbag, edit)
+}
+
 /// `podbag system compression [idle|off] --json`: `{"mode", "after"}`. With no mode it
 /// only reads. On macOS the command runs in the VM (it starts the VM when none runs).
 #[tauri::command(async)]
@@ -707,6 +773,19 @@ fn compression(
         return Err("Image compression requires the podbag engine".into());
     }
     cli::compression(&state.podbag, mode.as_deref())
+}
+
+#[tauri::command(async)]
+fn network_settings(
+    state: State<'_, AppState>,
+    token: u64,
+    values: Option<podbag::network::NetworkPreferences>,
+    expected_revision: Option<String>,
+) -> Result<Value, String> {
+    if state.session(token)?.target.choice != Choice::Podbag {
+        return Err("Network settings require the local podbag engine".into());
+    }
+    cli::network_settings(&state.podbag, values, expected_revision.as_deref())
 }
 
 #[tauri::command(async)]
@@ -833,7 +912,10 @@ fn set_engine(
     let file = podbag::client::ui_dir()
         .ok_or("cannot find the folder for ui.json")?
         .join("ui.json");
-    state.switch(token, &engine, &file)?;
+    {
+        let _work = lock(&state.builder_work);
+        state.switch(token, &engine, &file)?;
+    }
     update_tray(&app);
     Ok(())
 }
@@ -969,6 +1051,18 @@ fn open_training_guide(id: &str, lang: &str) -> Result<(), String> {
     open::that_detached(url).map_err(|e| e.to_string())
 }
 
+#[tauri::command(async)]
+fn engine_config(
+    state: State<'_, AppState>,
+    token: u64,
+    request: cli::EngineConfigRequest,
+) -> Result<Option<podbag::config::Document>, String> {
+    if state.session(token)?.target.choice != Choice::Podbag {
+        return Err("Engine configuration requires the local Podbag engine".into());
+    }
+    cli::engine_config(&state.podbag, request)
+}
+
 #[tauri::command]
 fn get_settings(state: State<'_, AppState>) -> Settings {
     lock(&state.settings).clone()
@@ -981,17 +1075,25 @@ fn set_settings(
     settings: Settings,
 ) -> Result<(), String> {
     let settings = settings.checked();
-    if settings.theme != lock(&state.settings).theme {
+    let mut active = lock(&state.settings);
+    let theme_changed = settings.theme != active.theme;
+    if theme_changed {
         window
             .set_theme(settings.theme.native())
             .map_err(|e| e.to_string())?;
     }
-    *lock(&state.settings) = settings.clone();
-    update_tray(window.app_handle());
-    match lock(&state.settings_file).as_ref() {
-        Some(file) => settings.save(file),
-        None => Ok(()),
+    if let Some(file) = lock(&state.settings_file).as_ref()
+        && let Err(error) = settings.save(file)
+    {
+        if theme_changed {
+            let _ = window.set_theme(active.theme.native());
+        }
+        return Err(error);
     }
+    *active = settings;
+    drop(active);
+    update_tray(window.app_handle());
+    Ok(())
 }
 
 // The tray.
@@ -1457,9 +1559,13 @@ fn main() {
             kubernetes::kube_openshift,
             kubernetes::kube_open_route,
             connection,
+            builder_list,
+            builder_inspect,
+            builder_action,
             contexts,
             create_volume,
             inspect,
+            analyze_image,
             act,
             remove,
             prune,
@@ -1490,13 +1596,16 @@ fn main() {
             docker_images,
             import_images,
             vm_resources,
+            vm_storage,
             compression,
             registry_proxy,
+            network_settings,
             take_star_prompt,
             terminal_command,
             install_terminal_command,
             open_repository,
             open_training_guide,
+            engine_config,
             get_settings,
             set_settings,
         ])

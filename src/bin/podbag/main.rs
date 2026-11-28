@@ -163,6 +163,30 @@ fn wsl_argv(cli: &Cli, mut argv: Vec<String>) -> Result<Vec<String>, String> {
             rewrite(&mut argv, None, "--rootfs", rootfs, wsl_path)?;
         }
         Cmd::Load { input: Some(_), .. } => rewrite(&mut argv, Some('i'), "--input", 1, wsl_path)?,
+        Cmd::Image {
+            cmd:
+                args::ImageCmd::Import {
+                    change,
+                    message,
+                    source,
+                    image,
+                },
+        } => {
+            argv = vec!["image".to_string(), "import".to_string()];
+            for instruction in change {
+                argv.push(format!("--change={instruction}"));
+            }
+            if let Some(message) = message {
+                argv.push(format!("--message={message}"));
+            }
+            argv.push("--".to_string());
+            argv.push(if source == "-" || podbag::image::archive_url(source) {
+                source.clone()
+            } else {
+                wsl_path(source)?
+            });
+            argv.extend(image.iter().cloned());
+        }
         Cmd::Save {
             output: Some(_), ..
         }
@@ -346,6 +370,14 @@ fn mac_command(cli: &Cli, argv: Vec<String>) -> podbag::macos::cli::Forward {
             Some(p) => f.paths.push(p.display().to_string()),
             None => f.stdin = true,
         },
+        Cmd::Image {
+            cmd: args::ImageCmd::Import { source, .. },
+        } => {
+            f.stdin = source == "-";
+            if !f.stdin && !podbag::image::archive_url(source) {
+                f.paths.push(source.clone());
+            }
+        }
         Cmd::Save {
             output: Some(p), ..
         }
@@ -368,6 +400,12 @@ fn mac_command(cli: &Cli, argv: Vec<String>) -> podbag::macos::cli::Forward {
                 socket: Some(p), ..
             },
         } => f.paths.push(p.display().to_string()),
+        Cmd::System {
+            cmd:
+                args::SystemCmd::Config {
+                    cmd: args::ConfigCmd::Check | args::ConfigCmd::Apply,
+                },
+        } => f.stdin = true,
         _ => {}
     }
     f
@@ -466,14 +504,40 @@ fn dispatch(cmd: Cmd) -> i32 {
         Cmd::Check { apparmor_profile } => check::run(apparmor_profile),
         Cmd::Rmi { images } => image::rmi(&images),
         Cmd::Load { input, quiet } => image::load(input.as_deref(), quiet),
+        Cmd::Image {
+            cmd:
+                args::ImageCmd::Import {
+                    change,
+                    message,
+                    source,
+                    image,
+                },
+        } => image::import(
+            &source,
+            podbag::image::ImportOptions {
+                name: image,
+                message: message.unwrap_or_default(),
+                changes: change,
+            },
+        ),
+        Cmd::Image {
+            cmd: args::ImageCmd::History { image, no_trunc },
+        } => image::history(&image, no_trunc),
         Cmd::Save { output, images } => image::save(output.as_deref(), &images),
         Cmd::Build(a) => build::build(a),
         Cmd::Commit {
             change,
             container: c,
             image,
-            ..
-        } => build::commit(&c, image, change),
+            author,
+            message,
+        } => build::commit(
+            &c,
+            image,
+            change,
+            author.as_deref().unwrap_or_default(),
+            message.as_deref().unwrap_or_default(),
+        ),
         Cmd::Export {
             output,
             container: c,
@@ -700,6 +764,20 @@ mod tests {
         let argv: Vec<String> = args.iter().map(|a| a.to_string()).collect();
         let cli = parse(&argv).expect("valid arguments");
         wsl_argv(&cli, argv)
+    }
+
+    #[test]
+    fn lab_start_takes_tui() {
+        use crate::args::LabCmd;
+        let argv = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let tui = |a: &[&str]| match parse(&argv(a)).unwrap().cmd {
+            Cmd::Lab {
+                cmd: LabCmd::Start { tui, .. },
+            } => tui,
+            _ => panic!("not lab start"),
+        };
+        assert!(tui(&["lab", "start", "web-basics", "--tui"]));
+        assert!(!tui(&["lab", "start", "web-basics"]));
     }
 
     #[test]
