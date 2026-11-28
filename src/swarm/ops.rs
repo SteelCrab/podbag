@@ -602,15 +602,35 @@ impl Engine {
         }
         let tasks_change = new["TaskTemplate"] != old["TaskTemplate"]
             || new["EndpointSpec"] != old["EndpointSpec"];
-        if tasks_change && old_placement != remote::Placement::Local {
-            return Err(Error::new(
-                ErrorKind::Unsupported,
-                "cannot update worker tasks",
-                "rolling updates of worker services are not supported",
-                "scale the service or create a new one with the required task settings",
-            ));
-        }
-        let mut warnings = self.prepare_service(&cluster, &mut candidate, false)?;
+        let pinned = match old_placement {
+            remote::Placement::Pinned(id) => {
+                if update::active(&service).is_some() || (update::paused(&service) && !tasks_change)
+                {
+                    return Err(Error::new(
+                        ErrorKind::Conflict,
+                        "cannot change a worker service during a rollout",
+                        "an update is pending or paused",
+                        "wait for the rollout, or roll back or retry a paused update",
+                    ));
+                }
+                tasks_change
+                    .then(|| remote::enrolled(self, id))
+                    .transpose()?
+            }
+            remote::Placement::Workers if tasks_change => {
+                return Err(Error::new(
+                    ErrorKind::Unsupported,
+                    "cannot update worker tasks",
+                    "rolling updates across multiple workers are not supported",
+                    "create a new distributed service or pin the service to one worker",
+                ));
+            }
+            _ => None,
+        };
+        let mut warnings = match &pinned {
+            Some(worker) => worker.check_pinned(&cluster, &candidate, rollback)?,
+            None => self.prepare_service(&cluster, &mut candidate, false)?,
+        };
         let mut service = candidate;
         service.previous_spec = Some(old);
         service.version = cluster.next_index();
@@ -620,7 +640,9 @@ impl Engine {
         }
         self.store.write_cluster(&cluster)?;
         self.store.write_service(&service)?;
-        if tasks_change {
+        if let Some(worker) = pinned {
+            update::spawn_pinned(self.clone(), worker, &service, rollback);
+        } else if tasks_change {
             update::spawn(self.clone(), service.id.clone(), rollback);
         } else {
             self.apply_service(&cluster, &mut service, &mut warnings)?;
@@ -635,7 +657,12 @@ impl Engine {
         let mut service = self.find_service(key)?;
         let workers = match remote::placement(&service, &cluster)? {
             remote::Placement::Local => None,
-            remote::Placement::Pinned(id) => Some(vec![remote::enrolled(self, id)?]),
+            remote::Placement::Pinned(id) => {
+                let worker = remote::enrolled(self, id)?;
+                service.removing = true;
+                self.store.write_service(&service)?;
+                Some(vec![worker])
+            }
             remote::Placement::Workers => {
                 service.removing = true;
                 self.store.write_service(&service)?;
@@ -643,6 +670,7 @@ impl Engine {
             }
         };
         if let Some(workers) = workers {
+            update::forget(&service.id);
             let mut result = Ok(());
             for worker in workers {
                 if let Err(error) = worker.remove_service(&cluster, &service) {
@@ -682,6 +710,21 @@ impl Engine {
                 })
             })
             .collect()
+    }
+
+    /// Resume a pending worker revision when an inspecting client reconnects.
+    pub(super) fn resume_pinned_update(&self, id: &str) -> Result<()> {
+        let _lock = self.store.lock()?;
+        let cluster = self.require()?;
+        let service = self.find_service(id)?;
+        if !service.removing
+            && let Some(rollback) = update::active(&service)
+            && let remote::Placement::Pinned(id) = remote::placement(&service, &cluster)?
+        {
+            let worker = remote::enrolled(self, id)?;
+            update::spawn_pinned(self.clone(), worker, &service, rollback);
+        }
+        Ok(())
     }
 
     /// Bring every service's tasks to what it wants (not those in a rolling update).
@@ -772,7 +815,15 @@ impl Engine {
         match remote::placement(service, cluster)? {
             remote::Placement::Local => self.reconcile_local(cluster, service, all),
             remote::Placement::Pinned(id) => {
-                remote::enrolled(self, id)?.reconcile(cluster, service)
+                let worker = remote::enrolled(self, id)?;
+                if let Some(rollback) = update::active(service) {
+                    update::spawn_pinned(self.clone(), worker, service, rollback);
+                    Ok(())
+                } else if update::paused(service) {
+                    Ok(())
+                } else {
+                    worker.reconcile(cluster, service)
+                }
             }
             remote::Placement::Workers => {
                 let mut result = Ok(());

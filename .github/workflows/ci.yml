@@ -133,6 +133,24 @@ jobs:
         if: matrix.mode == 'root'
         timeout-minutes: 15
         run: dev/root-lib-tests.sh
+      - name: Pinned Swarm rollout over OpenSSH
+        if: matrix.mode == 'root' && matrix.arch == 'x86_64'
+        timeout-minutes: 8
+        run: |
+          if [ ! -x /usr/sbin/sshd ]; then
+            sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends openssh-server
+          fi
+          if [ ! -d /run/sshd ]; then
+            sudo install -d -m 0755 /run/sshd
+          fi
+          test_binary=$(cargo test --locked --test swarm_workers --no-run --message-format=json |
+            jq -ers 'first(.[] | select(.target.name == "swarm_workers" and .executable != null) | .executable)')
+          sudo unshare --net -- sh -ec '
+            ip link set lo up
+            exec setpriv --reuid="$1" --regid="$2" --init-groups env PATH="$3" HOME="$4" \
+              PODBAG_TEST_ROOTFS="$5" PODBAG_TEST_ROOT=1 PODBAG_TEST_SWARM_SSH=1 \
+              "$6" --test-threads=1 --nocapture
+          ' sh "$(id -u)" "$(id -g)" "$PATH" "$HOME" "$PODBAG_TEST_ROOTFS" "$test_binary"
 
   # Real images and programs, compared with Docker: Python's .pyc files, cron, a damaged
   # file in the store, compressed images (containers, save, build, verify, decompress).

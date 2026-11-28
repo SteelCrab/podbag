@@ -389,6 +389,9 @@ fn services(req: &Request, ctx: &Ctx) -> Reply {
 fn service(ctx: &Ctx, id: &str) -> Reply {
     let (engine, _) = found!(engine(ctx));
     let s = ok_or_reply!(engine.find_service(id));
+    if super::update::active(&s).is_some() && !super::update::running(&s.id) {
+        let _ = engine.resume_pinned_update(&s.id);
+    }
     Reply::Json(
         200,
         shapes::service_json(&s, &super::net::vips_json(&s), None),

@@ -5,6 +5,7 @@ use super::ops::{Engine, TaskEntry, host};
 use super::plan;
 use super::shapes::Host;
 use super::store::{self, Cluster, NodeRecord, ServiceRecord, Tokens};
+use super::update;
 use crate::client::{Client, Endpoint};
 use crate::{Error, ErrorKind, Result};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -189,6 +190,36 @@ impl Worker {
         )
     }
 
+    pub fn check_pinned(
+        &self,
+        cluster: &Cluster,
+        service: &ServiceRecord,
+        rollback: bool,
+    ) -> Result<Vec<String>> {
+        self.call(
+            cluster,
+            Action::CheckPinnedRoll {
+                service: Box::new(service.clone()),
+                rollback,
+            },
+        )
+    }
+
+    pub(super) fn roll(
+        &self,
+        cluster: &Cluster,
+        service: &ServiceRecord,
+        rollback: bool,
+    ) -> Result<Value> {
+        self.call(
+            cluster,
+            Action::RollPinned {
+                service: Box::new(service.clone()),
+                rollback,
+            },
+        )
+    }
+
     pub fn reconcile(&self, cluster: &Cluster, service: &ServiceRecord) -> Result<()> {
         let record = Box::new(service.clone());
         let action = if service.worker_slots.is_empty() {
@@ -214,6 +245,17 @@ impl Worker {
     }
 }
 
+fn constraint(service: &ServiceRecord) -> Option<(&str, &str)> {
+    let [rule] = service.spec["TaskTemplate"]["Placement"]["Constraints"]
+        .as_array()?
+        .as_slice()
+    else {
+        return None;
+    };
+    let (key, value) = rule.as_str()?.split_once("==")?;
+    Some((key.trim(), value.trim()))
+}
+
 /// Unconstrained services keep using the manager. Only an explicit worker role
 /// constraint opts in to scheduling replicas across enrolled workers.
 #[derive(Debug, PartialEq, Eq)]
@@ -231,10 +273,8 @@ pub fn placement<'a>(service: &'a ServiceRecord, cluster: &Cluster) -> Result<Pl
     if list.is_empty() {
         return Ok(Placement::Local);
     }
-    if let [rule] = list
-        && let Some((key, value)) = rule.as_str().and_then(|rule| rule.split_once("=="))
-    {
-        match (key.trim(), value.trim()) {
+    if let Some(rule) = constraint(service) {
+        match rule {
             ("node.id", id) if plan::is_object_id(id) => {
                 return Ok(if id == cluster.node_id {
                     Placement::Local
@@ -383,6 +423,43 @@ pub fn check_remote(service: &ServiceRecord) -> Result<()> {
     Ok(())
 }
 
+fn validate_pinned_roll(
+    cluster: &Cluster,
+    previous: &ServiceRecord,
+    service: &ServiceRecord,
+    rollback: bool,
+) -> Result<()> {
+    let policy = plan::UpdatePolicy::from_spec(
+        &service.spec[if rollback {
+            "RollbackConfig"
+        } else {
+            "UpdateConfig"
+        }],
+    );
+    let mode = plan::mode_of(&service.spec);
+    if constraint(previous) != Some(("node.id", cluster.node_id.as_str()))
+        || constraint(service) != constraint(previous)
+        || !service.worker_slots.is_empty()
+        || !matches!(mode, Some(plan::Mode::Replicated(_)))
+        || mode != plan::mode_of(&previous.spec)
+    {
+        return Err(invalid(
+            "unsupported worker rollout placement",
+            "the service must keep the same worker and replica count",
+        ));
+    }
+    if policy.order != plan::Order::StopFirst
+        || policy.failure_action != plan::FailureAction::Pause
+        || policy.max_failure_ratio != 0.0
+    {
+        return Err(invalid(
+            "unsupported worker rollout policy",
+            "use stop-first order and pause at the first task failure",
+        ));
+    }
+    check_remote(service)
+}
+
 pub fn add(
     engine: &Engine,
     name: &str,
@@ -480,14 +557,32 @@ enum Action {
     Join,
     Probe,
     ProbeAssignments,
-    Check { service: Box<ServiceRecord> },
-    Reconcile { service: Box<ServiceRecord> },
+    Check {
+        service: Box<ServiceRecord>,
+    },
+    CheckPinnedRoll {
+        service: Box<ServiceRecord>,
+        rollback: bool,
+    },
+    RollPinned {
+        service: Box<ServiceRecord>,
+        rollback: bool,
+    },
+    Reconcile {
+        service: Box<ServiceRecord>,
+    },
     // A separate action lets an older worker reject this request instead of
     // ignoring the slot map and starting all replicas.
-    ReconcileAssigned { service: Box<ServiceRecord> },
+    ReconcileAssigned {
+        service: Box<ServiceRecord>,
+    },
     Tasks,
-    Remove { id: String },
-    RemoveAssigned { id: String },
+    Remove {
+        id: String,
+    },
+    RemoveAssigned {
+        id: String,
+    },
     Leave,
 }
 
@@ -535,7 +630,7 @@ pub fn handle(engine: &Engine, request: Wire) -> Result<Value> {
     };
     let cluster = enrolled.cluster();
     let assigned_request = matches!(action, Action::ReconcileAssigned { .. });
-    if let Action::RemoveAssigned { id } = &action {
+    if let Action::Remove { id } | Action::RemoveAssigned { id } = &action {
         engine.store.retire_service(id)?;
     }
     match action {
@@ -546,6 +641,20 @@ pub fn handle(engine: &Engine, request: Wire) -> Result<Value> {
             check_remote(&service)?;
             let warnings = engine.check_local(&cluster, &service)?;
             Ok(json!(warnings))
+        }
+        Action::CheckPinnedRoll { service, rollback } => {
+            let previous = engine.find_service(&service.id)?;
+            if previous.version != service.version
+                || engine.store.service_retired(&service.id)?
+                || update::active(&previous).is_some()
+            {
+                return Err(held("this worker service is being removed or updated"));
+            }
+            validate_pinned_roll(&cluster, &previous, &service, rollback)?;
+            Ok(json!(engine.check_local(&cluster, &service)?))
+        }
+        Action::RollPinned { service, rollback } => {
+            roll_pinned(engine, cluster, *service, rollback)
         }
         Action::Reconcile { mut service } | Action::ReconcileAssigned { mut service } => {
             let valid_placement = match placement(&service, &cluster)? {
@@ -564,7 +673,7 @@ pub fn handle(engine: &Engine, request: Wire) -> Result<Value> {
                     "the service has no matching replica assignments for this worker",
                 ));
             }
-            if assigned_request && engine.store.service_retired(&service.id)? {
+            if engine.store.service_retired(&service.id)? {
                 return Err(held("the worker already removed this service"));
             }
             check_remote(&service)?;
@@ -581,6 +690,12 @@ pub fn handle(engine: &Engine, request: Wire) -> Result<Value> {
                 {
                     return Err(held("the worker already has a newer service specification"));
                 }
+                if update::active(previous).is_some() || update::paused(previous) {
+                    if previous.version == service.version {
+                        return Ok(Value::Null);
+                    }
+                    return Err(held("finish or roll back the previous worker update first"));
+                }
                 service.vips = previous.vips.clone();
             }
             if previous.as_ref() != Some(&service) {
@@ -593,6 +708,7 @@ pub fn handle(engine: &Engine, request: Wire) -> Result<Value> {
         }
         Action::Tasks => Ok(json!(engine.local_task_list(&cluster)?)),
         Action::Remove { id } | Action::RemoveAssigned { id } => {
+            update::forget(&id);
             let Some(service) = engine.store.services()?.into_iter().find(|s| s.id == id) else {
                 return Ok(Value::Null);
             };
@@ -627,6 +743,54 @@ pub fn handle(engine: &Engine, request: Wire) -> Result<Value> {
             Ok(Value::Null)
         }
     }
+}
+
+/// The worker owns batch execution. Repeating the same revision reads or resumes its
+/// existing rollout, while old revisions and deleted services can never restart tasks.
+fn roll_pinned(
+    engine: &Engine,
+    cluster: Cluster,
+    mut service: ServiceRecord,
+    rollback: bool,
+) -> Result<Value> {
+    if engine.store.service_retired(&service.id)? {
+        return Err(held("the worker already removed this service"));
+    }
+    let previous = engine.find_service(&service.id)?;
+    validate_pinned_roll(&cluster, &previous, &service, rollback)?;
+    if previous.version > service.version
+        || (previous.version == service.version
+            && (previous.spec != service.spec || previous.previous_spec != service.previous_spec))
+    {
+        return Err(held("the worker already has a newer service specification"));
+    }
+    if previous.version == service.version {
+        service = previous;
+    } else {
+        if update::active(&previous).is_some()
+            || service.previous_spec.as_ref() != Some(&previous.spec)
+            || update::active(&service) != Some(rollback)
+        {
+            return Err(held(
+                "the worker's current service revision does not match the rollout",
+            ));
+        }
+        service.vips = previous.vips;
+        engine.store.write_service(&service)?;
+    }
+    let status = service
+        .update_status
+        .clone()
+        .ok_or_else(|| held("this service revision has no rolling update"))?;
+    if let Some(active) = update::active(&service) {
+        if active != rollback {
+            return Err(held(
+                "this rollout revision has a different update direction",
+            ));
+        }
+        update::spawn_worker(engine.clone(), cluster, &service, rollback);
+    }
+    Ok(status)
 }
 
 #[cfg(test)]
@@ -751,6 +915,50 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.kind, ErrorKind::Conflict);
         assert!(error.why.contains("already removed"));
+        assert!(engine.store.services().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_pinned_worker_keeps_newer_state_and_never_restarts_a_removed_rollout() {
+        let temp = tempfile::tempdir().unwrap();
+        let engine = Engine::new(&crate::paths::Dirs {
+            data: temp.path().join("data"),
+            runtime: temp.path().join("run"),
+            config: temp.path().join("config"),
+        });
+        let member = membership();
+        engine.store.write_membership(&member).unwrap();
+        let cluster = member.cluster();
+        let service = ServiceRecord {
+            id: "s".repeat(plan::ID_LEN),
+            version: 2,
+            created: String::new(),
+            updated: String::new(),
+            spec: json!({
+                "Name": "pinned",
+                "TaskTemplate": {"Placement": {"Constraints": [format!("node.id=={}", member.node_id)]}},
+                "Mode": {"Replicated": {"Replicas": 1}},
+            }),
+            previous_spec: None,
+            update_status: Some(update::status(false, update::Stage::Completed, "")),
+            ports: Vec::new(),
+            vips: BTreeMap::new(),
+            worker_slots: BTreeMap::new(),
+            removing: false,
+        };
+        engine.store.write_service(&service).unwrap();
+        let get = |service| roll_pinned(&engine, cluster.clone(), service, false);
+        assert_eq!(get(service.clone()).unwrap()["State"], "completed");
+        let mut stale = service.clone();
+        stale.version -= 1;
+        assert_eq!(get(stale).unwrap_err().kind, ErrorKind::Conflict);
+        let mut conflict = service.clone();
+        conflict.spec["TaskTemplate"]["ForceUpdate"] = json!(1);
+        assert_eq!(get(conflict).unwrap_err().kind, ErrorKind::Conflict);
+        assert_eq!(engine.find_service(&service.id).unwrap(), service);
+        engine.store.retire_service(&service.id).unwrap();
+        engine.store.remove_service(&service.id).unwrap();
+        assert_eq!(get(service).unwrap_err().kind, ErrorKind::Conflict);
         assert!(engine.store.services().unwrap().is_empty());
     }
 

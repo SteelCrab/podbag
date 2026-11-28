@@ -1775,6 +1775,13 @@ docker node rm "$worker_id"
   worker pulls the image and runs the tasks. If a task is removed, reading or changing
   the service asks the worker to reconcile it again. Unreachable workers stay assigned
   to their services.
+- A replicated service pinned to one worker supports rolling updates and manual
+  rollback. Keep the worker constraint and replica count the same during the rollout.
+  The worker stops each old task before starting its replacement. It honors
+  parallelism, delay and monitor settings, and pauses at the first failed task.
+- The worker retains the current rollout revision if SSH disconnects. Inspect the
+  service after reconnecting to resume coordination with the same worker. A paused
+  rollout can be retried or rolled back.
 - Remove the services assigned to a worker before removing it. Remove the workers before
   leaving the manager's swarm.
 
@@ -1800,6 +1807,9 @@ docker service scale jobs=6
   assigned workers must be reachable to complete service removal. If a worker is
   disconnected, retry the removal when it reconnects. The manager stops starting tasks
   for the service while removal is pending.
+- Rolling updates for services spread across workers remain unsupported. Worker
+  rollouts also require stop-first order and pause on failure. Automatic rollback
+  remains available for local services.
 
 ### How it runs without a daemon
 
