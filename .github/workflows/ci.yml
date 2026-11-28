@@ -117,6 +117,10 @@ jobs:
       - name: Store tests
         timeout-minutes: 30
         run: cargo test --test store --test image_mount
+      - name: Exercise NVIDIA device selection and driver hooks
+        if: matrix.mode == 'root'
+        timeout-minutes: 5
+        run: dev/ci/nvidia-gpu.sh target/debug/podbag "$PODBAG_TEST_ROOTFS"
       - name: Library tests as root
         if: matrix.mode == 'root'
         timeout-minutes: 15
