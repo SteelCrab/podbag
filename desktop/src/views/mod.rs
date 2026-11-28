@@ -10,6 +10,7 @@ pub mod extensions;
 pub mod image_analysis;
 pub mod import;
 pub mod kubernetes;
+pub mod local_kubernetes;
 pub mod login;
 pub mod migrate;
 pub mod models;

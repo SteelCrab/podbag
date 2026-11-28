@@ -43,6 +43,10 @@ pub struct Container {
     security: crate::spec::Security,
     #[serde(default)]
     mounts: Vec<crate::volume::MountRequest>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    devices: Vec<crate::spec::Device>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    gpu_requests: Vec<crate::gpu::Request>,
     #[serde(default)]
     network: Option<crate::network::NetworkMode>,
     #[serde(default)]
@@ -151,6 +155,8 @@ impl Container {
             pids_limit: None,
             security: crate::spec::Security::default(),
             mounts: Vec::new(),
+            devices: Vec::new(),
+            gpu_requests: Vec::new(),
             network: None,
             publish: Vec::new(),
             labels: std::collections::BTreeMap::new(),
@@ -330,6 +336,24 @@ impl Container {
     /// Add a mount request as `-v` or `--tmpfs` produced it.
     pub fn mount(mut self, request: crate::MountRequest) -> Container {
         self.mounts.push(request);
+        self
+    }
+
+    /// Make a host device available inside a root-mode container.
+    pub fn device(mut self, device: crate::spec::Device) -> Container {
+        self.devices.push(device);
+        self
+    }
+
+    /// Select Linux DRM render devices by count or ID.
+    pub fn gpus(mut self, request: crate::gpu::Request) -> Container {
+        self.gpu_requests.push(request);
+        self
+    }
+
+    /// Make the root filesystem read-only, while keeping each mount's own access mode.
+    pub fn read_only(mut self, yes: bool) -> Container {
+        self.security.read_only_rootfs = yes;
         self
     }
 
@@ -1014,7 +1038,29 @@ mod linux_launch {
         let limits = c.limits()?;
         // SAFETY: geteuid has no preconditions.
         let rootless = unsafe { libc::geteuid() } != 0;
+        let uses_devices = !c.devices.is_empty() || !c.gpu_requests.is_empty();
+        if rootless && uses_devices {
+            return Err(Error::new(
+                ErrorKind::Unsupported,
+                "cannot map a host device",
+                "device mappings require root on the Linux host",
+                "run podbag as root, or omit the device mapping",
+            ));
+        }
+        crate::gpu::setup(&c.gpu_requests)?;
+        crate::cgroup::device_rules(&c.devices)?;
         let (placement, warning) = crate::cgroup::choose_placement(rootless, &limits)?;
+        if uses_devices
+            && !c.security.privileged
+            && matches!(placement, crate::cgroup::Placement::None)
+        {
+            return Err(Error::new(
+                ErrorKind::Unsupported,
+                "cannot map a host device",
+                "device access permissions require cgroup v2",
+                "enable a writable cgroup v2 hierarchy",
+            ));
+        }
         if let Some(w) = warning {
             eprintln!("podbag: warning: {w}");
         }
@@ -1151,7 +1197,8 @@ mod linux_launch {
                     extra_networks: c.extra_networks.clone(),
                     fixed_addresses: c.fixed_addresses.clone(),
                     namespaces: Default::default(),
-                    devices: Vec::new(),
+                    devices: c.devices,
+                    gpu_requests: c.gpu_requests,
                     log_config: c.log_config.clone(),
                     cri_log: None,
                     stdin_fifo: None,
@@ -1197,7 +1244,8 @@ mod linux_launch {
                         extra_networks: c.extra_networks.clone(),
                         fixed_addresses: c.fixed_addresses.clone(),
                         namespaces: Default::default(),
-                        devices: Vec::new(),
+                        devices: c.devices,
+                        gpu_requests: c.gpu_requests,
                         log_config: c.log_config.clone(),
                         cri_log: None,
                         stdin_fifo: None,

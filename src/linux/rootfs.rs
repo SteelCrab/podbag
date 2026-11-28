@@ -16,6 +16,7 @@ pub(super) fn enter_rootfs(
     rootless: bool,
     security: &crate::spec::Security,
     nfs: &super::mounts::NfsMounts,
+    gpu: Option<&crate::gpu::nvidia::Setup>,
 ) -> Result<()> {
     let privileged = security.privileged;
     // Mounts of the host reach the container only through a mount that asks for them:
@@ -39,6 +40,14 @@ pub(super) fn enter_rootfs(
     )?;
     let (masked, read_only) = kernel_paths(security);
     let rootfs = mount_root(spec, rootless)?;
+    if gpu.is_some() && rootfs == Path::new("/") {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "cannot configure NVIDIA GPUs",
+            "the host root filesystem cannot be used with NVIDIA driver mounts",
+            "select a container image or an unpacked container root filesystem",
+        ));
+    }
 
     let at = |p: &str| rootfs.join(p);
 
@@ -190,6 +199,10 @@ pub(super) fn enter_rootfs(
             "make /sys read-only",
             set_read_only_recursive(&sys),
         )?;
+    }
+    if let Some(gpu) = gpu {
+        super::mounts::mount_all(rootless, rootfs, &gpu.mounts, nfs)?;
+        gpu.run_hooks(rootfs)?;
     }
     // The container's own mounts come last, as with runc, so they may cover /dev/shm.
     super::mounts::mount_all(rootless, rootfs, mounts, nfs)?;

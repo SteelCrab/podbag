@@ -101,6 +101,8 @@ struct Io {
     outputs: Vec<Output>,
     /// The terminal's controlling side, kept open for the container's life.
     master: Option<OwnedFd>,
+    /// The slave can be closed by PID 1 and reopened by name without ending output.
+    terminal_slave: Option<OwnedFd>,
     /// With `-t`: where the terminal arrives, whether the caller is attached, and `-i`.
     terminal_from: Option<(OwnedFd, bool, bool)>,
 }
@@ -128,6 +130,7 @@ impl Io {
                 child_ends: vec![child_end],
                 outputs: Vec::new(),
                 master: None,
+                terminal_slave: None,
                 terminal_from: Some((shim_end, attached, spec.interactive)),
             });
         }
@@ -175,6 +178,7 @@ impl Io {
                 },
             ],
             master: None,
+            terminal_slave: None,
             terminal_from: None,
         })
     }
@@ -191,6 +195,13 @@ impl Io {
                 "report this bug",
             )
         })?;
+        self.terminal_slave = Some(linux::pty::recv_fd(socket.as_raw_fd()).map_err(|e| {
+            Error::io(
+                "cannot receive the container terminal's slave",
+                &e,
+                "report this bug",
+            )
+        })?);
         // A terminal of the caller's own is the better guess (the container's init set
         // the size the settings ask for).
         if attached {
@@ -360,6 +371,48 @@ pub(super) fn run(
         started: false,
         handed_over: false,
     };
+    let mut gpus = match crate::gpu::setup(&spec.gpu_requests) {
+        Ok(gpus) => gpus,
+        Err(e) => return failed(status, e),
+    };
+    let mut devices = spec.devices.clone();
+    for gpu in gpus.drm {
+        if !devices
+            .iter()
+            .any(|device| device.container == gpu.container)
+        {
+            devices.push(gpu);
+        }
+    }
+    let ordinary_device_mounts = device_mounts(&devices);
+    if let Some(nvidia) = &mut gpus.nvidia {
+        nvidia.mounts.extend(device_mounts(&nvidia.devices));
+        for mount in spec.mounts.iter().chain(&ordinary_device_mounts) {
+            let target = std::path::Path::new(&mount.target);
+            if let Some(gpu) = nvidia.mounts.iter().find(|gpu| {
+                let path = std::path::Path::new(&gpu.target);
+                path.starts_with(target) || target.starts_with(path)
+            }) {
+                return failed(
+                    status,
+                    Error::new(
+                        ErrorKind::InvalidInput,
+                        "cannot mount NVIDIA GPU files",
+                        format!(
+                            "the mount at {} conflicts with {}",
+                            mount.target, gpu.target
+                        ),
+                        "remove the conflicting mount or omit the NVIDIA GPU request",
+                    ),
+                );
+            }
+        }
+        devices.extend(nvidia.devices.iter().cloned());
+    }
+    let device_rules = match crate::cgroup::device_rules(&devices) {
+        Ok(rules) => rules,
+        Err(e) => return failed(status, e),
+    };
     let id = spec.id.as_str();
     let mut io = match Io::prepare(spec) {
         Ok(io) => io,
@@ -412,17 +465,12 @@ pub(super) fn run(
     // As root, the container may open only the usual devices (a privileged one: all).
     // Rootless, the kernel refuses device nodes to the user namespace already.
     if let (false, false, Some(g)) = (rootless, spec.security.privileged, &group) {
-        let rules = crate::cgroup::device_rules(&spec.devices);
-        let restricted = rules.and_then(|rules| {
-            crate::cgroup::restrict_devices(g.fd(), &rules).map_err(|e| {
-                Error::io(
-                    "cannot limit the devices the container may open",
-                    &e,
-                    "check that the kernel has cgroup BPF (CONFIG_CGROUP_BPF)",
-                )
-            })
-        });
-        if let Err(e) = restricted {
+        if let Err(e) = crate::cgroup::restrict_devices(g.fd(), &device_rules) {
+            let e = Error::io(
+                "cannot limit the devices the container may open",
+                &e,
+                "check that the kernel has cgroup BPF (CONFIG_CGROUP_BPF)",
+            );
             remove_control(dirs, id);
             if let Some(g) = group {
                 g.remove();
@@ -481,11 +529,14 @@ pub(super) fn run(
         }
     };
     let mut run_spec = spec.clone();
+    if let Some(nvidia) = &gpus.nvidia {
+        run_spec.env.extend(nvidia.env.iter().cloned());
+    }
     let mut dns_upstream = match super::net::files(spec, dirs, rootless, own, config.embedded_dns) {
         Ok((mut files, upstream)) => {
             files.append(&mut run_spec.mounts);
             run_spec.mounts = files;
-            run_spec.mounts.extend(device_mounts(&spec.devices));
+            run_spec.mounts.extend(ordinary_device_mounts);
             upstream
         }
         Err(e) => {
@@ -526,7 +577,7 @@ pub(super) fn run(
         }
         Ok(())
     };
-    let child = match linux::spawn(
+    let child = match linux::spawn_with_gpu(
         &run_spec,
         io.stdio,
         group.as_ref().map(|g| g.fd()),
@@ -537,6 +588,7 @@ pub(super) fn run(
             linux::Parent::Caller
         },
         &mut attach,
+        gpus.nvidia.as_ref(),
     ) {
         Ok(c) => c,
         Err(e) => {
@@ -616,7 +668,10 @@ pub(super) fn run(
         // The listener, the lock and the output go to the keeper; this process ends.
         let mut fds = vec![listener.as_raw_fd(), lock.as_raw_fd()];
         match &io.master {
-            Some(master) => fds.push(master.as_raw_fd()),
+            Some(master) => {
+                fds.push(master.as_raw_fd());
+                fds.extend(io.terminal_slave.iter().map(|fd| fd.as_raw_fd()));
+            }
             None => fds.extend(io.outputs.iter().map(|o| o.fd.as_raw_fd())),
         }
         return match crate::keeper::handover::send(dirs, id, child.pid, spec.tty, &fds) {
@@ -834,6 +889,9 @@ fn serve(
     let mut probe_fd: Option<OwnedFd> = None;
 
     loop {
+        if exit.is_some() {
+            drop(io.terminal_slave.take());
+        }
         if exit.is_some()
             && (io.outputs.is_empty() || drain_until.is_some_and(|d| Instant::now() >= d))
         {

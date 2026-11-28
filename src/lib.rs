@@ -35,6 +35,8 @@ pub mod elf;
 #[doc(hidden)]
 pub mod envcheck;
 mod error;
+#[doc(hidden)]
+pub mod gpu;
 pub mod health;
 #[cfg(unix)]
 #[doc(hidden)]

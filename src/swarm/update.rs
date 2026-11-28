@@ -8,7 +8,8 @@
 
 use super::ops::Engine;
 use super::plan::{self, FailureAction, Order, Slot, UpdatePolicy};
-use super::store::{ServiceRecord, now};
+use super::remote::Worker;
+use super::store::{Cluster, ServiceRecord, now};
 use super::tasks::{self, Task};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -73,13 +74,12 @@ pub fn status(rollback: bool, stage: Stage, message: &str) -> Value {
     v
 }
 
-/// Start the update thread of service `id`, unless one runs: that one takes the new
-/// spec at its next step. Called with the store's lock held.
-pub fn spawn(engine: Engine, id: String, rollback: bool) {
+/// Start the update thread of service `id`, unless one runs. The caller holds the store lock.
+fn launch(id: &str, run: impl FnOnce() + Send + 'static) {
     if !RUNNING
         .lock()
         .unwrap_or_else(|p| p.into_inner())
-        .insert(id.clone())
+        .insert(id.to_owned())
     {
         return;
     }
@@ -87,18 +87,118 @@ pub fn spawn(engine: Engine, id: String, rollback: bool) {
     let started = std::thread::Builder::new()
         .name("swarm-update".into())
         .spawn(move || {
-            run(&engine, &id, rollback);
+            run();
             THREADS.fetch_sub(1, Ordering::SeqCst);
         });
     if started.is_err() {
         THREADS.fetch_sub(1, Ordering::SeqCst);
-        forget_after_spawn_failure();
+        forget(id);
     }
 }
 
-fn forget_after_spawn_failure() {
-    // The service stays as it is; its next update or reconcile goes on.
-    RUNNING.lock().unwrap_or_else(|p| p.into_inner()).clear();
+pub fn spawn(engine: Engine, id: String, rollback: bool) {
+    let name = id.clone();
+    launch(&name, move || run(&engine, &id, rollback, None));
+}
+
+struct WorkerRevision {
+    cluster: Cluster,
+    version: u64,
+}
+
+/// The worker already checked that this record belongs to its cluster and node.
+pub(super) fn spawn_worker(
+    engine: Engine,
+    cluster: Cluster,
+    service: &ServiceRecord,
+    rollback: bool,
+) {
+    let worker = WorkerRevision {
+        cluster,
+        version: service.version,
+    };
+    let id = service.id.clone();
+    launch(&service.id, move || {
+        run(&engine, &id, rollback, Some(&worker))
+    });
+}
+
+pub(super) fn active(service: &ServiceRecord) -> Option<bool> {
+    match service.update_status.as_ref()?.get("State")?.as_str()? {
+        "updating" => Some(false),
+        "rollback_started" => Some(true),
+        _ => None,
+    }
+}
+
+pub(super) fn paused(service: &ServiceRecord) -> bool {
+    matches!(
+        service
+            .update_status
+            .as_ref()
+            .and_then(|status| status["State"].as_str()),
+        Some("paused" | "rollback_paused")
+    )
+}
+
+pub(super) fn spawn_pinned(
+    engine: Engine,
+    worker: Worker,
+    service: &ServiceRecord,
+    rollback: bool,
+) {
+    let id = service.id.clone();
+    let version = service.version;
+    launch(&service.id, move || {
+        poll_worker(&engine, &worker, &id, version, rollback)
+    });
+}
+
+fn pinned_service(engine: &Engine, id: &str, version: u64) -> Option<ServiceRecord> {
+    engine.find_service(id).ok().filter(|service| {
+        service.version == version && !service.removing && active(service).is_some()
+    })
+}
+
+/// Keep the manager's revision pending after a lost connection. Reconciliation can
+/// retry it without starting another revision or moving the service to another node.
+fn poll_worker(engine: &Engine, worker: &Worker, id: &str, version: u64, rollback: bool) {
+    loop {
+        let (Ok(Some(cluster)), Some(service)) =
+            (engine.cluster(), pinned_service(engine, id, version))
+        else {
+            forget(id);
+            return;
+        };
+        let result = worker.roll(&cluster, &service, rollback);
+        {
+            let Ok(_lock) = engine.store.lock() else {
+                forget(id);
+                return;
+            };
+            let Some(mut service) = pinned_service(engine, id, version) else {
+                forget(id);
+                return;
+            };
+            let connected = result.is_ok();
+            match result {
+                Ok(status) => service.update_status = Some(status),
+                Err(error) => {
+                    if let Some(status) = &mut service.update_status {
+                        status["Message"] = Value::from(error.to_string());
+                    }
+                }
+            }
+            if engine.store.write_service(&service).is_err()
+                || !connected
+                || active(&service).is_none()
+            {
+                forget(id);
+                return;
+            }
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
 }
 
 /// What became of a new task while it is watched.
@@ -114,9 +214,14 @@ fn failed(engine: &Engine, all: &[Task], task_id: &str) -> bool {
 }
 
 /// Write the service's update status (the service may be gone).
-fn set_status(engine: &Engine, id: &str, value: Value) -> Option<ServiceRecord> {
+fn set_status(
+    engine: &Engine,
+    id: &str,
+    value: Value,
+    worker: Option<&WorkerRevision>,
+) -> Option<ServiceRecord> {
     let _lock = engine.store.lock().ok()?;
-    let mut service = engine.find_service(id).ok()?;
+    let (_, mut service) = state(engine, id, worker)?;
     let started = service
         .update_status
         .as_ref()
@@ -157,16 +262,56 @@ fn outdated<'a>(
     out
 }
 
+fn state(
+    engine: &Engine,
+    id: &str,
+    worker: Option<&WorkerRevision>,
+) -> Option<(Cluster, ServiceRecord)> {
+    let service = engine.find_service(id).ok()?;
+    let cluster = match worker {
+        Some(worker) => {
+            if service.version != worker.version || active(&service).is_none() {
+                return None;
+            }
+            worker.cluster.clone()
+        }
+        None => engine.store.cluster().ok()??,
+    };
+    Some((cluster, service))
+}
+
+/// Pinned rollouts replace missing slots in the same batches as outdated ones.
+fn pinned_pending<'a>(
+    engine: &Engine,
+    service: &ServiceRecord,
+    all: &'a [Task],
+) -> BTreeMap<Slot, Vec<&'a Task>> {
+    let Some(plan::Mode::Replicated(replicas)) = plan::mode_of(&service.spec) else {
+        return BTreeMap::new();
+    };
+    let mut by_slot: BTreeMap<Slot, Vec<&Task>> = (1..=replicas)
+        .map(|number| (Slot::Replica(number), Vec::new()))
+        .collect();
+    for task in all.iter().filter(|task| task.service_id == service.id) {
+        if let Some(tasks) = task.slot.and_then(|slot| by_slot.get_mut(&slot)) {
+            tasks.push(task);
+        }
+    }
+    by_slot.retain(|_, tasks| {
+        !matches!(tasks.as_slice(), [task] if task.running() && engine.up_to_date(service, &task.task_id))
+    });
+    by_slot
+}
+
 /// One step, under the lock: replace the next batch of outdated tasks.
-fn step(engine: &Engine, id: &str, rollback: bool) -> Step {
+fn step(engine: &Engine, id: &str, rollback: bool, worker: Option<&WorkerRevision>) -> Step {
     let Ok(_lock) = engine.store.lock() else {
         return Step::Gone;
     };
     if !running(id) {
         return Step::Gone;
     }
-    let (Ok(Some(cluster)), Ok(mut service)) = (engine.store.cluster(), engine.find_service(id))
-    else {
+    let Some((mut cluster, mut service)) = state(engine, id, worker) else {
         return Step::Gone;
     };
     let key = if rollback {
@@ -176,10 +321,14 @@ fn step(engine: &Engine, id: &str, rollback: bool) -> Step {
     };
     let policy = UpdatePolicy::from_spec(&service.spec[key]);
     // Missing and extra tasks first, as reconcile does.
-    let all = tasks::list(&engine.dirs, &cluster.node_id);
-    let _ = engine.reconcile_service(&cluster, &mut service, &all);
-    let all = tasks::list(&engine.dirs, &cluster.node_id);
-    let outdated = outdated(engine, &service, &all);
+    let mut all = tasks::list(&engine.dirs, &cluster.node_id);
+    let outdated = if worker.is_some() {
+        pinned_pending(engine, &service, &all)
+    } else {
+        let _ = engine.reconcile_service(&mut cluster, &mut service, &all);
+        all = tasks::list(&engine.dirs, &cluster.node_id);
+        outdated(engine, &service, &all)
+    };
     let slots: Vec<Slot> = outdated.keys().copied().collect();
     let Some(batch) = plan::batches(&slots, policy.parallelism).into_iter().next() else {
         return Step::Nothing(policy);
@@ -201,6 +350,18 @@ fn step(engine: &Engine, id: &str, rollback: bool) -> Step {
                 scope.spawn(move || {
                     if policy.order == Order::StopFirst {
                         tasks::remove(&engine.store, &old, grace);
+                        if worker.is_some()
+                            && tasks::list(&engine.dirs, &cluster.node_id)
+                                .iter()
+                                .any(|task| old.iter().any(|prior| prior.task_id == task.task_id))
+                        {
+                            return Err(crate::Error::new(
+                                crate::ErrorKind::Conflict,
+                                "cannot replace the task",
+                                "the previous task is still present on its worker",
+                                "check the worker and retry the rollout",
+                            ));
+                        }
                     }
                     let new = engine.start_task(cluster, service, *slot, networks, image);
                     if policy.order == Order::StartFirst {
@@ -227,18 +388,22 @@ fn step(engine: &Engine, id: &str, rollback: bool) -> Step {
 
 /// End the update when nothing is outdated, under the lock (an update stored meanwhile
 /// is then seen here, or finds this thread gone and starts its own).
-fn finish(engine: &Engine, id: &str, rollback: bool) -> bool {
+fn finish(engine: &Engine, id: &str, rollback: bool, worker: Option<&WorkerRevision>) -> bool {
     let Ok(_lock) = engine.store.lock() else {
         forget(id);
         return true;
     };
-    let (Ok(Some(cluster)), Ok(mut service)) = (engine.store.cluster(), engine.find_service(id))
-    else {
+    let Some((cluster, mut service)) = state(engine, id, worker) else {
         forget(id);
         return true;
     };
     let all = tasks::list(&engine.dirs, &cluster.node_id);
-    if !outdated(engine, &service, &all).is_empty() {
+    let pending = if worker.is_some() {
+        pinned_pending(engine, &service, &all)
+    } else {
+        outdated(engine, &service, &all)
+    };
+    if !pending.is_empty() {
         return false;
     }
     let started = service
@@ -306,23 +471,37 @@ fn watch(
     batch: &[String],
     policy: UpdatePolicy,
     more: bool,
+    worker: Option<&WorkerRevision>,
 ) -> Watched {
     let since = Instant::now();
     loop {
         if !running(id) {
             return Watched::Stopped;
         }
-        let node = engine
-            .store
-            .cluster()
-            .ok()
-            .flatten()
-            .map(|c| c.node_id)
-            .unwrap_or_default();
+        let node = match worker {
+            Some(worker) => worker.cluster.node_id.clone(),
+            None => engine
+                .store
+                .cluster()
+                .ok()
+                .flatten()
+                .map(|c| c.node_id)
+                .unwrap_or_default(),
+        };
         let all = tasks::list(&engine.dirs, &node);
         for (task, made, window) in &w.tasks {
             if made.elapsed() < *window && failed(engine, &all, task) {
                 w.failures.insert(task.clone());
+            }
+        }
+        if worker.is_some() && since.elapsed() >= policy.monitor {
+            for task in batch {
+                if !all
+                    .iter()
+                    .any(|item| item.task_id == *task && item.running())
+                {
+                    w.failures.insert(task.clone());
+                }
             }
         }
         if policy.failure_action != FailureAction::Continue
@@ -330,7 +509,9 @@ fn watch(
         {
             return Watched::Failed(w.failures.iter().next().cloned().unwrap_or_default());
         }
-        let done = if more {
+        let done = if more && worker.is_some() {
+            since.elapsed() >= policy.monitor && since.elapsed() >= policy.delay
+        } else if more {
             let up = batch
                 .iter()
                 .all(|t| all.iter().any(|x| &x.task_id == t && x.running()));
@@ -347,11 +528,11 @@ fn watch(
     }
 }
 
-fn run(engine: &Engine, id: &str, rollback: bool) {
+fn run(engine: &Engine, id: &str, rollback: bool, worker: Option<&WorkerRevision>) {
     let mut rollback = rollback;
     let mut w = Watch::default();
     loop {
-        let (made, policy, more) = match step(engine, id, rollback) {
+        let (made, policy, more) = match step(engine, id, rollback, worker) {
             Step::Gone => {
                 forget(id);
                 return;
@@ -372,11 +553,12 @@ fn run(engine: &Engine, id: &str, rollback: bool) {
                 batch.push(task);
             }
         }
-        match watch(engine, id, &mut w, &batch, policy, more) {
+        match watch(engine, id, &mut w, &batch, policy, more, worker) {
             Watched::Stopped => return,
             Watched::Done => {}
             Watched::Failed(task) => {
-                if policy.failure_action == FailureAction::Rollback
+                if worker.is_none()
+                    && policy.failure_action == FailureAction::Rollback
                     && !rollback
                     && begin_rollback(engine, id, &task)
                 {
@@ -384,17 +566,17 @@ fn run(engine: &Engine, id: &str, rollback: bool) {
                     w = Watch::default();
                     continue;
                 }
-                pause(engine, id, rollback, &task);
+                pause(engine, id, rollback, &task, worker);
                 return;
             }
         }
-        if !more && finish(engine, id, rollback) {
+        if !more && finish(engine, id, rollback, worker) {
             return;
         }
     }
 }
 
-fn pause(engine: &Engine, id: &str, rollback: bool, task: &str) {
+fn pause(engine: &Engine, id: &str, rollback: bool, task: &str, worker: Option<&WorkerRevision>) {
     let what = if rollback { "rollback" } else { "update" };
     let _ = set_status(
         engine,
@@ -404,6 +586,7 @@ fn pause(engine: &Engine, id: &str, rollback: bool, task: &str) {
             Stage::Paused,
             &format!("{what} paused due to failure or early termination of task {task}"),
         ),
+        worker,
     );
     forget(id);
 }

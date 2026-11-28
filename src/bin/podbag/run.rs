@@ -94,8 +94,15 @@ fn build(args: RunArgs) -> podbag::Result<Container> {
         .interactive(args.interactive)
         .remove_on_exit(args.rm)
         .privileged(args.privileged)
+        .read_only(args.read_only)
         .tty(args.tty)
         .logging(logging);
+    for device in args.devices {
+        c = c.device(device);
+    }
+    for request in args.gpus {
+        c = c.gpus(request);
+    }
     if let Some(policy) = &args.restart {
         c = c.restart(policy.parse()?);
     }

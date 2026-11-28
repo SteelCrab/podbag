@@ -257,11 +257,20 @@ pub fn list_ids(dirs: &Dirs) -> Result<Vec<String>> {
             ));
         }
     };
-    let mut ids: Vec<String> = entries
-        .flatten()
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| id::is_valid(n))
-        .collect();
+    let mut ids = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|e| {
+            Error::io(
+                "cannot list containers",
+                &e,
+                format!("check that {} is readable", dir.display()),
+            )
+        })?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if id::is_valid(&name) {
+            ids.push(name);
+        }
+    }
     ids.sort();
     Ok(ids)
 }
