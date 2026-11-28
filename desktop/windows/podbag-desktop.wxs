@@ -1,0 +1,147 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The Podbag Desktop installer. desktop/windows/build-msi.ps1 builds it with WiX:
+    -d Version=X.Y.Z -d App=podbag-desktop.exe -d Engine=podbag.exe -d Icon=icon.ico
+
+  It upgrades the installs of 0.3.2 and earlier in place. Those MSIs came from the Tauri
+  bundler, so the values below keep its choices: the UpgradeCode (a v5 UUID of
+  "Podbag Desktop.exe.app.x64" in the DNS namespace, on every CPU), the product name and
+  manufacturer, the per-machine scope, the folder in Program Files, the file names, the
+  component GUIDs, the shortcuts and the registry values under HKCU.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Package Name="Podbag Desktop"
+           Manufacturer="SteelCrab"
+           Version="$(var.Version)"
+           UpgradeCode="43294F5F-5CA2-5C9B-AD98-D421422A0586"
+           Language="1033"
+           Codepage="1252"
+           Scope="perMachine">
+    <SummaryInformation Description="Podbag Desktop" Manufacturer="SteelCrab" Keywords="Installer" />
+
+    <!-- The released 0.3.2 MSIs use language 0 in their summary information. -->
+    <MajorUpgrade Schedule="afterInstallInitialize"
+                  IgnoreLanguage="yes"
+                  AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- Reinstall every file, registry value and shortcut. -->
+    <Property Id="REINSTALLMODE" Value="amus" />
+    <Icon Id="ProductIcon" SourceFile="$(var.Icon)" />
+    <Property Id="ARPPRODUCTICON" Value="ProductIcon" />
+    <Property Id="ARPNOREPAIR" Value="yes" Secure="yes" />
+    <SetProperty Id="ARPNOMODIFY" Value="1" After="InstallValidate" Sequence="execute" />
+    <SetProperty Id="ARPINSTALLLOCATION" Value="[INSTALLDIR]" After="CostFinalize" Sequence="execute" />
+
+    <!-- The folder of the earlier install. The last match wins: the MSI's InstallDir. -->
+    <Property Id="INSTALLDIR">
+      <RegistrySearch Id="PrevInstallDirNoName" Root="HKCU" Key="Software\SteelCrab\Podbag Desktop" Type="raw" />
+      <RegistrySearch Id="PrevInstallDirWithName" Root="HKCU" Key="Software\SteelCrab\Podbag Desktop" Name="InstallDir" Type="raw" />
+    </Property>
+
+    <!-- An upgrade keeps the desktop shortcut only if the user kept it. -->
+    <Property Id="DESKTOPSHORTCUTEXISTS" Secure="yes">
+      <DirectorySearch Id="DesktopShortcutSearch" Path="[DesktopFolder]" Depth="0">
+        <FileSearch Id="DesktopShortcutFile" Name="Podbag Desktop.lnk" />
+      </DirectorySearch>
+    </Property>
+
+    <!-- AUTOLAUNCHAPP=1 starts the app after a passive install. -->
+    <Property Id="AUTOLAUNCHAPP" Secure="yes" />
+    <Property Id="LAUNCHAPPARGS" Secure="yes" />
+    <CustomAction Id="LaunchApplication" Impersonate="yes" FileRef="Path" ExeCommand="[LAUNCHAPPARGS]" Return="asyncNoWait" />
+    <InstallExecuteSequence>
+      <!-- Shortcuts stay during an upgrade, so pinned ones keep working. -->
+      <RemoveShortcuts Condition="Installed AND NOT UPGRADINGPRODUCTCODE" />
+      <Custom Action="LaunchApplication" After="InstallFinalize" Condition="AUTOLAUNCHAPP AND NOT Installed" />
+    </InstallExecuteSequence>
+
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch Podbag Desktop" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLDIR" />
+    <UI>
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchApplication"
+               Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed" />
+      <!-- No license dialog. -->
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="InstallDirDlg" Order="2" />
+      <Publish Dialog="InstallDirDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" Order="2" />
+    </UI>
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLDIR" Name="Podbag Desktop" />
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="Podbag Desktop" />
+    </StandardDirectory>
+
+    <DirectoryRef Id="INSTALLDIR">
+      <Component Id="Path" Guid="99D0054F-5D45-5BEB-8C5F-8CA3ED54325A">
+        <File Id="Path" Name="podbag-desktop.exe" Source="$(var.App)" KeyPath="yes" Checksum="yes" />
+      </Component>
+      <!-- The engine, which the app finds next to itself. -->
+      <Component Id="Engine">
+        <File Id="Engine" Name="podbag.exe" Source="$(var.Engine)" KeyPath="yes" />
+      </Component>
+      <Component Id="RegistryEntries" Guid="2D636159-3621-55E7-BC5C-491E7A7865EB">
+        <RegistryValue Root="HKCU" Key="Software\SteelCrab\Podbag Desktop" Name="InstallDir" Type="string" Value="[INSTALLDIR]" KeyPath="yes" />
+      </Component>
+      <Component Id="CMP_UninstallShortcut" Guid="80CDDABC-12CA-5B5F-B27F-46682CEE6F79">
+        <Shortcut Id="UninstallShortcut"
+                  Name="Uninstall Podbag Desktop"
+                  Description="Uninstalls Podbag Desktop"
+                  Target="[System64Folder]msiexec.exe"
+                  Arguments="/x [ProductCode]" />
+        <RemoveFolder Id="RemoveInstallDir" On="uninstall" />
+        <RegistryValue Root="HKCU" Key="Software\SteelCrab\Podbag Desktop" Name="Uninstaller Shortcut" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="ApplicationProgramsFolder">
+      <Component Id="ApplicationShortcut" Guid="494F3B75-1750-5F79-9D08-224DD67CCE8B">
+        <Shortcut Id="ApplicationStartMenuShortcut"
+                  Name="Podbag Desktop"
+                  Description="Runs Podbag Desktop"
+                  Target="[!Path]"
+                  Icon="ProductIcon"
+                  WorkingDirectory="INSTALLDIR">
+          <ShortcutProperty Key="System.AppUserModel.ID" Value="io.github.steelcrab.podbag" />
+        </Shortcut>
+        <RemoveFolder Id="RemoveApplicationProgramsFolder" On="uninstall" />
+        <RegistryValue Root="HKCU" Key="Software\SteelCrab\Podbag Desktop" Name="Start Menu Shortcut" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <StandardDirectory Id="DesktopFolder">
+      <Component Id="ApplicationShortcutDesktop" Guid="3D65C126-CD90-5CD4-B834-2378F2AA6BDC"
+                 Condition="NOT WIX_UPGRADE_DETECTED OR DESKTOPSHORTCUTEXISTS">
+        <Shortcut Id="ApplicationDesktopShortcut"
+                  Name="Podbag Desktop"
+                  Description="Runs Podbag Desktop"
+                  Target="[!Path]"
+                  WorkingDirectory="INSTALLDIR" />
+        <RemoveFolder Id="RemoveDesktopFolder" On="uninstall" />
+        <RegistryValue Root="HKCU" Key="Software\SteelCrab\Podbag Desktop" Name="Desktop Shortcut" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <Feature Id="MainProgram"
+             Title="Application"
+             Description="Installs Podbag Desktop."
+             Level="1"
+             ConfigurableDirectory="INSTALLDIR"
+             AllowAdvertise="no"
+             AllowAbsent="no"
+             Display="expand">
+      <ComponentRef Id="RegistryEntries" />
+      <ComponentRef Id="Engine" />
+      <Feature Id="ShortcutsFeature" Title="Shortcuts" Level="1">
+        <ComponentRef Id="Path" />
+        <ComponentRef Id="CMP_UninstallShortcut" />
+        <ComponentRef Id="ApplicationShortcut" />
+        <ComponentRef Id="ApplicationShortcutDesktop" />
+      </Feature>
+    </Feature>
+  </Package>
+</Wix>
