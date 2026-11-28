@@ -8,12 +8,14 @@ use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchRetained};
 use objc2::AllocAnyThread;
 use objc2::rc::Retained;
-use objc2_foundation::{NSArray, NSError, NSFileHandle, NSString, NSURL};
+use objc2_foundation::{NSArray, NSDictionary, NSError, NSFileHandle, NSString, NSURL};
 use objc2_virtualization::*;
 use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::Duration;
+
+use crate::vm::shares;
 
 /// What the VM is made of.
 #[derive(Debug, Clone)]
@@ -26,8 +28,10 @@ pub struct VmSpec {
     pub cpus: usize,
     pub memory: u64,
     pub cmdline: String,
-    /// Shared with the guest as virtiofs tag `users` (the Mac's /Users).
-    pub share: PathBuf,
+    /// A read-only directory with the guest's path manifest. None keeps the legacy
+    /// `users` device for the default configuration.
+    pub share_config: Option<PathBuf>,
+    pub shared_paths: Vec<PathBuf>,
     /// The network device's address: the same for every VM of a home, so the Mac's DHCP
     /// server gives it its address again.
     pub mac: [u8; 6],
@@ -145,16 +149,46 @@ fn configuration(spec: &VmSpec) -> Result<Retained<VZVirtualMachineConfiguration
             VZVirtioTraditionalMemoryBalloonDeviceConfiguration::new(),
         )]));
 
-        let shared = VZSharedDirectory::initWithURL_readOnly(
-            VZSharedDirectory::alloc(),
-            &url(&spec.share),
-            false,
-        );
-        let share =
-            VZSingleDirectoryShare::initWithDirectory(VZSingleDirectoryShare::alloc(), &shared);
+        let (tag, share): (_, Retained<VZDirectoryShare>) = match &spec.share_config {
+            Some(manifest) => {
+                let mut names = vec![NSString::from_str(shares::CONFIG)];
+                let mut dirs = vec![VZSharedDirectory::initWithURL_readOnly(
+                    VZSharedDirectory::alloc(),
+                    &url(manifest),
+                    true,
+                )];
+                for (index, path) in spec.shared_paths.iter().enumerate() {
+                    names.push(NSString::from_str(&shares::entry(index)));
+                    dirs.push(VZSharedDirectory::initWithURL_readOnly(
+                        VZSharedDirectory::alloc(),
+                        &url(path),
+                        false,
+                    ));
+                }
+                let names: Vec<&NSString> = names.iter().map(|name| &**name).collect();
+                let dirs = NSDictionary::from_retained_objects(&names, &dirs);
+                let share = VZMultipleDirectoryShare::initWithDirectories(
+                    VZMultipleDirectoryShare::alloc(),
+                    &dirs,
+                );
+                (shares::TAG, Retained::into_super(share))
+            }
+            None => {
+                let dir = VZSharedDirectory::initWithURL_readOnly(
+                    VZSharedDirectory::alloc(),
+                    &url(Path::new(shares::DEFAULT)),
+                    false,
+                );
+                let share = VZSingleDirectoryShare::initWithDirectory(
+                    VZSingleDirectoryShare::alloc(),
+                    &dir,
+                );
+                ("users", Retained::into_super(share))
+            }
+        };
         let fs = VZVirtioFileSystemDeviceConfiguration::initWithTag(
             VZVirtioFileSystemDeviceConfiguration::alloc(),
-            &NSString::from_str("users"),
+            &NSString::from_str(tag),
         );
         fs.setShare(Some(&share));
         config

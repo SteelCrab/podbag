@@ -55,14 +55,21 @@ function setInstalledPractice(records) {
   S.practiceContainers = records.some(r => r.id === containerPractice.id || r.steps?.length);
 }
 
-function renderPracticeProgress(panel, announcement, practice, stage, liveCommand) {
+// Where to click in Podbag Desktop for a UI step: the current step reads the attempt's own `ui`
+// (its port names the resource); the other steps read the module's default.
+function stepWhere(ui) {
+  return ui ? h("p", { class: "training-step-where", text: t("training.ui." + ui.action, { name: ui.name }) }) : null;
+}
+
+function renderPracticeProgress(panel, announcement, practice, stage, liveCommand, liveUi) {
   const complete = stage === "complete";
   const current = practice.steps.findIndex(([key]) => key === (stage === "restart" ? "stop" : stage));
   const label = (key) => practiceLabel(practice, key);
-  const rows = practice.steps.map(([key, command], index) => {
+  const rows = practice.steps.map(([key, command, ui], index) => {
     const done = complete || index < current;
     const active = index === current;
     const line = active && (stage === "restart" ? "exit" : key === "start" ? practiceStartCommand(practice.id) : (liveCommand || command));
+    const where = stepWhere(active ? liveUi : ui);
     return h("li", { class: "training-step", "data-state": done ? "done" : active ? "current" : "pending",
       "aria-current": active ? "step" : null },
       h("div", { class: "training-step-heading" },
@@ -70,10 +77,12 @@ function renderPracticeProgress(panel, announcement, practice, stage, liveComman
         h("span", { class: "training-step-name", text: label(key) }),
         h("span", { class: "training-step-status",
           text: t(done ? "training.done" : active ? "practice.current" : "training.pending") })),
-      line ? h("div", { class: "training-step-command" },
-        stage === "restart" ? h("p", { text: t("training.restart") })
-          : key === "start" ? h("p", { text: t("training.terminalStart") }) : null,
-        codeLine(line)) : null);
+      where || line ? h("div", { class: "training-step-command" },
+        where,
+        where && line ? h("p", { text: t("training.ui.or") }) : null,
+        line && stage === "restart" ? h("p", { text: t("training.restart") })
+          : line && key === "start" ? h("p", { text: t("training.terminalStart") }) : null,
+        line ? codeLine(line) : null) : null);
   });
   announcement.textContent = complete ? t("tutorial.complete")
     : practice.steps[current] ? label(practice.steps[current][0]) + " · " + t("practice.current") : "";
@@ -169,9 +178,9 @@ function renderTutorials(main) {
       !entries.length && !jsonOverview && !jsonDetail ? h("p", { class: "nothing", text: t("tutorial.empty") }) : null);
     for (const {record, practice, progress, announcement} of entries) {
       if (!practice) continue;
-      watchPractice(progress, practice, null, { completed: record.completed, onStage: (stage, command) => {
+      watchPractice(progress, practice, null, { completed: record.completed, onStage: (stage, command, ui) => {
         if (id) {
-          renderPracticeProgress(progress, announcement, practice, stage, command);
+          renderPracticeProgress(progress, announcement, practice, stage, command, ui);
           return;
         }
         const current = stage === "restart" ? "stop" : stage;

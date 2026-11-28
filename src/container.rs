@@ -57,6 +57,8 @@ pub struct Container {
     dns: crate::netfiles::DnsSettings,
     #[serde(default)]
     extra_networks: Vec<crate::spec::Attachment>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    fixed_addresses: crate::network::FixedByNetwork,
     #[serde(default)]
     stop_timeout: Option<i64>,
     #[serde(default)]
@@ -65,6 +67,11 @@ pub struct Container {
     health: Option<crate::health::HealthSettings>,
     #[serde(default)]
     console_size: Option<(u16, u16)>,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::log_driver::LogConfig::is_default"
+    )]
+    log_config: crate::log_driver::LogConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -151,11 +158,19 @@ impl Container {
             extra_hosts: Vec::new(),
             dns: Default::default(),
             extra_networks: Vec::new(),
+            fixed_addresses: Default::default(),
             stop_timeout: None,
             restart: Default::default(),
             health: None,
             console_size: None,
+            log_config: Default::default(),
         }
+    }
+
+    /// Set the logging driver and options.
+    pub fn logging(mut self, config: crate::log_driver::LogConfig) -> Container {
+        self.log_config = config;
+        self
     }
 
     /// A label (`key=value` in `docker run --label`).
@@ -175,6 +190,18 @@ impl Container {
     /// containers there find it by this name too. User networks only.
     pub fn network_alias(mut self, alias: impl Into<String>) -> Container {
         self.aliases.push(alias.into());
+        self
+    }
+
+    /// Set the requested addresses of an attached bridge network.
+    pub fn fixed_addresses(
+        mut self,
+        network: impl Into<String>,
+        addresses: crate::network::FixedAddresses,
+    ) -> Container {
+        if !addresses.is_empty() {
+            self.fixed_addresses.insert(network.into(), addresses);
+        }
         self
     }
 
@@ -791,16 +818,42 @@ mod linux_launch {
                     nocopy,
                 } => {
                     let (v, _) = volume::create_in(dirs, Some(&name), false)?;
-                    Mount {
-                        copy_up: !nocopy && empty(&v.mountpoint),
-                        source: MountSource::Volume {
-                            name,
-                            anonymous: false,
-                            path: v.mountpoint,
-                        },
-                        target,
-                        read_only: access(a),
-                    }
+                    let copy_up = !nocopy
+                        && v.nfs.is_none()
+                        && v.plugin.is_none()
+                        && !crate::vm::sync::is_cache_volume(&v)
+                        && empty(&v.mountpoint);
+                    named_mount(v, target, access(a), copy_up)?
+                }
+                MountRequest::NamedNfs {
+                    name,
+                    target,
+                    access: a,
+                    nfs,
+                } => {
+                    let (volume, _) = volume::create_with_nfs(
+                        dirs,
+                        Some(&name),
+                        false,
+                        Default::default(),
+                        Some(nfs),
+                    )?;
+                    named_mount(volume, target, access(a), false)?
+                }
+                MountRequest::NamedDriver {
+                    name,
+                    target,
+                    access: a,
+                    plugin,
+                } => {
+                    let (volume, _) = volume::create_with_backend(
+                        dirs,
+                        Some(&name),
+                        false,
+                        Default::default(),
+                        volume::Backend::Plugin(plugin),
+                    )?;
+                    named_mount(volume, target, access(a), false)?
                 }
                 MountRequest::Anonymous { target, access: a } => {
                     let (v, _) = volume::create_in(dirs, None, true)?;
@@ -835,6 +888,43 @@ mod linux_launch {
         Ok(mounts)
     }
 
+    fn named_mount(
+        v: volume::Volume,
+        target: String,
+        read_only: bool,
+        copy_up: bool,
+    ) -> Result<Mount> {
+        let name = v.name;
+        let (source, copy_up) = if let Some(options) = v.nfs {
+            (MountSource::Nfs { name, options }, false)
+        } else if let Some(plugin) = v.plugin {
+            // SAFETY: geteuid has no preconditions.
+            volume::require_rootful("external volume drivers", unsafe { libc::geteuid() } != 0)?;
+            (
+                MountSource::Driver {
+                    name,
+                    driver: plugin.name,
+                },
+                false,
+            )
+        } else {
+            (
+                MountSource::Volume {
+                    name,
+                    anonymous: false,
+                    path: v.mountpoint,
+                },
+                copy_up,
+            )
+        };
+        Ok(Mount {
+            source,
+            target,
+            read_only,
+            copy_up,
+        })
+    }
+
     /// A host path for `-v`: absolute, created when missing (as `docker run -v` does).
     fn bind_source(source: &str) -> Result<String> {
         let fail = |e: std::io::Error| {
@@ -850,13 +940,28 @@ mod linux_launch {
         } else {
             std::env::current_dir().map_err(fail)?.join(path)
         };
+        let shares = crate::vm::shares::active().filter(|_| crate::vm::shares::valid_target(&path));
+        let check = |path: &std::path::Path| {
+            if shares
+                .as_ref()
+                .is_some_and(|roots| !crate::vm::shares::contains(roots, path))
+            {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("cannot use {source} as a volume"),
+                    "the path is outside the Mac folders shared with the VM",
+                    "share the folder or use a named volume",
+                ));
+            }
+            Ok(())
+        };
+        check(&path)?;
         if !path.exists() {
             std::fs::create_dir_all(&path).map_err(fail)?;
         }
-        Ok(std::fs::canonicalize(&path)
-            .map_err(fail)?
-            .to_string_lossy()
-            .into_owned())
+        let real = std::fs::canonicalize(&path).map_err(fail)?;
+        check(&real)?;
+        Ok(real.to_string_lossy().into_owned())
     }
 
     /// Save the settings and start the shim. Returns after the command started.
@@ -934,6 +1039,7 @@ mod linux_launch {
             }
         }
         crate::spec::check_networks(&network, &c.aliases, &c.extra_networks)?;
+        crate::spec::check_address_networks(&network, &c.extra_networks, &c.fixed_addresses)?;
         crate::netfiles::check_settings(&network, rootless, &c.extra_hosts, &c.dns)?;
         // Without the keeper, a rootless bridge container's shim is in the network
         // session's user namespace: only the user's service manager can start its restarter.
@@ -957,10 +1063,16 @@ mod linux_launch {
             ));
         }
         if let crate::network::NetworkMode::Bridge { network } = &network {
-            crate::network::get_in(&dirs, network)?;
+            crate::network::get_in(&dirs, network)?
+                .check_addresses(c.fixed_addresses.get(network).copied().unwrap_or_default())?;
         }
         for a in &c.extra_networks {
-            crate::network::get_in(&dirs, &a.network)?;
+            crate::network::get_in(&dirs, &a.network)?.check_addresses(
+                c.fixed_addresses
+                    .get(&a.network)
+                    .copied()
+                    .unwrap_or_default(),
+            )?;
         }
         let id = id::new_id()?;
         let short = id::short_id(&id).to_string();
@@ -990,9 +1102,7 @@ mod linux_launch {
         };
         // Held until the config names the volumes: `volume rm` checks the configs under
         // the exclusive lock.
-        let volume_lock = (!requests.is_empty())
-            .then(|| volume::lock_shared(&dirs))
-            .transpose()?;
+        let volume_lock = volume::lock_for_mounts(&dirs, &requests)?;
         let mounts = resolve_mounts(&dirs, requests, &mut cleanup.anonymous)?;
         match c.source {
             Source::Rootfs(ref path) => {
@@ -1039,8 +1149,10 @@ mod linux_launch {
                     health: health.clone(),
                     console_size: c.console_size,
                     extra_networks: c.extra_networks.clone(),
+                    fixed_addresses: c.fixed_addresses.clone(),
                     namespaces: Default::default(),
                     devices: Vec::new(),
+                    log_config: c.log_config.clone(),
                     cri_log: None,
                     stdin_fifo: None,
                 };
@@ -1083,8 +1195,10 @@ mod linux_launch {
                         health: health.clone(),
                         console_size: c.console_size,
                         extra_networks: c.extra_networks.clone(),
+                        fixed_addresses: c.fixed_addresses.clone(),
                         namespaces: Default::default(),
                         devices: Vec::new(),
+                        log_config: c.log_config.clone(),
                         cri_log: None,
                         stdin_fifo: None,
                     })

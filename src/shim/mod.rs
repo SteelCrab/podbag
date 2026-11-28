@@ -2,6 +2,8 @@
 //! ends: output to the log (and to the caller when attached), the control socket, signals.
 
 pub mod control;
+#[cfg(target_os = "linux")]
+mod dns;
 pub mod logbook;
 #[cfg(target_os = "linux")]
 mod net;

@@ -5,7 +5,14 @@
 use crate::paths::Dirs;
 use crate::{Error, ErrorKind, Result};
 use serde::{Deserialize, Serialize};
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
+
+#[cfg(unix)]
+mod attachment;
+#[cfg(unix)]
+pub(crate) use attachment::AttachmentChange;
+#[cfg(target_os = "linux")]
+pub use attachment::attachment_main;
 
 /// The network a container gets without `--network`.
 pub const DEFAULT: &str = "bridge";
@@ -173,6 +180,9 @@ pub struct Network {
     /// `10.78.1.0/24`.
     pub subnet: String,
     pub gateway: String,
+    /// A second, IPv6 subnet on a dual-stack bridge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ipv6: Option<Ipv6Subnet>,
     /// The bridge device.
     pub bridge: String,
     pub created: u64,
@@ -181,6 +191,98 @@ pub struct Network {
     #[serde(default)]
     pub labels: Labels,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ipv6Subnet {
+    pub network: Ipv6Addr,
+    pub prefix: u8,
+}
+
+impl Ipv6Subnet {
+    pub fn gateway(self) -> Ipv6Addr {
+        Ipv6Addr::from(u128::from(self.network) + 1)
+    }
+
+    pub fn contains(self, address: Ipv6Addr) -> bool {
+        mask6(u128::from(address), self.prefix) == u128::from(self.network)
+    }
+
+    fn overlaps(self, other: Self) -> bool {
+        self.contains(other.network) || other.contains(self.network)
+    }
+}
+
+impl std::fmt::Display for Ipv6Subnet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.network, self.prefix)
+    }
+}
+
+impl std::str::FromStr for Ipv6Subnet {
+    type Err = Error;
+
+    fn from_str(text: &str) -> Result<Self> {
+        let bad = |why| {
+            invalid(
+                format!("invalid IPv6 subnet {text:?}"),
+                why,
+                "give a unicast subnet such as fd42:98ab::/64",
+            )
+        };
+        let (address, prefix) = text
+            .split_once('/')
+            .ok_or_else(|| bad("expected address/prefix"))?;
+        let network: Ipv6Addr = address
+            .parse()
+            .map_err(|_| bad("expected an IPv6 address"))?;
+        let prefix: u8 = prefix
+            .parse()
+            .ok()
+            .filter(|p| (1..=126).contains(p))
+            .ok_or_else(|| bad("the prefix must be between 1 and 126"))?;
+        if network.is_unspecified()
+            || network.is_loopback()
+            || network.is_multicast()
+            || network.is_unicast_link_local()
+            || network.to_ipv4_mapped().is_some()
+        {
+            return Err(bad("the subnet must be unicast and routable on the bridge"));
+        }
+        if mask6(u128::from(network), prefix) != u128::from(network) {
+            return Err(bad("the address has host bits set"));
+        }
+        Ok(Self { network, prefix })
+    }
+}
+
+fn mask6(address: u128, prefix: u8) -> u128 {
+    address
+        & u128::MAX
+            .checked_shl(128 - u32::from(prefix.min(128)))
+            .unwrap_or(0)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Addresses {
+    pub ipv4: Ipv4Addr,
+    pub ipv6: Option<Ipv6Addr>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FixedAddresses {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ipv4: Option<Ipv4Addr>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ipv6: Option<Ipv6Addr>,
+}
+
+impl FixedAddresses {
+    pub fn is_empty(self) -> bool {
+        self.ipv4.is_none() && self.ipv6.is_none()
+    }
+}
+
+pub type FixedByNetwork = std::collections::BTreeMap<String, FixedAddresses>;
 
 /// Labels of a network or a volume: key to value.
 pub type Labels = std::collections::BTreeMap<String, String>;
@@ -213,6 +315,40 @@ impl Network {
     /// Create a network with labels.
     pub fn create_with(name: &str, subnet: Option<&str>, labels: Labels) -> Result<Network> {
         create_labeled_in(&crate::paths::dirs()?, name, subnet, labels, &host_routes())
+    }
+
+    /// Create a dual-stack bridge; when no IPv6 subnet is given, derive a ULA /64.
+    pub fn create_dual_stack(
+        name: &str,
+        subnet: Option<&str>,
+        ipv6: Option<Ipv6Subnet>,
+        labels: Labels,
+    ) -> Result<Network> {
+        let ipv6 = ipv6.unwrap_or_else(|| {
+            let id = u128::from_str_radix(&sha_id(name), 16).unwrap_or_default();
+            Ipv6Subnet {
+                network: Ipv6Addr::from((0xfd00_0000_0000_0000 | id) << 64),
+                prefix: 64,
+            }
+        });
+        if let Some(route) = host_routes6()
+            .into_iter()
+            .find(|route| route.overlaps(ipv6))
+        {
+            return Err(invalid(
+                format!("cannot create network {name} with subnet {ipv6}"),
+                format!("it overlaps the host route {route}"),
+                "choose another IPv6 subnet",
+            ));
+        }
+        create_configured_in(
+            &crate::paths::dirs()?,
+            name,
+            subnet,
+            Some(ipv6),
+            labels,
+            &host_routes(),
+        )
     }
 
     pub fn get(name: &str) -> Result<Network> {
@@ -265,6 +401,31 @@ impl Network {
     pub fn cidr(&self) -> (Ipv4Addr, u8) {
         parse_cidr(&self.subnet).unwrap_or(DEFAULT_SUBNET)
     }
+
+    pub(crate) fn check_addresses(&self, addresses: FixedAddresses) -> Result<()> {
+        let bad = |address: std::net::IpAddr| {
+            invalid(
+                format!("cannot assign {address} on network {}", self.name),
+                "address is outside the network's usable range",
+                "choose an address in the subnet other than the gateway",
+            )
+        };
+        if let Some(address) = addresses.ipv4 {
+            let (network, prefix) = self.cidr();
+            let start = u32::from(network);
+            if u32::from(address) < start + 2 || u32::from(address) >= (start | !mask(prefix)) {
+                return Err(bad(address.into()));
+            }
+        }
+        if let Some(address) = addresses.ipv6
+            && !self
+                .ipv6
+                .is_some_and(|s| s.contains(address) && address > s.gateway())
+        {
+            return Err(bad(address.into()));
+        }
+        Ok(())
+    }
 }
 
 /// A network with its address table.
@@ -278,6 +439,8 @@ struct Record {
 #[derive(Serialize, Deserialize, Clone)]
 struct Member {
     ip: Ipv4Addr,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ip6: Option<Ipv6Addr>,
     name: String,
     /// Further names of the container on this network (`--network-alias`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -293,6 +456,32 @@ struct Member {
     /// The container's extra `/etc/hosts` lines (`--add-host`), their addresses found.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     extra_hosts: Vec<crate::netfiles::HostEntry>,
+}
+
+impl Member {
+    fn addresses(&self) -> Addresses {
+        Addresses {
+            ipv4: self.ip,
+            ipv6: self.ip6,
+        }
+    }
+}
+
+fn host_routes6() -> Vec<Ipv6Subnet> {
+    std::fs::read_to_string("/proc/net/ipv6_route")
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| {
+            let iface = line.split_whitespace().last()?;
+            if matches!(iface, "lo" | DEFAULT_BRIDGE) || iface.starts_with("pbg-") {
+                return None;
+            }
+            let mut fields = line.split_whitespace();
+            let network = Ipv6Addr::from(u128::from_str_radix(fields.next()?, 16).ok()?);
+            let prefix = u8::from_str_radix(fields.next()?, 16).ok()?;
+            (prefix > 0).then_some(Ipv6Subnet { network, prefix })
+        })
+        .collect()
 }
 
 /// The host's IPv4 routes (destination and prefix), except the default route, so a new
@@ -391,15 +580,18 @@ pub(crate) fn prune_matching_in(
 
 /// The containers in `network`: (ID, name, address), by address.
 #[cfg_attr(not(unix), allow(dead_code))]
-pub(crate) fn endpoints(dirs: &Dirs, network: &str) -> Result<Vec<(String, String, Ipv4Addr)>> {
+pub(crate) fn endpoints(dirs: &Dirs, network: &str) -> Result<Vec<(String, String, Addresses)>> {
     let _lock = lock(dirs)?;
     let record = load(dirs, network)?;
-    let mut out: Vec<(String, String, Ipv4Addr)> = record
+    let mut out: Vec<_> = record
         .containers
         .into_iter()
-        .map(|(id, m)| (id, m.name, m.ip))
+        .map(|(id, m)| {
+            let addresses = m.addresses();
+            (id, m.name, addresses)
+        })
         .collect();
-    out.sort_by_key(|(_, _, ip)| u32::from(*ip));
+    out.sort_by_key(|(_, _, addresses)| addresses.ipv4);
     Ok(out)
 }
 
@@ -478,8 +670,186 @@ fn not_found(name: &str) -> Error {
     )
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NetworkPreferences {
+    pub default_subnet: String,
+    pub default_ipv6_subnet: Option<String>,
+    pub embedded_dns: bool,
+    pub dns_filter: crate::config::DnsFilter,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkSettings {
+    pub preferences: NetworkPreferences,
+    pub revision: String,
+    pub active_subnet: Option<String>,
+    pub active_ipv6_subnet: Option<String>,
+    pub overrides: Vec<&'static str>,
+}
+
+const SETTING_ENV: [&str; 4] = [
+    "PODBAG_DEFAULT_SUBNET",
+    "PODBAG_DEFAULT_IPV6_SUBNET",
+    "PODBAG_EMBEDDED_DNS",
+    "PODBAG_DNS_FILTER",
+];
+
+/// Inspect the local engine's defaults without initializing or changing its bridges.
+pub fn settings(dirs: &Dirs) -> Result<NetworkSettings> {
+    use sha2::{Digest, Sha256};
+
+    let config = crate::config::load(dirs)?;
+    let preferences = NetworkPreferences {
+        default_subnet: config.default_subnet,
+        default_ipv6_subnet: config.default_ipv6_subnet.map(|subnet| subnet.to_string()),
+        embedded_dns: config.embedded_dns,
+        dns_filter: config.dns_filter,
+    };
+    let overrides: Vec<_> = SETTING_ENV
+        .into_iter()
+        .filter(|name| std::env::var(name).is_ok())
+        .collect();
+    let snapshot = serde_json::json!([&preferences, &overrides]).to_string();
+    let revision = Sha256::digest(snapshot)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let active = read_record(dirs, DEFAULT)?.map(|record| record.network);
+    Ok(NetworkSettings {
+        preferences,
+        revision,
+        active_subnet: active.as_ref().map(|network| network.subnet.clone()),
+        active_ipv6_subnet: active
+            .and_then(|network| network.ipv6)
+            .map(|subnet| subnet.to_string()),
+        overrides,
+    })
+}
+
+/// Save new bridge defaults and DNS settings together. Initialized networks retain their configuration.
+pub fn save_settings(
+    dirs: &Dirs,
+    requested: NetworkPreferences,
+    expected_revision: Option<&str>,
+) -> Result<NetworkSettings> {
+    let (addr, prefix) = parse_cidr(&requested.default_subnet)?;
+    let ipv6 = requested
+        .default_ipv6_subnet
+        .as_deref()
+        .map(str::parse::<Ipv6Subnet>)
+        .transpose()?;
+    let subnet = format!("{addr}/{prefix}");
+    let ipv6_text = ipv6.map(|subnet| subnet.to_string());
+    let _network_lock = lock(dirs)?;
+    let _config_lock = crate::config::lock_config(dirs)?;
+    let current = settings(dirs)?;
+    if expected_revision.is_some_and(|expected| expected != current.revision) {
+        return Err(Error::new(
+            ErrorKind::Conflict,
+            "cannot save the network settings",
+            "network settings changed after they were opened",
+            "reload the saved settings and apply your edits again",
+        ));
+    }
+    let old = &current.preferences;
+    let ipv4_changed = subnet != old.default_subnet;
+    let ipv6_changed = ipv6_text != old.default_ipv6_subnet;
+    let mut changes = Vec::new();
+    for (index, key, value, changed) in [
+        (0, "default_subnet", subnet.as_str(), ipv4_changed),
+        (
+            1,
+            "default_ipv6_subnet",
+            ipv6_text.as_deref().unwrap_or_default(),
+            ipv6_changed,
+        ),
+        (
+            2,
+            "embedded_dns",
+            if requested.embedded_dns {
+                "true"
+            } else {
+                "false"
+            },
+            requested.embedded_dns != old.embedded_dns,
+        ),
+        (
+            3,
+            "dns_filter",
+            requested.dns_filter.name(),
+            requested.dns_filter != old.dns_filter,
+        ),
+    ] {
+        if !changed {
+            continue;
+        }
+        let env = SETTING_ENV[index];
+        if current.overrides.contains(&env) {
+            return Err(Error::new(
+                ErrorKind::Conflict,
+                format!("cannot change {key}"),
+                format!("{env} overrides this setting"),
+                "change or unset the environment variable",
+            ));
+        }
+        changes.push((key, value));
+    }
+    let conflict = |subnet: &str, owner: String| {
+        invalid(
+            format!("cannot use the default subnet {subnet}"),
+            format!("it overlaps {owner}"),
+            "choose a subnet that no network or host route uses",
+        )
+    };
+    if ipv4_changed || ipv6_changed {
+        for other in all_records(dirs)?
+            .into_iter()
+            .map(|r| r.network)
+            .filter(|n| n.name != DEFAULT)
+        {
+            if ipv4_changed && overlaps((addr, prefix), other.cidr()) {
+                return Err(conflict(
+                    &subnet,
+                    format!("network {} ({})", other.name, other.subnet),
+                ));
+            }
+            if ipv6_changed
+                && let (Some(wanted), Some(active)) = (ipv6, other.ipv6)
+                && wanted.overlaps(active)
+            {
+                return Err(conflict(
+                    &wanted.to_string(),
+                    format!("network {} ({active})", other.name),
+                ));
+            }
+        }
+    }
+    if ipv4_changed
+        && let Some((a, p)) = host_routes()
+            .into_iter()
+            .find(|r| overlaps(*r, (addr, prefix)))
+    {
+        return Err(conflict(&subnet, format!("the host route {a}/{p}")));
+    }
+    if ipv6_changed
+        && let Some(wanted) = ipv6
+        && let Some(route) = host_routes6().into_iter().find(|r| r.overlaps(wanted))
+    {
+        return Err(conflict(
+            &wanted.to_string(),
+            format!("the host route {route}"),
+        ));
+    }
+    crate::config::set_values_locked(dirs, &changes)?;
+    settings(dirs)
+}
+
 fn default_record(dirs: &Dirs, host_routes: &[(Ipv4Addr, u8)]) -> Result<Record> {
-    let subnet = crate::config::load(dirs)?.default_subnet;
+    let config = crate::config::load(dirs)?;
+    let subnet = config.default_subnet;
+    let ipv6 = config.default_ipv6_subnet;
     let (addr, prefix) = parse_cidr(&subnet)?;
     if let Some((a, p)) = host_routes.iter().find(|r| overlaps(**r, (addr, prefix))) {
         return Err(Error::new(
@@ -489,15 +859,27 @@ fn default_record(dirs: &Dirs, host_routes: &[(Ipv4Addr, u8)]) -> Result<Record>
             "set default_subnet in config.toml (or PODBAG_DEFAULT_SUBNET) to a free subnet",
         ));
     }
+    if let Some(wanted) = ipv6
+        && let Some(route) = host_routes6().into_iter().find(|r| r.overlaps(wanted))
+    {
+        return Err(invalid(
+            "cannot set up the default network".to_string(),
+            format!("its subnet {wanted} overlaps the host route {route}"),
+            "set default_ipv6_subnet in config.toml (or PODBAG_DEFAULT_IPV6_SUBNET) to a free subnet",
+        ));
+    }
     Ok(Record {
         network: Network {
             name: DEFAULT.to_string(),
             id: sha_id(DEFAULT),
             subnet: format!("{addr}/{prefix}"),
             gateway: Ipv4Addr::from(u32::from(addr) + 1).to_string(),
+            ipv6,
             // podbag0 for the usual subnet; another subnet gets a bridge of its own, so
             // data directories with different default subnets can share a root host.
-            bridge: if (addr, prefix) == DEFAULT_SUBNET {
+            bridge: if let Some(ipv6) = ipv6 {
+                format!("pbg-{}", &sha_id(&format!("{addr}/{prefix},{ipv6}"))[..8])
+            } else if (addr, prefix) == DEFAULT_SUBNET {
                 DEFAULT_BRIDGE.to_string()
             } else {
                 format!("pbg-{}", &sha_id(&subnet)[..8])
@@ -575,6 +957,17 @@ pub(crate) fn create_labeled_in(
     labels: Labels,
     host_routes: &[(Ipv4Addr, u8)],
 ) -> Result<Network> {
+    create_configured_in(dirs, name, subnet, None, labels, host_routes)
+}
+
+fn create_configured_in(
+    dirs: &Dirs,
+    name: &str,
+    subnet: Option<&str>,
+    ipv6: Option<Ipv6Subnet>,
+    labels: Labels,
+    host_routes: &[(Ipv4Addr, u8)],
+) -> Result<Network> {
     check_name(name)?;
     if matches!(name, "bridge" | "host" | "none" | "default") {
         return Err(invalid(
@@ -595,6 +988,17 @@ pub(crate) fn create_labeled_in(
     // The default network counts even before its first use.
     load_with(dirs, DEFAULT, host_routes)?;
     let others: Vec<Network> = all_records(dirs)?.into_iter().map(|r| r.network).collect();
+    if let Some(ipv6) = ipv6
+        && let Some(other) = others
+            .iter()
+            .find(|n| n.ipv6.is_some_and(|s| s.overlaps(ipv6)))
+    {
+        return Err(invalid(
+            format!("cannot create network {name} with subnet {ipv6}"),
+            format!("it overlaps network {}", other.name),
+            "choose another IPv6 subnet",
+        ));
+    }
     let conflict = |cidr: (Ipv4Addr, u8)| -> Option<String> {
         if let Some(n) = others.iter().find(|n| overlaps(n.cidr(), cidr)) {
             return Some(format!("it overlaps network {} ({})", n.name, n.subnet));
@@ -636,6 +1040,7 @@ pub(crate) fn create_labeled_in(
         id,
         subnet: format!("{}/{}", cidr.0, cidr.1),
         gateway: Ipv4Addr::from(u32::from(cidr.0) + 1).to_string(),
+        ipv6,
         created: crate::state::now(),
         labels,
     };
@@ -706,6 +1111,7 @@ pub(crate) struct Endpoint<'a> {
     pub networks: &'a [String],
     /// Its extra `/etc/hosts` lines (`--add-host`).
     pub extra_hosts: &'a [crate::netfiles::HostEntry],
+    pub fixed: FixedAddresses,
 }
 
 /// An address for container `id` in `network`: its old one, or the lowest free one after
@@ -718,7 +1124,7 @@ pub(crate) fn allocate(
     name: &str,
     hostname: &str,
 ) -> Result<Ipv4Addr> {
-    join(
+    Ok(join(
         dirs,
         network,
         id,
@@ -728,34 +1134,60 @@ pub(crate) fn allocate(
             aliases: &[],
             networks: &[],
             extra_hosts: &[],
+            fixed: Default::default(),
         },
-    )
+    )?
+    .ipv4)
 }
 
 /// Container `id` joins `network`: its old address, or the lowest free one after the
 /// gateway. Its names there are written down for the hosts files.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-pub(crate) fn join(dirs: &Dirs, network: &str, id: &str, endpoint: &Endpoint) -> Result<Ipv4Addr> {
-    let name = endpoint.name;
+pub(crate) fn join(dirs: &Dirs, network: &str, id: &str, endpoint: &Endpoint) -> Result<Addresses> {
     let _lock = lock(dirs)?;
     let mut record = load(dirs, network)?;
+    let (addresses, changed) = join_record(&mut record, id, endpoint)?;
+    if changed {
+        write_record(dirs, &record)?;
+    }
+    Ok(addresses)
+}
+
+fn join_record(record: &mut Record, id: &str, endpoint: &Endpoint) -> Result<(Addresses, bool)> {
+    let network = &record.network.name;
+    let name = endpoint.name;
+    record.network.check_addresses(endpoint.fixed)?;
     if let Some(m) = record.containers.get_mut(id) {
-        let ip = m.ip;
+        let addresses = m.addresses();
+        if endpoint.fixed.ipv4.is_some_and(|ip| ip != addresses.ipv4)
+            || endpoint
+                .fixed
+                .ipv6
+                .is_some_and(|ip| Some(ip) != addresses.ipv6)
+        {
+            return Err(Error::new(
+                ErrorKind::Conflict,
+                format!("cannot give container {name} a fixed address"),
+                format!("it still holds another address on network {network}"),
+                "try again after its previous attachment is removed",
+            ));
+        }
         // A member from an earlier version's record learns its hostname at its next start;
         // names given since (`network connect`) take effect at the next start too.
         let hostname = Some(endpoint.hostname.to_string());
-        if m.hostname != hostname
+        let changed = m.name != name
+            || m.hostname != hostname
             || m.aliases != endpoint.aliases
             || m.networks != endpoint.networks
-            || m.extra_hosts != endpoint.extra_hosts
-        {
+            || m.extra_hosts != endpoint.extra_hosts;
+        if changed {
+            m.name = name.to_string();
             m.hostname = hostname;
             m.aliases = endpoint.aliases.to_vec();
             m.networks = endpoint.networks.to_vec();
             m.extra_hosts = endpoint.extra_hosts.to_vec();
-            write_record(dirs, &record)?;
         }
-        return Ok(ip);
+        return Ok((addresses, changed));
     }
     let (addr, prefix) = record.network.cidr();
     let first = u32::from(addr) + 2;
@@ -765,21 +1197,65 @@ pub(crate) fn join(dirs: &Dirs, network: &str, id: &str, endpoint: &Endpoint) ->
         .values()
         .map(|m| u32::from(m.ip))
         .collect();
-    let ip = (first..broadcast)
-        .find(|a| !used.contains(a))
-        .map(Ipv4Addr::from)
-        .ok_or_else(|| {
-            Error::new(
-                ErrorKind::Runtime,
-                format!("cannot give container {name} an address"),
-                format!("network {network} has no free address left"),
-                "remove containers from it, or use a network with a larger subnet",
-            )
-        })?;
+    let in_use = |ip: std::net::IpAddr| {
+        Error::new(
+            ErrorKind::Conflict,
+            format!("cannot give container {name} the address {ip}"),
+            format!("the address is in use on network {network}"),
+            "choose an unused address",
+        )
+    };
+    let ip = if let Some(ip) = endpoint.fixed.ipv4 {
+        if used.contains(&u32::from(ip)) {
+            return Err(in_use(ip.into()));
+        }
+        ip
+    } else {
+        (first..broadcast)
+            .find(|a| !used.contains(a))
+            .map(Ipv4Addr::from)
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::Runtime,
+                    format!("cannot give container {name} an address"),
+                    format!("network {network} has no free address left"),
+                    "remove containers from it, or use a network with a larger subnet",
+                )
+            })?
+    };
+    let ip6 = record
+        .network
+        .ipv6
+        .map(|subnet| {
+            let first = u128::from(subnet.network) + 2;
+            let used: std::collections::BTreeSet<_> =
+                record.containers.values().filter_map(|m| m.ip6).collect();
+            if let Some(ip) = endpoint.fixed.ipv6 {
+                return if used.contains(&ip) {
+                    Err(in_use(ip.into()))
+                } else {
+                    Ok(ip)
+                };
+            }
+            (first..=u128::MAX)
+                .map(Ipv6Addr::from)
+                .take_while(|address| subnet.contains(*address))
+                .find(|address| !used.contains(address))
+                .ok_or_else(|| {
+                    Error::new(
+                        ErrorKind::Runtime,
+                        format!("cannot give container {name} an IPv6 address"),
+                        format!("network {network} has no free IPv6 address left"),
+                        "remove containers from it, or use a network with a larger subnet",
+                    )
+                })
+        })
+        .transpose()?;
     record.containers.insert(
         id.to_string(),
         Member {
             ip,
+            ip6,
             name: name.to_string(),
             aliases: endpoint.aliases.to_vec(),
             networks: endpoint.networks.to_vec(),
@@ -787,8 +1263,13 @@ pub(crate) fn join(dirs: &Dirs, network: &str, id: &str, endpoint: &Endpoint) ->
             extra_hosts: endpoint.extra_hosts.to_vec(),
         },
     );
-    write_record(dirs, &record)?;
-    Ok(ip)
+    Ok((
+        Addresses {
+            ipv4: ip,
+            ipv6: ip6,
+        },
+        true,
+    ))
 }
 
 /// Give back container `id`'s address. A missing network or entry is not an error.
@@ -802,6 +1283,23 @@ pub(crate) fn release(dirs: &Dirs, network: &str, id: &str) -> Result<()> {
         write_record(dirs, &record)?;
     }
     Ok(())
+}
+
+/// Return addresses left by a former run, including an interrupted live change.
+/// At startup, retain addresses on the networks in the saved settings.
+pub(crate) fn release_container(dirs: &Dirs, id: &str, retain: &[&str]) -> Result<()> {
+    let _lock = lock(dirs)?;
+    let mut result = Ok(());
+    for mut record in all_records(dirs)? {
+        if !retain.contains(&record.network.name.as_str()) && record.containers.remove(id).is_some()
+        {
+            match write_record(dirs, &record) {
+                Ok(()) => refresh_hosts_locked(dirs, &record.network.name),
+                Err(error) => result = Err(error),
+            }
+        }
+    }
+    result
 }
 
 /// Container `id` has a new name: its entries in the networks it is on (while it runs)
@@ -839,6 +1337,7 @@ impl Loaded {
                 .filter(|_| named)
                 .map(|m| crate::netfiles::Peer {
                     ip: m.ip,
+                    ip6: m.ip6,
                     name: &m.name,
                     aliases: &m.aliases,
                 })
@@ -869,7 +1368,7 @@ impl Loads {
 /// `/etc/hosts` of container `id`, a member of `networks` (its primary one first), from
 /// networks read already. None when it has an address on none of them.
 fn compose_hosts(loads: &Loads, dirs: &Dirs, id: &str, networks: &[&str]) -> Option<String> {
-    let mut own: Vec<(Ipv4Addr, &[String])> = Vec::with_capacity(networks.len());
+    let mut own = Vec::with_capacity(networks.len());
     let mut lists = Vec::with_capacity(networks.len());
     let mut first: Option<&Member> = None;
     for network in networks {
@@ -887,7 +1386,10 @@ fn compose_hosts(loads: &Loads, dirs: &Dirs, id: &str, networks: &[&str]) -> Opt
             continue;
         };
         first.get_or_insert(m);
-        own.push((m.ip, m.aliases.as_slice()));
+        own.push((std::net::IpAddr::from(m.ip), m.aliases.as_slice()));
+        if let Some(ip6) = m.ip6 {
+            own.push((ip6.into(), m.aliases.as_slice()));
+        }
         if *network != DEFAULT {
             lists.push((&loaded.block, Some(place)));
         }
@@ -940,10 +1442,14 @@ pub(crate) fn hosts_text(dirs: &Dirs, id: &str, networks: &[String]) -> Result<S
 /// at the same moment cannot leave a stale list behind.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn refresh_hosts(dirs: &Dirs, network: &str) {
+    let Ok(_lock) = lock(dirs) else { return };
+    refresh_hosts_locked(dirs, network);
+}
+
+fn refresh_hosts_locked(dirs: &Dirs, network: &str) {
     if network == DEFAULT {
         return;
     }
-    let Ok(_lock) = lock(dirs) else { return };
     let mut loads = Loads::default();
     loads.read(dirs, network);
     // The other networks of its containers: their lines go into those files too.
@@ -970,11 +1476,18 @@ pub(crate) fn refresh_hosts(dirs: &Dirs, network: &str) {
             let Some(hostname) = hostname_of(m, dirs, id) else {
                 continue;
             };
+            let mut own = [(m.ip.into(), m.aliases.as_slice()); 2];
+            let count = if let Some(ip6) = m.ip6 {
+                own[1].0 = ip6.into();
+                2
+            } else {
+                1
+            };
             crate::netfiles::bridge_hosts(
                 &hostname,
                 &m.name,
                 &m.extra_hosts,
-                &[(m.ip, m.aliases.as_slice())],
+                &own[..count],
                 &[(&loaded.block, Some(place))],
             )
         } else {
@@ -996,13 +1509,62 @@ pub(crate) fn with_address_of(
     name: &str,
     id: &str,
 ) -> Result<(Network, Option<Ipv4Addr>)> {
+    let (network, addresses) = with_addresses_of(dirs, name, id)?;
+    Ok((network, addresses.map(|a| a.ipv4)))
+}
+
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(crate) fn with_addresses_of(
+    dirs: &Dirs,
+    name: &str,
+    id: &str,
+) -> Result<(Network, Option<Addresses>)> {
     if name != DEFAULT {
         check_name(name)?;
     }
     let _lock = lock(dirs)?;
     let record = load(dirs, name)?;
-    let ip = record.containers.get(id).map(|m| m.ip);
-    Ok((record.network, ip))
+    let addresses = record.containers.get(id).map(Member::addresses);
+    Ok((record.network, addresses))
+}
+
+/// Find a name only on the caller's active user bridges. Hold the same lock as live
+/// attachment changes so a lookup sees consistent settings and allocations.
+#[cfg(target_os = "linux")]
+pub(crate) fn lookup_peer(dirs: &Dirs, caller: &str, name: &str) -> Result<Vec<std::net::IpAddr>> {
+    let _lock = lock(dirs)?;
+    let spec = crate::state::read_config(dirs, caller)?;
+    let mut addresses = Vec::new();
+    let matches_name = |candidate: &str| candidate.trim_end_matches('.').eq_ignore_ascii_case(name);
+    for network in spec
+        .bridge_networks()
+        .into_iter()
+        .filter(|network| *network != DEFAULT)
+    {
+        let Some(record) = read_record(dirs, network)? else {
+            continue;
+        };
+        if !record.containers.contains_key(caller) {
+            continue;
+        }
+        for (id, member) in &record.containers {
+            if !matches_name(&member.name)
+                && !member.aliases.iter().any(|alias| matches_name(alias))
+            {
+                continue;
+            }
+            // A killed watcher can leave a record behind until its state is reconciled.
+            // Service virtual addresses are not owned by a container watcher.
+            if crate::id::is_valid(id) && !crate::state::shim_running(dirs, id) {
+                continue;
+            }
+            addresses.push(member.ip.into());
+            addresses.extend(member.ip6.map(std::net::IpAddr::from));
+        }
+    }
+    addresses.sort_unstable();
+    addresses.dedup();
+    Ok(addresses)
 }
 
 /// The containers with an address in `network`: (name, address), by address.
@@ -1037,6 +1599,102 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn network_settings_keep_the_initialized_default_bridge() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = dirs_in(tmp.path());
+        crate::config::set_value(&dirs, "image_compression", "idle").unwrap();
+        let initial = settings(&dirs).unwrap();
+        assert!(initial.active_subnet.is_none());
+
+        let requested = NetworkPreferences {
+            default_subnet: "10.246.205.0/24".into(),
+            default_ipv6_subnet: Some("fd35:d51a:133::/64".into()),
+            embedded_dns: true,
+            dns_filter: crate::config::DnsFilter::Ipv6,
+        };
+        let saved = save_settings(&dirs, requested.clone(), Some(&initial.revision)).unwrap();
+        assert_eq!(saved.preferences, requested);
+        assert!(saved.active_subnet.is_none());
+        let bridge = ensure_default(&dirs).unwrap();
+        assert_eq!(bridge.subnet, requested.default_subnet);
+        assert_eq!(
+            bridge.ipv6.unwrap().to_string(),
+            requested.default_ipv6_subnet.clone().unwrap()
+        );
+
+        let changed = NetworkPreferences {
+            default_subnet: "10.246.206.0/24".into(),
+            default_ipv6_subnet: None,
+            ..requested
+        };
+        let saved = save_settings(&dirs, changed.clone(), Some(&saved.revision)).unwrap();
+        assert_eq!(saved.preferences, changed);
+        assert_eq!(saved.active_subnet.as_deref(), Some(bridge.subnet.as_str()));
+        assert_eq!(
+            saved.active_ipv6_subnet,
+            bridge.ipv6.map(|subnet| subnet.to_string())
+        );
+        assert_eq!(ensure_default(&dirs).unwrap().bridge, bridge.bridge);
+        assert_eq!(
+            crate::config::load(&dirs).unwrap().image_compression,
+            crate::config::ImageCompression::Idle
+        );
+    }
+
+    #[test]
+    fn network_settings_reject_stale_values_but_keep_unrelated_edits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = dirs_in(tmp.path());
+        let before = settings(&dirs).unwrap();
+        crate::config::set_value(&dirs, "image_compression", "idle").unwrap();
+
+        let first = NetworkPreferences {
+            dns_filter: crate::config::DnsFilter::Ipv4,
+            ..before.preferences.clone()
+        };
+        let saved = save_settings(&dirs, first, Some(&before.revision)).unwrap();
+        assert_ne!(saved.revision, before.revision);
+        let second = NetworkPreferences {
+            embedded_dns: !before.preferences.embedded_dns,
+            ..before.preferences
+        };
+        let error = save_settings(&dirs, second, Some(&before.revision)).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Conflict);
+        assert_eq!(settings(&dirs).unwrap().preferences, saved.preferences);
+        assert_eq!(
+            crate::config::load(&dirs).unwrap().image_compression,
+            crate::config::ImageCompression::Idle
+        );
+    }
+
+    #[test]
+    fn network_settings_reject_conflicts_without_changing_dns() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = dirs_in(tmp.path());
+        let created = create_in(&dirs, "app", Some("10.246.207.0/24"), &[]).unwrap();
+        let before = settings(&dirs).unwrap();
+        let conflict = NetworkPreferences {
+            default_subnet: created.subnet,
+            embedded_dns: !before.preferences.embedded_dns,
+            ..before.preferences.clone()
+        };
+        assert!(
+            save_settings(&dirs, conflict, None)
+                .unwrap_err()
+                .why
+                .contains("network app")
+        );
+        let invalid = NetworkPreferences {
+            default_subnet: "10.246.207.1/24".into(),
+            embedded_dns: !before.preferences.embedded_dns,
+            ..before.preferences.clone()
+        };
+        assert!(save_settings(&dirs, invalid, None).is_err());
+        assert_eq!(settings(&dirs).unwrap().preferences, before.preferences);
+        assert!(!dirs.config.join("config.toml").exists());
     }
 
     #[test]
@@ -1149,7 +1807,14 @@ mod tests {
         let ip = allocate(&dirs, "app", &spec.id, &spec.name, &spec.hostname).unwrap();
         assert_eq!(
             endpoints(&dirs, "app").unwrap(),
-            [(spec.id.clone(), spec.name.clone(), ip)]
+            [(
+                spec.id.clone(),
+                spec.name.clone(),
+                Addresses {
+                    ipv4: ip,
+                    ipv6: None
+                }
+            )]
         );
     }
 
@@ -1583,9 +2248,11 @@ mod tests {
                 aliases: &aliases,
                 networks: &networks,
                 extra_hosts: &[],
+                fixed: Default::default(),
             },
         )
         .unwrap()
+        .ipv4
     }
 
     const LOCAL: &str = "127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n";
@@ -1630,8 +2297,9 @@ mod tests {
             aliases: &[],
             networks: &[],
             extra_hosts: &extra,
+            fixed: Default::default(),
         };
-        let web_ip = join(&dirs, "app", &web, &endpoint).unwrap();
+        let web_ip = join(&dirs, "app", &web, &endpoint).unwrap().ipv4;
         let want = format!("{LOCAL}10.9.9.9\tcache\n{web_ip}\tweb\n");
         assert_eq!(hosts_text(&dirs, &web, &["app".to_string()]).unwrap(), want);
         // Another container arrives: the file is written again, the extra line kept.

@@ -24,7 +24,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     container: rust:1-bookworm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install build tools
         env:
           NFPM_VERSION: 2.48.0
@@ -40,7 +40,7 @@ jobs:
           dpkg -i "$deb"
       - name: Build GUI and engine packages
         run: desktop/linux/package.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: podbag-desktop-${{ matrix.arch }}
           path: target/packages/
@@ -57,8 +57,8 @@ jobs:
     runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     container: ${{ matrix.system }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           name: podbag-desktop-${{ matrix.arch }}
           path: dist

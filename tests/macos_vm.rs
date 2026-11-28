@@ -237,6 +237,103 @@ impl Drop for Mac {
 }
 
 #[test]
+fn storage_grows_the_filesystem_and_relocates_the_saved_disk() {
+    if !enabled() {
+        return;
+    }
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    const GIB: u64 = 1 << 30;
+    let mac = Mac::bare(0);
+    let storage = |args: &[&str]| -> serde_json::Value {
+        let mut argv = vec!["vm", "storage"];
+        argv.extend(args);
+        serde_json::from_str(&mac.ok(&argv)).unwrap()
+    };
+    let original = mac.home.path().join("disk.img");
+    let data = tempfile::tempdir().unwrap();
+    let destination = data.path().join("moved disk.img");
+    let target = destination.to_str().unwrap();
+    assert_eq!(storage(&[])["exists"], false);
+    assert_eq!(mac.ok(&["vm", "status"]), "stopped");
+
+    mac.ok(&[
+        "volume",
+        "create",
+        "--label",
+        "proof=retained",
+        "storage-marker",
+    ]);
+    assert_eq!(storage(&[])["filesystemBytes"], 64 * GIB);
+    for action in [["grow", "65"], ["move", target]] {
+        let output = mac.run(&["vm", "storage", action[0], action[1]]);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("stop the VM"));
+    }
+    mac.ok(&["vm", "stop"]);
+
+    // Legacy disk modes must not be copied into a new recovery file or destination.
+    std::fs::set_permissions(&original, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let shrink = mac.run(&["vm", "storage", "grow", "63"]);
+    assert!(!shrink.status.success(), "{shrink:?}");
+    let scheduled = storage(&["grow", "65"]);
+    assert_eq!(scheduled["growthPending"], true);
+    assert_eq!(scheduled["sizeBytes"], 65 * GIB);
+    assert_eq!(scheduled["filesystemBytes"], 64 * GIB);
+    let backup = Path::new(scheduled["backupPath"].as_str().unwrap());
+    let backup_meta = std::fs::metadata(backup).unwrap();
+    assert_eq!(backup_meta.len(), 64 * GIB);
+    assert_eq!(backup_meta.mode() & 0o777, 0o600);
+
+    mac.ok(&["vm", "start"]);
+    let grown = storage(&[]);
+    assert_eq!(grown["growthPending"], false);
+    assert_eq!(grown["filesystemBytes"], 65 * GIB);
+    let marker = mac.ok(&["volume", "inspect", "storage-marker"]);
+    assert!(marker.contains("retained"), "{marker}");
+    mac.ok(&["volume", "create", "after-growth"]);
+    mac.ok(&["vm", "stop"]);
+
+    std::fs::write(&destination, "do not overwrite").unwrap();
+    let blocked = mac.run(&["vm", "storage", "move", target]);
+    assert!(!blocked.status.success(), "{blocked:?}");
+    assert_eq!(
+        std::fs::read_to_string(&destination).unwrap(),
+        "do not overwrite"
+    );
+    std::fs::remove_file(&destination).unwrap();
+
+    let moved = storage(&["move", target]);
+    let saved = destination.canonicalize().unwrap();
+    assert_eq!(moved["path"], saved.to_str().unwrap());
+    assert_eq!(moved["backupPath"], original.to_str().unwrap());
+    assert_eq!(moved["filesystemBytes"], 65 * GIB);
+    assert!(original.is_file());
+    assert_eq!(
+        std::fs::metadata(&destination).unwrap().mode() & 0o777,
+        0o600
+    );
+    let info: serde_json::Value =
+        serde_json::from_str(&mac.ok(&["vm", "status", "--json"])).unwrap();
+    assert_eq!(info["disk"]["path"], saved.to_str().unwrap());
+
+    // An unplugged destination must not open the old image or create a new empty one.
+    let unavailable = destination.with_extension("unavailable");
+    std::fs::rename(&destination, &unavailable).unwrap();
+    let blocked = mac.run(&["vm", "start"]);
+    assert!(!blocked.status.success(), "{blocked:?}");
+    assert_eq!(storage(&[])["exists"], false);
+    std::fs::rename(&unavailable, &destination).unwrap();
+
+    mac.ok(&["vm", "start"]);
+    assert!(
+        mac.ok(&["volume", "inspect", "storage-marker"])
+            .contains("retained")
+    );
+    assert!(mac.ok(&["volume", "ls"]).contains("after-growth"));
+    assert_eq!(storage(&[])["path"], saved.to_str().unwrap());
+}
+
+#[test]
 fn saved_resources_apply_on_the_next_boot() {
     if !enabled() {
         return;
@@ -914,6 +1011,210 @@ fn mac_paths_outside_users_are_refused_however_written() {
 }
 
 #[test]
+fn synchronized_share_moves_edits_across_the_vm_restart() {
+    if !enabled() {
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    let mac = Mac::bare(60);
+    let project = tempfile::tempdir_in(std::env::var("HOME").unwrap()).unwrap();
+    let source = project.path().join("original");
+    std::fs::write(&source, "from host\n").unwrap();
+    std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o750)).unwrap();
+    let name = project.path().canonicalize().unwrap();
+    let name = name.to_str().unwrap();
+    let status = |args: &[&str]| {
+        let text = mac.ok(args);
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(value["lastError"].is_null(), "{value:#}");
+        assert_eq!(
+            value["conflicts"],
+            serde_json::json!([]),
+            "{args:?}: {value:#}"
+        );
+        value
+    };
+    let share = status(&["vm", "sync", "add", "project", name]);
+    assert_eq!(share["volume"], "podbag-sync-project");
+    let alpine = IMAGES[0].0;
+    mac.ok(&["pull", alpine]);
+    let empty = tempfile::tempdir_in(std::env::var("HOME").unwrap()).unwrap();
+    let empty_path = empty.path().canonicalize().unwrap();
+    status(&["vm", "sync", "add", "empty", empty_path.to_str().unwrap()]);
+    mac.ok(&[
+        "run",
+        "--rm",
+        "-v",
+        "podbag-sync-empty:/etc",
+        alpine,
+        "sh",
+        "-ec",
+        "test ! -e /etc/alpine-release",
+    ]);
+    status(&["vm", "sync", "remove", "empty"]);
+    let run = |script| {
+        mac.ok(&[
+            "run",
+            "--rm",
+            "-v",
+            "podbag-sync-project:/work",
+            alpine,
+            "sh",
+            "-ec",
+            script,
+        ])
+    };
+
+    assert_eq!(
+        run("cat /work/original; stat -c %a /work/original"),
+        "from host\n750"
+    );
+    run(
+        "mv /work/original /work/renamed; echo 'from guest' > /work/renamed; chmod 640 /work/renamed",
+    );
+    status(&["vm", "sync", "now", "project"]);
+    assert!(!source.exists());
+    let renamed = project.path().join("renamed");
+    assert_eq!(std::fs::read_to_string(&renamed).unwrap(), "from guest\n");
+    assert_eq!(
+        renamed.metadata().unwrap().permissions().mode() & 0o777,
+        0o640
+    );
+    let old_file = std::fs::read_dir(project.path().join(".podbag-sync-recovery"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path()
+        .join("file");
+    assert_eq!(std::fs::read_to_string(old_file).unwrap(), "from host\n");
+
+    mac.ok(&["vm", "stop"]);
+    std::fs::write(&renamed, "edited while off\n").unwrap();
+    status(&["vm", "sync", "now", "project"]);
+    assert_eq!(run("cat /work/renamed"), "edited while off");
+    std::fs::remove_file(&renamed).unwrap();
+    status(&["vm", "sync", "now", "project"]);
+    run("test ! -e /work/renamed");
+    status(&["vm", "sync", "remove", "project"]);
+    assert_eq!(mac.ok(&["vm", "sync", "list"]), "[]");
+    assert!(mac.ok(&["volume", "ls"]).contains("podbag-sync-project"));
+
+    // A synchronized share reads its source through a shared folder.
+    let outside = tempfile::tempdir_in("/private/tmp").unwrap();
+    let refused = mac.run(&[
+        "vm",
+        "sync",
+        "add",
+        "outside",
+        outside.path().to_str().unwrap(),
+    ]);
+    assert!(!refused.status.success(), "{refused:?}");
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("Add it to the shared folders first"),
+        "{refused:?}"
+    );
+}
+
+#[test]
+fn configured_mac_folder_reaches_cli_and_docker_after_restart() {
+    if !enabled() {
+        return;
+    }
+    let mac = Mac::bare(60);
+    let image = IMAGES[0].0;
+    let folder = tempfile::Builder::new()
+        .prefix("podbag shared folder ")
+        .tempdir_in("/private/tmp")
+        .unwrap();
+    let path = folder.path().canonicalize().unwrap();
+    let path = path.to_str().unwrap();
+    let source = format!("{path}:/project");
+    let read = ["run", "--rm", "-v", &source, image, "cat", "/project/note"];
+    std::fs::write(folder.path().join("note"), "from the Mac\n").unwrap();
+
+    assert_eq!(mac.run(&read).status.code(), Some(125));
+    mac.ok(&["pull", image]);
+    mac.ok(&["vm", "set", "--share", "/Users", "--share", path]);
+    assert_eq!(status_json(&mac)["pending"], true);
+    assert_eq!(mac.run(&read).status.code(), Some(125));
+
+    mac.ok(&["vm", "restart", "--yes"]);
+    assert_eq!(mac.ok(&read), "from the Mac");
+    if have_docker() {
+        assert_eq!(mac.docker_ok(&read), "from the Mac");
+    }
+    let relative = mac
+        .cmd(&[
+            "run",
+            "--rm",
+            "-v",
+            "./:/project",
+            image,
+            "cat",
+            "/project/note",
+        ])
+        .current_dir(path)
+        .output()
+        .unwrap();
+    assert!(relative.status.success(), "{relative:?}");
+    assert_eq!(relative.stdout, b"from the Mac\n");
+
+    let link = folder.path().join("out");
+    std::os::unix::fs::symlink("/private/etc", &link).unwrap();
+    let escape = format!("{}:/escaped", link.display());
+    assert_eq!(
+        mac.run(&["run", "--rm", "-v", &escape, image, "true"])
+            .status
+            .code(),
+        Some(125)
+    );
+    if have_docker() {
+        let out = mac
+            .docker(&["run", "--rm", "-v", &escape, image, "true"])
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("mounts denied"),
+            "{out:?}"
+        );
+    }
+
+    mac.ok(&[
+        "create",
+        "--name",
+        "binds-old-share",
+        "-v",
+        "/Users:/old",
+        image,
+        "true",
+    ]);
+    mac.ok(&["vm", "set", "--no-shares", "--restart", "--yes"]);
+    let old = mac.run(&["start", "binds-old-share"]);
+    assert!(!old.status.success(), "{old:?}");
+    assert!(
+        String::from_utf8_lossy(&old.stderr).contains("outside the Mac folders"),
+        "{old:?}"
+    );
+    assert_eq!(
+        status_json(&mac)["sharedPaths"]["inUse"],
+        serde_json::json!([])
+    );
+    assert_eq!(mac.run(&read).status.code(), Some(125));
+    if have_docker() {
+        let out = mac.docker(&read).output().unwrap();
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("mounts denied"),
+            "{out:?}"
+        );
+    }
+    assert_eq!(
+        mac.ok(&["run", "--rm", image, "echo", "still runs"]),
+        "still runs"
+    );
+}
+
+#[test]
 fn a_broken_data_disk_is_an_error_not_a_ram_disk() {
     if !enabled() {
         return;
@@ -1051,6 +1352,7 @@ fn agent_request(mac: &Mac, argv: &[&str]) {
         argv: argv.iter().map(|a| a.to_string()).collect(),
         env: Vec::new(),
         cwd: "/".into(),
+        paths: Vec::new(),
         tty: false,
         rows: 0,
         cols: 0,

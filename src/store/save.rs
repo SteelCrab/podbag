@@ -66,7 +66,8 @@ impl Store {
                 diff_ids.push(format!("sha256:{hex}"));
                 layers.push(path);
             }
-            let config = manifest::config_json(&record.config, &diff_ids, record.created);
+            let config =
+                manifest::config_json(&record.config, &diff_ids, record.created, &record.history);
             let hex = crate::image::registry::sha256_hex(&config);
             let config_path = format!("blobs/sha256/{hex}");
             if written.insert(hex) {

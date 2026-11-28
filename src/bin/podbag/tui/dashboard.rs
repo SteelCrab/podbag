@@ -18,6 +18,8 @@ pub enum Change {
     #[cfg(unix)]
     UpgradeTerminal,
     Pull,
+    /// A volume was created: its name.
+    Volume(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,7 +76,10 @@ pub fn open(ui: &mut Screen, target: &Target, exe: &Path, lab: &mut Lab) -> Resu
     }
     let i = ui.menu("col.actions", &keys)?;
     match keys[i] {
-        "volume.create" => resources::volume(ui, &Client::new(target.endpoint.clone()))?,
+        "volume.create" => {
+            return resources::volume(ui, &Client::new(target.endpoint.clone()))
+                .map(Change::Volume);
+        }
         "action.pull" => return Ok(Change::Pull),
         "pull.login" => {
             let registry = resources::registry(ui, exe)?;
@@ -261,6 +266,7 @@ fn vm(ui: &mut Screen, exe: &Path) -> Result<Change> {
                 memory_mib: Some(memory_mib),
                 idle_seconds: Some(idle_seconds),
                 restart,
+                ..cli::VmSettings::default()
             };
             ui.confirm(
                 &format!(

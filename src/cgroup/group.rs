@@ -173,6 +173,21 @@ pub fn kill_all(path: &Path) {
     }
 }
 
+/// Wait up to `limit` until no process is left in the group at `path` (and below it):
+/// `kill_all` only sends the signal. True when the group is empty or gone.
+pub fn wait_empty(path: &Path, limit: Duration) -> bool {
+    let deadline = Instant::now() + limit;
+    loop {
+        match std::fs::read_to_string(path.join("cgroup.events")) {
+            Ok(events) if !events.lines().any(|l| l.trim() == "populated 1") => return true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return true,
+            Err(_) => return false,
+            Ok(_) if Instant::now() >= deadline => return false,
+            Ok(_) => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
+}
+
 /// Remove an empty cgroup directory once, with the groups below it; a busy or missing
 /// one is left as it is.
 pub fn try_remove_dir(path: &Path) {
@@ -585,6 +600,21 @@ fn cgroup_error(path: &Path, e: std::io::Error) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn waiting_for_an_empty_group_ends_in_time() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        // The group is gone.
+        assert!(wait_empty(&dir.join("gone"), Duration::from_millis(50)));
+        std::fs::write(dir.join("cgroup.events"), "populated 0\nfrozen 0\n").unwrap();
+        assert!(wait_empty(dir, Duration::from_millis(50)));
+        // A process never exits: the wait ends and says so.
+        std::fs::write(dir.join("cgroup.events"), "populated 1\nfrozen 0\n").unwrap();
+        let start = Instant::now();
+        assert!(!wait_empty(dir, Duration::from_millis(50)));
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
 
     /// A cgroup root whose controllers cannot be passed down: inside a cgroup namespace
     /// whose root has processes, writing `cgroup.subtree_control` fails (EBUSY). Here the

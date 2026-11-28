@@ -10,6 +10,7 @@ mod mouse;
 mod preferences;
 mod pull;
 mod resources;
+mod training;
 mod tutorial;
 mod view;
 
@@ -19,6 +20,7 @@ use podbag::client::{
     ApiError, Choice, Client, Closer, DockerTarget, Endpoint, Kind, Location, Target,
     podbag_program,
 };
+use podbag::volume_lesson::course::UiReport;
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
@@ -83,6 +85,20 @@ pub fn run(once: bool, engine: Option<Choice>, mouse: bool) -> i32 {
     };
     let mut runtime = Runtime::new(target, exe, engines);
     runtime.app.appearance = preferences::Appearance::load();
+    // Training mode: a practice session with a course attempt (`lab start <id> --tui`).
+    #[cfg(unix)]
+    if let Some(root) = std::env::var_os(podbag::volume_lesson::SCOPE).map(PathBuf::from)
+        && podbag::volume_lesson::course::Attempt::active(&root)
+    {
+        let title = std::env::var(crate::lesson::TITLE).ok();
+        match training::Panel::load(&root, title.as_deref()) {
+            Ok(panel) => {
+                runtime.app.training = Some(panel);
+                runtime.training = Some(root);
+            }
+            Err(e) => runtime.app.message = Some((format!("Cannot read the course: {e}"), true)),
+        }
+    }
     if let Err(e) = ready {
         runtime.app.message = Some((e, true));
     }
@@ -259,6 +275,9 @@ type Login = Arc<dyn Fn(&Location) -> Option<String> + Send + Sync>;
 /// The login header for a pull of this image. A secret: never shown or logged.
 type Auth = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
+/// Sends a UI action to the course engine: (practice root, what the UI did).
+type Reporter = Arc<dyn Fn(&Path, &UiReport) -> Result<(), String> + Send + Sync>;
+
 /// How the TUI finds, saves and looks at engines (tests give fakes).
 struct Engines {
     find: FindEngine,
@@ -358,6 +377,10 @@ struct Runtime {
     asked_features: bool,
     /// A search to start once the typing stops.
     pending_search: Option<(String, Instant)>,
+    /// The practice root, in training mode.
+    training: Option<PathBuf>,
+    /// Sends a UI action of the current step to the course engine.
+    report: Reporter,
 }
 
 impl Runtime {
@@ -390,6 +413,12 @@ impl Runtime {
             logs: None,
             asked_features: false,
             pending_search: None,
+            training: None,
+            report: Arc::new(|root, done| {
+                podbag::volume_lesson::course::ui_report(root, done)
+                    .map(drop)
+                    .map_err(|e| e.to_string())
+            }),
         }
     }
 
@@ -419,6 +448,7 @@ impl Runtime {
                         return Ok(());
                     }
                     Effect::Shell { id, name } => self.shell(&id, &name, terminal)?,
+                    Effect::TrainingShell => self.training_shell(terminal)?,
                     Effect::Dashboard
                     | Effect::Page(_)
                     | Effect::CreateVolume
@@ -470,7 +500,7 @@ impl Runtime {
             look: &mut self.app.appearance,
         };
         let result = match effect {
-            Effect::CreateVolume => resources::volume(&mut ui, &self.client).map(|_| Change::None),
+            Effect::CreateVolume => resources::volume(&mut ui, &self.client).map(Change::Volume),
             Effect::RegistryLogin(place) => {
                 resources::login(&mut ui, &self.exe, &place).map(|_| Change::None)
             }
@@ -519,6 +549,10 @@ impl Runtime {
                 self.apply(login);
             }
             Ok(Change::Notice(text)) => self.app.message = Some((text, false)),
+            Ok(Change::Volume(name)) => self.apply(Effect::Report {
+                action: "create-volume",
+                name,
+            }),
             Ok(Change::None) => {
                 if let app::Mode::Pull(form) = &self.app.mode {
                     self.apply(Effect::Login(form.place()));
@@ -561,6 +595,8 @@ impl Runtime {
             Msg::Changed => self.soon(SETTLE),
             Msg::Live(_) => self.soon(Duration::ZERO),
             Msg::Lists(result) => {
+                // The training shell may have done a step.
+                self.reload_training();
                 self.loading = false;
                 // Without events, read again soon; with them, now and then for the
                 // times shown ("Up 5 minutes").
@@ -579,9 +615,57 @@ impl Runtime {
                 }
             }
             Msg::Done(..) => self.soon(Duration::ZERO),
+            Msg::Step(Ok(())) => self.reload_training(),
             _ => {}
         }
         self.app.on_msg(msg);
+    }
+
+    /// The panel, read again from the attempt. A session that has ended keeps it as it was.
+    fn reload_training(&mut self) {
+        let (Some(root), Some(panel)) = (&self.training, &mut self.app.training) else {
+            return;
+        };
+        if let Ok(new) = training::Panel::load(root, Some(&panel.title)) {
+            *panel = new;
+        }
+    }
+
+    /// What `apply` reports for EFFECT: only an action of the current step's own kind.
+    /// Err: that kind on another name, in the course engine's words. `apply` then does not
+    /// run it (it could make a later step impossible). logs and inspect change nothing: on
+    /// another name they run as usual, and are not reported.
+    fn step_report(&self, effect: &Effect) -> Result<Option<StepReport>, String> {
+        let (Some(root), Some(panel), Some(step), Some((action, name))) = (
+            self.training.clone(),
+            self.app.training.as_ref(),
+            self.app.training.as_ref().and_then(|panel| panel.step()),
+            training::ui_report(effect),
+        ) else {
+            return Ok(None);
+        };
+        if panel
+            .expected()
+            .is_none_or(|(expected, _)| expected != action)
+        {
+            return Ok(None);
+        }
+        if let Err(e) = panel.expects(action, &name) {
+            return match action {
+                "logs" | "inspect" => Ok(None),
+                _ => Err(e.to_string()),
+            };
+        }
+        Ok(Some(StepReport {
+            root,
+            done: UiReport {
+                step: step.key.clone(),
+                action: action.to_owned(),
+                name,
+                seen: None,
+            },
+            report: self.report.clone(),
+        }))
     }
 
     /// Refresh within `after` (an earlier one stays).
@@ -673,6 +757,17 @@ impl Runtime {
     }
 
     fn select_engine(&mut self, next: Choice) -> bool {
+        // Training mode: steps are reported only for actions on the practice engine.
+        if self.training.is_some() {
+            self.app.message = Some((
+                format!(
+                    "Cannot use {}: This terminal is connected to the practice store.",
+                    next.label()
+                ),
+                true,
+            ));
+            return false;
+        }
         let target = match (self.engines.find)(&next) {
             Ok(t) => t,
             Err(e) => {
@@ -721,10 +816,23 @@ impl Runtime {
     /// Run an effect in a thread (the shell, which takes the terminal, is not here).
     fn apply(&mut self, effect: Effect) {
         let (client, tx) = (self.client.clone(), self.sender());
+        // Decided now, sent by the effect's thread once the effect has worked.
+        let step = match self.step_report(&effect) {
+            Ok(step) => step,
+            Err(refused) => {
+                // The pull form said "Pulling …" before this effect; no worker clears it.
+                if matches!(effect, Effect::Pull(_)) {
+                    self.app.busy = None;
+                }
+                self.app.on_msg(Msg::Step(Err(refused)));
+                return;
+            }
+        };
         match effect {
             Effect::None
             | Effect::Quit
             | Effect::Shell { .. }
+            | Effect::TrainingShell
             | Effect::Dashboard
             | Effect::Page(_)
             | Effect::CreateVolume
@@ -760,7 +868,11 @@ impl Runtime {
             } => {
                 self.app.busy = Some(format!("{} {name}", verb.doing()));
                 std::thread::spawn(move || {
-                    tx.send(act(&client, kind, &id, &name, verb));
+                    let msg = act(&client, kind, &id, &name, verb);
+                    if matches!(msg, Msg::Done(_, false)) {
+                        report(step, &tx);
+                    }
+                    tx.send(msg);
                 });
             }
             Effect::Inspect {
@@ -785,6 +897,12 @@ impl Runtime {
                                     }
                                 }
                             }
+                            // The step checks the details shown here, not a second read.
+                            let step = step.map(|mut s| {
+                                s.done.seen = Some(v);
+                                s
+                            });
+                            report(step, &tx);
                             Msg::Text(
                                 format!("Inspect: {name}"),
                                 text.lines().map(str::to_string).collect(),
@@ -802,6 +920,7 @@ impl Runtime {
                     Ok(lines) => {
                         self.logs = Some(lines.closer());
                         std::thread::spawn(move || {
+                            report(step, &tx);
                             for line in lines {
                                 let Ok(line) = line else { break };
                                 if !tx.send(Msg::LogLine(generation, line)) {
@@ -864,6 +983,9 @@ impl Runtime {
                     let done = client.pull_auth(&image, login.as_deref(), |line| {
                         tx.send(Msg::Progress(format!("Pulling {image}: {line}")));
                     });
+                    if done.is_ok() {
+                        report(step, &tx);
+                    }
                     tx.send(match done {
                         Ok(()) => Msg::Done(format!("Pulled {image}"), false),
                         Err(e) => Msg::Done(format!("Cannot pull {image}: {e}"), true),
@@ -872,8 +994,15 @@ impl Runtime {
             }
             Effect::Prune(kind) => {
                 std::thread::spawn(move || {
-                    tx.send(prune(&client, kind));
+                    let msg = prune(&client, kind);
+                    if matches!(msg, Msg::Done(_, false)) {
+                        report(step, &tx);
+                    }
+                    tx.send(msg);
                 });
+            }
+            Effect::Report { .. } => {
+                std::thread::spawn(move || report(step, &tx));
             }
             Effect::Rename { id, to } => {
                 std::thread::spawn(move || {
@@ -911,6 +1040,23 @@ impl Runtime {
         name: &str,
         terminal: &mut DefaultTerminal,
     ) -> std::io::Result<()> {
+        let status = self.suspended(terminal, || command.status())?;
+        let code = status.ok().and_then(|s| s.code());
+        let text = match code {
+            Some(0) => format!("The shell in {name} ended"),
+            Some(c) => format!("The shell in {name} ended with exit code {c}"),
+            None => format!("Cannot open a shell in {name}"),
+        };
+        self.app.message = Some((text, code != Some(0)));
+        Ok(())
+    }
+
+    /// Leaves the TUI screen, runs RUN, comes back (run_shell's code, shared with `:`).
+    fn suspended<T>(
+        &mut self,
+        terminal: &mut DefaultTerminal,
+        run: impl FnOnce() -> T,
+    ) -> std::io::Result<T> {
         use ratatui::crossterm::terminal as term;
         execute!(
             std::io::stdout(),
@@ -920,7 +1066,7 @@ impl Runtime {
         )?;
         term::disable_raw_mode()?;
         terminal.show_cursor()?;
-        let status = command.status();
+        let out = run();
         term::enable_raw_mode()?;
         execute!(
             std::io::stdout(),
@@ -931,14 +1077,47 @@ impl Runtime {
             execute!(std::io::stdout(), EnableMouseCapture)?;
         }
         terminal.clear()?;
-        let code = status.ok().and_then(|s| s.code());
-        let text = match code {
-            Some(0) => format!("The shell in {name} ended"),
-            Some(c) => format!("The shell in {name} ended with exit code {c}"),
-            None => format!("Cannot open a shell in {name}"),
+        Ok(out)
+    }
+
+    /// `:` in training mode: the practice shell with the step's command, then the lists
+    /// and the panel again (its commands may have done steps).
+    #[cfg(unix)]
+    fn training_shell(&mut self, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
+        let (Some(root), Some(panel)) = (self.training.clone(), self.app.training.as_ref()) else {
+            return Ok(());
         };
-        self.app.message = Some((text, code != Some(0)));
+        let intro = training::shell_intro(&self.app.appearance, panel);
+        let done = self.suspended(terminal, || {
+            println!("{intro}");
+            crate::lesson::training_shell(&root, "training $ ")
+        })?;
+        if let Err(e) = done {
+            self.app.message = Some((format!("Cannot open the training shell: {e}"), true));
+        }
+        self.reload_training();
+        self.soon(Duration::ZERO);
         Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fn training_shell(&mut self, _terminal: &mut DefaultTerminal) -> std::io::Result<()> {
+        self.app.message = Some(("The training shell runs on Linux and macOS.".into(), true));
+        Ok(())
+    }
+}
+
+/// A UI action of the current step, for the course engine.
+struct StepReport {
+    root: PathBuf,
+    done: UiReport,
+    report: Reporter,
+}
+
+/// Tells the course engine of STEP (when there is one) and sends what it said.
+fn report(step: Option<StepReport>, tx: &Tx) {
+    if let Some(s) = step {
+        tx.send(Msg::Step((s.report)(&s.root, &s.done)));
     }
 }
 
@@ -947,6 +1126,7 @@ mod tests {
     use super::*;
     use podbag::client::fake::{FakeEngine, small_engine};
     use podbag::client::{Choice, DockerTarget, Location, Target};
+    use podbag::volume_lesson::course::Attempt;
     use std::path::Path;
 
     #[test]
@@ -1207,6 +1387,435 @@ mod tests {
                 rt.on_msg(msg);
             }
         }
+    }
+
+    /// A practice session of the web-basics fixture at step KEY, its socket linked to
+    /// ENGINE, and a runtime on ENGINE in training mode, in English. The tempdir is the
+    /// practice root.
+    fn training(engine: &FakeEngine, key: &str) -> (tempfile::TempDir, Runtime) {
+        let module = include_str!("../../../../tests/fixtures/training/web-basics.podbag");
+        training_of(engine, module, key)
+    }
+
+    /// As `training`, for the module MODULE (its .podbag text).
+    fn training_of(engine: &FakeEngine, module: &str, key: &str) -> (tempfile::TempDir, Runtime) {
+        use podbag::volume_lesson::containers;
+        let course = podbag::volume_lesson::parse_package(module)
+            .unwrap()
+            .course()
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir(root.join("run")).unwrap();
+        Attempt::start(root, &course).unwrap();
+        let mut attempt = Attempt::read(root).unwrap();
+        while attempt.step().unwrap().key != key {
+            attempt.advance(root).unwrap();
+        }
+        std::os::unix::fs::symlink(engine.socket(), containers::socket(root)).unwrap();
+        let mut rt = one_engine(engine, Arc::new(|_| None), None);
+        rt.app.appearance.language = "en".into();
+        rt.training = Some(root.into());
+        rt.app.training = Some(training::Panel::load(root, None).unwrap());
+        (dir, rt)
+    }
+
+    #[test]
+    fn a_ui_action_reports_and_the_panel_moves_on() {
+        // After the remove, the fake lists no containers: container-absent holds.
+        let engine =
+            FakeEngine::start(
+                |method: &str, path: &str| match (method, path.split('?').next()) {
+                    ("GET", Some("/containers/json")) => {
+                        podbag::client::fake::json(200, serde_json::json!([]))
+                    }
+                    _ => small_engine(method, path),
+                },
+            );
+        let (dir, mut rt) = training(&engine, "remove");
+        assert_eq!(
+            rt.app.training.as_ref().unwrap().expected(),
+            Some(("remove", "lab-web".into()))
+        );
+        rt.apply(Effect::Act {
+            kind: Kind::Containers,
+            id: "id-lab-web".into(),
+            name: "lab-web".into(),
+            verb: Verb::Remove { force: false },
+        });
+        let msg = wait_for(&mut rt, |m| matches!(m, Msg::Step(_)));
+        assert!(matches!(msg, Msg::Step(Ok(()))), "{msg:?}");
+        rt.on_msg(msg);
+        assert!(rt.app.training.as_ref().unwrap().finished());
+        assert_eq!(
+            rt.app.message.as_ref().unwrap().0,
+            "All steps are done. Press q to end the session."
+        );
+        assert_eq!(
+            Attempt::read(dir.path()).unwrap().step().unwrap().key,
+            "finish"
+        );
+        assert!(
+            engine
+                .requests()
+                .contains(&"DELETE /containers/id-lab-web".to_string())
+        );
+    }
+
+    #[test]
+    fn a_step_action_on_another_name_is_refused_before_it_runs() {
+        // api is listed and web is not: once web is removed, container-absent holds.
+        let engine =
+            FakeEngine::start(
+                |method: &str, path: &str| match (method, path.split('?').next()) {
+                    ("GET", Some("/containers/json")) => podbag::client::fake::json(
+                        200,
+                        serde_json::json!([{"Id": "id-api", "Names": ["/api"],
+                            "Image": "busybox", "State": "running", "Status": "Up"}]),
+                    ),
+                    _ => small_engine(method, path),
+                },
+            );
+        let module = include_str!("../../../../tests/fixtures/training/container-network.podbag");
+        let (dir, mut rt) = training_of(&engine, module, "remove");
+        assert_eq!(
+            rt.app.training.as_ref().unwrap().expected(),
+            Some(("remove", "web".into()))
+        );
+        let remove = |id: &str, name: &str| Effect::Act {
+            kind: Kind::Containers,
+            id: id.into(),
+            name: name.into(),
+            verb: Verb::Remove { force: true },
+        };
+        // api, by mistake: not removed, and the engine's words say why.
+        rt.apply(remove("id-api", "api"));
+        assert_eq!(
+            rt.app.message,
+            Some(("This step is remove web.".into(), true))
+        );
+        assert!(rt.app.busy.is_none());
+        rt.apply(remove("id-web", "web"));
+        let msg = wait_for(&mut rt, |m| matches!(m, Msg::Step(_)));
+        assert!(matches!(msg, Msg::Step(Ok(()))), "{msg:?}");
+        rt.on_msg(msg);
+        let deletes: Vec<_> = engine
+            .requests()
+            .into_iter()
+            .filter(|r| r.starts_with("DELETE"))
+            .collect();
+        assert_eq!(deletes, ["DELETE /containers/id-web?force=1"]);
+        assert_eq!(
+            Attempt::read(dir.path()).unwrap().step().unwrap().key,
+            "removeApi"
+        );
+        assert_eq!(
+            rt.app.message.as_ref().unwrap().0,
+            "Step done: Remove the container in the CLI"
+        );
+    }
+
+    #[test]
+    fn training_mode_keeps_the_practice_engine() {
+        // The engines here would switch; training mode refuses before it asks them.
+        let engine = FakeEngine::start(small_engine);
+        let (_dir, mut rt) = training(&engine, "stop");
+        let endpoint = rt.app.endpoint.clone();
+        rt.apply(Effect::SwitchEngine);
+        assert_eq!(
+            rt.app.message,
+            Some((
+                "Cannot use Docker: This terminal is connected to the practice store.".into(),
+                true
+            ))
+        );
+        assert_eq!(
+            (rt.target.choice.clone(), &rt.app.endpoint),
+            (Choice::Podbag, &endpoint)
+        );
+        assert!(rt.training.is_some() && rt.app.training.is_some());
+        assert!(!rt.select_engine(Choice::Docker));
+        assert_eq!(rt.target.choice, Choice::Podbag);
+    }
+
+    /// web-basics as a v2 module whose steps are STEPS, then finish.
+    fn module_of(steps: serde_json::Value) -> String {
+        let mut module: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/training/web-basics.podbag"
+        ))
+        .unwrap();
+        let finish = module["steps"].as_array().unwrap().last().unwrap().clone();
+        let mut steps = steps.as_array().unwrap().clone();
+        steps.push(finish);
+        module["format"] = "podbag-course-v2".into();
+        module["steps"] = steps.into();
+        module.to_string()
+    }
+
+    #[test]
+    fn a_second_inspect_report_does_not_do_the_next_step() {
+        // Two inspects of web before the first report: the first does inspectOne; the second
+        // was for inspectOne too, so inspectTwo waits for its own inspect.
+        let inspect_step = |key: &str| {
+            serde_json::json!({
+                "key": key, "names": {"en": key},
+                "command": "podbag inspect web",
+                "ui": {"action": "inspect", "name": "web"},
+                "check": {"kind": "output-contains", "text": "nginx:alpine"},
+            })
+        };
+        let module = module_of(serde_json::json!([
+            inspect_step("inspectOne"),
+            inspect_step("inspectTwo")
+        ]));
+        let engine = FakeEngine::start(small_engine);
+        let (dir, mut rt) = training_of(&engine, &module, "inspectOne");
+        let inspect = || Effect::Inspect {
+            kind: Kind::Containers,
+            id: "a1b2c3d4e5f6a7b8".into(),
+            name: "web".into(),
+            running: false,
+        };
+        rt.apply(inspect());
+        rt.apply(inspect());
+        for _ in 0..2 {
+            let msg = wait_for(&mut rt, |m| matches!(m, Msg::Step(_)));
+            assert!(matches!(msg, Msg::Step(Ok(()))), "{msg:?}");
+        }
+        assert_eq!(
+            Attempt::read(dir.path()).unwrap().step().unwrap().key,
+            "inspectTwo"
+        );
+    }
+
+    #[test]
+    fn an_inspect_step_checks_the_details_it_showed() {
+        // web exits between the TUI's inspect and the report: the step reads what the
+        // learner saw (running), not a second inspect (exited).
+        let module = module_of(serde_json::json!([{
+            "key": "inspectExited", "names": {"en": "See that web exited"},
+            "command": "podbag inspect web",
+            "ui": {"action": "inspect", "name": "web"},
+            "check": {"kind": "output-contains", "text": "exited"},
+        }]));
+        let inspects = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let seen = inspects.clone();
+        let engine = FakeEngine::start(move |method: &str, path: &str| {
+            match (method, path.split('?').next()) {
+                ("GET", Some("/containers/a1b2c3d4e5f6a7b8/json" | "/containers/web/json")) => {
+                    let state = match seen.fetch_add(1, Ordering::SeqCst) {
+                        0 => "running",
+                        _ => "exited",
+                    };
+                    podbag::client::fake::json(
+                        200,
+                        serde_json::json!({"Id": "a1b2c3d4e5f6a7b8", "Name": "/web",
+                            "State": {"Status": state}}),
+                    )
+                }
+                _ => small_engine(method, path),
+            }
+        });
+        let (dir, mut rt) = training_of(&engine, &module, "inspectExited");
+        rt.apply(Effect::Inspect {
+            kind: Kind::Containers,
+            id: "a1b2c3d4e5f6a7b8".into(),
+            name: "web".into(),
+            running: true,
+        });
+        let msg = wait_for(&mut rt, |m| matches!(m, Msg::Step(_)));
+        assert!(
+            matches!(msg, Msg::Step(Err(ref e)) if e == "The practice result did not match this step."),
+            "{msg:?}"
+        );
+        assert_eq!(inspects.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            Attempt::read(dir.path()).unwrap().step().unwrap().key,
+            "inspectExited"
+        );
+    }
+
+    #[test]
+    fn a_refused_pull_clears_its_busy_text() {
+        // The pull form says "Pulling …" before the effect; a refused pull starts no worker.
+        let engine = FakeEngine::start(small_engine);
+        let mut module: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/training/web-basics.podbag"
+        ))
+        .unwrap();
+        module["format"] = "podbag-course-v2".into();
+        module["steps"].as_array_mut().unwrap().insert(
+            0,
+            serde_json::json!({
+                "key": "pull", "names": {"en": "Pull the image"},
+                "command": "podbag pull busybox:1.37.0",
+                "ui": {"action": "pull", "name": "busybox:1.37.0"},
+                "check": {"kind": "image-exists", "name": "busybox:1.37.0"},
+            }),
+        );
+        let (_dir, mut rt) = training_of(&engine, &module.to_string(), "pull");
+        rt.app.busy = Some("Pulling alpine:latest".into());
+        rt.apply(Effect::Pull("alpine:latest".into()));
+        assert_eq!(
+            rt.app.message,
+            Some(("This step is pull busybox:1.37.0.".into(), true))
+        );
+        assert!(rt.app.busy.is_none(), "{:?}", rt.app.busy);
+        assert!(
+            !engine
+                .requests()
+                .iter()
+                .any(|r| r.starts_with("POST /images/create"))
+        );
+    }
+
+    #[test]
+    fn logs_and_inspect_of_another_name_show_it() {
+        // They change nothing: shown as usual, with no report and no "This step is …".
+        let module =
+            include_str!("../../../../tests/fixtures/training/web-service-recovery.podbag");
+        let engine = FakeEngine::start(small_engine);
+        let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let counted = calls.clone();
+        let counter: Reporter = Arc::new(move |_: &Path, _: &UiReport| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        let (_dir, mut rt) = training_of(&engine, module, "readRecoveryLogs");
+        rt.report = counter.clone();
+        assert_eq!(
+            rt.app.training.as_ref().unwrap().expected(),
+            Some(("logs", "lab-web".into()))
+        );
+        rt.apply(Effect::Logs {
+            id: "a1b2c3d4e5f6a7b8".into(),
+            name: "web".into(),
+        });
+        let msg = wait_for(&mut rt, |m| matches!(m, Msg::LogLine(..) | Msg::Step(_)));
+        assert!(matches!(msg, Msg::LogLine(..)), "{msg:?}");
+        assert!(rt.app.message.is_none(), "{:?}", rt.app.message);
+        let (_dir, mut rt) = training_of(&engine, module, "inspectFailed");
+        rt.report = counter;
+        assert_eq!(
+            rt.app.training.as_ref().unwrap().expected(),
+            Some(("inspect", "lab-web".into()))
+        );
+        rt.apply(Effect::Inspect {
+            kind: Kind::Containers,
+            id: "a1b2c3d4e5f6a7b8".into(),
+            name: "web".into(),
+            running: false,
+        });
+        let msg = wait_for(&mut rt, |m| matches!(m, Msg::Text(..) | Msg::Step(_)));
+        assert!(
+            matches!(msg, Msg::Text(ref title, _) if title == "Inspect: web"),
+            "{msg:?}"
+        );
+        assert!(rt.app.message.is_none(), "{:?}", rt.app.message);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn other_actions_do_not_report() {
+        let engine = FakeEngine::start(small_engine);
+        let (dir, mut rt) = training(&engine, "remove");
+        let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let counted = calls.clone();
+        let counter: Reporter = Arc::new(move |_: &Path, _: &UiReport| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        rt.report = counter;
+        // Msg::Step is sent before the effect's Msg::Done, so stopping at the first of the
+        // two is enough: no waiting for a message that might come late.
+        let first = |rt: &mut Runtime, effect| {
+            rt.apply(effect);
+            wait_for(rt, |m| matches!(m, Msg::Step(_) | Msg::Done(..)))
+        };
+        // The step expects remove: a start of lab-web is an ordinary action.
+        let msg = first(
+            &mut rt,
+            Effect::Act {
+                kind: Kind::Containers,
+                id: "id-lab-web".into(),
+                name: "lab-web".into(),
+                verb: Verb::Start,
+            },
+        );
+        assert!(matches!(msg, Msg::Done(_, false)), "{msg:?}");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        // A remove in another list is not the step's action either.
+        let msg = first(
+            &mut rt,
+            Effect::Act {
+                kind: Kind::Volumes,
+                id: "pgdata".into(),
+                name: "pgdata".into(),
+                verb: Verb::Remove { force: false },
+            },
+        );
+        assert!(matches!(msg, Msg::Done(_, false)), "{msg:?}");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        // Nor a prune, or a pull.
+        let msg = first(&mut rt, Effect::Prune(Kind::Containers));
+        assert!(matches!(msg, Msg::Done(_, false)), "{msg:?}");
+        let msg = first(&mut rt, Effect::Pull("alpine:latest".into()));
+        assert!(matches!(msg, Msg::Done(_, false)), "{msg:?}");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        // A failed action of the step's kind does not report.
+        let failing = FakeEngine::start(|method: &str, path: &str| match method {
+            "DELETE" => podbag::client::fake::json(
+                409,
+                serde_json::json!({"message": "container is running"}),
+            ),
+            _ => small_engine(method, path),
+        });
+        let saved = std::mem::replace(&mut rt.client, failing.client.clone());
+        let msg = first(
+            &mut rt,
+            Effect::Act {
+                kind: Kind::Containers,
+                id: "id-lab-web".into(),
+                name: "lab-web".into(),
+                verb: Verb::Remove { force: false },
+            },
+        );
+        assert!(matches!(msg, Msg::Done(_, true)), "{msg:?}");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        rt.client = saved;
+        // The step's own action does reach the counter (so the zeros above mean something).
+        let msg = first(
+            &mut rt,
+            Effect::Act {
+                kind: Kind::Containers,
+                id: "id-lab-web".into(),
+                name: "lab-web".into(),
+                verb: Verb::Remove { force: false },
+            },
+        );
+        assert!(matches!(msg, Msg::Step(Ok(()))), "{msg:?}");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        // No real report was sent: the attempt is still at remove.
+        assert_eq!(
+            Attempt::read(dir.path()).unwrap().step().unwrap().key,
+            "remove"
+        );
+    }
+
+    #[test]
+    fn the_panel_follows_steps_done_in_the_shell() {
+        let engine = FakeEngine::start(small_engine);
+        let (dir, mut rt) = training(&engine, "stop");
+        let old = rt.app.training.as_ref().unwrap().current;
+        // The shell's command advanced the attempt (as course_step does).
+        let mut attempt = Attempt::read(dir.path()).unwrap();
+        attempt.advance(dir.path()).unwrap();
+        rt.on_msg(Msg::Lists(Ok(Lists::default())));
+        assert_eq!(rt.app.training.as_ref().unwrap().current, old + 1);
+        // A session that has ended keeps the panel as it was.
+        std::fs::remove_file(dir.path().join("run/course.json")).ok();
+        rt.on_msg(Msg::Lists(Ok(Lists::default())));
+        assert_eq!(rt.app.training.as_ref().unwrap().current, old + 1);
     }
 
     #[test]

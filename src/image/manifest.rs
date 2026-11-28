@@ -3,7 +3,7 @@
 use crate::image::ImageConfig;
 use crate::image::reference::is_digest;
 use crate::{Error, ErrorKind, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub const OCI_INDEX: &str = "application/vnd.oci.image.index.v1+json";
 pub const DOCKER_LIST: &str = "application/vnd.docker.distribution.manifest.list.v2+json";
@@ -219,6 +219,21 @@ pub fn layer_compression(media_type: &str) -> Result<Compression> {
     }
 }
 
+/// One instruction or comment in an OCI image's history, oldest first.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HistoryEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub created_by: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub author: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub comment: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub empty_layer: bool,
+}
+
 /// The parts of an image config file that podbag uses.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigFile {
@@ -226,6 +241,7 @@ pub struct ConfigFile {
     pub os: String,
     pub diff_ids: Vec<String>,
     pub config: ImageConfig,
+    pub history: Vec<HistoryEntry>,
 }
 
 #[derive(Deserialize)]
@@ -237,6 +253,7 @@ struct RawConfig {
     #[serde(default)]
     config: Option<RawRun>,
     rootfs: RawRootfs,
+    history: Option<Vec<HistoryEntry>>,
 }
 
 #[derive(Deserialize, Default)]
@@ -265,7 +282,12 @@ struct RawRootfs {
 /// An image config file for `config` and the layers `diff_ids`, as [`parse_config`]
 /// reads it back: what `docker save` writes for an image of the store.
 #[cfg(unix)]
-pub fn config_json(config: &ImageConfig, diff_ids: &[String], created: u64) -> Vec<u8> {
+pub fn config_json(
+    config: &ImageConfig,
+    diff_ids: &[String],
+    created: u64,
+    history: &[HistoryEntry],
+) -> Vec<u8> {
     let env: Vec<String> = config.env.iter().map(|(k, v)| format!("{k}={v}")).collect();
     let volumes: serde_json::Map<String, serde_json::Value> = config
         .volumes
@@ -307,14 +329,17 @@ pub fn config_json(config: &ImageConfig, diff_ids: &[String], created: u64) -> V
     if !config.shell.is_empty() {
         run["Shell"] = serde_json::json!(config.shell);
     }
-    serde_json::to_vec(&serde_json::json!({
+    let mut result = serde_json::json!({
         "architecture": host_platform().0,
         "os": "linux",
         "created": crate::shim::logbook::rfc3339(created, 0),
         "config": run,
         "rootfs": {"type": "layers", "diff_ids": diff_ids},
-    }))
-    .unwrap_or_default()
+    });
+    if !history.is_empty() {
+        result["history"] = serde_json::json!(history);
+    }
+    serde_json::to_vec(&result).unwrap_or_default()
 }
 
 pub fn parse_config(body: &[u8]) -> Result<ConfigFile> {
@@ -349,6 +374,7 @@ pub fn parse_config(body: &[u8]) -> Result<ConfigFile> {
         architecture: raw.architecture,
         os: raw.os,
         diff_ids: raw.rootfs.diff_ids,
+        history: raw.history.unwrap_or_default(),
         config: ImageConfig {
             entrypoint: run.entrypoint.unwrap_or_default(),
             cmd: run.cmd.unwrap_or_default(),
@@ -422,13 +448,15 @@ mod tests {
             shell: vec!["/bin/bash".into(), "-c".into()],
         };
         let ids = vec![format!("sha256:{}", "a".repeat(64))];
-        let back = parse_config(&config_json(&config, &ids, 1_700_000_000)).unwrap();
+        let back = parse_config(&config_json(&config, &ids, 1_700_000_000, &[])).unwrap();
         assert_eq!(back.config, config);
         assert_eq!(back.diff_ids, ids);
         assert_eq!(back.os, "linux");
         let bare = ImageConfig::default();
         assert_eq!(
-            parse_config(&config_json(&bare, &[], 0)).unwrap().config,
+            parse_config(&config_json(&bare, &[], 0, &[]))
+                .unwrap()
+                .config,
             bare
         );
     }

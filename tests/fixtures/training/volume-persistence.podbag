@@ -26,6 +26,7 @@
         "vi": "Tạo volume trong CLI"
       },
       "command": "podbag volume create training-data",
+      "ui": { "action": "create-volume", "name": "training-data" },
       "check": {
         "kind": "volume-exists",
         "name": "training-data"
@@ -61,6 +62,7 @@
         "vi": "Xóa app-a trong CLI"
       },
       "command": "podbag rm app-a",
+      "ui": { "action": "remove", "name": "app-a" },
       "check": {
         "kind": "container-absent",
         "name": "app-a"
@@ -95,6 +97,7 @@
         "vi": "Xóa app-b trong CLI"
       },
       "command": "podbag rm app-b",
+      "ui": { "action": "remove", "name": "app-b" },
       "check": {
         "kind": "container-absent",
         "name": "app-b"

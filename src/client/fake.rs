@@ -64,6 +64,11 @@ impl FakeEngine {
         }
     }
 
+    /// The socket it serves on.
+    pub fn socket(&self) -> PathBuf {
+        self.dir.join("docker.sock")
+    }
+
     /// Header `name` of request `index` (counted from 0), if it was sent.
     pub fn header(&self, index: usize, name: &str) -> Option<String> {
         let heads = self.heads.lock().unwrap_or_else(|p| p.into_inner());

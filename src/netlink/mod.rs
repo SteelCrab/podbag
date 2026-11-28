@@ -192,6 +192,7 @@ mod kernel_tests {
             id: "0".repeat(12),
             subnet: "10.76.3.0/24".into(),
             gateway: "10.76.3.1".into(),
+            ipv6: None,
             bridge: "pbg-again".into(),
             created: 0,
             labels: Default::default(),

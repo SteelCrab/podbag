@@ -4,7 +4,7 @@
 //! and a check from a fixed set of kinds. The learner runs the commands; podbag only reads
 //! the practice engine's state to check them.
 use super::{Package, containers, gui};
-use crate::client::{ContainerSummary, Kind, VolumeSummary};
+use crate::client::{Client, ContainerSummary, Kind, VolumeSummary};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashSet},
@@ -25,6 +25,100 @@ const FILES_LIMIT: usize = 16 * 1024;
 pub fn is_course(format: &str) -> bool {
     format == FORMAT || format == FORMAT_V2
 }
+/// The check kinds each UI action may complete. podbag-page's dev/docs/training.py
+/// mirrors this table; its tests read it from this file, so keep one entry per line.
+#[rustfmt::skip]
+pub const UI_CHECKS: [(&str, &[&str]); 14] = [
+    ("start", &["container-running"]),
+    ("stop", &["container-stopped", "container-exited"]),
+    ("restart", &["container-restarted", "container-running"]),
+    ("pause", &["container-paused"]),
+    ("resume", &["container-running", "container-published"]),
+    ("remove", &["container-absent"]),
+    ("logs", &["output-has-line", "output-contains"]),
+    ("inspect", &["output-contains", "output-has-line"]),
+    ("pull", &["image-exists"]),
+    ("remove-image", &["image-absent"]),
+    ("create-volume", &["volume-exists"]),
+    ("remove-volume", &["volume-absent"]),
+    ("remove-network", &["network-absent"]),
+    ("prune", &["containers-empty", "volumes-empty", "image-absent", "network-absent"]),
+];
+pub const PRUNE_KINDS: [&str; 4] = ["containers", "images", "volumes", "networks"];
+/// The browser step's UI action: not a module action.
+pub const OPEN_WEB: &str = "open-web";
+
+/// What a learner does in a UI to complete a step. One variant per `UI_CHECKS` row, in
+/// the same order.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum UiAction {
+    Start,
+    Stop,
+    Restart,
+    Pause,
+    Resume,
+    Remove,
+    Logs,
+    Inspect,
+    Pull,
+    RemoveImage,
+    CreateVolume,
+    RemoveVolume,
+    RemoveNetwork,
+    Prune,
+}
+
+impl UiAction {
+    const ALL: [UiAction; 14] = [
+        Self::Start,
+        Self::Stop,
+        Self::Restart,
+        Self::Pause,
+        Self::Resume,
+        Self::Remove,
+        Self::Logs,
+        Self::Inspect,
+        Self::Pull,
+        Self::RemoveImage,
+        Self::CreateVolume,
+        Self::RemoveVolume,
+        Self::RemoveNetwork,
+        Self::Prune,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        UI_CHECKS[self as usize].0
+    }
+
+    pub fn parse(text: &str) -> Option<UiAction> {
+        Self::ALL.into_iter().find(|action| action.as_str() == text)
+    }
+
+    /// The check kinds this action may complete.
+    pub fn checks(self) -> &'static [&'static str] {
+        UI_CHECKS[self as usize].1
+    }
+}
+
+/// A step's UI form: the action and the object it acts on (a name, or for `prune` one
+/// of `PRUNE_KINDS`).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct Ui {
+    pub action: UiAction,
+    pub name: String,
+}
+
+impl Ui {
+    /// The UI with `{port}` in its name set to PORT.
+    pub fn with_port(&self, port: u16) -> Ui {
+        Ui {
+            action: self.action,
+            name: self.name.replace("{port}", &port.to_string()),
+        }
+    }
+}
+
 pub const ACTIVE: &str = "active-course-session";
 const MAX_STEPS: usize = 40;
 
@@ -128,6 +222,15 @@ pub enum Check {
 }
 
 impl Check {
+    /// The check's kind as written in a module file, like `container-stopped`.
+    pub fn kind(&self) -> String {
+        let value = serde_json::to_value(self).expect("a check is JSON");
+        value["kind"]
+            .as_str()
+            .expect("a check has a kind")
+            .to_owned()
+    }
+
     pub fn in_desktop(&self) -> bool {
         matches!(
             self,
@@ -208,6 +311,49 @@ pub struct StepDef {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
     pub check: Check,
+    /// The UI action that completes the step, for the Desktop and the TUI. Read leniently:
+    /// see `lenient_ui` and `drop_foreign_ui`.
+    #[serde(
+        default,
+        deserialize_with = "lenient_ui",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub ui: Option<Ui>,
+}
+
+/// A step's `ui` with an action this app does not know (a later app's) is no `ui`: the
+/// step stays a CLI step, and the module still installs. podbag-page refuses one. Only a
+/// known action needs `name`.
+fn lenient_ui<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Ui>, D::Error> {
+    #[derive(Deserialize)]
+    struct Raw {
+        action: String,
+        name: Option<String>,
+    }
+    let Some(raw) = Option::<Raw>::deserialize(d)? else {
+        return Ok(None);
+    };
+    let Some(action) = UiAction::parse(&raw.action) else {
+        return Ok(None);
+    };
+    let name = raw
+        .name
+        .ok_or_else(|| serde::de::Error::missing_field("name"))?;
+    Ok(Some(Ui { action, name }))
+}
+
+/// A step's `ui` whose action does not complete its check (outside `UI_CHECKS`) is no
+/// `ui`, as `lenient_ui`: a later app may pair them. podbag-page refuses one.
+pub fn drop_foreign_ui(package: &mut Package) {
+    for step in &mut package.steps {
+        if step
+            .ui
+            .as_ref()
+            .is_some_and(|ui| !ui.action.checks().contains(&step.check.kind().as_str()))
+        {
+            step.ui = None;
+        }
+    }
 }
 
 /// The steps of a course module, as a practice session keeps them.
@@ -402,6 +548,19 @@ pub fn validate(package: &Package) -> io::Result<()> {
                 step.key
             )));
         }
+        if let Some(ui) = &step.ui {
+            let name_ok = plain(&ui.name)
+                && !ui.name.contains(char::is_whitespace)
+                && ui.name.len() <= 200
+                && (ui.action != UiAction::Prune || PRUNE_KINDS.contains(&ui.name.as_str()))
+                && (package.port.is_some() || !ui.name.contains("{port}"));
+            if !name_ok {
+                return Err(invalid(&format!(
+                    "step {} has a ui it cannot have",
+                    step.key
+                )));
+            }
+        }
     }
     let last = package.steps.last().unwrap();
     if last.key != "finish" || last.check != Check::Finish {
@@ -453,6 +612,23 @@ impl StepDef {
 
     pub fn is_finish(&self) -> bool {
         self.check == Check::Finish
+    }
+
+    /// What a UI does for this step, with the attempt's port: the module's `ui`, or the
+    /// UI form of a desktop-* check ("inspect", "stop", "remove-volume", "open-web").
+    pub fn ui_form(&self, port: u16) -> Option<(&'static str, String)> {
+        if let Some(ui) = &self.ui {
+            return Some((ui.action.as_str(), ui.with_port(port).name));
+        }
+        match self.check.with_port(port) {
+            Check::DesktopInspectExited { name }
+            | Check::DesktopPorts { name }
+            | Check::DesktopInspectVolume { name } => Some(("inspect", name)),
+            Check::DesktopStop { name } => Some(("stop", name)),
+            Check::DesktopDeleteVolume { name } => Some(("remove-volume", name)),
+            Check::DesktopBrowser { name, .. } => Some((OPEN_WEB, name)),
+            _ => None,
+        }
     }
 
     /// Checks the practice engine after the learner ran this step's command.
@@ -563,14 +739,12 @@ impl StepDef {
             | Check::DesktopInspectVolume { .. }
             | Check::DesktopDeleteVolume { .. } => false,
         };
-        if verified {
-            Ok(())
-        } else {
-            Err(io::Error::other(
-                "The practice result did not match this step.",
-            ))
-        }
+        if verified { Ok(()) } else { Err(unmet()) }
     }
+}
+
+fn unmet() -> io::Error {
+    io::Error::other("The practice result did not match this step.")
 }
 
 #[derive(Serialize)]
@@ -578,6 +752,9 @@ pub struct Instruction {
     pub key: String,
     pub names: BTreeMap<String, String>,
     pub command: Option<String>,
+    /// The step's module `ui`, with the course's port.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ui: Option<Ui>,
 }
 
 /// The steps as Training lists them, with the course's own port.
@@ -590,6 +767,7 @@ pub fn instructions(course: &Course) -> Vec<Instruction> {
             key: step.key.clone(),
             names: step.names.clone(),
             command: step.command(port),
+            ui: step.ui.as_ref().map(|ui| ui.with_port(port)),
         })
         .collect()
 }
@@ -646,6 +824,18 @@ impl Attempt {
         Ok(file)
     }
 
+    pub fn index(&self) -> usize {
+        self.index
+    }
+
+    pub fn steps(&self) -> &[StepDef] {
+        &self.course.steps
+    }
+
+    pub fn module(&self) -> &str {
+        &self.module
+    }
+
     pub fn step(&self) -> io::Result<StepDef> {
         self.course
             .steps
@@ -698,7 +888,8 @@ fn normal_image(name: &str) -> String {
     }
 }
 
-fn same_image(a: &str, b: &str) -> bool {
+/// Image names compare as the engine lists them (`busybox` = docker.io/library/busybox:latest).
+pub fn same_image(a: &str, b: &str) -> bool {
     normal_image(a) == normal_image(b)
 }
 
@@ -802,6 +993,10 @@ pub struct Snapshot {
     containers: Vec<ContainerSummary>,
     volumes: Vec<VolumeSummary>,
     detail: Option<serde_json::Value>,
+    /// The current step's module `ui`, with the attempt's port.
+    ui: Option<Ui>,
+    /// Log text after a logs step.
+    text: Option<String>,
     web: Option<Web>,
     stop: Option<String>,
     inspect_container: Option<String>,
@@ -842,76 +1037,134 @@ pub fn view(
     };
     let mut attempt = Attempt::read(&root)?;
     let client = containers::client(&root);
-    let mut rows = client.containers().map_err(io::Error::other)?;
-    let mut volumes = client.volumes().map_err(io::Error::other)?;
-    let mut detail = None;
+    let rows = client.containers().map_err(io::Error::other)?;
+    let volumes = client.volumes().map_err(io::Error::other)?;
     let row = |name: &str| {
         rows.iter()
             .find(|row| row.name() == name)
             .ok_or_else(|| io::Error::other("The practice container was not found."))
     };
     let step = attempt.step()?;
-    let check = step.check.with_port(attempt.port);
-    match (action, &check) {
-        ("status", _) => {}
+    let port = attempt.port;
+    let check = step.check.with_port(port);
+    // The desktop-* arms match the container ID (or the volume name) Desktop sends, do
+    // the step's engine action, then share desktop_check with ui_step.
+    let shown = match (action, &check) {
+        ("status", _) => Shown::default(),
+        // A step with a module `ui`: Desktop sends the name. The action and the name must
+        // match before anything changes on the engine. An inspect of another listed volume
+        // only shows it, below.
+        _ if step.ui.as_ref().is_some_and(|ui| {
+            ui.action.as_str() == action
+                && !(ui.action == UiAction::Inspect
+                    && ui.with_port(port).name != target
+                    && volumes.iter().any(|v| v.name == target))
+        }) =>
+        {
+            expects(&step, port, action, target)?;
+            perform(&client, action, target)?;
+            ui_step(&root, &mut attempt, action, target, None)?
+        }
         ("inspect-failed", Check::DesktopInspectExited { name })
-            if row(name)?.id == target && row(name)?.state == "exited" =>
+        | ("ports", Check::DesktopPorts { name })
+            if row(name)?.id == target =>
         {
+            let shown = desktop_check(&client, port, &check)?;
             attempt.advance(&root)?;
+            shown
         }
-        ("ports", Check::DesktopPorts { name })
-            if published(row(name)?, attempt.port) && row(name)?.id == target =>
+        ("open-web" | "show-web", Check::DesktopBrowser { name, .. })
+            if row(name)?.id == target =>
         {
-            attempt.advance(&root)?;
-        }
-        ("open-web" | "show-web", Check::DesktopBrowser { name, page })
-            if published(row(name)?, attempt.port) && row(name)?.id == target =>
-        {
-            check_page(attempt.port, page).map_err(|e| {
-                io::Error::other(format!("Check the published page and try again: {e}"))
-            })?;
+            let shown = desktop_check(&client, port, &check)?;
             if action == "open-web" {
                 attempt.advance(&root)?;
             }
+            shown
         }
         ("stop", Check::DesktopStop { name }) if row(name)?.id == target => {
             client
                 .container_action(target, "stop")
                 .map_err(io::Error::other)?;
-            rows = client.containers().map_err(io::Error::other)?;
-            if !rows.iter().any(|r| r.id == target && r.state == "exited") {
-                return Err(io::Error::other(
-                    "The practice container has not stopped yet.",
-                ));
-            }
+            let shown = desktop_check(&client, port, &check)?;
             attempt.advance(&root)?;
+            shown
         }
-        ("inspect", check) if volumes.iter().any(|v| v.name == target) => {
-            detail = Some(
+        ("inspect", Check::DesktopInspectVolume { name }) if name == target => {
+            let shown = desktop_check(&client, port, &check)?;
+            attempt.advance(&root)?;
+            shown
+        }
+        // Any listed volume may be inspected; only the step's own advances.
+        ("inspect", _) if volumes.iter().any(|v| v.name == target) => Shown {
+            detail: Some(
                 client
                     .inspect(Kind::Volumes, target)
                     .map_err(io::Error::other)?,
-            );
-            if matches!(check, Check::DesktopInspectVolume { name } if name == target) {
-                attempt.advance(&root)?;
-            }
-        }
+            ),
+            text: None,
+        },
         ("remove", Check::DesktopDeleteVolume { name }) if name == target => {
             client
                 .remove(Kind::Volumes, target, false)
                 .map_err(io::Error::other)?;
-            volumes = client.volumes().map_err(io::Error::other)?;
-            if volumes.iter().any(|volume| volume.name == target) {
-                return Err(io::Error::other("The practice volume still exists."));
-            }
+            let shown = desktop_check(&client, port, &check)?;
             attempt.advance(&root)?;
+            shown
         }
         _ => {
             return Err(io::Error::other(
                 "This action is unavailable for the current practice step.",
             ));
         }
-    }
+    };
+    Ok(Some(snapshot(&root, session, &attempt, shown)?))
+}
+
+/// Does ACTION on NAME with the practice engine, as Desktop's buttons ask. logs, inspect
+/// and open-web change nothing (the check reads them). Unknown: "Unknown practice action."
+pub fn perform(client: &Client, action: &str, name: &str) -> io::Result<()> {
+    let done = match action {
+        "start" | "stop" | "restart" | "pause" => client.container_action(name, action),
+        "resume" => client.container_action(name, "unpause"),
+        "remove" => {
+            let busy = client
+                .containers()
+                .map_err(io::Error::other)?
+                .iter()
+                .any(|row| {
+                    row.name() == name && matches!(row.state.as_str(), "running" | "paused")
+                });
+            client.remove(Kind::Containers, name, busy)
+        }
+        "pull" => client.pull(name, |_| {}),
+        // By name: removes only that tag.
+        "remove-image" => client.remove(Kind::Images, name, false),
+        "create-volume" => client.create_volume(name),
+        "remove-volume" => client.remove(Kind::Volumes, name, false),
+        "remove-network" => client.remove(Kind::Networks, name, false),
+        "prune" => {
+            let Some(kind) = Kind::ALL.into_iter().find(|kind| kind.segment() == name) else {
+                return Err(io::Error::other("Unknown practice action."));
+            };
+            client.prune(kind).map(drop)
+        }
+        "logs" | "inspect" | OPEN_WEB => Ok(()),
+        _ => return Err(io::Error::other("Unknown practice action.")),
+    };
+    done.map_err(io::Error::other)
+}
+
+/// What the check read and the UI may show: inspect JSON, log text.
+#[derive(Default)]
+struct Shown {
+    detail: Option<serde_json::Value>,
+    text: Option<String>,
+}
+
+/// The session as a UI shows it after a step: the current step and the practice objects.
+fn snapshot(root: &Path, session: String, attempt: &Attempt, shown: Shown) -> io::Result<Snapshot> {
+    let client = containers::client(root);
     let step = attempt.step()?;
     let check = step.check.with_port(attempt.port);
     let web = match &check {
@@ -924,7 +1177,7 @@ pub fn view(
         _ => None,
     };
     let named = |wanted: fn(&Check) -> Option<&String>| wanted(&check).cloned();
-    Ok(Some(Snapshot {
+    Ok(Snapshot {
         stop: named(|c| match c {
             Check::DesktopStop { name } => Some(name),
             _ => None,
@@ -938,19 +1191,237 @@ pub fn view(
             _ => None,
         }),
         command: step.command(attempt.port),
+        ui: step.ui.as_ref().map(|ui| ui.with_port(attempt.port)),
         stage: step.key,
-        module: attempt.module,
+        module: attempt.module.clone(),
         session,
-        containers: rows,
-        volumes,
-        detail,
+        containers: client.containers().map_err(io::Error::other)?,
+        volumes: client.volumes().map_err(io::Error::other)?,
+        detail: shown.detail,
+        text: shown.text,
         web,
-    }))
+    })
+}
+
+/// Ok when ACTION on NAME is STEP's UI form with PORT (`same_image` for `pull` and
+/// `remove-image`, exact otherwise); else the step's own action and name. The TUI asks it
+/// before an action of the step's kind runs.
+pub fn expects(step: &StepDef, port: u16, action: &str, name: &str) -> io::Result<()> {
+    let Some((expected_action, expected_name)) = step.ui_form(port) else {
+        return Err(io::Error::other(
+            "This step is done with its command in the training shell.",
+        ));
+    };
+    let same_name = if matches!(expected_action, "pull" | "remove-image") {
+        same_image(&expected_name, name)
+    } else {
+        expected_name == name
+    };
+    if expected_action == action && same_name {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "This step is {expected_action} {expected_name}."
+        )))
+    }
+}
+
+/// The one check of a desktop-* step after its UI action. Desktop's `view` and `ui_step`
+/// both call it, so the two UIs share one rule (unmet: "The practice result did not match
+/// this step."):
+/// desktop-inspect-exited → the row is `exited`; desktop-ports → `published(row, port)`;
+/// desktop-inspect-volume → the volume is listed (`detail` = its inspect JSON);
+/// desktop-stop → poll 10 s for `exited` (as `ContainerStopped`); desktop-delete-volume →
+/// the volume is not listed; desktop-browser → `published` and `check_page`.
+fn desktop_check(client: &Client, port: u16, check: &Check) -> io::Result<Shown> {
+    let rows = || client.containers().map_err(io::Error::other);
+    let row_is = |name: &str, ok: &dyn Fn(&ContainerSummary) -> bool| -> io::Result<bool> {
+        Ok(rows()?.iter().any(|row| row.name() == name && ok(row)))
+    };
+    let listed = |name: &str| -> io::Result<bool> {
+        Ok(client
+            .volumes()
+            .map_err(io::Error::other)?
+            .iter()
+            .any(|vol| vol.name == name))
+    };
+    let mut shown = Shown::default();
+    let verified = match check {
+        Check::DesktopInspectExited { name } => row_is(name, &|row| row.state == "exited")?,
+        Check::DesktopPorts { name } => row_is(name, &|row| published(row, port))?,
+        Check::DesktopInspectVolume { name } => {
+            let found = listed(name)?;
+            if found {
+                shown.detail = Some(
+                    client
+                        .inspect(Kind::Volumes, name)
+                        .map_err(io::Error::other)?,
+                );
+            }
+            found
+        }
+        // `stop` may return before the state changes.
+        Check::DesktopStop { name } => poll(Duration::from_secs(10), || {
+            row_is(name, &|row| row.state == "exited")
+                .ok()?
+                .then_some(())
+        }),
+        Check::DesktopDeleteVolume { name } => !listed(name)?,
+        Check::DesktopBrowser { name, page } => {
+            let up = row_is(name, &|row| published(row, port))?;
+            if up {
+                check_page(port, page).map_err(|e| {
+                    io::Error::other(format!("Check the published page and try again: {e}"))
+                })?;
+            }
+            up
+        }
+        _ => false,
+    };
+    if verified { Ok(shown) } else { Err(unmet()) }
+}
+
+/// The inspect details of NAME: a container, else a volume, else a network.
+fn inspect_named(client: &Client, name: &str) -> io::Result<serde_json::Value> {
+    let kind = if client
+        .containers()
+        .map_err(io::Error::other)?
+        .iter()
+        .any(|row| row.name() == name)
+    {
+        Kind::Containers
+    } else if client
+        .volumes()
+        .map_err(io::Error::other)?
+        .iter()
+        .any(|vol| vol.name == name)
+    {
+        Kind::Volumes
+    } else if client
+        .networks()
+        .map_err(io::Error::other)?
+        .iter()
+        .any(|net| net.name == name)
+    {
+        Kind::Networks
+    } else {
+        return Err(unmet());
+    };
+    client.inspect(kind, name).map_err(io::Error::other)
+}
+
+/// Under the caller's lock: when the current step's UI form is ACTION on NAME, check it on
+/// the practice engine and advance. SEEN: the inspect details the UI showed, which an
+/// inspect step checks instead of inspecting again.
+fn ui_step(
+    root: &Path,
+    attempt: &mut Attempt,
+    action: &str,
+    name: &str,
+    seen: Option<serde_json::Value>,
+) -> io::Result<Shown> {
+    let step = attempt.step()?;
+    let port = attempt.port;
+    expects(&step, port, action, name)?;
+    let client = containers::client(root);
+    let shown = match step.ui.as_ref().map(|ui| ui.action) {
+        None => desktop_check(&client, port, &step.check.with_port(port))?,
+        Some(UiAction::Logs) => {
+            let lines = client
+                .logs(name, 1000, false)
+                .map_err(io::Error::other)?
+                .collect::<io::Result<Vec<_>>>()?;
+            let text = lines.join("\n");
+            step.verify_cli(root, port, text.as_bytes())?;
+            Shown {
+                text: Some(text),
+                ..Shown::default()
+            }
+        }
+        Some(UiAction::Inspect) => {
+            // The details the UI showed (the TUI's), or a fresh inspect (Desktop's).
+            let detail = match seen {
+                Some(detail) => detail,
+                None => inspect_named(&client, name)?,
+            };
+            let text = serde_json::to_string_pretty(&detail)?;
+            step.verify_cli(root, port, text.as_bytes())?;
+            Shown {
+                detail: Some(detail),
+                ..Shown::default()
+            }
+        }
+        Some(_) => {
+            step.verify_cli(root, port, b"")?;
+            Shown::default()
+        }
+    };
+    attempt.advance(root)?;
+    Ok(shown)
+}
+
+/// A UI did ACTION on NAME: under the course lock, check and advance.
+pub fn ui_action(root: &Path, action: &str, name: &str) -> io::Result<Snapshot> {
+    locked_ui_step(root, None, action, name, None)?
+        .ok_or_else(|| io::Error::other("Invalid Training step."))
+}
+
+/// A UI action the TUI reports once it has worked: ACTION on NAME, done for the step
+/// with key STEP.
+#[derive(Clone, Debug)]
+pub struct UiReport {
+    pub step: String,
+    pub action: String,
+    pub name: String,
+    /// The inspect details the UI showed: an inspect step checks them.
+    pub seen: Option<serde_json::Value>,
+}
+
+/// As `ui_action`, while the attempt is still at REPORT's step. Ok(None): another report
+/// for that step has advanced it (two inspects before the first report), and nothing changes.
+pub fn ui_report(root: &Path, report: &UiReport) -> io::Result<Option<Snapshot>> {
+    locked_ui_step(
+        root,
+        Some(&report.step),
+        &report.action,
+        &report.name,
+        report.seen.clone(),
+    )
+}
+
+/// Under the course lock: `ui_step` (with SEEN) when the attempt is at step STEP (any step
+/// for None).
+fn locked_ui_step(
+    root: &Path,
+    step: Option<&str>,
+    action: &str,
+    name: &str,
+    seen: Option<serde_json::Value>,
+) -> io::Result<Option<Snapshot>> {
+    if !Attempt::active(root) || root.join("run/closing").exists() {
+        return Err(io::Error::other("The practice session has ended."));
+    }
+    let _lock = Attempt::lock(root)?;
+    let mut attempt = Attempt::read(root)?;
+    if let Some(key) = step
+        && attempt.step()?.key != key
+    {
+        return Ok(None);
+    }
+    let shown = ui_step(root, &mut attempt, action, name, seen)?;
+    let session = root
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    snapshot(root, session, &attempt, shown).map(Some)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use crate::client::fake::{Answer, FakeEngine, json as reply, small_engine};
+    use serde_json::json;
 
     fn fixture(id: &str) -> Course {
         let text = match id {
@@ -960,6 +1431,9 @@ mod tests {
             }
             "container-network" => {
                 include_str!("../../tests/fixtures/training/container-network.podbag")
+            }
+            "volume-persistence" => {
+                include_str!("../../tests/fixtures/training/volume-persistence.podbag")
             }
             _ => unreachable!(),
         };
@@ -976,12 +1450,18 @@ mod tests {
     /// An attempt at INDEX of COURSE, in a new session directory.
     fn attempt_at(course: &Course, index: usize) -> (tempfile::TempDir, Attempt) {
         let dir = tempfile::tempdir().unwrap();
-        fs::create_dir(dir.path().join("run")).unwrap();
-        Attempt::start(dir.path(), course).unwrap();
-        let mut attempt = Attempt::read(dir.path()).unwrap();
-        attempt.index = index;
-        attempt.save(dir.path()).unwrap();
+        let attempt = attempt_in(dir.path(), course, index);
         (dir, attempt)
+    }
+
+    /// An attempt at INDEX of COURSE in ROOT, with its run/ folder.
+    fn attempt_in(root: &Path, course: &Course, index: usize) -> Attempt {
+        fs::create_dir(root.join("run")).unwrap();
+        Attempt::start(root, course).unwrap();
+        let mut attempt = Attempt::read(root).unwrap();
+        attempt.index = index;
+        attempt.save(root).unwrap();
+        attempt
     }
 
     #[test]
@@ -1130,12 +1610,183 @@ mod tests {
         assert!(!stored.step().unwrap().is_finish());
     }
 
+    /// The web-basics fixture with UI set on step KEY, parsed as a module file.
+    fn with_ui(text: &str, key: &str, ui: serde_json::Value) -> io::Result<Package> {
+        let mut module: serde_json::Value = serde_json::from_str(text).unwrap();
+        let step = module["steps"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|step| step["key"] == key)
+            .unwrap();
+        step["ui"] = ui;
+        crate::volume_lesson::parse_package(&module.to_string())
+    }
+
+    #[test]
+    fn the_ui_table_is_the_specs() {
+        assert_eq!(UI_CHECKS.len(), 14);
+        for (name, checks) in UI_CHECKS {
+            let action = UiAction::parse(name).unwrap();
+            assert_eq!(action.as_str(), name);
+            assert_eq!(action.checks(), checks);
+        }
+        // Every variant, in the table's order, with serde's name equal to the table's.
+        let all = [
+            UiAction::Start,
+            UiAction::Stop,
+            UiAction::Restart,
+            UiAction::Pause,
+            UiAction::Resume,
+            UiAction::Remove,
+            UiAction::Logs,
+            UiAction::Inspect,
+            UiAction::Pull,
+            UiAction::RemoveImage,
+            UiAction::CreateVolume,
+            UiAction::RemoveVolume,
+            UiAction::RemoveNetwork,
+            UiAction::Prune,
+        ];
+        assert_eq!(all.map(UiAction::as_str), UI_CHECKS.map(|(name, _)| name));
+        for action in all {
+            assert_eq!(serde_json::to_value(action).unwrap(), action.as_str());
+        }
+        assert_eq!(
+            UiAction::Stop.checks(),
+            ["container-stopped", "container-exited"]
+        );
+        assert_eq!(
+            UiAction::Resume.checks(),
+            ["container-running", "container-published"]
+        );
+        assert_eq!(UiAction::parse("kill"), None);
+        assert_eq!(
+            Check::ContainerStopped { name: "web".into() }.kind(),
+            "container-stopped"
+        );
+    }
+
+    #[test]
+    fn a_step_may_name_its_ui() {
+        let web = include_str!("../../tests/fixtures/training/web-basics.podbag");
+        let package = with_ui(
+            web,
+            "remove",
+            json!({"action": "remove", "name": "lab-web"}),
+        )
+        .unwrap();
+        let step = package.steps.iter().find(|s| s.key == "remove").unwrap();
+        assert_eq!(
+            step.ui,
+            Some(Ui {
+                action: UiAction::Remove,
+                name: "lab-web".into()
+            })
+        );
+        // Without ui, nothing is written: the file stays as released apps read it.
+        let run = package.steps.iter().find(|s| s.key == "runWeb").unwrap();
+        assert!(serde_json::to_value(run).unwrap().get("ui").is_none());
+        assert_eq!(package.format, FORMAT); // a v1 module may have ui
+        let ui = Ui {
+            action: UiAction::Remove,
+            name: "app-{port}".into(),
+        };
+        assert_eq!(ui.with_port(8080).name, "app-8080");
+    }
+
+    #[test]
+    fn ui_follows_the_rules() {
+        let web = include_str!("../../tests/fixtures/training/web-basics.podbag");
+        let volumes = include_str!("../../tests/fixtures/training/volume-persistence.podbag"); // no port
+        // Package has no Debug: .err().unwrap(), not unwrap_err().
+        let refused = |text, key, ui| with_ui(text, key, ui).err().unwrap().to_string();
+        let rule = "has a ui it cannot have";
+        assert!(refused(web, "remove", json!({"action": "remove", "name": " "})).contains(rule));
+        assert!(
+            refused(
+                web,
+                "remove",
+                json!({"action": "remove", "name": "lab web"})
+            )
+            .contains(rule)
+        );
+        assert!(
+            refused(
+                volumes,
+                "checkVolumes",
+                json!({"action": "prune", "name": "things"})
+            )
+            .contains(rule)
+        );
+        assert!(
+            refused(
+                volumes,
+                "removeWriter",
+                json!({"action": "remove", "name": "app-{port}"})
+            )
+            .contains(rule)
+        );
+        assert!(refused(web, "remove", json!({"action": "remove"})).contains("name"));
+        assert!(
+            with_ui(
+                volumes,
+                "checkVolumes",
+                json!({"action": "prune", "name": "volumes"})
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_ui_this_app_does_not_know_leaves_a_cli_step() {
+        // A later app's action, or a pairing outside UI_CHECKS: the module installs and the
+        // step has no ui (podbag-page refuses them when a module is written).
+        let web = include_str!("../../tests/fixtures/training/web-basics.podbag");
+        let ui_of = |key: &str, ui| {
+            let package = with_ui(web, key, ui).unwrap_or_else(|e| panic!("{key}: {e}"));
+            let step = package.steps.into_iter().find(|s| s.key == key).unwrap();
+            (step.ui, step.command)
+        };
+        let (ui, command) = ui_of("remove", json!({"action": "future-thing", "name": "x"}));
+        assert_eq!((ui, command.as_deref()), (None, Some("podbag rm lab-web")));
+        // A later app's action may need no name.
+        assert_eq!(ui_of("remove", json!({"action": "future-thing"})).0, None);
+        // runApi is container-running: stop does not complete it.
+        let network = include_str!("../../tests/fixtures/training/container-network.podbag");
+        let package = with_ui(network, "runApi", json!({"action": "stop", "name": "api"})).unwrap();
+        let run = package.steps.iter().find(|s| s.key == "runApi").unwrap();
+        assert_eq!(
+            (&run.ui, run.check.kind().as_str()),
+            (&None, "container-running")
+        );
+        assert_eq!(
+            ui_of("remove", json!({"action": "stop", "name": "lab-web"})).0,
+            None
+        );
+        assert_eq!(
+            ui_of("stop", json!({"action": "stop", "name": "lab-web"})).0,
+            None
+        ); // desktop-stop
+        // It installs.
+        let mut module: serde_json::Value = serde_json::from_str(web).unwrap();
+        module["steps"][4]["ui"] = json!({"action": "future-thing", "name": "x"});
+        let dir = tempfile::tempdir().unwrap();
+        let installed = crate::volume_lesson::install(dir.path(), &module.to_string()).unwrap();
+        let record = crate::volume_lesson::read(dir.path(), &installed)
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.package.steps[4].key, "remove");
+        assert_eq!(record.package.steps[4].ui, None);
+    }
+
     fn cli_step(command: &str, check: Check) -> StepDef {
         StepDef {
             key: "step".into(),
             names: BTreeMap::from([("en".into(), "A step".into())]),
             command: Some(command.into()),
             check,
+            ui: None,
         }
     }
 
@@ -1355,5 +2006,777 @@ mod tests {
             assert_eq!(check_page(port, "My Podbag site").is_ok(), expected);
             server.join().unwrap();
         }
+    }
+
+    /// A session of COURSE at step KEY; its practice socket leads to a fake engine.
+    #[cfg(unix)]
+    fn practice(
+        course: &Course,
+        key: &str,
+        answer: impl Fn(&str, &str) -> Answer + Send + Sync + 'static,
+    ) -> (tempfile::TempDir, FakeEngine) {
+        let index = course.steps.iter().position(|s| s.key == key).unwrap();
+        let (dir, _) = attempt_at(course, index);
+        let engine = FakeEngine::start(answer);
+        std::os::unix::fs::symlink(engine.socket(), containers::socket(dir.path())).unwrap();
+        (dir, engine)
+    }
+
+    /// small_engine, but GET /containers/json lists ROWS and GET /images/json lists IMAGES.
+    #[cfg(unix)]
+    fn engine(
+        rows: serde_json::Value,
+        images: serde_json::Value,
+    ) -> impl Fn(&str, &str) -> Answer + Send + Sync + 'static {
+        move |method: &str, path: &str| match (method, path.split('?').next().unwrap_or(path)) {
+            ("GET", "/containers/json") => reply(200, rows.clone()),
+            ("GET", "/images/json") => reply(200, images.clone()),
+            _ => small_engine(method, path),
+        }
+    }
+
+    #[cfg(unix)]
+    fn row(name: &str, state: &str) -> serde_json::Value {
+        json!({"Id": format!("id-{name}"), "Names": [format!("/{name}")], "Image": "busybox",
+            "State": state, "Status": state, "Ports": []})
+    }
+
+    /// COURSE with `ui` {ACTION, NAME} on step KEY (no validation: the engine tests need none).
+    fn ui_on(mut course: Course, key: &str, action: UiAction, name: &str) -> Course {
+        let step = course.steps.iter_mut().find(|s| s.key == key).unwrap();
+        step.ui = Some(Ui {
+            action,
+            name: name.into(),
+        });
+        course
+    }
+
+    /// web-basics with ui {remove, lab-web} on "remove".
+    #[cfg(unix)]
+    fn web_basics_with_ui() -> Course {
+        ui_on(fixture("web-basics"), "remove", UiAction::Remove, "lab-web")
+    }
+
+    /// COURSE with its first step replaced by a CLI step KEY: COMMAND, CHECK and `ui` {ACTION, NAME}.
+    #[cfg(unix)]
+    fn first_step(
+        mut course: Course,
+        key: &str,
+        command: &str,
+        check: Check,
+        action: UiAction,
+        name: &str,
+    ) -> Course {
+        course.steps[0] = StepDef {
+            key: key.into(),
+            ui: Some(Ui {
+                action,
+                name: name.into(),
+            }),
+            ..cli_step(command, check)
+        };
+        course
+    }
+
+    /// A logs body as the engine streams it: per line [1, 0, 0, 0], the length as u32 BE, the
+    /// line (as small_engine builds its logs).
+    #[cfg(unix)]
+    fn log_frames(lines: &[&str]) -> Vec<u8> {
+        let mut raw = Vec::new();
+        for line in lines {
+            raw.extend([1u8, 0, 0, 0]);
+            raw.extend((line.len() as u32).to_be_bytes());
+            raw.extend(line.as_bytes());
+        }
+        raw
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ui_action_checks_the_engine_then_advances() {
+        let course = web_basics_with_ui();
+        let (dir, _engine) = practice(&course, "remove", engine(json!([]), json!([])));
+        ui_action(dir.path(), "remove", "lab-web").unwrap();
+        assert_eq!(
+            Attempt::read(dir.path()).unwrap().step().unwrap().key,
+            "finish"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ui_action_refuses_other_steps_and_names() {
+        let course = web_basics_with_ui();
+        let (dir, _e) = practice(&course, "runWeb", engine(json!([]), json!([])));
+        assert_eq!(
+            ui_action(dir.path(), "remove", "lab-web")
+                .err()
+                .unwrap()
+                .to_string(),
+            "This step is done with its command in the training shell."
+        );
+        let (dir, _e) = practice(&course, "remove", engine(json!([]), json!([])));
+        for (action, name) in [("remove", "web"), ("stop", "lab-web")] {
+            assert_eq!(
+                ui_action(dir.path(), action, name)
+                    .err()
+                    .unwrap()
+                    .to_string(),
+                "This step is remove lab-web."
+            );
+        }
+        assert_eq!(
+            Attempt::read(dir.path()).unwrap().step().unwrap().key,
+            "remove"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unmet_check_does_not_advance() {
+        let (dir, _e) = practice(
+            &web_basics_with_ui(),
+            "remove",
+            engine(json!([row("lab-web", "exited")]), json!([])),
+        );
+        assert_eq!(
+            ui_action(dir.path(), "remove", "lab-web")
+                .err()
+                .unwrap()
+                .to_string(),
+            "The practice result did not match this step."
+        );
+        assert_eq!(
+            Attempt::read(dir.path()).unwrap().step().unwrap().key,
+            "remove"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn logs_and_inspect_read_what_the_ui_shows() {
+        let recovery = ui_on(
+            fixture("web-service-recovery"),
+            "readRecoveryLogs",
+            UiAction::Logs,
+            "lab-web",
+        );
+        let logs = |line: &'static str| {
+            move |method: &str, path: &str| -> Answer {
+                if path.split('?').next() == Some("/containers/lab-web/logs") {
+                    (
+                        200,
+                        "application/vnd.docker.multiplexed-stream",
+                        log_frames(&[line]),
+                    )
+                } else {
+                    small_engine(method, path)
+                }
+            }
+        };
+        let (dir, _e) = practice(&recovery, "readRecoveryLogs", logs("Listening on 8080\n"));
+        assert_eq!(
+            ui_action(dir.path(), "logs", "lab-web")
+                .err()
+                .unwrap()
+                .to_string(),
+            "The practice result did not match this step."
+        );
+        assert_eq!(
+            Attempt::read(dir.path()).unwrap().step().unwrap().key,
+            "readRecoveryLogs"
+        );
+        let (dir, _e) = practice(
+            &recovery,
+            "readRecoveryLogs",
+            logs("SITE_TITLE is required\n"),
+        );
+        ui_action(dir.path(), "logs", "lab-web").unwrap();
+        assert_eq!(
+            Attempt::read(dir.path()).unwrap().step().unwrap().key,
+            "removeFailed"
+        );
+
+        // inspect: the check reads the inspect JSON, pretty-printed, as the UI shows it.
+        let course = first_step(
+            fixture("web-basics"),
+            "inspectApp",
+            "podbag inspect app",
+            Check::OutputContains {
+                text: "\"Status\": \"running\"".into(),
+            },
+            UiAction::Inspect,
+            "app",
+        );
+        let state = |status: &'static str| {
+            let lists = engine(json!([row("app", "running")]), json!([]));
+            move |method: &str, path: &str| -> Answer {
+                if (method, path) == ("GET", "/containers/app/json") {
+                    reply(200, json!({"Id": "id-app", "State": {"Status": status}}))
+                } else {
+                    lists(method, path)
+                }
+            }
+        };
+        let (dir, _e) = practice(&course, "inspectApp", state("exited"));
+        assert_eq!(
+            ui_action(dir.path(), "inspect", "app")
+                .err()
+                .unwrap()
+                .to_string(),
+            "The practice result did not match this step."
+        );
+        let (dir, _e) = practice(&course, "inspectApp", state("running"));
+        ui_action(dir.path(), "inspect", "app").unwrap();
+        assert_eq!(
+            Attempt::read(dir.path()).unwrap().step().unwrap().key,
+            "ports"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn image_names_match_like_the_cli() {
+        let full = "docker.io/library/busybox:1.37.0";
+        let course = first_step(
+            fixture("web-basics"),
+            "pull",
+            &format!("podbag pull {full}"),
+            Check::ImageExists { name: full.into() },
+            UiAction::Pull,
+            full,
+        );
+        let images = || json!([{"Id": "sha256:1", "RepoTags": [full]}]);
+        let (dir, _e) = practice(&course, "pull", engine(json!([]), images()));
+        assert_eq!(
+            ui_action(dir.path(), "pull", "busybox:1.36.0")
+                .err()
+                .unwrap()
+                .to_string(),
+            format!("This step is pull {full}.")
+        );
+        assert_eq!(
+            Attempt::read(dir.path()).unwrap().step().unwrap().key,
+            "pull"
+        );
+        // The short name, as a learner types it in the TUI's pull form.
+        ui_action(dir.path(), "pull", "busybox:1.37.0").unwrap();
+        assert_eq!(
+            Attempt::read(dir.path()).unwrap().step().unwrap().key,
+            "ports"
+        );
+        // Not pulled yet: the name matches, the check does not.
+        let (dir, _e) = practice(&course, "pull", engine(json!([]), json!([])));
+        assert_eq!(
+            ui_action(dir.path(), "pull", full)
+                .err()
+                .unwrap()
+                .to_string(),
+            "The practice result did not match this step."
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ui_names_use_the_attempts_port() {
+        let name = "127.0.0.1:{port}/training/busybox:1";
+        let mut course = first_step(
+            fixture("web-basics"),
+            "pullBack",
+            &format!("podbag pull {name}"),
+            Check::ImageExists { name: name.into() },
+            UiAction::Pull,
+            name,
+        );
+        course.port = Some(18105);
+        let (dir, _e) = practice(
+            &course,
+            "pullBack",
+            engine(
+                json!([]),
+                json!([{"Id": "sha256:1", "RepoTags": ["127.0.0.1:18999/training/busybox:1"]}]),
+            ),
+        );
+        let mut attempt = Attempt::read(dir.path()).unwrap();
+        attempt.port = 18999; // as refresh_port does when 18105 is taken
+        attempt.save(dir.path()).unwrap();
+        assert_eq!(
+            ui_action(dir.path(), "pull", "127.0.0.1:18105/training/busybox:1")
+                .err()
+                .unwrap()
+                .to_string(),
+            "This step is pull 127.0.0.1:18999/training/busybox:1."
+        );
+        assert_eq!(
+            Attempt::read(dir.path()).unwrap().step().unwrap().key,
+            "pullBack"
+        );
+        ui_action(dir.path(), "pull", "127.0.0.1:18999/training/busybox:1").unwrap();
+        assert_eq!(
+            Attempt::read(dir.path()).unwrap().step().unwrap().key,
+            "ports"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn desktop_steps_have_a_ui_form() {
+        let course = fixture("web-basics");
+        assert_eq!(
+            step(&course, "stop").ui_form(0),
+            Some(("stop", "lab-web".into()))
+        );
+        assert_eq!(
+            step(&course, "ports").ui_form(0),
+            Some(("inspect", "lab-web".into()))
+        );
+        assert_eq!(
+            step(&course, "browser").ui_form(0),
+            Some((OPEN_WEB, "lab-web".into()))
+        );
+        assert_eq!(step(&course, "runWeb").ui_form(0), None);
+        let volumes = fixture("volume-persistence");
+        assert_eq!(
+            step(&volumes, "inspect").ui_form(0),
+            Some(("inspect", "training-data".into()))
+        );
+        assert_eq!(
+            step(&volumes, "delete").ui_form(0),
+            Some(("remove-volume", "training-data".into()))
+        );
+        // The TUI's stop does a desktop-stop step.
+        let (dir, _e) = practice(
+            &course,
+            "stop",
+            engine(json!([row("lab-web", "exited")]), json!([])),
+        );
+        ui_action(dir.path(), "stop", "lab-web").unwrap();
+        assert_eq!(
+            Attempt::read(dir.path()).unwrap().step().unwrap().key,
+            "remove"
+        );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn perform_sends_each_actions_request() {
+        let engine = FakeEngine::start(small_engine); // web running, job exited
+        let c = &engine.client;
+        let sent = |action, name| {
+            let before = engine.requests().len();
+            perform(c, action, name).unwrap();
+            engine.requests()[before..].to_vec()
+        };
+        assert!(sent("start", "job").contains(&"POST /containers/job/start".to_string()));
+        assert!(sent("resume", "web").contains(&"POST /containers/web/unpause".to_string()));
+        assert!(sent("remove", "web").contains(&"DELETE /containers/web?force=1".to_string()));
+        assert!(sent("remove", "job").contains(&"DELETE /containers/job".to_string()));
+        assert_eq!(
+            sent("remove-image", "my-busybox:1"),
+            ["DELETE /images/my-busybox:1"]
+        );
+        assert!(sent("create-volume", "x")[0].starts_with("POST /volumes/create"));
+        assert_eq!(sent("remove-volume", "pgdata"), ["DELETE /volumes/pgdata"]);
+        assert_eq!(sent("remove-network", "app"), ["DELETE /networks/app"]);
+        assert!(sent("prune", "volumes")[0].starts_with("POST /volumes/prune"));
+        assert!(sent("pull", "busybox:1.37.0")[0].starts_with("POST /images/create?fromImage="));
+        for quiet in ["logs", "inspect", OPEN_WEB] {
+            assert!(sent(quiet, "web").is_empty());
+        }
+        assert_eq!(
+            perform(c, "kill", "web").unwrap_err().to_string(),
+            "Unknown practice action."
+        );
+    }
+
+    /// A Desktop session as `view` finds it.
+    #[cfg(unix)]
+    struct Desktop {
+        library: tempfile::TempDir,
+        _session: tempfile::TempDir,
+        id: String,
+        engine: FakeEngine,
+    }
+
+    /// A practice session of COURSE at step KEY in /tmp, where `view` looks, made active in
+    /// a new library; its practice socket leads to a fake engine that ANSWER answers.
+    #[cfg(unix)]
+    fn desktop(
+        course: &Course,
+        key: &str,
+        answer: impl Fn(&str, &str) -> Answer + Send + Sync + 'static,
+    ) -> Desktop {
+        let index = course.steps.iter().position(|s| s.key == key).unwrap();
+        let session = tempfile::Builder::new()
+            .prefix(containers::PREFIX)
+            .tempdir_in("/tmp")
+            .unwrap();
+        attempt_in(session.path(), course, index);
+        let id = session
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let library = tempfile::tempdir().unwrap();
+        fs::write(library.path().join(ACTIVE), &id).unwrap();
+        let engine = FakeEngine::start(answer);
+        std::os::unix::fs::symlink(engine.socket(), containers::socket(session.path())).unwrap();
+        Desktop {
+            library,
+            _session: session,
+            id,
+            engine,
+        }
+    }
+
+    /// `view` as Desktop calls it, its snapshot as JSON.
+    #[cfg(unix)]
+    fn shown(d: &Desktop, action: &str, target: &str) -> io::Result<serde_json::Value> {
+        view(
+            d.library.path(),
+            action,
+            (action != "status").then_some(d.id.as_str()),
+            target,
+        )
+        .map(|s| serde_json::to_value(s.unwrap()).unwrap())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn desktop_does_a_ui_step_and_shows_it() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let course = ui_on(fixture("web-basics"), "remove", UiAction::Remove, "lab-web");
+        let gone = Arc::new(AtomicBool::new(false));
+        let deleted = gone.clone();
+        let d = desktop(
+            &course,
+            "remove",
+            move |method: &str, path: &str| -> Answer {
+                if method == "DELETE" && path.starts_with("/containers/lab-web") {
+                    deleted.store(true, Ordering::SeqCst);
+                }
+                let rows = if deleted.load(Ordering::SeqCst) {
+                    json!([])
+                } else {
+                    json!([row("lab-web", "exited")])
+                };
+                engine(rows, json!([]))(method, path)
+            },
+        );
+        let status = shown(&d, "status", "").unwrap();
+        assert_eq!(status["ui"], json!({"action": "remove", "name": "lab-web"}));
+        assert_eq!(status["stage"], "remove");
+        // A wrong name is refused before the engine is asked to do anything.
+        assert_eq!(
+            shown(&d, "remove", "web").err().unwrap().to_string(),
+            "This step is remove lab-web."
+        );
+        assert!(
+            !d.engine.requests().iter().any(|r| r.starts_with("DELETE")),
+            "{:?}",
+            d.engine.requests()
+        );
+        assert!(!gone.load(Ordering::SeqCst));
+        let after = shown(&d, "remove", "lab-web").unwrap();
+        assert_eq!(after["stage"], "finish");
+        assert!(
+            d.engine
+                .requests()
+                .contains(&"DELETE /containers/lab-web".to_string())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn desktop_logs_show_the_text() {
+        let course = ui_on(
+            fixture("web-service-recovery"),
+            "readRecoveryLogs",
+            UiAction::Logs,
+            "lab-web",
+        );
+        let d = desktop(
+            &course,
+            "readRecoveryLogs",
+            |method: &str, path: &str| -> Answer {
+                if path.split('?').next() == Some("/containers/lab-web/logs") {
+                    (
+                        200,
+                        "application/vnd.docker.multiplexed-stream",
+                        log_frames(&["SITE_TITLE is required\n"]),
+                    )
+                } else {
+                    engine(json!([row("lab-web", "exited")]), json!([]))(method, path)
+                }
+            },
+        );
+        let after = shown(&d, "logs", "lab-web").unwrap();
+        assert!(
+            after["text"]
+                .as_str()
+                .unwrap()
+                .contains("SITE_TITLE is required"),
+            "{after}"
+        );
+        assert_eq!(after["stage"], "removeFailed");
+        // logs changes nothing on the engine.
+        assert!(
+            d.engine.requests().iter().all(|r| r.starts_with("GET ")),
+            "{:?}",
+            d.engine.requests()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ui_action_refuses_an_ended_session() {
+        let ended = "The practice session has ended.";
+        let (dir, _e) = practice(
+            &web_basics_with_ui(),
+            "remove",
+            engine(json!([]), json!([])),
+        );
+        fs::write(dir.path().join("run/closing"), "").unwrap();
+        assert_eq!(
+            ui_action(dir.path(), "remove", "lab-web")
+                .err()
+                .unwrap()
+                .to_string(),
+            ended
+        );
+        assert_eq!(
+            Attempt::read(dir.path()).unwrap().step().unwrap().key,
+            "remove"
+        );
+        let (dir, _e) = practice(
+            &web_basics_with_ui(),
+            "remove",
+            engine(json!([]), json!([])),
+        );
+        fs::remove_file(dir.path().join(STATE)).unwrap();
+        assert_eq!(
+            ui_action(dir.path(), "remove", "lab-web")
+                .err()
+                .unwrap()
+                .to_string(),
+            ended
+        );
+    }
+
+    #[test]
+    fn instructions_carry_the_ui_with_the_port() {
+        let course = ui_on(
+            fixture("container-network"),
+            "deleteNetwork",
+            UiAction::RemoveNetwork,
+            "lab-net",
+        );
+        // An unvalidated name with {port}: course.port is 18083.
+        let course = ui_on(course, "removeApi", UiAction::Remove, "app-{port}");
+        let steps = instructions(&course);
+        assert_eq!(steps[9].key, "deleteNetwork");
+        assert_eq!(
+            steps[9].ui,
+            Some(Ui {
+                action: UiAction::RemoveNetwork,
+                name: "lab-net".into()
+            })
+        );
+        assert_eq!(steps[8].key, "removeApi");
+        assert_eq!(steps[8].ui.as_ref().unwrap().name, "app-18083");
+        assert_eq!(steps[0].ui, None);
+        assert!(serde_json::to_value(&steps[0]).unwrap().get("ui").is_none());
+    }
+    const UNMET: &str = "The practice result did not match this step.";
+
+    /// `engine` with ROWS, and GET /volumes listing the volumes VOLUMES.
+    #[cfg(unix)]
+    fn lists(
+        rows: serde_json::Value,
+        volumes: &[&str],
+    ) -> impl Fn(&str, &str) -> Answer + Send + Sync + 'static {
+        let volumes: Vec<_> = volumes.iter().map(|name| json!({"Name": name})).collect();
+        let volumes = json!({ "Volumes": volumes });
+        let rest = engine(rows, json!([]));
+        move |method: &str, path: &str| {
+            if (method, path.split('?').next().unwrap_or(path)) == ("GET", "/volumes") {
+                reply(200, volumes.clone())
+            } else {
+                rest(method, path)
+            }
+        }
+    }
+
+    /// BEFORE answers until a METHOD request on a path that starts with PREFIX; AFTER then.
+    #[cfg(unix)]
+    fn changes_on(
+        method: &'static str,
+        prefix: &'static str,
+        before: impl Fn(&str, &str) -> Answer + Send + Sync + 'static,
+        after: impl Fn(&str, &str) -> Answer + Send + Sync + 'static,
+    ) -> impl Fn(&str, &str) -> Answer + Send + Sync + 'static {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let changed = AtomicBool::new(false);
+        move |m: &str, path: &str| {
+            if m == method && path.starts_with(prefix) {
+                changed.store(true, Ordering::SeqCst);
+            }
+            if changed.load(Ordering::SeqCst) {
+                after(m, path)
+            } else {
+                before(m, path)
+            }
+        }
+    }
+
+    /// The current step of D's session.
+    #[cfg(unix)]
+    fn stage(d: &Desktop) -> String {
+        shown(d, "status", "").unwrap()["stage"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn desktop_stop_stops_then_checks() {
+        let course = fixture("web-basics");
+        let running = || lists(json!([row("lab-web", "running")]), &[]);
+        let exited = lists(json!([row("lab-web", "exited")]), &[]);
+        let d = desktop(
+            &course,
+            "stop",
+            changes_on("POST", "/containers/id-lab-web/stop", running(), exited),
+        );
+        assert_eq!(shown(&d, "stop", "id-lab-web").unwrap()["stage"], "remove");
+        assert!(
+            d.engine
+                .requests()
+                .contains(&"POST /containers/id-lab-web/stop".to_string())
+        );
+        // It never stops: after the 10 s poll the step is unmet and stays.
+        let d = desktop(&course, "stop", running());
+        assert_eq!(
+            shown(&d, "stop", "id-lab-web").err().unwrap().to_string(),
+            UNMET
+        );
+        assert_eq!(stage(&d), "stop");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn desktop_inspect_failed_needs_the_exited_container() {
+        let course = fixture("web-service-recovery");
+        let d = desktop(
+            &course,
+            "inspectFailed",
+            lists(json!([row("lab-web", "exited")]), &[]),
+        );
+        assert_eq!(
+            shown(&d, "inspect-failed", "id-lab-web").unwrap()["stage"],
+            "readRecoveryLogs"
+        );
+        let d = desktop(
+            &course,
+            "inspectFailed",
+            lists(json!([row("lab-web", "running")]), &[]),
+        );
+        assert_eq!(
+            shown(&d, "inspect-failed", "id-lab-web")
+                .err()
+                .unwrap()
+                .to_string(),
+            UNMET
+        );
+        assert_eq!(stage(&d), "inspectFailed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn desktop_inspect_volume_shows_it_and_advances() {
+        let course = fixture("volume-persistence");
+        let d = desktop(&course, "inspect", lists(json!([]), &["training-data"]));
+        let after = shown(&d, "inspect", "training-data").unwrap();
+        assert_eq!(after["stage"], "delete");
+        assert!(after["detail"].is_object(), "{after}");
+        // Not listed: the arm takes the step's name, the check refuses it.
+        let d = desktop(&course, "inspect", lists(json!([]), &[]));
+        assert_eq!(
+            shown(&d, "inspect", "training-data")
+                .err()
+                .unwrap()
+                .to_string(),
+            UNMET
+        );
+        assert_eq!(stage(&d), "inspect");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn desktop_remove_volume_removes_then_checks() {
+        let course = fixture("volume-persistence");
+        let listed = || lists(json!([]), &["training-data"]);
+        let d = desktop(
+            &course,
+            "delete",
+            changes_on(
+                "DELETE",
+                "/volumes/training-data",
+                listed(),
+                lists(json!([]), &[]),
+            ),
+        );
+        assert_eq!(
+            shown(&d, "remove", "training-data").unwrap()["stage"],
+            "checkVolumes"
+        );
+        assert!(
+            d.engine
+                .requests()
+                .contains(&"DELETE /volumes/training-data".to_string())
+        );
+        // The engine keeps it: the step is unmet and stays.
+        let d = desktop(&course, "delete", listed());
+        assert_eq!(
+            shown(&d, "remove", "training-data")
+                .err()
+                .unwrap()
+                .to_string(),
+            UNMET
+        );
+        assert_eq!(stage(&d), "delete");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn desktop_inspects_other_volumes_during_an_inspect_step() {
+        let course = first_step(
+            fixture("web-basics"),
+            "inspectApp",
+            "podbag inspect app",
+            Check::OutputContains {
+                text: "\"Status\": \"running\"".into(),
+            },
+            UiAction::Inspect,
+            "app",
+        );
+        let rest = lists(json!([row("app", "running")]), &["pgdata"]);
+        let d = desktop(&course, "inspectApp", move |method: &str, path: &str| {
+            if (method, path) == ("GET", "/containers/app/json") {
+                reply(200, json!({"Id": "id-app", "State": {"Status": "running"}}))
+            } else {
+                rest(method, path)
+            }
+        });
+        // Another volume: its detail, and the step stays.
+        let other = shown(&d, "inspect", "pgdata").unwrap();
+        assert_eq!(other["stage"], "inspectApp");
+        assert!(other["detail"].is_object(), "{other}");
+        // The step's own name does the step.
+        assert_eq!(shown(&d, "inspect", "app").unwrap()["stage"], "ports");
     }
 }

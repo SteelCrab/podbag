@@ -19,13 +19,16 @@ const API = (() => {
       token = id;
       return { name, local };
     },
-    migrationList: (source, kind) => invoke("migration_list", { source, kind }),
+    migrationList: (source, kind, hosts) => invoke("migration_list", { source, kind, hosts }),
     migrate(request, onProgress) {
       const updates = new tauri.core.Channel();
       updates.onmessage = onProgress;
       return invoke("migrate", { request, updates });
     },
     contexts: () => invoke("contexts"),
+    builderList: () => scoped("builder_list"),
+    builderInspect: (scope, name) => scoped("builder_inspect", { scope, name }),
+    builderAction: (scope, name, action) => scoped("builder_action", { scope, name, action }),
     migrationSources: () => invoke("migration_sources"),
     kubeCounts: (context, allNamespaces) => invoke("kube_counts", { context: context || null, allNamespaces }),
     kubeContexts: () => invoke("kube_contexts"),
@@ -33,9 +36,12 @@ const API = (() => {
     kubeOpenRoute: (context, namespace, name) => invoke("kube_open_route", { context, namespace, name }),
     createVolume: (name) => scoped("create_volume", { name }),
     engine: (start) => scoped("engine", { start: !!start }),
+    extensions: (request) => invoke("desktop_extensions", { request }),
+    models: (request) => invoke("models", { request }),
     list: (kind) => scoped("list", { kind }),
     kubeList: (kind, allNamespaces, context) => invoke("kube_list", { kind, allNamespaces, context: context || null }),
     inspect: (kind, id) => scoped("inspect", { kind, id }),
+    analyzeImage: (id) => scoped("analyze_image", { id }),
     act: (id, action) => scoped("act", { id, action }),
     remove: (kind, id, force) => scoped("remove", { kind, id, force: !!force }),
     prune: (kind) => scoped("prune", { kind }),
@@ -57,12 +63,18 @@ const API = (() => {
     openShell: (id) => scoped("open_shell", { id }),
     vm: (action) => scoped("vm", { action }),
     vmResources: (values) => scoped("vm_resources", { values: values || null }),
+    vmStorage: (edit = null) => scoped("vm_storage", { edit }),
     // No mode reads; "idle" or "off" sets. Resolves with { mode, after }.
     compression: (mode) => scoped("compression", { mode: mode || null }),
+    registryProxy: (values) => scoped("registry_proxy", { values: values || null }),
+    networkSettings: (values, expectedRevision) => scoped("network_settings", {
+      values: values || null, expectedRevision: expectedRevision || null,
+    }),
     launchAtLogin: () => invoke("plugin:autostart|is_enabled"),
     setLaunchAtLogin: (enabled) => invoke(enabled ? "plugin:autostart|enable" : "plugin:autostart|disable"),
     vmStatus: () => scoped("vm_status"),
     vmSet: (settings) => scoped("vm_set", { settings }),
+    vmSync: (action, name = null, path = null) => scoped("vm_sync", { action, name, path }),
     setEngine: (engine) => scoped("set_engine", { engine }),
     updates: (check) => invoke("updates", { check }),
     upgrade: (version) => invoke("upgrade", { version: version || null }),
@@ -74,6 +86,7 @@ const API = (() => {
     installTerminalCommand: () => invoke("install_terminal_command"),
     openRepository: () => invoke("open_repository"),
     openTrainingGuide: (id) => invoke("open_training_guide", { id, lang: I18N.lang }),
+    engineConfig: (request) => scoped("engine_config", { request }),
     getSettings: () => invoke("get_settings"),
     setSettings: (settings) => invoke("set_settings", { settings }),
     // Events: changed, live, logs, pull-progress, shown, engine-changed, open-updates,

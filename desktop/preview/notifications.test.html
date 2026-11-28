@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Desktop notification preferences and history</title>
+<iframe src="preview.html?view=settings&amp;lang=en" width="900" height="650" title="Desktop preview"></iframe>
+<pre id="result">Running</pre>
+<script>
+"use strict";
+const frame = document.querySelector("iframe");
+const result = document.getElementById("result");
+
+async function until(match) {
+  for (let i = 0; i < 120; i++) {
+    const value = match();
+    if (value) return value;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  throw new Error("Timed out waiting for Desktop notifications");
+}
+
+function check(value, message) {
+  if (!value) throw new Error(message);
+}
+
+async function test() {
+  const win = frame.contentWindow;
+  const doc = frame.contentDocument;
+  const find = selector => doc.querySelector(selector);
+  const search = await until(() => find("#settings-search"));
+  search.value = "routine task popups";
+  search.dispatchEvent(new win.Event("input"));
+  find('[data-setting-result="notifications.status"]').click();
+  const toggle = find("#status-notifications");
+  check(toggle.checked && doc.activeElement === toggle, "Default to enabled and focus the searchable setting");
+  toggle.click();
+  await until(() => win.previewSavedSettings?.statusNotifications === false && !toggle.disabled);
+
+  const invoke = win.__TAURI__.core.invoke;
+  let failRemove = false;
+  let failSave = false;
+  win.__TAURI__.core.invoke = (command, args) => {
+    if (command === "remove" && failRemove) throw new Error("Engine refused to remove the container");
+    if (command === "set_settings" && failSave) throw new Error("Could not save preferences");
+    return invoke(command, args);
+  };
+
+  async function removeContainer() {
+    const pending = win.podbag.remove("containers", 0);
+    (await until(() => find("#confirm[open] #confirm-yes"))).click();
+    await pending;
+  }
+
+  await removeContainer();
+  check(!find("#toasts .toast:not(.toast-error)"), "Suppress routine popups");
+  failRemove = true;
+  await removeContainer();
+  check(find(".toast-error")?.textContent.includes("Engine refused"), "Keep errors visible");
+
+  find("#notifications-open").click();
+  const history = find("#notification-history[open]");
+  const entries = history.querySelectorAll("li");
+  check(entries.length === 2 && entries[0].classList.contains("notification-error"), "Show errors and suppressed messages newest first");
+  check(entries[1].textContent.includes("web") && entries[1].querySelector("time[datetime]"), "Show the task message and its time");
+  find("#notifications-clear").click();
+  check(!history.querySelector("li") && !find(".notification-empty").hidden, "Clear the history");
+  history.querySelector('[aria-label="Close notifications"]').click();
+
+  failSave = true;
+  const restored = find("#status-notifications");
+  restored.click();
+  await until(() => !restored.checked && !restored.disabled);
+  check([...doc.querySelectorAll(".toast-error")].some(toast => toast.textContent.includes("Could not save preferences")), "Restore the previous value on a save error");
+}
+
+frame.addEventListener("load", () => test().then(
+  () => { result.textContent = "PASS"; },
+  error => { result.textContent = "FAIL: " + error.message; },
+), { once: true });
+</script>
+</html>
