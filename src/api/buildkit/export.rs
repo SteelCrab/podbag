@@ -8,6 +8,7 @@ use prost::{
     Message,
     encoding::{DecodeContext, WireType, decode_key, decode_varint, skip_field},
 };
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, Read, Write};
@@ -19,9 +20,11 @@ pub(super) const SOLVE: &str = "/moby.buildkit.v1.Control/Solve";
 pub(super) const FILE_SEND: &str = "/moby.filesync.v1.FileSend/DiffCopy";
 const EXPORTER_ID: &str = "buildkit-attachable-exporter-id";
 const NEW_SESSION: &str = "start a new BuildKit session after an incomplete export";
+const MAX_EXPORT_SESSIONS: usize = 4096;
 
+type SessionKey = [u8; 32];
 #[derive(Clone, Default)]
-pub(super) struct Exports(Arc<Mutex<HashMap<String, Session>>>);
+pub(super) struct Exports(Arc<Mutex<HashMap<SessionKey, Session>>>);
 
 enum Session {
     // An explicit file exporter can use the same ID that an unrelated Solve
@@ -53,7 +56,7 @@ enum ArchiveState {
 
 struct Lease {
     exports: Exports,
-    id: String,
+    key: SessionKey,
     archive: Option<Archive>,
     complete: bool,
 }
@@ -63,13 +66,21 @@ impl Exports {
         use std::collections::hash_map::Entry;
         // BuildKit's SessionManager.Get strips a nonempty session prefix.
         let id = match id.split_once(':') {
-            Some((_, suffix)) if !suffix.is_empty() => suffix.to_owned(),
-            _ => id,
+            Some((_, suffix)) if !suffix.is_empty() => suffix,
+            _ => &id,
         };
+        let key = Sha256::digest(id.as_bytes()).into();
         let mut sessions = self.0.lock().unwrap();
+        let at_capacity = sessions.len() >= MAX_EXPORT_SESSIONS;
         let mut archive = None;
-        match sessions.entry(id.clone()) {
+        match sessions.entry(key) {
             Entry::Vacant(entry) => {
+                // Failed sessions must stay fenced while this worker can send old data.
+                if at_capacity {
+                    return Err(io::Error::other(
+                        "the BuildKit worker's export session table is full",
+                    ));
+                }
                 if let Some(index) = index {
                     let load = Archive::default();
                     archive = Some(load.clone());
@@ -101,14 +112,15 @@ impl Exports {
         }
         Ok(Lease {
             exports: self.clone(),
-            id,
+            key,
             archive,
             complete: false,
         })
     }
 
     fn file_send(&self, id: &str, index: Option<usize>) -> FileSend {
-        match self.0.lock().unwrap().get(id) {
+        let key: SessionKey = Sha256::digest(id.as_bytes()).into();
+        match self.0.lock().unwrap().get(&key) {
             Some(Session::Load {
                 index: expected,
                 archive,
@@ -129,21 +141,21 @@ impl Drop for Lease {
             archive.close();
         }
         let mut sessions = self.exports.0.lock().unwrap();
-        match sessions.get_mut(&self.id) {
+        match sessions.get_mut(&self.key) {
             Some(Session::Forward { active, incomplete }) => {
                 *active -= 1;
                 // Late explicit FileSend requests still go to their client. They
                 // must never be mistaken for an Engine archive on this session.
                 *incomplete |= !self.complete;
                 if *active == 0 && !*incomplete {
-                    sessions.remove(&self.id);
+                    sessions.remove(&self.key);
                 }
             }
             Some(Session::Load { .. }) if !self.complete => {
-                sessions.insert(self.id.clone(), Session::Blocked);
+                sessions.insert(self.key, Session::Blocked);
             }
             _ => {
-                sessions.remove(&self.id);
+                sessions.remove(&self.key);
             }
         }
     }
@@ -888,6 +900,27 @@ mod tests {
         assert!(archive.take_complete().is_err());
         drop(staged);
         assert!(archive.begin_receive().is_err());
+    }
+
+    #[test]
+    fn a_full_export_table_keeps_old_sessions_fenced() {
+        let exports = Exports::default();
+        for index in 0..MAX_EXPORT_SESSIONS {
+            drop(
+                exports
+                    .reserve(format!("session-{index}"), Some(0))
+                    .unwrap(),
+            );
+        }
+        assert!(exports.reserve("another-session".into(), Some(0)).is_err());
+        assert!(matches!(
+            exports.file_send("session-0", Some(0)),
+            FileSend::Reject(NEW_SESSION)
+        ));
+        assert!(matches!(
+            Exports::default().file_send("session-0", Some(0)),
+            FileSend::Forward
+        ));
     }
 
     #[test]
