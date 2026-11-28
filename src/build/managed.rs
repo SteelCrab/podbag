@@ -4,6 +4,7 @@ use super::managed_worker::{Workspace, read_tail};
 use super::{BuildOptions, Built};
 use crate::image::{Image, reference::Reference};
 use crate::{Error, ErrorKind, Result};
+use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io;
 use std::os::unix::fs::FileTypeExt;
@@ -87,11 +88,7 @@ pub fn run(
             "give an OS and architecture",
         ));
     }
-    if matches!(export, Output::Load)
-        && options
-            .platform
-            .is_some_and(|p| p.contains(',') || !crate::build::steps::is_this_platform(p))
-    {
+    if matches!(export, Output::Load) && options.platform.is_some_and(|p| !is_load_platform(p)) {
         return Err(invalid(
             "cannot load a foreign or multi-platform result",
             "export it with --output type=oci,dest=FILE or type=local,dest=DIR",
@@ -117,12 +114,6 @@ pub fn run(
     };
     let workspace = Workspace::new(&crate::paths::dirs()?.data)?;
     let work = workspace.path();
-    let sources = work.join("dockerfile");
-    fs::create_dir(&sources).map_err(|e| io_error("stage the Dockerfile", e))?;
-    fs::write(sources.join("Dockerfile"), &build.dockerfile)
-        .and_then(|()| fs::write(sources.join("Dockerfile.dockerignore"), &build.ignore))
-        .map_err(|e| io_error("stage the Dockerfile and ignore rules", e))?;
-
     let archive = work.join("image.tar");
     let staging = match export {
         Output::Local(destination) => Some(
@@ -138,7 +129,17 @@ pub fn run(
         Output::Load => export_args("docker", &archive, None),
         Output::Oci(_) => export_args("oci", &archive, tags.first()),
         Output::Local(_) => export_args("local", staging.as_ref().unwrap().path(), None),
-    };
+    }?;
+    let mut ignore = build.ignore.clone();
+    if let Some(staging) = &staging {
+        exclude_staging(&mut ignore, &build.context, staging.path())?;
+    }
+    let sources = work.join("dockerfile");
+    fs::create_dir(&sources).map_err(|e| io_error("stage the Dockerfile", e))?;
+    fs::write(sources.join("Dockerfile"), &build.dockerfile)
+        .and_then(|()| fs::write(sources.join("Dockerfile.dockerignore"), ignore))
+        .map_err(|e| io_error("stage the Dockerfile and ignore rules", e))?;
+
     let addr = workspace.address();
     let mut client = Command::new("buildctl");
     client
@@ -337,50 +338,109 @@ fn ssh_socket(value: &str) -> Result<String> {
 }
 
 fn valid_cache(value: &str, local_path: &str) -> bool {
-    let fields: Vec<_> = value
-        .split(',')
-        .filter_map(|field| field.split_once('='))
-        .collect();
-    let get = |name| {
-        fields
-            .iter()
-            .find(|(key, _)| key == &name)
-            .map(|(_, val)| *val)
-    };
-    if fields.len() != value.split(',').count()
-        || fields.iter().any(|(key, value)| {
-            value.is_empty()
-                || !matches!(
-                    *key,
-                    "type"
-                        | "src"
-                        | "dest"
-                        | "ref"
-                        | "mode"
-                        | "compression"
-                        | "compression-level"
-                        | "force-compression"
-                        | "oci-mediatypes"
-                        | "image-manifest"
-                        | "ignore-error"
-                        | "digest"
-                        | "tag"
-                )
-        })
-    {
-        return false;
+    let mut fields = BTreeMap::new();
+    for field in value.split(',') {
+        let Some((key, value)) = field.split_once('=') else {
+            return false;
+        };
+        if value.is_empty()
+            || !matches!(
+                key,
+                "type"
+                    | "src"
+                    | "dest"
+                    | "ref"
+                    | "mode"
+                    | "compression"
+                    | "compression-level"
+                    | "force-compression"
+                    | "oci-mediatypes"
+                    | "image-manifest"
+                    | "ignore-error"
+                    | "digest"
+                    | "tag"
+            )
+            || fields.insert(key, value).is_some()
+        {
+            return false;
+        }
     }
-    if fields.iter().filter(|(key, _)| *key == "type").count() != 1 {
-        return false;
-    }
-    match get("type") {
-        Some("local") => get(local_path).is_some(),
-        Some("registry") => get("ref").is_some_and(|name| Reference::parse(name).is_ok()),
+    match fields.get("type").copied() {
+        Some("local") => fields.contains_key(local_path),
+        Some("registry") => fields
+            .get("ref")
+            .is_some_and(|name| Reference::parse(name).is_ok()),
         _ => false,
     }
 }
 
-fn export_args(kind: &str, destination: &Path, tag: Option<&String>) -> String {
+fn is_load_platform(platform: &str) -> bool {
+    if platform.contains(',') {
+        return false;
+    }
+    let Some((os, target)) = platform.split_once('/') else {
+        return false;
+    };
+    let arch = target.split('/').next().unwrap_or_default();
+    // BuildKit accepts the containerd platform aliases as well as OCI architecture names.
+    let arch = match arch {
+        "x86_64" | "x86-64" => "amd64",
+        "aarch64" => "arm64",
+        "i386" => "386",
+        "armhf" | "armel" => "arm",
+        arch => arch,
+    };
+    super::steps::is_this_platform(&format!("{os}/{arch}"))
+}
+
+fn exclude_staging(ignore: &mut String, context: &Path, staging: &Path) -> Result<()> {
+    let context = context
+        .canonicalize()
+        .map_err(|e| io_error("resolve the BuildKit context directory", e))?;
+    let staging = staging
+        .canonicalize()
+        .map_err(|e| io_error("resolve the local BuildKit staging directory", e))?;
+    let Ok(relative) = staging.strip_prefix(context) else {
+        return Ok(());
+    };
+    let path = relative
+        .to_str()
+        .filter(|path| !path.contains(['\r', '\n']))
+        .ok_or_else(|| {
+            invalid(
+                "the local BuildKit staging path cannot be excluded from the context",
+                "use a directory outside the context or a UTF-8 path without line breaks",
+            )
+        })?;
+    // The last rule wins even when the user's rules re-include the directory's parent.
+    // Anchor the path at the context root and quote glob metacharacters literally.
+    ignore.push_str("\n/");
+    for ch in path.chars() {
+        if ch.is_whitespace() {
+            ignore.push('[');
+            ignore.push(ch);
+            ignore.push(']');
+        } else {
+            if matches!(ch, '\\' | '!' | '*' | '?' | '[' | ']') {
+                ignore.push('\\');
+            }
+            ignore.push(ch);
+        }
+    }
+    ignore.push('\n');
+    Ok(())
+}
+
+fn export_args(kind: &str, destination: &Path, tag: Option<&String>) -> Result<String> {
+    let destination = destination
+        .to_str()
+        .filter(|path| !path.contains("\r\n"))
+        .ok_or_else(|| {
+            invalid(
+                "invalid BuildKit exporter staging path",
+                "use a UTF-8 build data or output path without CRLF line endings",
+            )
+        })?;
     let field = |key: &str, value: &str| {
         let field = format!("{key}={value}");
         if field.contains([',', '"', '\n', '\r']) {
@@ -389,15 +449,12 @@ fn export_args(kind: &str, destination: &Path, tag: Option<&String>) -> String {
             field
         }
     };
-    let mut value = format!(
-        "type={kind},{}",
-        field("dest", &destination.to_string_lossy())
-    );
+    let mut value = format!("type={kind},{}", field("dest", destination));
     if let Some(tag) = tag {
         value.push(',');
         value.push_str(&field("name", tag));
     }
-    value
+    Ok(value)
 }
 
 fn local_arg(key: &str, path: &Path) -> std::ffi::OsString {
@@ -427,4 +484,18 @@ fn io_error(what: &str, error: io::Error) -> Error {
         &error,
         "check permissions and disk space",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    #[test]
+    fn exporter_arguments_do_not_replace_non_utf8_path_bytes() {
+        let dest = Path::new(OsStr::from_bytes(b"/tmp/output-\xff"));
+        assert!(export_args("local", dest, None).is_err());
+        assert!(export_args("oci", dest, None).is_err());
+    }
 }
