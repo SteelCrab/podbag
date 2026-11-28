@@ -3,17 +3,20 @@
 use super::http::Request;
 use super::router::{Reply, message, reply_error};
 use ::http::{HeaderMap, HeaderName, HeaderValue};
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use prost::Message;
 use std::io;
 use std::os::unix::net::UnixStream;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+mod export;
+mod grpc;
 mod worker;
 pub(super) use worker::{Client, Owner};
 
 const SESSION_RPC: &str = "http://localhost/moby.buildkit.v1.Control/Session";
 const SESSION_ID: &str = "x-docker-expose-session-uuid";
+const SESSION_METHOD: &str = "x-docker-expose-session-grpc-method";
 const MAX_MESSAGE: usize = 16 << 20;
 
 #[derive(Message)]
@@ -63,7 +66,7 @@ fn session_headers(req: &Request) -> io::Result<HeaderMap> {
                 | "x-docker-expose-session-name"
                 | "x-docker-expose-session-sharedkey"
                 | "x-docker-expose-session-sharedkey-encoded"
-                | "x-docker-expose-session-grpc-method"
+                | SESSION_METHOD
         ) {
             continue;
         }
@@ -92,30 +95,106 @@ fn relay(
         .enable_io()
         .build()?
         .block_on(async {
-            let mut stream = tokio::net::UnixStream::from_std(stream)?;
-            let mut backend = tokio::net::UnixStream::from_std(backend.stream)?;
+            let stream = tokio::net::UnixStream::from_std(stream)?;
+            let worker = tokio::net::UnixStream::from_std(backend.stream)?;
+            let (read, write) = stream.into_split();
+            let stream = tokio::io::join(
+                AsyncReadExt::chain(std::io::Cursor::new(prefix), read),
+                write,
+            );
             if is_session {
-                return relay_session(stream, backend, prefix, metadata).await;
+                return relay_session(stream, worker, metadata, backend.exports).await;
             }
-            backend.write_all(&prefix).await?;
-            tokio::io::copy_bidirectional(&mut stream, &mut backend).await?;
-            Ok(())
+            relay_control(stream, worker, backend.exports).await
         })
 }
 
-async fn relay_session(
-    client: tokio::net::UnixStream,
+async fn relay_control(
+    client: impl AsyncRead + AsyncWrite + Unpin,
     worker: tokio::net::UnixStream,
-    prefix: Vec<u8>,
+    exports: export::Exports,
+) -> io::Result<()> {
+    let (upstream, mut downstream) = tokio::try_join!(grpc::upstream(worker), async {
+        h2::server::handshake(client)
+            .await
+            .map_err(io::Error::other)
+    })?;
+    while let Some(incoming) = downstream.accept().await {
+        let (request, reply) = incoming.map_err(io::Error::other)?;
+        if request.uri().path() == export::SOLVE {
+            tokio::spawn(export::solve(
+                upstream.clone(),
+                request,
+                reply,
+                exports.clone(),
+            ));
+        } else {
+            tokio::spawn(grpc::forward(upstream.clone(), request, reply));
+        }
+    }
+    Ok(())
+}
+
+async fn relay_session(
+    client: impl AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    worker: tokio::net::UnixStream,
+    mut metadata: HeaderMap,
+    exports: export::Exports,
+) -> io::Result<()> {
+    let session = metadata[SESSION_ID]
+        .to_str()
+        .map_err(io::Error::other)?
+        .to_owned();
+    if !metadata.get_all(SESSION_METHOD).iter().any(|value| {
+        value
+            .as_bytes()
+            .eq_ignore_ascii_case(export::FILE_SEND.as_bytes())
+    }) {
+        metadata.append(SESSION_METHOD, HeaderValue::from_static(export::FILE_SEND));
+    }
+    let (bridge, reverse) = tokio::io::duplex(64 << 10);
+    tokio::select! {
+        result = bridge_session(bridge, worker, metadata) => result,
+        result = relay_reverse_session(client, reverse, exports, session) => result,
+    }
+}
+
+async fn relay_reverse_session(
+    client: impl AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    worker: tokio::io::DuplexStream,
+    exports: export::Exports,
+    session: String,
+) -> io::Result<()> {
+    let (upstream, mut downstream) = tokio::try_join!(grpc::upstream(client), async {
+        h2::server::handshake(worker)
+            .await
+            .map_err(io::Error::other)
+    })?;
+    while let Some(incoming) = downstream.accept().await {
+        let (request, reply) = incoming.map_err(io::Error::other)?;
+        tokio::spawn(export::session(
+            upstream.clone(),
+            request,
+            reply,
+            exports.clone(),
+            session.clone(),
+        ));
+    }
+    Ok(())
+}
+
+async fn bridge_session(
+    bridge: tokio::io::DuplexStream,
+    worker: tokio::net::UnixStream,
     metadata: HeaderMap,
 ) -> io::Result<()> {
     // The Docker client exposes a gRPC server on its upgraded session. BuildKit
     // connects to it through its own Control/Session bidirectional stream.
-    let (upstream, connection) = h2::client::handshake(worker)
+    let mut upstream = grpc::upstream(worker)
+        .await?
+        .ready()
         .await
         .map_err(io::Error::other)?;
-    tokio::spawn(connection);
-    let mut upstream = upstream.ready().await.map_err(io::Error::other)?;
     let mut request = ::http::Request::post(SESSION_RPC)
         .version(::http::Version::HTTP_2)
         .body(())
@@ -130,8 +209,8 @@ async fn relay_session(
     let (response, sender) = upstream
         .send_request(request, false)
         .map_err(io::Error::other)?;
-    let (client_read, client_write) = client.into_split();
-    let send = send_session(client_read, sender, prefix);
+    let (client_read, client_write) = tokio::io::split(bridge);
+    let send = send_session(client_read, sender);
     let receive = receive_session(client_write, response);
     tokio::pin!(receive);
     tokio::select! {
@@ -144,13 +223,9 @@ async fn relay_session(
 }
 
 async fn send_session(
-    mut client: tokio::net::unix::OwnedReadHalf,
+    mut client: impl AsyncRead + Unpin,
     mut worker: h2::SendStream<Bytes>,
-    prefix: Vec<u8>,
 ) -> io::Result<()> {
-    if !prefix.is_empty() {
-        send_message(&mut worker, Bytes::from(prefix)).await?;
-    }
     let mut buffer = [0; 32 << 10];
     loop {
         let read = client.read(&mut buffer).await?;
@@ -164,17 +239,7 @@ async fn send_session(
 }
 
 async fn send_message(worker: &mut h2::SendStream<Bytes>, data: Bytes) -> io::Result<()> {
-    let mut frame = encode_message(data)?;
-    worker.reserve_capacity(frame.len());
-    while !frame.is_empty() {
-        let capacity = std::future::poll_fn(|context| worker.poll_capacity(context))
-            .await
-            .ok_or_else(|| io::Error::other("BuildKit closed the session stream"))?
-            .map_err(io::Error::other)?;
-        let chunk = frame.split_to(capacity.min(frame.len()));
-        worker.send_data(chunk, false).map_err(io::Error::other)?;
-    }
-    Ok(())
+    grpc::send_data(worker, encode_message(data)?).await
 }
 
 fn encode_message(data: Bytes) -> io::Result<Bytes> {
@@ -188,7 +253,7 @@ fn encode_message(data: Bytes) -> io::Result<Bytes> {
 }
 
 async fn receive_session(
-    mut client: tokio::net::unix::OwnedWriteHalf,
+    mut client: impl AsyncWrite + Unpin,
     response: h2::client::ResponseFuture,
 ) -> io::Result<()> {
     let response = response.await.map_err(io::Error::other)?;
@@ -229,19 +294,19 @@ fn grpc_ok(headers: &HeaderMap) -> bool {
 }
 
 fn read_message(buffer: &mut BytesMut) -> io::Result<Option<Bytes>> {
-    if buffer.len() < 5 {
+    let Some((compressed, message)) = grpc::read_frame(buffer)? else {
         return Ok(None);
+    };
+    if compressed {
+        return Err(io::Error::other(
+            "compressed BuildKit session frames are unsupported",
+        ));
     }
-    let len = u32::from_be_bytes(buffer[1..5].try_into().unwrap()) as usize;
-    if buffer[0] != 0 || len > MAX_MESSAGE {
-        return Err(io::Error::other("unsupported BuildKit session frame"));
-    }
-    if buffer.len() < 5 + len {
-        return Ok(None);
-    }
-    buffer.advance(5);
-    let message = SessionBytes::decode(buffer.split_to(len).freeze()).map_err(io::Error::other)?;
-    Ok(Some(message.data))
+    Ok(Some(
+        SessionBytes::decode(message)
+            .map_err(io::Error::other)?
+            .data,
+    ))
 }
 
 #[cfg(test)]

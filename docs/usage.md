@@ -1045,17 +1045,22 @@ export DOCKER_HOST=unix://$XDG_RUNTIME_DIR/podbag-buildkit.sock
 docker buildx inspect default
 docker buildx build --builder default --secret id=config,src=/path/to/config \
   --output type=local,dest=build-result .
+docker buildx build --builder default -t myapp .
+docker image inspect myapp
+docker buildx build --builder default --load -t myapp:loaded .
 docker buildx build --builder default -t myapp --output type=docker,dest=myapp.tar .
-docker load -i myapp.tar
 ```
 
 - Buildx sends its build context, secret mounts and SSH mounts through the session.
   The worker starts on the first Buildx request and uses a private Unix socket.
   Podbag removes it after 15 seconds without a Buildx connection or when the service
   stops. Use an explicit cache exporter to retain cache between workers.
-- Use an explicit output. For an image in Podbag, export a Docker archive and load it.
-  The Docker driver's implicit image output and `--load` require Docker's Moby
-  image exporter. The classic `POST /build` path remains available with `DOCKER_BUILDKIT=0`.
+- The default output and `--load` install one platform's image in Podbag. All supplied
+  tags become available to `docker image inspect` and `podbag run` after a successful build.
+  Use `--output type=docker,dest=...` to save an archive. Run `podbag push IMAGE` after
+  building to publish a loaded image. Use a `docker-container` builder for multi-platform
+  output.
+- Use `DOCKER_BUILDKIT=0` to select the classic `POST /build` path.
 
 ## TUI and GUI
 

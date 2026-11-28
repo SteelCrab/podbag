@@ -476,18 +476,28 @@ fn engine_v2_uses_the_requests_registry_credentials() {
     println!("PASS: Docker Engine HTTP v2 uses only the supplied registry credentials");
 }
 
-/// Set PODBAG_TEST_BUILDX to an executable Docker Buildx plugin to enable this test.
-#[test]
-fn engine_driver_transfers_context_secret_and_image_and_reaps_its_worker() {
+fn buildx_sandbox() -> Option<Sandbox> {
     let Some(buildx) = std::env::var_os("PODBAG_TEST_BUILDX") else {
-        eprintln!("PODBAG_TEST_BUILDX is unset: skipped");
-        return;
+        eprintln!("PODBAG_TEST_BUILDX is not set: skipped");
+        return None;
     };
-    let buildx = std::fs::canonicalize(buildx).unwrap();
     let sb = Sandbox::new();
     let plugins = sb.tmp.path().join("docker-config/cli-plugins");
     std::fs::create_dir_all(&plugins).unwrap();
-    std::os::unix::fs::symlink(buildx, plugins.join("docker-buildx")).unwrap();
+    std::os::unix::fs::symlink(
+        std::fs::canonicalize(buildx).unwrap(),
+        plugins.join("docker-buildx"),
+    )
+    .unwrap();
+    Some(sb)
+}
+
+/// Set PODBAG_TEST_BUILDX to an executable Docker Buildx plugin to enable this test.
+#[test]
+fn engine_driver_transfers_context_secret_and_image_and_reaps_its_worker() {
+    let Some(sb) = buildx_sandbox() else {
+        return;
+    };
 
     let context = sb.tmp.path().join("context");
     std::fs::create_dir(&context).unwrap();
@@ -550,6 +560,197 @@ fn engine_driver_transfers_context_secret_and_image_and_reaps_its_worker() {
     assert_eq!(stdout(&ran), "engine build");
     assert!(wait_for(Duration::from_secs(25), || workers(&sb).is_empty()));
     println!("PASS: stock Buildx session, archive import, and idle-worker cleanup");
+}
+
+#[test]
+fn engine_docker_driver_loads_implicit_and_explicit_images() {
+    if !enabled() {
+        return;
+    }
+    let Some(sb) = buildx_sandbox() else {
+        return;
+    };
+
+    let context = sb.tmp.path().join("context");
+    std::fs::create_dir(&context).unwrap();
+    let busybox = std::env::var_os("PODBAG_TEST_BUSYBOX").unwrap_or("/usr/bin/busybox".into());
+    std::fs::copy(busybox, context.join("busybox")).unwrap();
+    std::fs::write(
+        context.join("Dockerfile"),
+        "FROM scratch\nCOPY busybox /bin/busybox\nCOPY message /message\nCMD [\"/bin/busybox\", \"cat\", \"/message\"]\n",
+    )
+    .unwrap();
+    let service = Service::start(&sb, &["--buildkit", "--timeout", "0"]);
+    for (tag, flags) in [
+        ("engine-kit:implicit", &[][..]),
+        (
+            "engine-kit:load",
+            &["--load", "--tag", "engine-kit:alias"][..],
+        ),
+    ] {
+        std::fs::write(context.join("message"), format!("{tag}\n")).unwrap();
+        let mut args = vec![
+            "buildx",
+            "build",
+            "--builder",
+            "default",
+            "--progress",
+            "plain",
+            "--network",
+            "none",
+            "--tag",
+            tag,
+        ];
+        args.extend_from_slice(flags);
+        args.push(context.to_str().unwrap());
+        let build = checked(docker_out(&sb, &service, &args));
+        assert!(
+            stderr(&build).contains(" using docker driver"),
+            "{}",
+            stderr(&build)
+        );
+        let inspected = checked(docker_out(
+            &sb,
+            &service,
+            &["image", "inspect", "--format", "{{.Id}}", tag],
+        ));
+        assert!(stdout(&inspected).starts_with("sha256:"));
+        let ran = checked(
+            sb.podbag()
+                .args(["run", "--rm", "--network", "none", tag])
+                .output()
+                .unwrap(),
+        );
+        assert_eq!(stdout(&ran), tag);
+    }
+    let ran = checked(
+        sb.podbag()
+            .args(["run", "--rm", "--network", "none", "engine-kit:alias"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(stdout(&ran), "engine-kit:load");
+    let iid = sb.tmp.path().join("image-id");
+    std::fs::write(context.join("message"), "untagged image\n").unwrap();
+    checked(docker_out(
+        &sb,
+        &service,
+        &[
+            "buildx",
+            "build",
+            "--builder",
+            "default",
+            "--network",
+            "none",
+            "--iidfile",
+            iid.to_str().unwrap(),
+            context.to_str().unwrap(),
+        ],
+    ));
+    let id = std::fs::read_to_string(iid).unwrap();
+    assert!(id.starts_with("sha256:"));
+    let ran = checked(
+        sb.podbag()
+            .args(["run", "--rm", "--network", "none", &id])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(stdout(&ran), "untagged image");
+
+    std::fs::write(
+        context.join("Dockerfile"),
+        "FROM scratch\nCOPY missing /missing\n",
+    )
+    .unwrap();
+    let failure = docker_out(
+        &sb,
+        &service,
+        &[
+            "buildx",
+            "build",
+            "--builder",
+            "default",
+            "--network",
+            "none",
+            "--load",
+            "--tag",
+            "engine-kit:load",
+            context.to_str().unwrap(),
+        ],
+    );
+    assert!(!failure.status.success());
+    assert!(stderr(&failure).contains("missing"), "{}", stderr(&failure));
+    let ran = checked(
+        sb.podbag()
+            .args(["run", "--rm", "--network", "none", "engine-kit:load"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(stdout(&ran), "engine-kit:load");
+    println!("PASS: stock Docker Buildx default output and --load are visible to inspect and run");
+}
+
+#[test]
+fn engine_docker_driver_loads_registry_base_layers() {
+    use common::registry::{FakeRegistry, TarEntry, TestImage, layer};
+    if !enabled() || !root_mode() {
+        return;
+    }
+    let Some(sb) = buildx_sandbox() else {
+        return;
+    };
+    let registry = FakeRegistry::start(false);
+    let busybox = std::env::var_os("PODBAG_TEST_BUSYBOX").unwrap_or("/usr/bin/busybox".into());
+    registry.push(
+        "fixtures/busybox",
+        "v1",
+        &TestImage {
+            layers: vec![layer(&[
+                TarEntry::File {
+                    path: "busybox".into(),
+                    data: std::fs::read(busybox).unwrap(),
+                    mode: 0o755,
+                    uid: 0,
+                    gid: 0,
+                },
+                TarEntry::file("message", b"registry base layer\n"),
+            ])],
+            config: serde_json::json!({ "Cmd": ["/busybox", "cat", "/message"] }),
+        },
+    );
+    std::fs::write(
+        sb.tmp.path().join("Dockerfile"),
+        format!(
+            "FROM {}/fixtures/busybox:v1\nLABEL test=registry-layer\n",
+            registry.host,
+        ),
+    )
+    .unwrap();
+    let service = Service::start(&sb, &["--buildkit", "--timeout", "0"]);
+    checked(docker_out(
+        &sb,
+        &service,
+        &[
+            "buildx",
+            "build",
+            "--builder",
+            "default",
+            "--network",
+            "none",
+            "--load",
+            "--tag",
+            "engine-kit:base",
+            sb.tmp.path().to_str().unwrap(),
+        ],
+    ));
+    let ran = checked(
+        sb.podbag()
+            .args(["run", "--rm", "--network", "none", "engine-kit:base"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(stdout(&ran), "registry base layer");
+    println!("PASS: stock Buildx --load includes an unused base layer from a fixture registry");
 }
 
 #[test]

@@ -18,6 +18,7 @@ pub(in crate::api) struct Client(mpsc::Sender<Request>);
 
 pub(super) struct Connection {
     pub stream: UnixStream,
+    pub exports: super::export::Exports,
     _live: Arc<()>,
 }
 
@@ -31,6 +32,7 @@ struct Running {
     work: Workspace,
     live: Arc<()>,
     last_used: Instant,
+    exports: super::export::Exports,
 }
 
 impl Owner {
@@ -121,6 +123,7 @@ fn connect(worker: &mut Option<Running>, data: &Path) -> Result<Connection> {
         work,
         live: Arc::new(()),
         last_used: Instant::now(),
+        exports: super::export::Exports::default(),
     };
     let connection = running.connect().map_err(|error| worker_error(&error))?;
     *worker = Some(running);
@@ -141,6 +144,7 @@ impl Running {
         Ok(Connection {
             stream,
             _live: self.live.clone(),
+            exports: self.exports.clone(),
         })
     }
 }
