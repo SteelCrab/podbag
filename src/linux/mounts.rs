@@ -6,16 +6,21 @@
 //! parts are created relative to directory descriptors, and mounts are attached to the
 //! target's descriptor (`open_tree`, `fsmount`, `move_mount`), never to a path string.
 
-use crate::volume::{Mount, MountSource};
+use crate::volume::{Mount, MountSource, NfsOptions};
 use crate::{Error, ErrorKind, Result};
 use rustix::fs::{AtFlags, FileType, Mode, OFlags, ResolveFlags};
 use rustix::mount::{FsMountFlags, FsOpenFlags, MountAttrFlags, MoveMountFlags, OpenTreeFlags};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd};
 use std::path::Path;
 
 /// Make every mount under `root` (the container's root, not yet entered), parents first.
-pub(super) fn mount_all(rootless: bool, root: &Path, mounts: &[Mount]) -> Result<()> {
+pub(super) fn mount_all(
+    rootless: bool,
+    root: &Path,
+    mounts: &[Mount],
+    nfs: &NfsMounts,
+) -> Result<()> {
     if mounts.is_empty() {
         return Ok(());
     }
@@ -29,7 +34,7 @@ pub(super) fn mount_all(rootless: bool, root: &Path, mounts: &[Mount]) -> Result
     let mut ordered: Vec<&Mount> = mounts.iter().collect();
     ordered.sort_by_key(|m| m.target.split('/').filter(|p| !p.is_empty()).count());
     for m in ordered {
-        mount_one(root_fd.as_fd(), m, shares.as_deref()).map_err(|e| {
+        mount_one(root_fd.as_fd(), m, shares.as_deref(), nfs).map_err(|e| {
             super::userns_denial(rootless, Some(&e), None).unwrap_or_else(|| fail(&m.target, e))
         })?;
     }
@@ -40,6 +45,7 @@ fn mount_one(
     root: BorrowedFd<'_>,
     m: &Mount,
     shares: Option<&[std::path::PathBuf]>,
+    nfs: &NfsMounts,
 ) -> std::io::Result<()> {
     match &m.source {
         MountSource::Bind {
@@ -73,11 +79,104 @@ fn mount_one(
             }
             bind(Path::new(path), target.as_fd(), m.read_only, true)
         }
+        MountSource::Nfs { .. } => {
+            let target = open_target(root, &m.target, false)?;
+            let mount = nfs
+                .get(&m.target)
+                .ok_or_else(|| std::io::Error::other("NFS mount was not prepared"))?;
+            attach(mount.as_fd(), target.as_fd())
+        }
+        MountSource::Driver { .. } => Err(std::io::Error::other(
+            "the volume driver has not supplied a mount path",
+        )),
         MountSource::Tmpfs { options } => {
             let target = open_target(root, &m.target, false)?;
             tmpfs(options, m.read_only, target.as_fd())
         }
     }
+}
+
+pub(super) type NfsMounts = BTreeMap<String, OwnedFd>;
+
+/// Open detached mounts in the engine's network namespace, before cloning the container.
+/// The only attachment is in the container's private mount namespace.
+pub(super) fn prepare_nfs(rootless: bool, mounts: &[Mount]) -> Result<NfsMounts> {
+    let mut prepared = BTreeMap::new();
+    for mount in mounts {
+        let MountSource::Nfs { name, options } = &mount.source else {
+            continue;
+        };
+        crate::volume::require_rootful("native NFS mounts", rootless)?;
+        let fd = open_nfs(options, mount.read_only).map_err(|e| {
+            Error::new(
+                ErrorKind::Runtime,
+                format!("cannot mount NFS volume {name} at {}", mount.target),
+                e.to_string(),
+                "check the NFS server, export, client kernel support and mount options",
+            )
+        })?;
+        prepared.insert(mount.target.clone(), fd);
+    }
+    Ok(prepared)
+}
+
+fn open_nfs(options: &NfsOptions, read_only: bool) -> std::io::Result<OwnedFd> {
+    let addr = options.resolve_address()?.to_string();
+    let fs = rustix::mount::fsopen(options.fs_type(), FsOpenFlags::FSOPEN_CLOEXEC)?;
+    rustix::mount::fsconfig_set_string(&fs, "source", options.source().as_str())?;
+    rustix::mount::fsconfig_set_string(&fs, "addr", addr.as_str())?;
+    if options.fs_type() == "nfs4" {
+        // The descriptor API does not infer the NFS version from the filesystem alias.
+        rustix::mount::fsconfig_set_string(&fs, "vers", "4")?;
+    }
+    let mut attrs = MountAttrFlags::empty();
+    for option in options.parameters() {
+        if set_mount_attr(&mut attrs, option) {
+            continue;
+        }
+        match option.split_once('=') {
+            Some(("addr", _)) => {}
+            Some(("source", _)) => return Err(rustix::io::Errno::INVAL.into()),
+            Some((key, value)) => rustix::mount::fsconfig_set_string(&fs, key, value)?,
+            None => rustix::mount::fsconfig_set_flag(&fs, option)?,
+        }
+    }
+    if read_only {
+        attrs |= MountAttrFlags::MOUNT_ATTR_RDONLY;
+    }
+    rustix::mount::fsconfig_create(&fs)?;
+    Ok(rustix::mount::fsmount(
+        &fs,
+        FsMountFlags::FSMOUNT_CLOEXEC,
+        attrs,
+    )?)
+}
+
+/// Apply a mount option that is a per-mount attribute, not a filesystem parameter (the
+/// filesystem context rejects these). Returns false for every other option.
+fn set_mount_attr(attrs: &mut MountAttrFlags, option: &str) -> bool {
+    // The access-time mode is one field: the last of these options wins.
+    let atime = |attrs: &mut MountAttrFlags, mode: MountAttrFlags| {
+        *attrs -= MountAttrFlags::MOUNT_ATTR__ATIME;
+        *attrs |= mode;
+    };
+    match option {
+        "ro" => *attrs |= MountAttrFlags::MOUNT_ATTR_RDONLY,
+        "rw" => *attrs -= MountAttrFlags::MOUNT_ATTR_RDONLY,
+        "nosuid" => *attrs |= MountAttrFlags::MOUNT_ATTR_NOSUID,
+        "suid" => *attrs -= MountAttrFlags::MOUNT_ATTR_NOSUID,
+        "nodev" => *attrs |= MountAttrFlags::MOUNT_ATTR_NODEV,
+        "dev" => *attrs -= MountAttrFlags::MOUNT_ATTR_NODEV,
+        "noexec" => *attrs |= MountAttrFlags::MOUNT_ATTR_NOEXEC,
+        "exec" => *attrs -= MountAttrFlags::MOUNT_ATTR_NOEXEC,
+        "noatime" => atime(attrs, MountAttrFlags::MOUNT_ATTR_NOATIME),
+        "relatime" | "atime" => atime(attrs, MountAttrFlags::MOUNT_ATTR_RELATIME),
+        "strictatime" => atime(attrs, MountAttrFlags::MOUNT_ATTR_STRICTATIME),
+        "nodiratime" => *attrs |= MountAttrFlags::MOUNT_ATTR_NODIRATIME,
+        "diratime" => *attrs -= MountAttrFlags::MOUNT_ATTR_NODIRATIME,
+        _ => return false,
+    }
+    true
 }
 
 fn open_shared_source(path: &Path, roots: &[std::path::PathBuf]) -> std::io::Result<OwnedFd> {
@@ -496,6 +595,35 @@ mod tests {
         let mode = std::fs::metadata(&outside).unwrap().permissions().mode() & 0o7777;
         assert_eq!(mode, 0o600);
         assert!(!outdir.join("f").exists(), "wrote through a planted link");
+    }
+
+    /// The filesystem context rejects access-time options, so they must become attributes.
+    #[test]
+    fn access_time_options_are_mount_attributes() {
+        let attrs = |options: &[&str]| {
+            let mut attrs = MountAttrFlags::empty();
+            for option in options {
+                assert!(set_mount_attr(&mut attrs, option), "{option}");
+            }
+            attrs
+        };
+        assert_eq!(attrs(&["noatime"]), MountAttrFlags::MOUNT_ATTR_NOATIME);
+        assert_eq!(
+            attrs(&["noatime", "strictatime"]),
+            MountAttrFlags::MOUNT_ATTR_STRICTATIME
+        );
+        assert_eq!(attrs(&["strictatime", "relatime"]), MountAttrFlags::empty());
+        assert_eq!(attrs(&["noatime", "atime"]), MountAttrFlags::empty());
+        assert_eq!(
+            attrs(&["nosuid", "nodiratime", "noatime"]),
+            MountAttrFlags::MOUNT_ATTR_NOSUID
+                | MountAttrFlags::MOUNT_ATTR_NODIRATIME
+                | MountAttrFlags::MOUNT_ATTR_NOATIME
+        );
+        assert_eq!(attrs(&["nodiratime", "diratime"]), MountAttrFlags::empty());
+        let mut other = MountAttrFlags::empty();
+        assert!(!set_mount_attr(&mut other, "vers=4"));
+        assert!(!set_mount_attr(&mut other, "hard"));
     }
 
     #[test]

@@ -6,6 +6,11 @@ use crate::paths::Dirs;
 use crate::{Error, ErrorKind, Result};
 use serde::{Deserialize, Serialize};
 
+mod nfs;
+#[cfg(target_os = "linux")]
+pub(crate) mod plugin;
+pub use nfs::{NfsOptions, parse_options};
+
 /// A named (or anonymous) volume in `<data>/volumes/<name>`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Volume {
@@ -19,6 +24,10 @@ pub struct Volume {
     /// Labels (Docker's `--label`; Compose finds a project's volumes by them).
     #[serde(default)]
     pub labels: crate::network::Labels,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nfs: Option<NfsOptions>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin: Option<DriverVolume>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -29,6 +38,25 @@ struct Meta {
     /// Missing in the files of volumes made before volumes had labels.
     #[serde(default)]
     labels: crate::network::Labels,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    nfs: Option<NfsOptions>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    plugin: Option<DriverVolume>,
+}
+
+/// A configured Unix-socket volume driver and its creation options.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DriverVolume {
+    pub name: String,
+    pub options: crate::network::Labels,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Backend {
+    ExistingOrDirectory,
+    Directory,
+    Nfs(NfsOptions),
+    Plugin(DriverVolume),
 }
 
 const META: &str = "meta.json";
@@ -52,8 +80,35 @@ impl Volume {
         name: Option<&str>,
         labels: crate::network::Labels,
     ) -> Result<Volume> {
+        Self::create_with_options(dirs, name, labels, None)
+    }
+
+    /// Create a local volume with optional NFS settings.
+    pub fn create_with_options(
+        dirs: &Dirs,
+        name: Option<&str>,
+        labels: crate::network::Labels,
+        nfs: Option<NfsOptions>,
+    ) -> Result<Volume> {
         let _lock = lock_shared(dirs)?;
-        create_labeled_in(dirs, name, false, labels).map(|(v, _)| v)
+        create_with_nfs(dirs, name, false, labels, nfs).map(|(v, _)| v)
+    }
+
+    /// Create a local or external volume with the given driver options.
+    pub fn create_with_driver(
+        dirs: &Dirs,
+        name: Option<&str>,
+        labels: crate::network::Labels,
+        driver: &str,
+        options: crate::network::Labels,
+    ) -> Result<Volume> {
+        let backend = backend(driver, options)?;
+        let _lock = lock(dirs, matches!(backend, Backend::Plugin(_)))?;
+        create_with_backend(dirs, name, false, labels, backend).map(|(v, _)| v)
+    }
+
+    pub fn driver(&self) -> &str {
+        self.plugin.as_ref().map_or("local", |p| p.name.as_str())
     }
 
     pub fn get(name: &str) -> Result<Volume> {
@@ -105,15 +160,20 @@ fn volumes_dir(dirs: &Dirs) -> Result<std::path::PathBuf> {
 
 fn volume_of(dirs: &Dirs, meta: Meta) -> Volume {
     Volume {
-        mountpoint: dirs
-            .volume_dir(&meta.name)
-            .join("data")
-            .to_string_lossy()
-            .into_owned(),
+        mountpoint: if meta.plugin.is_some() {
+            String::new()
+        } else {
+            dirs.volume_dir(&meta.name)
+                .join("data")
+                .to_string_lossy()
+                .into_owned()
+        },
         name: meta.name,
         created: meta.created,
         anonymous: meta.anonymous,
         labels: meta.labels,
+        nfs: meta.nfs,
+        plugin: meta.plugin,
     }
 }
 
@@ -134,6 +194,38 @@ pub(crate) fn create_labeled_in(
     anonymous: bool,
     labels: crate::network::Labels,
 ) -> Result<(Volume, bool)> {
+    create_with_backend(dirs, name, anonymous, labels, Backend::ExistingOrDirectory)
+}
+
+pub(crate) fn create_with_nfs(
+    dirs: &Dirs,
+    name: Option<&str>,
+    anonymous: bool,
+    labels: crate::network::Labels,
+    nfs: Option<NfsOptions>,
+) -> Result<(Volume, bool)> {
+    create_with_backend(
+        dirs,
+        name,
+        anonymous,
+        labels,
+        nfs.map_or(Backend::Directory, Backend::Nfs),
+    )
+}
+
+pub(crate) fn create_with_backend(
+    dirs: &Dirs,
+    name: Option<&str>,
+    anonymous: bool,
+    labels: crate::network::Labels,
+    backend: Backend,
+) -> Result<(Volume, bool)> {
+    match &backend {
+        Backend::ExistingOrDirectory | Backend::Directory => {}
+        Backend::Nfs(_) => require_rootful("native NFS mounts", rootless())?,
+        Backend::Plugin(_) => require_rootful("external volume drivers", rootless())?,
+    }
+    let generated = name.is_none();
     let name = match name {
         Some(n) => {
             check_name(n)?;
@@ -142,7 +234,15 @@ pub(crate) fn create_labeled_in(
         None => crate::id::new_id()?,
     };
     let dir = dirs.volume_dir(&name);
-    volumes_dir(dirs)?;
+    let parent = volumes_dir(dirs)?;
+    #[cfg(target_os = "linux")]
+    if let Backend::Plugin(plugin) = &backend {
+        return create_driver_record(dirs, &parent, name, generated, anonymous, labels, plugin);
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = generated;
+    #[cfg(not(target_os = "linux"))]
+    let _ = parent;
     match std::fs::create_dir(&dir) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -155,6 +255,9 @@ pub(crate) fn create_labeled_in(
                             && std::time::Instant::now() < deadline =>
                     {
                         std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Ok(v) if !same_backend(&v, &backend) => {
+                        return Err(conflicting_backend(&name));
                     }
                     other => return other.map(|v| (v, false)),
                 }
@@ -171,6 +274,11 @@ pub(crate) fn create_labeled_in(
         created: crate::state::now(),
         anonymous,
         labels,
+        nfs: match backend {
+            Backend::Nfs(options) => Some(options),
+            _ => None,
+        },
+        plugin: None,
     };
     let json = serde_json::to_vec(&meta).unwrap_or_default();
     let tmp = dir.join(".meta.json.tmp");
@@ -178,6 +286,141 @@ pub(crate) fn create_labeled_in(
         .and_then(|()| std::fs::rename(&tmp, dir.join(META)))
         .map_err(|e| store_error(&dir, e))?;
     Ok((volume_of(dirs, meta), true))
+}
+
+fn conflicting_backend(name: &str) -> Error {
+    Error::new(
+        ErrorKind::Conflict,
+        format!("volume {name} already exists with different options"),
+        "an existing volume's backing storage cannot change",
+        "choose another volume name",
+    )
+}
+
+/// The exclusive volume lock covers creation, including requests from container create.
+/// A lost Create reply for a given name leaves no published directory and can be retried
+/// with the same name. For a `generated` name, the record stays: only it knows the name.
+#[cfg(target_os = "linux")]
+fn create_driver_record(
+    dirs: &Dirs,
+    parent: &std::path::Path,
+    name: String,
+    generated: bool,
+    anonymous: bool,
+    labels: crate::network::Labels,
+    driver: &DriverVolume,
+) -> Result<(Volume, bool)> {
+    use std::io::Write;
+    match get_in(dirs, &name) {
+        Ok(v) if compatible_driver(&v, driver) => return Ok((v, false)),
+        Ok(_) => return Err(conflicting_backend(&name)),
+        Err(e) if e.kind != ErrorKind::NotFound => return Err(e),
+        Err(_) => {}
+    }
+    let fail = |e| store_error(parent, e);
+    let stage = tempfile::Builder::new()
+        .prefix(".driver-")
+        .tempdir_in(parent)
+        .map_err(fail)?;
+    let meta = Meta {
+        name,
+        created: crate::state::now(),
+        anonymous,
+        labels,
+        nfs: None,
+        plugin: Some(driver.clone()),
+    };
+    let mut file = std::fs::File::create(stage.path().join(META)).map_err(fail)?;
+    file.write_all(&serde_json::to_vec(&meta).unwrap_or_default())
+        .and_then(|()| file.sync_all())
+        .and_then(|()| std::fs::File::open(stage.path())?.sync_all())
+        .map_err(fail)?;
+    let publish = || {
+        std::fs::rename(stage.path(), dirs.volume_dir(&meta.name))
+            .and_then(|()| std::fs::File::open(parent)?.sync_all())
+            .map_err(fail)
+    };
+    match plugin::create(dirs, &meta.name, driver) {
+        Ok(()) => {}
+        // The driver may have made the volume: keep its record, so that it can be seen
+        // and removed.
+        Err(plugin::Failure::Unknown(e)) if generated => {
+            publish()?;
+            return Err(Error::new(
+                e.kind,
+                format!(
+                    "volume driver {} may have created volume {}",
+                    driver.name, meta.name
+                ),
+                e.why,
+                format!(
+                    "check the driver, then remove the volume (`podbag volume rm {}`)",
+                    meta.name
+                ),
+            ));
+        }
+        Err(failure) => return Err(failure.into()),
+    }
+    publish()?;
+    Ok((volume_of(dirs, meta), true))
+}
+
+fn same_backend(volume: &Volume, expected: &Backend) -> bool {
+    match expected {
+        Backend::ExistingOrDirectory => true,
+        Backend::Directory => volume.plugin.is_none(),
+        Backend::Nfs(options) => volume.nfs.as_ref() == Some(options),
+        Backend::Plugin(_) => false,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn compatible_driver(volume: &Volume, plugin: &DriverVolume) -> bool {
+    volume.plugin.as_ref().is_some_and(|v| {
+        v.name == plugin.name && (plugin.options.is_empty() || v.options == plugin.options)
+    })
+}
+
+pub(crate) fn backend(driver: &str, options: crate::network::Labels) -> Result<Backend> {
+    if matches!(driver, "" | "local") {
+        return Ok(parse_options(options)?.map_or(Backend::Directory, Backend::Nfs));
+    }
+    check_driver_name(driver)?;
+    Ok(Backend::Plugin(DriverVolume {
+        name: driver.to_string(),
+        options,
+    }))
+}
+
+pub(crate) fn check_driver_name(driver: &str) -> Result<()> {
+    if driver.len() > 64 || check_name(driver).is_err() {
+        return Err(invalid(
+            format!("invalid volume driver {driver:?}"),
+            "a driver name has 2 to 64 letters, digits, periods, dashes or underscores and begins with a letter or digit",
+            "choose a name that matches a configured volume-driver socket",
+        ));
+    }
+    Ok(())
+}
+
+fn rootless() -> bool {
+    #[cfg(unix)]
+    // SAFETY: geteuid has no preconditions.
+    return unsafe { libc::geteuid() } != 0;
+    #[cfg(not(unix))]
+    true
+}
+
+pub(crate) fn require_rootful(feature: &str, rootless: bool) -> Result<()> {
+    if rootless || !cfg!(target_os = "linux") {
+        return Err(Error::new(
+            ErrorKind::Unsupported,
+            format!("cannot use {feature}"),
+            format!("{feature} require a rootful Linux engine"),
+            "use a rootful engine or bind a directory prepared by the system",
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn get_in(dirs: &Dirs, name: &str) -> Result<Volume> {
@@ -236,10 +479,12 @@ fn users_except(dirs: &Dirs, name: &str, except_id: &str) -> Result<Vec<String>>
         let Ok(spec) = crate::state::read_config(dirs, &id) else {
             continue;
         };
-        let uses = spec
-            .mounts
-            .iter()
-            .any(|m| matches!(&m.source, MountSource::Volume { name: n, .. } if n == name));
+        let uses = spec.mounts.iter().any(|m| match &m.source {
+            MountSource::Volume { name: n, .. }
+            | MountSource::Nfs { name: n, .. }
+            | MountSource::Driver { name: n, .. } => n == name,
+            _ => false,
+        });
         if uses {
             users.push(spec.name);
         }
@@ -269,12 +514,37 @@ pub(crate) fn lock_shared(dirs: &Dirs) -> Result<std::fs::File> {
     lock(dirs, false)
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) fn lock_for_mounts(
+    dirs: &Dirs,
+    mounts: &[MountRequest],
+) -> Result<Option<std::fs::File>> {
+    let creates_driver = mounts
+        .iter()
+        .any(|req| matches!(req, MountRequest::NamedDriver { .. }));
+    (!mounts.is_empty())
+        .then(|| lock(dirs, creates_driver))
+        .transpose()
+}
+
 pub(crate) fn remove_in(dirs: &Dirs, name: &str, force: bool) -> Result<()> {
+    remove_if(dirs, name, force, &|_| true).map(drop)
+}
+
+/// Remove volume `name` if its record, read under the volume lock, passes `eligible`.
+/// False when it does not: another process may have replaced the volume meanwhile.
+fn remove_if(
+    dirs: &Dirs,
+    name: &str,
+    force: bool,
+    eligible: &dyn Fn(&Volume) -> bool,
+) -> Result<bool> {
     check_name(name)?;
     let _lock = lock(dirs, true)?;
     match get_in(dirs, name) {
+        Ok(v) if !eligible(&v) => return Ok(false),
         Ok(_) => {}
-        Err(e) if e.kind == ErrorKind::NotFound && force => return Ok(()),
+        Err(e) if e.kind == ErrorKind::NotFound && force => return Ok(true),
         Err(e) => return Err(e),
     }
     let users = users_of(dirs, name)?;
@@ -286,7 +556,7 @@ pub(crate) fn remove_in(dirs: &Dirs, name: &str, force: bool) -> Result<()> {
             "remove those containers first (`podbag rm`)",
         ));
     }
-    remove_files(dirs, name)
+    remove_files(dirs, name).map(|()| true)
 }
 
 #[cfg(test)]
@@ -299,19 +569,27 @@ pub(crate) fn prune_matching_in(
     all: bool,
     pick: &dyn Fn(&Volume) -> bool,
 ) -> Result<(Vec<String>, u64)> {
+    // Prune never removes a driver's volume: its data follows the driver's own policy.
+    let eligible = |v: &Volume| v.plugin.is_none() && (all || v.anonymous) && pick(v);
     let mut gone = Vec::new();
     let mut bytes = 0;
     for v in list_in(dirs)? {
-        if (!all && !v.anonymous) || !pick(&v) {
+        if !eligible(&v) {
             continue;
         }
-        let size = tree_size(&dirs.volume_dir(&v.name));
-        // Checks the users again under the volume lock: one mounted meanwhile stays.
-        match remove_in(dirs, &v.name, false) {
-            Ok(()) => {
+        let size = if v.nfs.is_some() {
+            0
+        } else {
+            tree_size(&dirs.volume_dir(&v.name))
+        };
+        // Checks the volume and its users again under the volume lock: one replaced or
+        // mounted meanwhile stays.
+        match remove_if(dirs, &v.name, false, &eligible) {
+            Ok(true) => {
                 gone.push(v.name);
                 bytes += size;
             }
+            Ok(false) => {}
             Err(e) if matches!(e.kind, ErrorKind::Conflict | ErrorKind::NotFound) => {}
             Err(e) => return Err(e),
         }
@@ -376,6 +654,27 @@ pub fn anonymous_volumes(mounts: &[Mount]) -> impl Iterator<Item = &str> {
 /// subordinate IDs; the store helper removes them inside the user namespace.
 pub(crate) fn remove_files(dirs: &Dirs, name: &str) -> Result<()> {
     let dir = dirs.volume_dir(name);
+    if let Ok(v) = get_in(dirs, name)
+        && let Some(plugin) = v.plugin
+    {
+        require_rootful("external volume drivers", rootless())?;
+        #[cfg(target_os = "linux")]
+        plugin::remove(dirs, name, &plugin)?;
+        #[cfg(not(target_os = "linux"))]
+        let _ = plugin;
+        std::fs::remove_file(dir.join(META)).map_err(|e| store_error(&dir, e))?;
+        return std::fs::remove_dir(&dir).map_err(|e| store_error(&dir, e));
+    }
+    if get_in(dirs, name).is_ok_and(|v| v.nfs.is_some()) {
+        // Never descend into an NFS mountpoint, even if someone mounted it separately.
+        match std::fs::remove_dir(dir.join("data")) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(store_error(&dir.join("data"), e)),
+        }
+        std::fs::remove_file(dir.join(META)).map_err(|e| store_error(&dir, e))?;
+        return std::fs::remove_dir(&dir).map_err(|e| store_error(&dir, e));
+    }
     match crate::store::remove_tree(&dir) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -418,6 +717,20 @@ pub enum MountRequest {
         /// Do not fill a new volume with the image's files at the target.
         nocopy: bool,
     },
+    /// A named NFS volume with explicit options, created on first use.
+    NamedNfs {
+        name: String,
+        target: String,
+        access: Access,
+        nfs: NfsOptions,
+    },
+    /// A named volume created by a configured driver.
+    NamedDriver {
+        name: String,
+        target: String,
+        access: Access,
+        plugin: DriverVolume,
+    },
     /// A volume of its own, removed with the container under `--rm` or `rm -v`.
     Anonymous { target: String, access: Access },
     /// A memory file system; `options` are mount options.
@@ -429,6 +742,8 @@ impl MountRequest {
         match self {
             MountRequest::Bind { target, .. }
             | MountRequest::Named { target, .. }
+            | MountRequest::NamedNfs { target, .. }
+            | MountRequest::NamedDriver { target, .. }
             | MountRequest::Anonymous { target, .. }
             | MountRequest::Tmpfs { target, .. } => target,
         }
@@ -438,6 +753,8 @@ impl MountRequest {
         match self {
             MountRequest::Bind { target, .. }
             | MountRequest::Named { target, .. }
+            | MountRequest::NamedNfs { target, .. }
+            | MountRequest::NamedDriver { target, .. }
             | MountRequest::Anonymous { target, .. }
             | MountRequest::Tmpfs { target, .. } => target,
         }
@@ -462,6 +779,16 @@ pub enum MountSource {
         anonymous: bool,
         /// The volume's `data` directory.
         path: String,
+    },
+    /// The export is mounted directly into the container's mount namespace.
+    Nfs {
+        name: String,
+        options: NfsOptions,
+    },
+    /// The driver supplies a host directory at start time.
+    Driver {
+        name: String,
+        driver: String,
     },
     Tmpfs {
         options: String,
@@ -835,6 +1162,39 @@ mod tests {
             .map(|v| v.name)
             .collect();
         assert_eq!(left, ["busy"]);
+    }
+
+    /// Another process replaces a pruned volume with a driver's volume between the list
+    /// and the removal: the driver's volume stays.
+    #[test]
+    fn prune_keeps_a_volume_replaced_by_a_driver_volume() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = dirs_in(tmp.path());
+        create_in(&dirs, Some("cache"), false).unwrap();
+        let replaced = std::cell::Cell::new(false);
+        let replace = |v: &Volume| {
+            if !replaced.replace(true) {
+                let meta = Meta {
+                    name: v.name.clone(),
+                    created: 1,
+                    anonymous: false,
+                    labels: Default::default(),
+                    nfs: None,
+                    plugin: Some(DriverVolume {
+                        name: "store".into(),
+                        options: Default::default(),
+                    }),
+                };
+                let dir = dirs.volume_dir(&v.name);
+                std::fs::remove_dir_all(&dir).unwrap();
+                std::fs::create_dir(&dir).unwrap();
+                std::fs::write(dir.join(META), serde_json::to_vec(&meta).unwrap()).unwrap();
+            }
+            true
+        };
+        let (gone, _) = prune_matching_in(&dirs, true, &replace).unwrap();
+        assert!(gone.is_empty(), "{gone:?}");
+        assert!(get_in(&dirs, "cache").unwrap().plugin.is_some());
     }
 
     #[test]
