@@ -146,7 +146,7 @@ pub fn body(d: &mut Desktop, ui: &mut Ui, x: f32, y0: f32, w: f32) -> f32 {
     let t = ui.theme;
     let mut y = y0;
     let mut edit = None;
-    if form.saved.is_some() {
+    if let Some(saved) = &form.saved {
         let ipv4 = form_field(ui, x, &mut y, w, &tr.t(FIELDS[0].0));
         let enabled = form.enabled(IPV4);
         text_field(ui, &mut form.ipv4, ipv4, None, enabled);
@@ -169,7 +169,6 @@ pub fn body(d: &mut Desktop, ui: &mut Ui, x: f32, y0: f32, w: f32) -> f32 {
             text_field(ui, &mut form.ipv6, ipv6, None, enabled);
         }
 
-        let saved = form.saved.as_ref().unwrap();
         let subnets = [
             saved.active_subnet.as_deref(),
             saved.active_ipv6_subnet.as_deref(),
