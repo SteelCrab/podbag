@@ -1842,6 +1842,7 @@ async function renderSettings(main) {
         engineConfigurationSetting(),
         dockerSettings(),
         compressionSetting()),
+      builderSettings(),
       registryProxySetting(),
       settingDetails("vm-settings", "vm", "vm"),
       settingDetails("sync-settings", "syncShares", "volumes"),

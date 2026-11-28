@@ -26,6 +26,9 @@ const API = (() => {
       return invoke("migrate", { request, updates });
     },
     contexts: () => invoke("contexts"),
+    builderList: () => scoped("builder_list"),
+    builderInspect: (scope, name) => scoped("builder_inspect", { scope, name }),
+    builderAction: (scope, name, action) => scoped("builder_action", { scope, name, action }),
     migrationSources: () => invoke("migration_sources"),
     kubeCounts: (context, allNamespaces) => invoke("kube_counts", { context: context || null, allNamespaces }),
     kubeContexts: () => invoke("kube_contexts"),
