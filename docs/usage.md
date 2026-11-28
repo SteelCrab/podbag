@@ -524,8 +524,8 @@ and group IDs for RootlessKit.
 
 Rootful builds and network changes share a lock on the current Linux network
 namespace. It works with a read-only `/run` when `PODBAG_RUNTIME_DIR` points to a
-writable location. Any user who can open their own namespace descriptor can
-hold the same lock. Podbag reports a conflict after waiting 30 seconds.
+writable location. Local users in the same network namespace can also hold the
+lock. Podbag reports a conflict if it cannot acquire the lock within 30 seconds.
 
 ```sh
 podbag build --buildkit -t app .
