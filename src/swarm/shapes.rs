@@ -104,10 +104,15 @@ pub fn worker_json(worker: &super::remote::Worker, ready: bool) -> Value {
     let host = worker.host.as_ref();
     json!({
         "ID": worker.id,
-        "Version": {"Index": 1},
+        "Version": {"Index": worker.version},
         "CreatedAt": worker.created,
-        "UpdatedAt": worker.created,
-        "Spec": {"Name": worker.name, "Role": "worker", "Availability": "active", "Labels": {}},
+        "UpdatedAt": worker.updated.as_ref().unwrap_or(&worker.created),
+        "Spec": {
+            "Name": worker.name,
+            "Role": "worker",
+            "Availability": if worker.drained { "drain" } else { "active" },
+            "Labels": {}
+        },
         "Description": {
             "Hostname": worker.name,
             "Platform": {"Architecture": host.map(|h| h.architecture.as_str()).unwrap_or_default(), "OS": "linux"},
@@ -429,6 +434,7 @@ mod tests {
             }],
             vips: BTreeMap::new(),
             worker_slots: Default::default(),
+            worker_releases: Default::default(),
             removing: false,
         }
     }

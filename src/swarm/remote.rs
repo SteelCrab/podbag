@@ -22,7 +22,17 @@ pub struct Worker {
     pub ssh_config: Option<String>,
     pub created: String,
     #[serde(default)]
+    pub updated: Option<String>,
+    #[serde(default = "initial_worker_version")]
+    pub version: u64,
+    #[serde(default)]
+    pub drained: bool,
+    #[serde(default)]
     pub host: Option<Host>,
+}
+
+fn initial_worker_version() -> u64 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -178,7 +188,9 @@ impl Worker {
     }
 
     fn accepts_assignments(&self, cluster: &Cluster) -> bool {
-        self.host.is_some() && self.call::<()>(cluster, Action::ProbeAssignments).is_ok()
+        !self.drained
+            && self.host.is_some()
+            && self.call::<()>(cluster, Action::ProbeAssignments).is_ok()
     }
 
     pub fn check(&self, cluster: &Cluster, service: &ServiceRecord) -> Result<Vec<String>> {
@@ -228,6 +240,16 @@ impl Worker {
             Action::ReconcileAssigned { service: record }
         };
         self.call(cluster, action)
+    }
+
+    fn release_assignment(&self, cluster: &Cluster, service: &ServiceRecord) -> Result<()> {
+        self.call(
+            cluster,
+            Action::ReleaseAssignment {
+                id: service.id.clone(),
+                version: service.version,
+            },
+        )
     }
 
     pub fn tasks(&self, cluster: &Cluster) -> Result<Vec<TaskEntry>> {
@@ -361,6 +383,11 @@ pub fn prepare_assignments(
     create: bool,
 ) -> Result<Vec<String>> {
     check_remote(service)?;
+    if !service.worker_releases.is_empty() {
+        return Err(held(
+            "wait for the old workers to confirm that their tasks have stopped",
+        ));
+    }
     let Some(plan::Mode::Replicated(replicas)) = plan::mode_of(&service.spec) else {
         return Err(invalid("cannot place the service", "use replicated mode"));
     };
@@ -385,6 +412,68 @@ pub fn prepare_assignments(
         warnings.extend(candidates[0].check(cluster, service)?);
     }
     Ok(warnings.into_iter().collect())
+}
+
+/// A previously assigned replica can move only after its old worker has fenced
+/// and removed the assignment. Persist the pending release before sending it.
+pub(super) fn reconcile_assignments(
+    engine: &Engine,
+    cluster: &mut Cluster,
+    service: &mut ServiceRecord,
+) -> Result<()> {
+    let workers = engine.store.workers()?;
+    let draining: BTreeSet<_> = workers
+        .iter()
+        .filter(|node| node.drained && service.worker_slots.values().any(|owner| owner == &node.id))
+        .map(|node| node.id.clone())
+        .collect();
+    if !draining.is_subset(&service.worker_releases) {
+        service.worker_releases.extend(draining);
+        save_revised_assignments(engine, cluster, service)?;
+    }
+
+    let mut waiting = Ok(());
+    for id in service.worker_releases.clone() {
+        let result = workers
+            .iter()
+            .find(|worker| worker.id == id)
+            .ok_or_else(|| held(format!("cannot confirm task removal on worker {id}")))
+            .and_then(|worker| worker.release_assignment(cluster, service));
+        if let Err(error) = result {
+            waiting = Err(error);
+            continue;
+        }
+        service.worker_slots.retain(|_, owner| owner != &id);
+        service.worker_releases.remove(&id);
+        engine.store.write_service(service)?;
+    }
+    waiting?;
+
+    let mut candidate = service.clone();
+    let fill = prepare_assignments(engine, cluster, &mut candidate, false);
+    if fill.is_ok() && candidate.worker_slots != service.worker_slots {
+        save_revised_assignments(engine, cluster, &mut candidate)?;
+        *service = candidate;
+    }
+    // Continue reconciling existing owners even if no worker can accept new slots.
+    let mut result = fill.map(|_| ());
+    for worker in assigned_workers(engine, service)? {
+        if let Err(error) = worker.reconcile(cluster, service) {
+            result = Err(error);
+        }
+    }
+    result
+}
+
+fn save_revised_assignments(
+    engine: &Engine,
+    cluster: &mut Cluster,
+    service: &mut ServiceRecord,
+) -> Result<()> {
+    service.version = cluster.next_index();
+    service.updated = store::now();
+    engine.store.write_cluster(cluster)?;
+    engine.store.write_service(service)
 }
 
 pub fn check_remote(service: &ServiceRecord) -> Result<()> {
@@ -492,6 +581,9 @@ pub fn add(
             destination: destination.to_owned(),
             ssh_config,
             created: store::now(),
+            updated: None,
+            version: initial_worker_version(),
+            drained: false,
             host: None,
         },
     };
@@ -515,6 +607,64 @@ pub fn find(engine: &Engine, key: &str) -> Result<Option<Worker>> {
         return Err(invalid("ambiguous worker", "give its full ID"));
     }
     Ok(first)
+}
+
+pub(super) fn update_availability(
+    engine: &Engine,
+    id: &str,
+    version: Option<u64>,
+    spec: &Value,
+) -> Result<()> {
+    {
+        let _lock = engine.store.lock()?;
+        let mut cluster = engine
+            .cluster()?
+            .ok_or_else(|| held("the manager is inactive"))?;
+        let mut worker = enrolled(engine, id)?;
+        Engine::check_version(version, worker.version)?;
+        if spec["Role"].as_str().is_some_and(|role| role != "worker")
+            || spec["Name"]
+                .as_str()
+                .is_some_and(|name| name != worker.name)
+            || spec["Labels"]
+                .as_object()
+                .is_some_and(|labels| !labels.is_empty())
+        {
+            return Err(invalid(
+                "cannot change worker settings",
+                "SSH workers support availability updates",
+            ));
+        }
+        let drain = match spec["Availability"].as_str() {
+            Some("active") => false,
+            Some("drain") => true,
+            _ => {
+                return Err(invalid(
+                    "invalid worker availability",
+                    "use active or drain",
+                ));
+            }
+        };
+        for service in engine.store.services()? {
+            if drain && placement(&service, &cluster)? == Placement::Pinned(id) {
+                return Err(held(format!(
+                    "remove the pinned service {} before draining this worker",
+                    service.name()
+                )));
+            }
+            if !drain && service.worker_releases.contains(id) {
+                return Err(held("finish draining this worker before reactivating it"));
+            }
+        }
+        if worker.drained != drain {
+            worker.drained = drain;
+            worker.version = cluster.next_index();
+            worker.updated = Some(store::now());
+            engine.store.write_cluster(&cluster)?;
+            engine.store.write_worker(&worker)?;
+        }
+    }
+    engine.reconcile()
 }
 
 pub fn remove(engine: &Engine, key: &str) -> Result<()> {
@@ -575,6 +725,10 @@ enum Action {
     // ignoring the slot map and starting all replicas.
     ReconcileAssigned {
         service: Box<ServiceRecord>,
+    },
+    ReleaseAssignment {
+        id: String,
+        version: u64,
     },
     Tasks,
     Remove {
@@ -668,13 +822,19 @@ pub fn handle(engine: &Engine, request: Wire) -> Result<Value> {
                 Placement::Local => !assigned_request && service.worker_slots.is_empty(),
                 Placement::Pinned(_) => false,
             };
-            if !valid_placement {
+            if !valid_placement || !service.worker_releases.is_empty() {
                 return Err(held(
                     "the service has no matching replica assignments for this worker",
                 ));
             }
             if engine.store.service_retired(&service.id)? {
                 return Err(held("the worker already removed this service"));
+            }
+            if engine
+                .store
+                .assignment_revoked(&service.id, service.version)?
+            {
+                return Err(held("the worker already released this assignment revision"));
             }
             check_remote(&service)?;
             let previous = engine
@@ -704,6 +864,10 @@ pub fn handle(engine: &Engine, request: Wire) -> Result<Value> {
             let all = super::tasks::list(&engine.dirs, &cluster.node_id);
             engine.reconcile_local(&cluster, &mut service, &all)?;
             engine.clean_task_dirs(&all);
+            Ok(Value::Null)
+        }
+        Action::ReleaseAssignment { id, version } => {
+            release_assignment(engine, &cluster, &id, version)?;
             Ok(Value::Null)
         }
         Action::Tasks => Ok(json!(engine.local_task_list(&cluster)?)),
@@ -743,6 +907,34 @@ pub fn handle(engine: &Engine, request: Wire) -> Result<Value> {
             Ok(Value::Null)
         }
     }
+}
+
+fn release_assignment(engine: &Engine, cluster: &Cluster, id: &str, version: u64) -> Result<()> {
+    let service = engine
+        .store
+        .services()?
+        .into_iter()
+        .find(|record| record.id == id);
+    if let Some(service) = &service {
+        if placement(service, cluster)? != Placement::Workers || service.version >= version {
+            return Err(held(
+                "the release does not supersede the current worker assignment",
+            ));
+        }
+    }
+
+    // Fence first, then remove the tasks. A lost SSH reply is safe to retry.
+    engine.store.revoke_assignment(id, version)?;
+    let grace = service
+        .as_ref()
+        .map_or(std::time::Duration::from_secs(10), |s| {
+            super::tasks::grace(&s.spec)
+        });
+    super::tasks::release_service(&engine.store, &engine.dirs, id, grace)?;
+    if let Some(service) = &service {
+        super::net::remove(&engine.dirs, service);
+    }
+    engine.store.remove_service(id)
 }
 
 /// The worker owns batch execution. Repeating the same revision reads or resumes its
@@ -813,6 +1005,9 @@ mod tests {
             destination: "user@test-host".into(),
             ssh_config: None,
             created: String::new(),
+            updated: None,
+            version: initial_worker_version(),
+            drained: false,
             host: None,
         };
         let Endpoint::Command(args) = worker.endpoint().unwrap() else {
@@ -842,6 +1037,9 @@ mod tests {
             destination: "test-host".into(),
             ssh_config: None,
             created: String::new(),
+            updated: None,
+            version: initial_worker_version(),
+            drained: false,
             host: None,
         };
         let alpha = worker("alpha");
@@ -907,6 +1105,7 @@ mod tests {
             ports: Vec::new(),
             vips: BTreeMap::new(),
             worker_slots: BTreeMap::from([(1, member.node_id.clone())]),
+            worker_releases: Default::default(),
             removing: false,
         };
         let error = send(Action::ReconcileAssigned {
@@ -916,6 +1115,66 @@ mod tests {
         assert_eq!(error.kind, ErrorKind::Conflict);
         assert!(error.why.contains("already removed"));
         assert!(engine.store.services().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_released_assignment_rejects_old_revisions_after_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let dirs = crate::paths::Dirs {
+            data: temp.path().join("data"),
+            runtime: temp.path().join("run"),
+            config: temp.path().join("config"),
+        };
+        let engine = Engine::new(&dirs);
+        let member = membership();
+        engine.store.write_membership(&member).unwrap();
+        let id = "s".repeat(plan::ID_LEN);
+        let send = |engine: &Engine, action| {
+            handle(
+                engine,
+                Wire {
+                    member: member.clone(),
+                    action,
+                },
+            )
+        };
+        let reconcile = |version| Action::ReconcileAssigned {
+            service: Box::new(ServiceRecord {
+                id: id.clone(),
+                version,
+                created: String::new(),
+                updated: String::new(),
+                spec: json!({
+                    "Name": "pool",
+                    "TaskTemplate": {"Placement": {"Constraints": ["node.role==worker"]}},
+                    "Mode": {"Replicated": {"Replicas": 0}},
+                }),
+                previous_spec: None,
+                update_status: None,
+                ports: Vec::new(),
+                vips: BTreeMap::new(),
+                worker_slots: BTreeMap::from([(1, member.node_id.clone())]),
+                worker_releases: BTreeSet::new(),
+                removing: false,
+            }),
+        };
+        let release = |version| Action::ReleaseAssignment {
+            id: id.clone(),
+            version,
+        };
+
+        send(&engine, reconcile(4)).unwrap();
+        send(&engine, release(5)).unwrap();
+        let engine = Engine::new(&dirs);
+        send(&engine, release(5)).unwrap();
+        assert!(engine.store.services().unwrap().is_empty());
+        for old in [4, 5] {
+            let error = send(&engine, reconcile(old)).unwrap_err();
+            assert!(error.why.contains("already released"));
+        }
+        send(&engine, reconcile(6)).unwrap();
+        assert!(send(&engine, release(5)).is_err());
+        assert_eq!(engine.store.services().unwrap()[0].version, 6);
     }
 
     #[test]
@@ -944,6 +1203,7 @@ mod tests {
             ports: Vec::new(),
             vips: BTreeMap::new(),
             worker_slots: BTreeMap::new(),
+            worker_releases: Default::default(),
             removing: false,
         };
         engine.store.write_service(&service).unwrap();

@@ -480,6 +480,43 @@ pub fn remove(store: &Store, tasks: &[&Task], grace: Duration) {
     });
 }
 
+/// Remove and confirm the service's containers before allowing another worker
+/// to start the same slots. A failed state read is not evidence of removal.
+pub(super) fn release_service(
+    store: &Store,
+    dirs: &Dirs,
+    service: &str,
+    grace: Duration,
+) -> Result<()> {
+    for id in state::list_ids(dirs)? {
+        let spec = match state::read_config(dirs, &id) {
+            Ok(spec) => spec,
+            Err(error) if error.kind == ErrorKind::NotFound => {
+                let directory = dirs.container_dir(&id);
+                if matches!(directory.try_exists(), Ok(false)) {
+                    continue;
+                }
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
+        if spec
+            .labels
+            .get(LABEL_SERVICE_ID)
+            .is_none_or(|value| value != service)
+        {
+            continue;
+        }
+        let handle = crate::ContainerHandle::from_id(id);
+        let _ = handle.stop(grace);
+        handle.remove_with_volumes(true)?;
+        if let Some(task_id) = spec.labels.get(LABEL_TASK_ID) {
+            store.remove_task_dir(task_id);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

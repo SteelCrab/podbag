@@ -1,5 +1,5 @@
 #![cfg(target_os = "linux")]
-//! An opt-in test with two isolated Podbag engines and a private OpenSSH server.
+//! Opt-in Swarm tests with isolated Podbag engines and private OpenSSH servers.
 
 mod common;
 use common::api::{Service, docker_out, wait_for};
@@ -28,7 +28,7 @@ struct SshWorker {
 }
 
 impl SshWorker {
-    fn start(worker: &Service) -> Self {
+    fn start(worker: &Service, alias: &str) -> Self {
         let files = tempfile::tempdir().unwrap();
         let path = files.path();
         for key in ["host", "client"] {
@@ -67,7 +67,7 @@ impl SshWorker {
         fs::write(path.join("sshd.conf"), server).unwrap();
         let config = path.join("ssh.conf");
         let client = format!(
-            "Host rollout-worker\n  HostName 127.0.0.1\n  User root\n  Port {port}\n  IdentityFile {dir}/client\n  UserKnownHostsFile {dir}/known_hosts\n  IdentitiesOnly yes\n",
+            "Host {alias}\n  HostName 127.0.0.1\n  User root\n  Port {port}\n  IdentityFile {dir}/client\n  UserKnownHostsFile {dir}/known_hosts\n  IdentitiesOnly yes\n",
             dir = path.display(),
         );
         fs::write(&config, client).unwrap();
@@ -168,7 +168,7 @@ fn pinned_workers_roll_and_roll_back_over_real_ssh() {
     let two = format!("{}/app:two", registry.host);
     let worker = Sandbox::new();
     let worker_service = Service::start(&worker, &["--timeout", "0"]);
-    let ssh = SshWorker::start(&worker_service);
+    let ssh = SshWorker::start(&worker_service, "rollout-worker");
     let manager = Sandbox::new();
     let mut service = Service::start(&manager, &["--timeout", "0"]);
     checked(docker_out(&manager, &service, &["swarm", "init"]));
@@ -343,4 +343,207 @@ fn pinned_workers_roll_and_roll_back_over_real_ssh() {
         &["swarm", "leave", "--force"],
     ));
     println!("PASS: service removal and worker unenrollment left no tasks");
+}
+
+fn enroll(manager: &Sandbox, name: &str, worker: &SshWorker) -> String {
+    checked(
+        manager
+            .podbag()
+            .args([
+                "swarm",
+                "worker-add",
+                name,
+                name,
+                "--ssh-config",
+                worker.config.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap(),
+    )
+}
+
+fn containers(engine: &Sandbox, service: &Service, name: &str) -> Vec<String> {
+    checked(docker_out(
+        engine,
+        service,
+        &[
+            "ps",
+            "--all",
+            "--filter",
+            &format!("label=com.docker.swarm.service.name={name}"),
+            "--format",
+            "{{.ID}} {{.State}}",
+        ],
+    ))
+    .lines()
+    .map(str::to_owned)
+    .collect()
+}
+
+#[test]
+fn distributed_replicas_move_only_after_the_old_worker_confirms_removal() {
+    if std::env::var("PODBAG_TEST_SWARM_SSH").as_deref() != Ok("1") || !root_mode() {
+        eprintln!("set PODBAG_TEST_SWARM_SSH=1 and PODBAG_TEST_ROOT=1 to run the OpenSSH fixture");
+        return;
+    }
+    let _turn = network_turn();
+    let registry = FakeRegistry::start(false);
+    registry.push("app", "handoff", &TestImage {
+        layers: vec![alpine_layer()],
+        config: serde_json::json!({"Cmd": ["sh", "-c", "trap 'exit 0' TERM; while true; do sleep 1; done"]}),
+    });
+    let image = format!("{}/app:handoff", registry.host);
+    let alpha = Sandbox::new();
+    let beta = Sandbox::new();
+    let alpha_service = Service::start(&alpha, &["--timeout", "0"]);
+    let beta_service = Service::start(&beta, &["--timeout", "0"]);
+    let alpha_ssh = SshWorker::start(&alpha_service, "handoff-alpha");
+    let beta_ssh = SshWorker::start(&beta_service, "handoff-beta");
+    let manager = Sandbox::new();
+    let mut service = Service::start(&manager, &["--timeout", "0"]);
+    checked(docker_out(&manager, &service, &["swarm", "init"]));
+    let alpha_id = enroll(&manager, "handoff-alpha", &alpha_ssh);
+    let beta_id = enroll(&manager, "handoff-beta", &beta_ssh);
+    checked(docker_out(
+        &manager,
+        &service,
+        &[
+            "service",
+            "create",
+            "--detach=true",
+            "--name",
+            "pool",
+            "--replicas",
+            "2",
+            "--constraint",
+            "node.role==worker",
+            "--stop-grace-period",
+            "1s",
+            &image,
+        ],
+    ));
+    assert_eq!(containers(&alpha, &alpha_service, "pool").len(), 1);
+    let original_beta = containers(&beta, &beta_service, "pool");
+    assert_eq!(original_beta.len(), 1);
+
+    checked(docker_out(
+        &manager,
+        &service,
+        &["node", "update", "--availability", "drain", &alpha_id],
+    ));
+    let availability = checked(docker_out(
+        &manager,
+        &service,
+        &[
+            "node",
+            "inspect",
+            "--format",
+            "{{.Spec.Availability}}",
+            &alpha_id,
+        ],
+    ));
+    assert_eq!(availability, "drain");
+    assert!(containers(&alpha, &alpha_service, "pool").is_empty());
+    let both_beta = containers(&beta, &beta_service, "pool");
+    assert_eq!(both_beta.len(), 2);
+    assert!(
+        both_beta
+            .iter()
+            .all(|container| container.ends_with(" running"))
+    );
+    assert!(both_beta.contains(&original_beta[0]));
+    println!("PASS: draining a reachable worker removed its container before replacing its slot");
+
+    checked(docker_out(
+        &manager,
+        &service,
+        &["node", "update", "--availability", "active", &alpha_id],
+    ));
+    assert!(containers(&alpha, &alpha_service, "pool").is_empty());
+    beta_ssh.set_reachable(false);
+    checked(docker_out(
+        &manager,
+        &service,
+        &["node", "update", "--availability", "drain", &beta_id],
+    ));
+    assert_eq!(containers(&beta, &beta_service, "pool"), both_beta);
+    assert!(containers(&alpha, &alpha_service, "pool").is_empty());
+
+    drop(service);
+    service = Service::start(&manager, &["--timeout", "0"]);
+    checked(docker_out(&manager, &service, &["service", "ps", "pool"]));
+    assert_eq!(containers(&beta, &beta_service, "pool"), both_beta);
+    assert!(containers(&alpha, &alpha_service, "pool").is_empty());
+    let status = checked(docker_out(
+        &manager,
+        &service,
+        &[
+            "node",
+            "inspect",
+            "--format",
+            "{{.Spec.Availability}} {{.Status.State}}",
+            &beta_id,
+        ],
+    ));
+    assert_eq!(status, "drain down");
+    println!("PASS: a partition plus manager restart kept both slots reserved on the old worker");
+
+    beta_ssh.set_reachable(true);
+    checked(docker_out(&manager, &service, &["service", "ps", "pool"]));
+    assert!(containers(&beta, &beta_service, "pool").is_empty());
+    let both_alpha = containers(&alpha, &alpha_service, "pool");
+    assert_eq!(both_alpha.len(), 2);
+    assert!(
+        both_alpha
+            .iter()
+            .all(|container| container.ends_with(" running"))
+    );
+    checked(docker_out(&manager, &service, &["node", "rm", &beta_id]));
+    assert_eq!(containers(&alpha, &alpha_service, "pool"), both_alpha);
+    println!(
+        "PASS: reconnection cleaned up both old containers and moved the slots to the other worker"
+    );
+
+    checked(docker_out(
+        &manager,
+        &service,
+        &["node", "update", "--availability", "drain", &alpha_id],
+    ));
+    assert!(containers(&alpha, &alpha_service, "pool").is_empty());
+    checked(docker_out(
+        &manager,
+        &service,
+        &["node", "update", "--availability", "active", &alpha_id],
+    ));
+    let restarted = containers(&alpha, &alpha_service, "pool");
+    assert_eq!(restarted.len(), 2);
+    assert!(
+        restarted
+            .iter()
+            .all(|container| container.ends_with(" running") && !both_alpha.contains(container))
+    );
+    println!("PASS: drained slots waited for a destination and resumed with a newer assignment");
+
+    checked(docker_out(
+        &manager,
+        &service,
+        &[
+            "service",
+            "create",
+            "--detach=true",
+            "--name",
+            "local",
+            "--stop-grace-period",
+            "1s",
+            &image,
+        ],
+    ));
+    assert_eq!(containers(&manager, &service, "local").len(), 1);
+    assert!(containers(&alpha, &alpha_service, "local").is_empty());
+    checked(docker_out(&manager, &service, &["service", "rm", "local"]));
+    checked(docker_out(&manager, &service, &["service", "rm", "pool"]));
+    checked(docker_out(&manager, &service, &["node", "rm", &alpha_id]));
+    println!(
+        "PASS: an unconstrained service stayed on the manager and the workers unenrolled cleanly"
+    );
 }

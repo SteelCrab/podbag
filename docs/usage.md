@@ -1822,10 +1822,17 @@ docker service scale jobs=6
   the fewest slots of that service. Worker name and ID break ties.
 - Each slot keeps its assigned worker through manager restarts and changes to the
   replica count. Enrolling a worker gives new slots another destination.
-- A disconnected worker may still be running its tasks. The manager reserves those
-  slots on that worker. Run `docker service ps` or `docker service ls` after the worker
-  reconnects to reconcile its tasks. The task list shows tasks from reachable nodes.
-- Remove the service before removing any worker that owns one of its slots. All
+- Use `docker node update --availability drain WORKER` to move that worker's replicas.
+  The worker must confirm removal of its old tasks before another worker can start them.
+  If every worker is drained, activate a worker to make the released slots available again.
+- A disconnected worker may still be running its tasks. The manager reserves its slots
+  until it reconnects and confirms removal. Use `docker service ps` or `docker service ls`
+  to resume a pending drain. A manager restart preserves the pending drain and its slots.
+  The task list shows tasks from reachable nodes.
+- Use `docker node update --availability active WORKER` to accept new assignments after
+  a drain completes. Existing replicas keep their current placement. Remove pinned
+  services before draining their worker.
+- Drain a worker or remove its services before removing it. All
   assigned workers must be reachable to complete service removal. If a worker is
   disconnected, retry the removal when it reconnects. The manager stops starting tasks
   for the service while removal is pending.

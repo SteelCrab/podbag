@@ -14,7 +14,7 @@ use crate::paths::Dirs;
 use crate::{Error, ErrorKind, Result};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -106,6 +106,9 @@ pub struct ServiceRecord {
     /// Owners of replica slots, including slots reserved after a scale-down.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub worker_slots: BTreeMap<u64, String>,
+    /// Old owners that must confirm removal before any replacement starts.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub worker_releases: BTreeSet<String>,
     /// A distributed service stays stopped while a disconnected worker is cleaned up.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub removing: bool,
@@ -202,6 +205,15 @@ fn fail(path: &Path, e: std::io::Error) -> Error {
         &e,
         "check that the podbag data directory is writable",
     )
+}
+
+/// The worker accepts a new assignment only after its revoked revision. A
+/// deletion (the original boolean record) instead retires the service permanently.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum Retirement {
+    Deleted(bool),
+    Revoked(u64),
 }
 
 /// The swarm's directory.
@@ -378,11 +390,36 @@ impl Store {
 
     /// Remember the removal so a delayed reconciliation cannot recreate its tasks.
     pub fn retire_service(&self, id: &str) -> Result<()> {
-        Store::write(&self.object_path("retired-services", id, "json")?, &true)
+        Store::write(
+            &self.object_path("retired-services", id, "json")?,
+            &Retirement::Deleted(true),
+        )
     }
 
     pub fn service_retired(&self, id: &str) -> Result<bool> {
-        Ok(Store::read(&self.object_path("retired-services", id, "json")?)?.unwrap_or(false))
+        Ok(matches!(
+            self.retirement(id)?,
+            Some(Retirement::Deleted(true))
+        ))
+    }
+
+    fn retirement(&self, id: &str) -> Result<Option<Retirement>> {
+        Store::read(&self.object_path("retired-services", id, "json")?)
+    }
+
+    pub fn assignment_revoked(&self, id: &str, version: u64) -> Result<bool> {
+        Ok(matches!(self.retirement(id)?, Some(Retirement::Revoked(old)) if version <= old))
+    }
+
+    pub fn revoke_assignment(&self, id: &str, version: u64) -> Result<()> {
+        match self.retirement(id)? {
+            Some(Retirement::Deleted(true)) => Ok(()),
+            Some(Retirement::Revoked(old)) if version <= old => Ok(()),
+            _ => Store::write(
+                &self.object_path("retired-services", id, "json")?,
+                &Retirement::Revoked(version),
+            ),
+        }
     }
 
     pub fn objects(&self, kind: Kind) -> Result<Vec<FileObject>> {
@@ -519,6 +556,7 @@ mod tests {
             ports: vec![],
             vips: BTreeMap::new(),
             worker_slots: BTreeMap::from([(1, id('b')), (3, id('c'))]),
+            worker_releases: Default::default(),
             removing: false,
         };
         s.write_service(&service).unwrap();

@@ -278,7 +278,7 @@ impl Engine {
     }
 
     /// Check a version a client sends against the object's.
-    fn check_version(given: Option<u64>, current: u64) -> Result<()> {
+    pub(super) fn check_version(given: Option<u64>, current: u64) -> Result<()> {
         match given {
             Some(v) if v != current => Err(invalid(
                 "update out of sequence",
@@ -325,7 +325,7 @@ impl Engine {
 
     /// `POST /nodes/{id}/update`: labels and availability; the one node stays a manager.
     pub fn update_node(&self, version: Option<u64>, spec: &Value) -> Result<()> {
-        let mut cluster = {
+        {
             let _lock = self.store.lock()?;
             let mut cluster = self.require()?;
             Engine::check_version(version, cluster.node.version)?;
@@ -356,9 +356,8 @@ impl Engine {
             cluster.node.version = cluster.next_index();
             cluster.node.updated = now();
             self.store.write_cluster(&cluster)?;
-            cluster
-        };
-        self.reconcile_with(&mut cluster)
+        }
+        self.reconcile()
     }
 
     // ---- services ----
@@ -397,7 +396,15 @@ impl Engine {
             remote::Placement::Local => self.check_local(cluster, service),
             remote::Placement::Pinned(id) => {
                 remote::check_remote(service)?;
-                remote::enrolled(self, id)?.check(cluster, service)
+                let worker = remote::enrolled(self, id)?;
+                if create && worker.drained {
+                    return Err(invalid(
+                        "cannot place a service on a drained worker",
+                        "the pinned worker does not accept new services",
+                        "activate the worker or use another one",
+                    ));
+                }
+                worker.check(cluster, service)
             }
             remote::Placement::Workers => {
                 remote::prepare_assignments(self, cluster, service, create)
@@ -407,7 +414,7 @@ impl Engine {
 
     fn apply_service(
         &self,
-        cluster: &Cluster,
+        cluster: &mut Cluster,
         service: &mut ServiceRecord,
         warnings: &mut Vec<String>,
     ) -> Result<()> {
@@ -526,13 +533,14 @@ impl Engine {
             ports,
             vips: Default::default(),
             worker_slots: Default::default(),
+            worker_releases: Default::default(),
             removing: false,
         };
         let mut warnings = self.prepare_service(&cluster, &mut service, true)?;
         service.version = cluster.next_index();
         self.store.write_cluster(&cluster)?;
         self.store.write_service(&service)?;
-        self.apply_service(&cluster, &mut service, &mut warnings)?;
+        self.apply_service(&mut cluster, &mut service, &mut warnings)?;
         Ok((id, warnings))
     }
 
@@ -645,7 +653,7 @@ impl Engine {
         } else if tasks_change {
             update::spawn(self.clone(), service.id.clone(), rollback);
         } else {
-            self.apply_service(&cluster, &mut service, &mut warnings)?;
+            self.apply_service(&mut cluster, &mut service, &mut warnings)?;
         }
         Ok(warnings)
     }
@@ -805,7 +813,7 @@ impl Engine {
 
     pub fn reconcile_service(
         &self,
-        cluster: &Cluster,
+        cluster: &mut Cluster,
         service: &mut ServiceRecord,
         all: &[Task],
     ) -> Result<()> {
@@ -825,15 +833,7 @@ impl Engine {
                     worker.reconcile(cluster, service)
                 }
             }
-            remote::Placement::Workers => {
-                let mut result = Ok(());
-                for worker in remote::assigned_workers(self, service)? {
-                    if let Err(error) = worker.reconcile(cluster, service) {
-                        result = Err(error);
-                    }
-                }
-                result
-            }
+            remote::Placement::Workers => remote::reconcile_assignments(self, cluster, service),
         }
     }
 

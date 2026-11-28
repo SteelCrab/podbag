@@ -278,11 +278,15 @@ fn node(ctx: &Ctx, id: &str) -> Reply {
 fn update_node(req: &Request, ctx: &Ctx, id: &str) -> Reply {
     let (engine, c) = found!(engine(ctx));
     if !(id == c.node_id || id == host().hostname || (id.len() >= 3 && c.node_id.starts_with(id))) {
-        if ok_or_reply!(remote::find(&engine, id)).is_some() {
-            return not_supported(
-                "updating an SSH worker",
-                "remove a worker's services to drain it",
-            );
+        if let Some(worker) = ok_or_reply!(remote::find(&engine, id)) {
+            let body = found!(body(req));
+            ok_or_reply!(remote::update_availability(
+                &engine,
+                &worker.id,
+                version(req),
+                &body
+            ));
+            return Reply::Empty(200);
         }
         return message(404, format!("node {id} not found"));
     }

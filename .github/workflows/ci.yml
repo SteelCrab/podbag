@@ -121,7 +121,7 @@ jobs:
         if: matrix.mode == 'root'
         timeout-minutes: 15
         run: dev/root-lib-tests.sh
-      - name: Pinned Swarm rollout over OpenSSH
+      - name: Swarm placement and rollout over OpenSSH
         if: matrix.mode == 'root' && matrix.arch == 'x86_64'
         timeout-minutes: 8
         run: |

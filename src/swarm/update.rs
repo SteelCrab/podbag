@@ -311,7 +311,7 @@ fn step(engine: &Engine, id: &str, rollback: bool, worker: Option<&WorkerRevisio
     if !running(id) {
         return Step::Gone;
     }
-    let Some((cluster, mut service)) = state(engine, id, worker) else {
+    let Some((mut cluster, mut service)) = state(engine, id, worker) else {
         return Step::Gone;
     };
     let key = if rollback {
@@ -325,7 +325,7 @@ fn step(engine: &Engine, id: &str, rollback: bool, worker: Option<&WorkerRevisio
     let outdated = if worker.is_some() {
         pinned_pending(engine, &service, &all)
     } else {
-        let _ = engine.reconcile_service(&cluster, &mut service, &all);
+        let _ = engine.reconcile_service(&mut cluster, &mut service, &all);
         all = tasks::list(&engine.dirs, &cluster.node_id);
         outdated(engine, &service, &all)
     };
