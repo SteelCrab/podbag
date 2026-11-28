@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Desktop
+
+- Podbag Desktop draws its own interface with the GPU (Metal, Direct3D 12, Vulkan or
+  OpenGL) instead of showing a web page in a WebView. It has the same pages, dialogs,
+  tray item and settings, in the same 7 languages.
+- Settings, launch at login and the answers to the app's questions carry over from
+  earlier versions.
+- On Linux, the app no longer needs WebKitGTK or libxdo. The `.deb` and `.rpm` depend on
+  GTK 3 and libayatana-appindicator (the tray item), xkbcommon, the X11 and Wayland
+  client libraries, and EGL. Mesa or the GPU vendor's driver draws the window.
+- On Windows, the installer no longer downloads WebView2. It replaces an installed
+  0.3.x in place: the same folder, Start menu and desktop shortcuts, and launch at login.
+- On macOS, the window has a standard title bar. Drag the title bar, not the toolbar, to
+  move the window.
+- Screen readers cannot read the window yet.
+
 ### Training
 
 - Training modules come from the catalog on podbag.dev. Podbag Desktop refreshes it at

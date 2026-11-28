@@ -1,0 +1,13 @@
+{
+  "apiVersion": 1,
+  "id": "workspace.checklist",
+  "name": "Workspace checklist",
+  "version": "1.0.0",
+  "description": "Review the local workspace before changing an image.",
+  "permissions": ["engineSummary"],
+  "content": [
+    {"type": "heading", "text": "Before a build"},
+    {"type": "list", "items": ["Check running containers.", "Confirm the target image tag."]},
+    {"type": "engineSummary"}
+  ]
+}

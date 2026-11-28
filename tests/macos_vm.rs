@@ -237,6 +237,89 @@ impl Drop for Mac {
 }
 
 #[test]
+fn desktop_settings_round_trip_through_the_guest() {
+    use serde_json::{Value, json};
+    use std::io::Write;
+    if !enabled() {
+        return;
+    }
+    let mac = Mac::bare(0);
+    let input = |args: &[&str], data: &[u8]| {
+        let mut child = mac
+            .cmd(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(data).unwrap();
+        child.wait_with_output().unwrap()
+    };
+    let network = ["system", "network-settings"];
+    let initial: Value = serde_json::from_str(&mac.ok(&network)).unwrap();
+    let mut prefs = initial["preferences"].clone();
+    prefs["defaultSubnet"] = json!("10.83.0.0/16");
+    let requested = prefs.to_string();
+    let revision = initial["revision"].as_str().unwrap();
+    let saved: Value = serde_json::from_str(&mac.ok(&[
+        "system",
+        "network-settings",
+        "--set",
+        &requested,
+        "--expect-revision",
+        revision,
+    ]))
+    .unwrap();
+    assert_eq!(saved["preferences"], prefs);
+    assert_ne!(saved["revision"], initial["revision"]);
+
+    let config = ["system", "config", "show"];
+    let original: Value = serde_json::from_str(&mac.ok(&config)).unwrap();
+    let text = format!(
+        "# Desktop settings\n{}",
+        original["text"].as_str().unwrap_or_default()
+    );
+    assert!(
+        input(&["system", "config", "check"], text.as_bytes())
+            .status
+            .success()
+    );
+    let edit = json!({"original": original["text"], "text": text}).to_string();
+    let apply = ["system", "config", "apply"];
+    let written = input(&apply, edit.as_bytes());
+    assert!(
+        written.status.success(),
+        "{}",
+        String::from_utf8_lossy(&written.stderr)
+    );
+    assert!(!input(&apply, edit.as_bytes()).status.success());
+    assert!(
+        !input(&["system", "config", "check"], b"broken line")
+            .status
+            .success()
+    );
+    let current: Value = serde_json::from_str(&mac.ok(&config)).unwrap();
+    assert_eq!(current["text"], text);
+
+    let manual =
+        json!({"mode":"manual","url":"http://proxy.example.com:3128","bypass":"localhost"});
+    let written = input(
+        &["system", "registry-proxy", "--set"],
+        manual.to_string().as_bytes(),
+    );
+    assert!(
+        written.status.success(),
+        "{}",
+        String::from_utf8_lossy(&written.stderr)
+    );
+    mac.ok(&["vm", "stop"]);
+    let saved: Value = serde_json::from_str(&mac.ok(&["system", "registry-proxy"])).unwrap();
+    assert_eq!(saved, manual);
+    let reopened: Value = serde_json::from_str(&mac.ok(&network)).unwrap();
+    assert_eq!(reopened["preferences"], prefs);
+}
+
+#[test]
 fn storage_grows_the_filesystem_and_relocates_the_saved_disk() {
     if !enabled() {
         return;

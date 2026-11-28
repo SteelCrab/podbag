@@ -30,7 +30,8 @@ jobs:
           NFPM_VERSION: 2.48.0
         run: |
           apt-get update -qq
-          apt-get install -y --no-install-recommends jq libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
+          # GTK 3 for the tray item; the app loads the rest at run time.
+          apt-get install -y --no-install-recommends jq libgtk-3-dev
           cd /tmp
           url="https://github.com/goreleaser/nfpm/releases/download/v$NFPM_VERSION"
           deb="nfpm_${NFPM_VERSION}_$(dpkg --print-architecture).deb"
@@ -54,6 +55,9 @@ jobs:
       matrix:
         arch: [amd64, arm64]
         system: ['debian:12', 'fedora:44']
+        include:
+          - { system: 'debian:12', name: debian-12 }
+          - { system: 'fedora:44', name: fedora-44 }
     runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     container: ${{ matrix.system }}
     steps:
@@ -62,24 +66,34 @@ jobs:
         with:
           name: podbag-desktop-${{ matrix.arch }}
           path: dist
+      # The test tools and Mesa's software drivers (llvmpipe, lavapipe) belong to the test
+      # container only: the runner has no GPU.
       - name: Install package and display tools
         run: |
           if command -v apt-get >/dev/null; then
             apt-get update -qq
             apt-get install -y --no-install-recommends ./dist/*.deb
-            apt-get install -y --no-install-recommends xvfb xauth xdotool dbus-daemon desktop-file-utils libglib2.0-bin curl
+            apt-get install -y --no-install-recommends xvfb xauth xdotool dbus-daemon desktop-file-utils libglib2.0-bin curl \
+              imagemagick libegl-mesa0 libgl1-mesa-dri mesa-vulkan-drivers
           else
             dnf install -y ./dist/*.rpm
-            dnf install -y xorg-x11-server-Xvfb xorg-x11-xauth xdotool dbus-daemon desktop-file-utils util-linux
+            dnf install -y xorg-x11-server-Xvfb xorg-x11-xauth xdotool dbus-daemon desktop-file-utils util-linux \
+              ImageMagick mesa-dri-drivers mesa-libEGL mesa-vulkan-drivers
           fi
       - name: Open the installed application
         env:
-          # The outer CI container supplies isolation. It cannot create WebKit's nested sandbox.
-          WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS: '1'
           LIBGL_ALWAYS_SOFTWARE: '1'
         run: |
           useradd --create-home desktop-test
-          runuser -u desktop-test -- dbus-run-session -- xvfb-run -a sh desktop/linux/test-installed.sh
+          install -d -o desktop-test shots
+          runuser -u desktop-test -- dbus-run-session -- xvfb-run -a -s '-screen 0 1600x1000x24' \
+            sh desktop/linux/test-installed.sh "shots/podbag-desktop-${{ matrix.name }}-${{ matrix.arch }}.png"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: podbag-desktop-linux-screenshot-${{ matrix.name }}-${{ matrix.arch }}
+          path: shots/
+          if-no-files-found: warn
       - name: Remove package
         run: |
           # The podbag command that Install in the app makes.
