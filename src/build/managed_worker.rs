@@ -3,7 +3,7 @@
 use crate::{Error, ErrorKind, Result};
 use std::fs::{self, File};
 use std::io::{self, Seek, SeekFrom};
-use std::os::unix::fs::FileTypeExt;
+use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 pub struct Workspace {
     work: tempfile::TempDir,
-    _socket_dir: tempfile::TempDir,
+    socket_dir: tempfile::TempDir,
     socket: PathBuf,
 }
 
@@ -21,16 +21,18 @@ impl Workspace {
         fs::create_dir_all(&builds).map_err(|e| io_error("create the build directory", e))?;
         let work = tempfile::Builder::new()
             .prefix("buildkit-")
+            .permissions(fs::Permissions::from_mode(0o700))
             .tempdir_in(builds)
             .map_err(|e| io_error("create private BuildKit state", e))?;
         let socket_dir = tempfile::Builder::new()
             .prefix("podbag-bk-")
+            .permissions(fs::Permissions::from_mode(0o700))
             .tempdir_in("/tmp")
             .map_err(|e| io_error("create the private BuildKit socket directory", e))?;
         let socket = socket_dir.path().join("buildkit.sock");
         Ok(Self {
             work,
-            _socket_dir: socket_dir,
+            socket_dir,
             socket,
         })
     }
@@ -49,7 +51,33 @@ impl Workspace {
 
     pub fn start(&self) -> Result<Process> {
         let log = self.work.path().join("buildkitd.log");
-        let mut daemon = start_daemon(self.work.path(), &self.address(), &log)?;
+        // SAFETY: geteuid has no pointer arguments or side effects.
+        let rootless = unsafe { libc::geteuid() } != 0;
+        // BuildKit installs a connected route while initializing its bridge, before
+        // opening the control socket. Serialize selection and that initialization.
+        let _bridge_lock = if rootless {
+            None
+        } else {
+            let file = fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open("/run/podbag-buildkit-bridge.lock")
+                .map_err(|e| io_error("open the BuildKit bridge lock", e))?;
+            file.lock()
+                .map_err(|e| io_error("lock BuildKit bridge allocation", e))?;
+            Some(file)
+        };
+        let mut daemon = start_daemon(
+            self.work.path(),
+            &self.address(),
+            self.socket_dir.path(),
+            &log,
+            rootless,
+        )?;
         wait_for_socket(&mut daemon, &self.socket, &log)?;
         Ok(daemon)
     }
@@ -82,11 +110,22 @@ cleanup
 exit "$status"
 "#;
 
-fn start_daemon(work: &Path, addr: &str, log: &Path) -> Result<Process> {
-    // SAFETY: geteuid has no pointer arguments or side effects.
-    let rootless = unsafe { libc::geteuid() } != 0;
+fn start_daemon(
+    work: &Path,
+    addr: &str,
+    socket_dir: &Path,
+    log: &Path,
+    rootless: bool,
+) -> Result<Process> {
     let config = work.join("buildkitd.toml");
-    fs::write(&config, "").map_err(|e| io_error("create the private BuildKit config", e))?;
+    let settings = if rootless {
+        String::new()
+    } else {
+        let (bridge, addr) = crate::network::buildkit_bridge()
+            .map_err(|e| io_error("allocate a private BuildKit bridge", e))?;
+        format!("[worker.oci]\nbridgeName = \"{bridge}\"\nbridgeSubnet = \"{addr}/24\"\n")
+    };
+    fs::write(&config, settings).map_err(|e| io_error("create the private BuildKit config", e))?;
     let mut command = if rootless {
         let mut cmd = Command::new("rootlesskit");
         cmd.args(["--net=pasta", "--disable-host-loopback", "--copy-up=/etc"])
@@ -130,6 +169,8 @@ fn start_daemon(work: &Path, addr: &str, log: &Path) -> Result<Process> {
             "--containerd-worker=false",
             "--cdi-disabled",
         ])
+        .arg("--otel-socket-path")
+        .arg(socket_dir.join("trace.sock"))
         .arg("--oci-worker-snapshotter=native")
         .arg("--root")
         .arg(work.join("state"))
@@ -138,12 +179,16 @@ fn start_daemon(work: &Path, addr: &str, log: &Path) -> Result<Process> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(File::create(log).map_err(|e| io_error("create the BuildKit daemon log", e))?);
-    spawn(&mut command).map(|child| Process { child })
-        .map_err(|e| Error::io(
+    if rootless {
+        command.env("XDG_RUNTIME_DIR", socket_dir);
+    }
+    spawn(&mut command).map(Process::new).map_err(|e| {
+        Error::io(
             "cannot start the private BuildKit backend",
             &e,
             "install buildkitd, buildctl and runc; rootless builds also need RootlessKit and pasta",
-        ))
+        )
+    })
 }
 
 fn wait_for_socket(daemon: &mut Process, socket: &Path, log: &Path) -> Result<()> {
@@ -192,6 +237,14 @@ pub struct Process {
 }
 
 impl Process {
+    pub(crate) fn new(child: Child) -> Self {
+        Self { child }
+    }
+
+    pub(crate) fn child(&mut self) -> &mut Child {
+        &mut self.child
+    }
+
     pub(crate) fn running(&mut self) -> io::Result<bool> {
         Ok(self.child.try_wait()?.is_none())
     }
@@ -239,4 +292,18 @@ fn io_error(what: &str, error: io::Error) -> Error {
         &error,
         "check permissions and disk space",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn both_worker_directories_are_private() {
+        let data = tempfile::tempdir().unwrap();
+        let workspace = Workspace::new(data.path()).unwrap();
+        for dir in [workspace.path(), workspace.socket_dir.path()] {
+            assert_eq!(dir.metadata().unwrap().permissions().mode() & 0o777, 0o700);
+        }
+    }
 }

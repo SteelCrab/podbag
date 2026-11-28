@@ -62,10 +62,19 @@ pub(super) async fn forward_response(
 }
 
 async fn copy(mut body: RecvStream, mut send: SendStream<Bytes>) -> io::Result<()> {
-    while let Some(chunk) = data(&mut body).await? {
+    loop {
+        let chunk = tokio::select! {
+            reset = std::future::poll_fn(|context| send.poll_reset(context)) => {
+                reset.map_err(io::Error::other)?;
+                return Ok(());
+            }
+            chunk = data(&mut body) => chunk?,
+        };
+        let Some(chunk) = chunk else {
+            return finish(&mut send, body.trailers().await.map_err(io::Error::other)?);
+        };
         send_data(&mut send, chunk).await?;
     }
-    finish(&mut send, body.trailers().await.map_err(io::Error::other)?)
 }
 
 pub(super) async fn send_data(send: &mut SendStream<Bytes>, mut data: Bytes) -> io::Result<()> {
@@ -173,4 +182,73 @@ pub(super) fn success(response: &Response<RecvStream>, trailers: Option<&HeaderM
         && trailers
             .and_then(|headers| headers.get("grpc-status"))
             .is_some_and(|status| status == "0")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use h2::Reason;
+    use std::future::poll_fn;
+    use std::time::Duration;
+    use tokio::io::duplex;
+    use tokio::sync::oneshot;
+
+    #[tokio::test]
+    async fn cancelling_an_idle_response_resets_the_upstream_subscription() {
+        let (worker_socket, proxy_upstream) = duplex(4096);
+        let worker = tokio::spawn(async move {
+            let mut connection = h2::server::handshake(worker_socket).await.unwrap();
+            let (_, mut reply) = connection.accept().await.unwrap().unwrap();
+            let mut stream = reply.send_response(Response::new(()), false).unwrap();
+            tokio::select! {
+                reset = poll_fn(|context| stream.poll_reset(context)) => reset.unwrap(),
+                _ = poll_fn(|context| connection.poll_closed(context)) => {
+                    panic!("the worker connection closed before the subscription reset")
+                }
+            }
+        });
+        let sender = upstream(proxy_upstream).await.unwrap();
+        let (proxy_socket, client_socket) = duplex(4096);
+        let proxy = tokio::spawn(async move {
+            let mut connection = h2::server::handshake(proxy_socket).await.unwrap();
+            let (request, reply) = connection.accept().await.unwrap().unwrap();
+            tokio::select! {
+                result = forward(sender, request, reply) => result.unwrap(),
+                _ = poll_fn(|context| connection.poll_closed(context)) => {
+                    panic!("the client connection closed before the subscription reset")
+                }
+            }
+            // Keep the connection open after the individual RPC exits.
+            let _ = poll_fn(|context| connection.poll_closed(context)).await;
+        });
+        let (sender, connection) = h2::client::handshake(client_socket).await.unwrap();
+        let client = tokio::spawn(connection);
+        let request = Request::builder()
+            .uri("http://buildkit/moby.buildkit.v1.Control/ListenBuildHistory")
+            .body(())
+            .unwrap();
+        let (response, mut send) = sender
+            .ready()
+            .await
+            .unwrap()
+            .send_request(request, true)
+            .unwrap();
+        let (fail, deadline) = oneshot::channel();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(5));
+            let _ = fail.send(());
+        });
+        tokio::select! {
+            _ = deadline => panic!("the idle subscription did not reset"),
+            completed = async {
+                let response = response.await.unwrap();
+                assert!(!response.body().is_end_stream());
+                send.send_reset(Reason::CANCEL);
+                worker.await.unwrap()
+            } => assert_eq!(completed, Reason::CANCEL)
+        }
+        assert!(!client.is_finished());
+        proxy.abort();
+        client.abort();
+    }
 }

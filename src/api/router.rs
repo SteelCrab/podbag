@@ -77,6 +77,8 @@ pub struct Ctx {
     volume_lesson: bool,
     #[cfg(target_os = "linux")]
     pub(super) buildkit: Option<super::buildkit::Client>,
+    #[cfg(target_os = "linux")]
+    pub(super) http_builds: std::sync::Arc<super::HttpBuilds>,
     /// Clients attached to containers that wait for a start, and how starts ended.
     pub attachments: std::sync::Arc<super::stream::Attachments>,
     /// Commands made by `POST /containers/{id}/exec`.
@@ -95,6 +97,8 @@ impl Ctx {
             volume_lesson: std::env::var_os(crate::volume_lesson::SCOPE).is_some(),
             #[cfg(target_os = "linux")]
             buildkit: None,
+            #[cfg(target_os = "linux")]
+            http_builds: Default::default(),
             attachments: Default::default(),
             execs: Default::default(),
             binds_under: None,

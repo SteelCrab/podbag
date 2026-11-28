@@ -172,13 +172,13 @@ pub fn serve(opts: ServeOptions) -> Result<()> {
     // Containers this service starts must not get a Ctrl+C or hangup meant for it.
     crate::helper::helpers_in_own_group();
     crate::helper::raise_descriptor_limit();
-    loop {
+    let result = loop {
         #[cfg(target_os = "linux")]
         if shutdown
             .as_ref()
             .is_some_and(|shutdown| wait_readable(shutdown.read.as_raw_fd(), 0))
         {
-            break;
+            break Ok(());
         }
         if wait_readable(listener.as_raw_fd(), 250) {
             match listener.accept() {
@@ -217,7 +217,7 @@ pub fn serve(opts: ServeOptions) -> Result<()> {
                     std::thread::sleep(std::time::Duration::from_millis(100));
                 }
                 Err(e) => {
-                    return Err(Error::io(
+                    break Err(Error::io(
                         "cannot accept API connections",
                         &e,
                         "restart the service",
@@ -229,13 +229,89 @@ pub fn serve(opts: ServeOptions) -> Result<()> {
         let timed_out = opts.timeout.is_some_and(|t| idle >= t);
         let replaced = idle >= REPLACED_GRACE && program.as_ref().is_some_and(|p| p.replaced());
         if (timed_out || replaced) && !crate::swarm::busy() {
-            break;
+            break Ok(());
         }
-    }
+    };
+    drop(listener);
     if let Some(path) = owned_path {
         let _ = std::fs::remove_file(path);
     }
-    Ok(())
+    #[cfg(target_os = "linux")]
+    if opts.managed_buildkit {
+        ctx.http_builds.stop();
+    }
+    result
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct HttpBuilds {
+    active: Mutex<HttpBuildState>,
+    finished: std::sync::Condvar,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct HttpBuildState {
+    stopping: bool,
+    clients: std::collections::HashMap<i32, UnixStream>,
+}
+
+#[cfg(target_os = "linux")]
+struct HttpBuild<'a> {
+    builds: &'a HttpBuilds,
+    socket: i32,
+}
+
+#[cfg(target_os = "linux")]
+impl HttpBuilds {
+    fn enter(&self, client: &UnixStream) -> std::io::Result<HttpBuild<'_>> {
+        let mut active = self.active.lock().unwrap_or_else(|p| p.into_inner());
+        if active.stopping {
+            return Err(std::io::Error::other("the BuildKit service is stopping"));
+        }
+        let client = client.try_clone()?;
+        let socket = client.as_raw_fd();
+        active.clients.insert(socket, client);
+        Ok(HttpBuild {
+            builds: self,
+            socket,
+        })
+    }
+
+    fn stop(&self) {
+        let mut active = self.active.lock().unwrap_or_else(|p| p.into_inner());
+        active.stopping = true;
+        // Unblock writes from a build whose client stopped reading its progress.
+        for client in active.clients.values() {
+            let _ = client.shutdown(std::net::Shutdown::Both);
+        }
+        drop(
+            self.finished
+                .wait_while(active, |active| !active.clients.is_empty())
+                .unwrap_or_else(|p| p.into_inner()),
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl HttpBuild<'_> {
+    fn stopping(&self) -> bool {
+        self.builds
+            .active
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .stopping
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for HttpBuild<'_> {
+    fn drop(&mut self) {
+        let mut active = self.builds.active.lock().unwrap_or_else(|p| p.into_inner());
+        active.clients.remove(&self.socket);
+        self.builds.finished.notify_all();
+    }
 }
 
 #[cfg(target_os = "linux")]

@@ -494,13 +494,42 @@ fn host_routes() -> Vec<(Ipv4Addr, u8)> {
 
 /// Read `/proc/net/route`.
 fn parse_routes(text: &str) -> Vec<(Ipv4Addr, u8)> {
+    parse_routes_with(text, |iface| {
+        iface != DEFAULT_BRIDGE && !iface.starts_with("pbg-")
+    })
+}
+
+/// A generated BuildKit bridge also has to avoid the Podbag routes, since it is
+/// managed by a separate network provider on the same host.
+#[cfg(target_os = "linux")]
+pub(crate) fn buildkit_bridge() -> std::io::Result<(String, Ipv4Addr)> {
+    let text = std::fs::read_to_string("/proc/net/route")?;
+    let routes = parse_routes_with(&text, |_| true);
+    for (pool, [first, second]) in [[10, 10], [10, 254], [172, 30]].into_iter().enumerate() {
+        for slot in 0..=255 {
+            let addr = Ipv4Addr::new(first, second, slot, 0);
+            let name = format!("podbag-bk-{pool}-{slot}");
+            if !routes.iter().any(|route| overlaps(*route, (addr, 24)))
+                && !std::path::Path::new("/sys/class/net")
+                    .join(&name)
+                    .try_exists()?
+            {
+                return Ok((name, addr));
+            }
+        }
+    }
+    Err(std::io::Error::other(
+        "no unused private BuildKit bridge subnet",
+    ))
+}
+
+fn parse_routes_with(text: &str, include: impl Fn(&str) -> bool) -> Vec<(Ipv4Addr, u8)> {
     text.lines()
         .skip(1)
         .filter_map(|line| {
             let f: Vec<&str> = line.split_whitespace().collect();
-            // podbag's own bridges: their subnets are networks, checked as such.
             let iface = *f.first()?;
-            if iface == DEFAULT_BRIDGE || iface.starts_with("pbg-") {
+            if !include(iface) {
                 return None;
             }
             let dest = u32::from_str_radix(f.get(1)?, 16).ok()?;

@@ -118,6 +118,7 @@ pub fn build(req: &Request, ctx: &Ctx) -> Reply {
         registry_logins,
         ..BuildOptions::default()
     };
+    let http_builds = buildkit.then(|| ctx.http_builds.clone());
     Reply::WithBody(Box::new(move |body| {
         let context = match engine::unpack_context(body) {
             Ok(c) => c,
@@ -137,11 +138,21 @@ pub fn build(req: &Request, ctx: &Ctx) -> Reply {
         Reply::Stream {
             content_type: "application/json",
             body: Box::new(move |w| {
+                let active = http_builds
+                    .as_ref()
+                    .map(|builds| builds.enter(w))
+                    .transpose();
                 let mut progress = |text: &str| send(w, &json!({"stream": text}));
-                let result = if buildkit {
-                    managed_build(&options, platform.as_deref(), &mut progress)
-                } else {
-                    engine::build(&options, &mut progress)
+                let result = match &active {
+                    Ok(Some(build)) => {
+                        managed_build(&options, platform.as_deref(), build, &mut progress)
+                    }
+                    Ok(None) => engine::build(&options, &mut progress),
+                    Err(error) => Err(crate::Error::io(
+                        "cannot start a BuildKit build",
+                        error,
+                        "retry after the API service restarts",
+                    )),
                 };
                 match result {
                     Ok(built) => {
@@ -167,11 +178,18 @@ pub fn build(req: &Request, ctx: &Ctx) -> Reply {
 fn managed_build(
     build: &crate::build::BuildOptions,
     platform: Option<&str>,
+    active: &super::HttpBuild<'_>,
     progress: &mut dyn FnMut(&str),
 ) -> crate::Result<crate::build::Built> {
     use crate::build::managed::{Options, RegistryConfig, ResultOutput, run};
-    use std::io::{BufRead, BufReader};
+    use crate::build::managed_worker::{Process, spawn};
+    use rustix::fs::{OFlags, fcntl_setfl};
+    use std::io::{BufRead, BufReader, ErrorKind};
+    use std::os::fd::AsRawFd;
     use std::process::Stdio;
+    use std::time::Duration;
+
+    let stopped = || std::io::Error::other("the BuildKit service is stopping");
 
     let options = Options {
         platform,
@@ -185,24 +203,45 @@ fn managed_build(
         if !build.quiet {
             command.stderr(Stdio::piped());
         }
-        let mut child = crate::build::managed_worker::spawn(command).map_err(error)?;
-        if let Some(log) = child.stderr.take() {
-            let mut log = BufReader::new(log);
-            let mut line = Vec::new();
-            loop {
-                line.clear();
-                match log.read_until(b'\n', &mut line) {
-                    Ok(0) => break,
-                    Ok(_) => progress(&String::from_utf8_lossy(&line)),
-                    Err(e) => {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        return Err(error(e));
+        if active.stopping() {
+            return Err(error(stopped()));
+        }
+        let mut process = Process::new(spawn(command).map_err(error)?);
+        let child = process.child();
+        let mut log = child.stderr.take().map(BufReader::new);
+        if let Some(log) = &log {
+            fcntl_setfl(log.get_ref(), OFlags::NONBLOCK).map_err(|e| error(e.into()))?;
+        }
+        let mut line = Vec::new();
+        loop {
+            if active.stopping() {
+                return Err(error(stopped()));
+            }
+            if let Some(reader) = &mut log {
+                match reader.read_until(b'\n', &mut line) {
+                    Ok(0) => log = None,
+                    Ok(_) => {
+                        progress(&String::from_utf8_lossy(&line));
+                        line.clear();
+                        continue;
                     }
+                    Err(e)
+                        if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) => {}
+                    Err(e) => return Err(error(e)),
                 }
             }
+            if let Some(status) = child.try_wait().map_err(error)? {
+                if !line.is_empty() {
+                    progress(&String::from_utf8_lossy(&line));
+                }
+                return Ok(status);
+            }
+            if let Some(log) = &log {
+                super::wait_readable(log.get_ref().as_raw_fd(), 100);
+            } else {
+                std::thread::sleep(Duration::from_millis(100));
+            }
         }
-        child.wait().map_err(error)
     })?;
     match output {
         ResultOutput::Image(image) => Ok(image),

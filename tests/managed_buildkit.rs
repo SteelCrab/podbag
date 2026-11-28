@@ -286,6 +286,11 @@ RUN ["/bin/busybox", "sh", "-c", "/bin/busybox head -c 32 /dev/urandom > /cache-
     println!("PASS: BuildKit multi-platform OCI archive, local exporter, cache export and import");
 }
 
+const CANCELLATION_DOCKERFILE: &str = r#"FROM scratch
+COPY busybox /bin/busybox
+RUN ["/bin/busybox", "sh", "-c", "echo podbag-cancel-ready; /bin/busybox sleep 90"]
+"#;
+
 #[test]
 fn interrupting_the_client_stops_the_worker_and_removes_its_state() {
     if !enabled() || root_mode() {
@@ -296,11 +301,7 @@ fn interrupting_the_client_stops_the_worker_and_removes_its_state() {
     std::fs::create_dir(&context).unwrap();
     let busybox = std::env::var_os("PODBAG_TEST_BUSYBOX").unwrap_or("/usr/bin/busybox".into());
     std::fs::copy(busybox, context.join("busybox")).unwrap();
-    std::fs::write(
-        context.join("Dockerfile"),
-        "FROM scratch\nCOPY busybox /bin/busybox\nRUN [\"/bin/busybox\", \"sleep\", \"30\"]\n",
-    )
-    .unwrap();
+    std::fs::write(context.join("Dockerfile"), CANCELLATION_DOCKERFILE).unwrap();
     let log = tempfile::NamedTempFile::new().unwrap();
     let mut build = Agent(
         sb.podbag()
@@ -314,7 +315,8 @@ fn interrupting_the_client_stops_the_worker_and_removes_its_state() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while !std::fs::read_to_string(log.path())
         .unwrap()
-        .contains("RUN [")
+        .lines()
+        .any(|line| line.ends_with(" podbag-cancel-ready"))
     {
         assert!(build.0.try_wait().unwrap().is_none());
         assert!(
@@ -325,7 +327,8 @@ fn interrupting_the_client_stops_the_worker_and_removes_its_state() {
     }
     // SAFETY: this is the child we started and have not yet reaped.
     assert_eq!(unsafe { libc::kill(build.0.id() as i32, libc::SIGINT) }, 0);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    // The daemon's shutdown grace period starts after buildctl has exited.
+    let deadline = std::time::Instant::now() + Duration::from_secs(25);
     loop {
         if let Some(status) = build.0.try_wait().unwrap() {
             assert!(!status.success());
@@ -339,6 +342,106 @@ fn interrupting_the_client_stops_the_worker_and_removes_its_state() {
     }
     clean(&sb);
     println!("PASS: interrupting BuildKit stops the private worker and removes its state");
+}
+
+#[test]
+fn terminating_the_service_cancels_an_active_http_build() {
+    use common::registry::{TarEntry, layer};
+    if !enabled() {
+        return;
+    }
+    let sb = Sandbox::new();
+    let socket = sb.tmp.path().join("docker.sock");
+    let mut service = Agent(
+        sb.podbag()
+            .args([
+                "system",
+                "service",
+                "--buildkit",
+                "--timeout",
+                "0",
+                "--socket",
+            ])
+            .arg(&socket)
+            .spawn()
+            .unwrap(),
+    );
+    assert!(wait_for(Duration::from_secs(10), || curl(
+        &socket,
+        &["/_ping"]
+    )
+    .0 == "OK"));
+
+    let busybox = std::env::var_os("PODBAG_TEST_BUSYBOX").unwrap_or("/usr/bin/busybox".into());
+    let busybox = std::fs::read(busybox).unwrap();
+    let archive = sb.tmp.path().join("context.tar");
+    std::fs::write(
+        &archive,
+        layer(&[
+            TarEntry::file("Dockerfile", CANCELLATION_DOCKERFILE.as_bytes()),
+            TarEntry::File {
+                path: "busybox".into(),
+                data: busybox,
+                mode: 0o755,
+                uid: 0,
+                gid: 0,
+            },
+        ]),
+    )
+    .unwrap();
+    let log = tempfile::NamedTempFile::new().unwrap();
+    let mut curl_cmd = if root_mode() {
+        let mut cmd = Command::new("sudo");
+        cmd.args(["-n", "curl"]);
+        cmd
+    } else {
+        Command::new("curl")
+    };
+    let _request = Agent(
+        curl_cmd
+            .args(["--silent", "--no-buffer", "--unix-socket"])
+            .arg(&socket)
+            .arg("--data-binary")
+            .arg(format!("@{}", archive.display()))
+            .arg("http://localhost/build?version=2&networkmode=none")
+            .stdout(log.reopen().unwrap())
+            .spawn()
+            .unwrap(),
+    );
+    assert!(
+        wait_for(Duration::from_secs(30), || {
+            std::fs::read_to_string(log.path())
+                .unwrap()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .any(|entry| {
+                    entry["stream"]
+                        .as_str()
+                        .is_some_and(|line| line.trim_end().ends_with(" podbag-cancel-ready"))
+                })
+        }),
+        "HTTP build did not start: {}",
+        std::fs::read_to_string(log.path()).unwrap()
+    );
+    assert_eq!(workers(&sb).len(), 1);
+
+    // SAFETY: this is the service child we started and have not yet reaped.
+    assert_eq!(
+        unsafe { libc::kill(service.0.id() as i32, libc::SIGTERM) },
+        0
+    );
+    assert!(
+        wait_for(Duration::from_secs(30), || {
+            service
+                .0
+                .try_wait()
+                .unwrap()
+                .is_some_and(|status| status.success())
+        }),
+        "the service did not stop cleanly"
+    );
+    clean(&sb);
+    assert!(!std::fs::read_to_string(log.path()).unwrap().contains("aux"));
 }
 
 #[test]
