@@ -1,5 +1,5 @@
 //! What the app asks the `podbag` program: the VM's state and settings, the version, the
-//! update check and the upgrade. No Tauri here, so it is tested with a fake program.
+//! update check and the upgrade. No UI here, so it is tested with a fake program.
 
 use serde::Serialize;
 use serde_json::Value;
@@ -195,7 +195,10 @@ pub enum VmStorageEdit {
 }
 
 /// Read or edit the storage of the macOS VM without connecting to the guest.
-pub fn vm_storage(podbag: &Path, edit: Option<VmStorageEdit>) -> Result<Value, String> {
+pub fn vm_storage(
+    podbag: &Path,
+    edit: Option<VmStorageEdit>,
+) -> Result<crate::vm::DiskStorage, String> {
     let base = ["vm", "storage"];
     let output = match edit {
         None => run_ok(podbag, &base)?,

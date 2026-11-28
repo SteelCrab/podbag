@@ -9,7 +9,7 @@ use super::kubernetes::host_command;
 
 #[derive(Clone, Copy, Default, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-enum Provider {
+pub enum Provider {
     #[default]
     Docker,
     Podbag,
@@ -35,14 +35,14 @@ struct Record {
     ready: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalCluster {
-    context: String,
-    version: Option<String>,
-    nodes: u8,
-    provider: Provider,
-    ready: bool,
+    pub context: String,
+    pub version: Option<String>,
+    pub nodes: u8,
+    pub provider: Provider,
+    pub ready: bool,
 }
 
 impl From<Record> for LocalCluster {
@@ -152,19 +152,30 @@ impl KindHost {
 }
 
 pub fn reset() -> Result<LocalCluster, String> {
-    reset_in(&directory()?, &run)
+    reset_in(&directory()?, None, &run)
 }
 
 pub fn remove() -> Result<(), String> {
-    remove_in(&directory()?, &run)
+    remove_in(&directory()?, None, &run)
+}
+
+/// Reset the owned cluster that Desktop showed when the user confirmed the operation.
+pub fn reset_context(context: &str) -> Result<LocalCluster, String> {
+    reset_in(&directory()?, Some(context), &run)
+}
+
+/// Remove the owned cluster that Desktop showed when the user confirmed the operation.
+pub fn remove_context(context: &str) -> Result<(), String> {
+    remove_in(&directory()?, Some(context), &run)
 }
 
 fn reset_in(
     dir: &Path,
+    context: Option<&str>,
     run: &impl Fn(&mut Command) -> Result<String, String>,
 ) -> Result<LocalCluster, String> {
     let _lock = operation(dir)?;
-    let mut record = owned(dir)?;
+    let mut record = owned(dir, context)?;
     check_engine(&record, run)?;
     let host = KindHost::open(&record.host, record.provider)?;
     record.ready = false;
@@ -175,10 +186,11 @@ fn reset_in(
 
 fn remove_in(
     dir: &Path,
+    context: Option<&str>,
     run: &impl Fn(&mut Command) -> Result<String, String>,
 ) -> Result<(), String> {
     let _lock = operation(dir)?;
-    let record = owned(dir)?;
+    let record = owned(dir, context)?;
     check_engine(&record, run)?;
     let host = KindHost::open(&record.host, record.provider)?;
     delete(dir, &record, &host, run)?;
@@ -205,8 +217,12 @@ fn read(dir: &Path) -> Result<Option<Record>, String> {
     Ok(Some(record))
 }
 
-fn owned(dir: &Path) -> Result<Record, String> {
-    read(dir)?.ok_or_else(|| "Podbag has no local cluster to manage".into())
+fn owned(dir: &Path, context: Option<&str>) -> Result<Record, String> {
+    let record = read(dir)?.ok_or("Podbag has no local cluster to manage")?;
+    if context.is_some_and(|context| context.strip_prefix("kind-") != Some(record.name.as_str())) {
+        return Err("The local cluster changed since it was shown".into());
+    }
+    Ok(record)
 }
 
 fn operation(dir: &Path) -> Result<File, String> {
@@ -561,7 +577,7 @@ mod tests {
                 assert_eq!(args, ["get", "clusters"]);
                 return Ok("unowned\n".into());
             }
-            let record = owned(&dir).unwrap();
+            let record = owned(&dir, None).unwrap();
             assert_eq!(args[1..4], ["cluster", "--name", &record.name]);
             let kubeconfig = args[args.iter().position(|&a| a == "--kubeconfig").unwrap() + 1];
             assert_eq!(Path::new(kubeconfig), dir.join("kubeconfig"));
@@ -583,7 +599,7 @@ mod tests {
             }
             Ok(String::new())
         };
-        assert!(remove_in(&dir, &run).is_err());
+        assert!(remove_in(&dir, None, &run).is_err());
         assert!(calls.borrow().is_empty());
         let created = create_in(
             &dir,
@@ -595,15 +611,20 @@ mod tests {
         )
         .unwrap();
         assert!(created.ready);
+        let stale = Some("kind-podbag-othercluster");
+        let err = reset_in(&dir, stale, &run).unwrap_err();
+        assert!(err.contains("changed since it was shown"), "{err}");
+        let err = remove_in(&dir, stale, &run).unwrap_err();
+        assert!(err.contains("changed since it was shown"), "{err}");
         engine.set("engine-two");
-        let err = reset_in(&dir, &run).unwrap_err();
+        let err = reset_in(&dir, None, &run).unwrap_err();
         assert!(err.contains("different Docker engine"), "{err}");
         assert!(dir.join("kubeconfig").exists());
         engine.set("engine-one");
-        let reset = reset_in(&dir, &run).unwrap();
+        let reset = reset_in(&dir, Some(&created.context), &run).unwrap();
         assert_eq!(reset.context, created.context);
         assert!(reset.ready);
-        remove_in(&dir, &run).unwrap();
+        remove_in(&dir, Some(&created.context), &run).unwrap();
         assert!(read(&dir).unwrap().is_none());
         assert!(!dir.join("kubeconfig").exists());
         assert_eq!(fs::read_to_string(external).unwrap(), "external kubeconfig");
@@ -651,7 +672,7 @@ mod tests {
             .as_deref(),
             Some("kind exited")
         );
-        let record = owned(dir.path()).unwrap();
+        let record = owned(dir.path(), None).unwrap();
         assert!(!record.ready);
         assert_eq!(record.engine_id, "engine-one");
     }
@@ -728,14 +749,14 @@ mod tests {
             if nodes()? != 2 {
                 return Err("kind did not create both nodes".into());
             }
-            if reset_in(dir.path(), &run)?.context != cluster.context || nodes()? != 2 {
+            if reset_in(dir.path(), None, &run)?.context != cluster.context || nodes()? != 2 {
                 return Err("kind did not recreate the same cluster and nodes".into());
             }
             Ok(())
         })();
         let cleanup = read(dir.path())
             .unwrap()
-            .map(|_| remove_in(dir.path(), &run));
+            .map(|_| remove_in(dir.path(), None, &run));
         result.unwrap();
         if let Some(cleanup) = cleanup {
             cleanup.unwrap();

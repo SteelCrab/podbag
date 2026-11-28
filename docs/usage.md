@@ -1415,8 +1415,7 @@ podbag lab remove container-network
 
 ![Available migrations in a Kubernetes namespace and resource counts in the sidebar](images/migration-overview-en.png)
 
-- On macOS, the window toolbar has Refresh and Settings on the right.
-  Drag the open space in the toolbar to move the window.
+- The top bar has the sidebar button, Back, Forward and Settings. Each list has Refresh.
 - Each list has a search box, and the same actions as the TUI.
 - A container's page has its details, its logs (as they come) and all its data.
 - Select **Containers → Run container** to start a new container. Each image in
@@ -1450,9 +1449,10 @@ podbag lab remove container-network
 - Install [kind](https://kind.sigs.k8s.io/docs/user/quick-start/), `kubectl`, and the
   Docker CLI on the desktop host. To use a separate Docker engine, select a local Docker
   context that runs Linux containers.
-- Open **Kubernetes → Local cluster**. Enter a Kubernetes release tag supported by your
-  kind version, or keep the kind default. Choose the node count and select **Create
-  cluster**. The first node is the control plane, and the remaining nodes are workers.
+- Open **Local cluster** in Settings, or select it from the Kubernetes page. Enter a
+  Kubernetes release tag supported by your kind version, or keep the kind default.
+  Choose the node count and select **Create cluster**. The first node is the control
+  plane, and the remaining nodes are workers.
 - The API server listens on loopback. The app stores the kubeconfig in its private
   `local-kubernetes` directory and includes that context in the cluster selector. Your
   normal kubeconfig and its current context are left alone.
@@ -1575,7 +1575,10 @@ in each Desktop session.
 - **Settings → Engine → Compress idle images** (podbag only) turns
   [image compression](#compression) on or off with `podbag system compression`. On macOS
   it saves the setting in the VM. The app also asks once, after an install or an update,
-  whether to turn it on.
+  whether to turn it on. While the VM is off, the switch waits for it: reading the
+  setting would start the VM.
+- **Images** shows a compressed image's size on disk with the compression icon, and how
+  much smaller it got. Its details show both sizes.
 - The choice is saved in `ui.json`. `podbag tui` uses the same choice.
 - Switching reloads the lists. The app never starts Docker. When Docker does not answer,
   it says so: "Docker is not running. Start Docker Desktop."
@@ -1705,15 +1708,37 @@ in each Desktop session.
 
 ### Build the desktop app
 
-- It is a separate program in `desktop/` (Tauri 2). The `podbag` binary does not carry
-  it, and `cargo build` leaves it out.
-- On Linux, it needs WebKitGTK 4.1 and an app indicator library:
+- It is a separate program in `desktop/`. It draws its own window with the GPU
+  (wgpu: Metal, Direct3D 12 or Vulkan, with OpenGL as the fallback), with no web view.
+  The `podbag` binary does not carry it, and `cargo build` leaves it out.
+- It is three crates: `ui/` (the UI layer), `desktop-core/` (the engine and system
+  calls) and `desktop/` (the app).
 
 ```sh
-sudo apt install libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
 cargo build --release -p podbag-desktop
 ./target/release/podbag-desktop
 ```
+
+- On Linux, the tray item is the `linux-tray` feature. It builds on GTK 3, and at run
+  time it needs an app indicator library (libayatana-appindicator3-1):
+
+```sh
+sudo apt install libgtk-3-dev
+cargo build --release -p podbag-desktop --features linux-tray
+```
+
+- Without the feature there is no tray item, and closing the window quits the app.
+- `--mock` (or `PODBAG_DESKTOP_MOCK=1`) runs it on sample data, with no engine.
+  `PODBAG_MOCK_SCENARIO` picks the case (`default`, `empty`, `vm`, `offline`, `docker`)
+  and `PODBAG_MOCK_LANG` the language.
+- Its tests run without a window or a GPU:
+
+```sh
+cargo test -p podbag-ui -p podbag-desktop-core -p podbag-desktop --all-features
+```
+
+- `cargo run -p podbag-desktop --example snapshots -- <folder>` draws each page on the
+  sample data to PNG files (it needs a GPU, but no window).
 
 - It finds the `podbag` program in this order:
   1. `PODBAG_BIN`.
@@ -1734,7 +1759,6 @@ desktop/bundle-macos.sh            # target/release/podbag.app (debug: add "debu
 open target/release/podbag.app
 ```
 
-- The script makes the bundle itself (Tauri's bundler needs the separate `tauri-cli`).
 - To include the CLI and its Linux guest, build the guest first and use `--with-cli`.
   Rebuild this bundle to update the included CLI and keep the app signature valid.
 
@@ -1749,7 +1773,6 @@ open target/release/podbag.app
 
 - Run bare, the executable's menu says About, Hide and Quit podbag, but macOS shows
   `podbag-desktop` as the menu bar's title and in the Dock. Only a bundle changes that.
-- Windows: the .exe's product name and file description are podbag.
 - Linux: `desktop/podbag.desktop` is a desktop entry named podbag. Copy it to
   `~/.local/share/applications/`.
 

@@ -4,8 +4,6 @@ logs/
 __pycache__/
 /dev/cri/gen/Cargo.lock
 /dev/cri/gen/target/
-/desktop/gen/
-/desktop/preview/out/
 
 # Design and plan notes (not committed)
 docs/superpowers/
