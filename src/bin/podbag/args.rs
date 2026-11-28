@@ -722,6 +722,15 @@ pub struct RunArgs {
     /// cgroup (inside the user namespace when rootless)
     #[arg(long)]
     pub privileged: bool,
+    /// Mount the container's root filesystem read-only
+    #[arg(long)]
+    pub read_only: bool,
+    /// Map a device as root on Linux (HOST[:CONTAINER][:rwm])
+    #[arg(long = "device", value_name = "DEVICE")]
+    pub devices: Vec<podbag::spec::Device>,
+    /// Select Linux GPUs as root (all, COUNT, device=ID, or driver=nvidia,SELECTION)
+    #[arg(long, value_name = "GPUS")]
+    pub gpus: Vec<podbag::gpu::Request>,
     /// Logging driver (json-file, syslog, journald)
     #[arg(long)]
     pub log_driver: Option<String>,

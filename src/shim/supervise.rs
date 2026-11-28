@@ -360,6 +360,48 @@ pub(super) fn run(
         started: false,
         handed_over: false,
     };
+    let mut gpus = match crate::gpu::setup(&spec.gpu_requests) {
+        Ok(gpus) => gpus,
+        Err(e) => return failed(status, e),
+    };
+    let mut devices = spec.devices.clone();
+    for gpu in gpus.drm {
+        if !devices
+            .iter()
+            .any(|device| device.container == gpu.container)
+        {
+            devices.push(gpu);
+        }
+    }
+    let ordinary_device_mounts = device_mounts(&devices);
+    if let Some(nvidia) = &mut gpus.nvidia {
+        nvidia.mounts.extend(device_mounts(&nvidia.devices));
+        for mount in spec.mounts.iter().chain(&ordinary_device_mounts) {
+            let target = std::path::Path::new(&mount.target);
+            if let Some(gpu) = nvidia.mounts.iter().find(|gpu| {
+                let path = std::path::Path::new(&gpu.target);
+                path.starts_with(target) || target.starts_with(path)
+            }) {
+                return failed(
+                    status,
+                    Error::new(
+                        ErrorKind::InvalidInput,
+                        "cannot mount NVIDIA GPU files",
+                        format!(
+                            "the mount at {} conflicts with {}",
+                            mount.target, gpu.target
+                        ),
+                        "remove the conflicting mount or omit the NVIDIA GPU request",
+                    ),
+                );
+            }
+        }
+        devices.extend(nvidia.devices.iter().cloned());
+    }
+    let device_rules = match crate::cgroup::device_rules(&devices) {
+        Ok(rules) => rules,
+        Err(e) => return failed(status, e),
+    };
     let id = spec.id.as_str();
     let mut io = match Io::prepare(spec) {
         Ok(io) => io,
@@ -412,17 +454,12 @@ pub(super) fn run(
     // As root, the container may open only the usual devices (a privileged one: all).
     // Rootless, the kernel refuses device nodes to the user namespace already.
     if let (false, false, Some(g)) = (rootless, spec.security.privileged, &group) {
-        let rules = crate::cgroup::device_rules(&spec.devices);
-        let restricted = rules.and_then(|rules| {
-            crate::cgroup::restrict_devices(g.fd(), &rules).map_err(|e| {
-                Error::io(
-                    "cannot limit the devices the container may open",
-                    &e,
-                    "check that the kernel has cgroup BPF (CONFIG_CGROUP_BPF)",
-                )
-            })
-        });
-        if let Err(e) = restricted {
+        if let Err(e) = crate::cgroup::restrict_devices(g.fd(), &device_rules) {
+            let e = Error::io(
+                "cannot limit the devices the container may open",
+                &e,
+                "check that the kernel has cgroup BPF (CONFIG_CGROUP_BPF)",
+            );
             remove_control(dirs, id);
             if let Some(g) = group {
                 g.remove();
@@ -481,11 +518,14 @@ pub(super) fn run(
         }
     };
     let mut run_spec = spec.clone();
+    if let Some(nvidia) = &gpus.nvidia {
+        run_spec.env.extend(nvidia.env.iter().cloned());
+    }
     let mut dns_upstream = match super::net::files(spec, dirs, rootless, own, config.embedded_dns) {
         Ok((mut files, upstream)) => {
             files.append(&mut run_spec.mounts);
             run_spec.mounts = files;
-            run_spec.mounts.extend(device_mounts(&spec.devices));
+            run_spec.mounts.extend(ordinary_device_mounts);
             upstream
         }
         Err(e) => {
@@ -526,7 +566,7 @@ pub(super) fn run(
         }
         Ok(())
     };
-    let child = match linux::spawn(
+    let child = match linux::spawn_with_gpu(
         &run_spec,
         io.stdio,
         group.as_ref().map(|g| g.fd()),
@@ -537,6 +577,7 @@ pub(super) fn run(
             linux::Parent::Caller
         },
         &mut attach,
+        gpus.nvidia.as_ref(),
     ) {
         Ok(c) => c,
         Err(e) => {

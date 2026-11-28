@@ -1,0 +1,53 @@
+#!/usr/bin/python3
+# Simulate the device inventory when the runner has no physical NVIDIA GPU.
+import json
+import os
+import sys
+
+if sys.argv[1:] == ["--version"]:
+    print("NVIDIA Container Toolkit CLI version 1.20.2")
+    sys.exit(0)
+
+args = sys.argv[1:]
+assert args[:2] == ["cdi", "generate"]
+assert "--format=json" in args and "--mode=nvml" in args
+assert args[args.index("--nvidia-cdi-hook-path") + 1] == "/usr/bin/nvidia-cdi-hook"
+assert "NVIDIA_VISIBLE_DEVICES" not in os.environ
+
+directory = "/usr/lib/podbag-nvidia-fixture"
+source = f"{directory}/libcuda.so.1.0.0"
+
+
+def hook(command, *arguments):
+    return {
+        "hookName": "createContainer",
+        "path": "/usr/bin/nvidia-cdi-hook",
+        "args": ["nvidia-cdi-hook", command, *arguments],
+        "env": ["NVIDIA_CTK_DEBUG=false"],
+    }
+
+
+def device(name, number):
+    node = {"path": f"/dev/nvidia{number}", "major": 195, "minor": number}
+    return {"name": name, "containerEdits": {"deviceNodes": [node]}}
+
+
+plan = {
+    "cdiVersion": "0.5.0",
+    "kind": "nvidia.com/gpu",
+    "containerEdits": {
+        "env": ["NVIDIA_VISIBLE_DEVICES=void", f"NVIDIA_CTK_LIBCUDA_DIR={directory}"],
+        "deviceNodes": [{"path": "/dev/nvidiactl"}],
+        "mounts": [{
+            "hostPath": source,
+            "containerPath": source,
+            "options": ["ro", "nosuid", "nodev", "rbind", "rprivate"],
+        }],
+        "hooks": [
+            hook("create-symlinks", "--link", f"libcuda.so.1.0.0::{directory}/libcuda.so.1"),
+            hook("update-ldcache", "--folder", directory),
+        ],
+    },
+    "devices": [device("GPU-A", 0), device("GPU-B", 1)],
+}
+print(json.dumps(plan))

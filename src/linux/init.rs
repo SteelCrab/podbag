@@ -19,6 +19,7 @@ pub(super) fn child_main(
     stdio: super::spawn::ContainerStdio,
     joins: &super::spawn::Joins,
     nfs: &super::mounts::NfsMounts,
+    gpu: Option<&crate::gpu::nvidia::Setup>,
 ) -> ! {
     let mut sync = File::from(sync_read);
     let mut byte = [0u8; 1];
@@ -36,7 +37,7 @@ pub(super) fn child_main(
         Ok(())
     };
     let error = match early
-        .and_then(|()| setup_and_exec(spec, rootless, status_fd, stdio.tty_socket, joins, nfs))
+        .and_then(|()| setup_and_exec(spec, rootless, status_fd, stdio.tty_socket, joins, nfs, gpu))
     {
         Err(e) => e,
         Ok(never) => match never {},
@@ -83,6 +84,7 @@ fn setup_and_exec(
     tty_socket: Option<i32>,
     joins: &super::spawn::Joins,
     nfs: &super::mounts::NfsMounts,
+    gpu: Option<&crate::gpu::nvidia::Setup>,
 ) -> Result<Infallible> {
     // First, while the host's files are in view: the pod's namespaces.
     joins.enter()?;
@@ -121,6 +123,7 @@ fn setup_and_exec(
         rootless,
         &spec.security,
         nfs,
+        gpu,
     )?;
     if let Some(sock) = tty_socket {
         // Open the terminal in the container's own /dev/pts, so the command can find it.

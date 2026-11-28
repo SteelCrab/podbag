@@ -15,6 +15,7 @@ mod spawn;
 pub mod userns;
 
 pub(crate) use rootfs::overlay_options;
+pub(crate) use spawn::spawn_with_gpu;
 pub use spawn::{ContainerStdio, Parent, UserNs, spawn, wait};
 
 use crate::{Error, ErrorKind};
