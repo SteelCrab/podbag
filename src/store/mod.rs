@@ -24,7 +24,7 @@ use crate::config::{DEFAULT_COMPRESS_IDLE_AFTER, ImageCompression, ImageMount};
 use crate::image::manifest::{self, Compression};
 use crate::image::reference::Reference;
 use crate::image::registry::{Registry, digest_mismatch};
-use crate::image::{DiskUsage, ImageConfig, PruneReport, VerifyReport};
+use crate::image::{DiskUsage, HistoryItem, ImageConfig, PruneReport, VerifyReport};
 use crate::paths::Dirs;
 use crate::{Error, ErrorKind, Result};
 use layer::{EntryKind, LayerIndex};
@@ -49,6 +49,8 @@ pub struct ImageRecord {
     pub config_digest: Option<String>,
     pub config: ImageConfig,
     pub diff_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<manifest::HistoryEntry>,
     /// Bytes of file content in the image.
     pub size: u64,
     /// Seconds since the epoch.
@@ -56,6 +58,26 @@ pub struct ImageRecord {
     /// It came in OCI's format (else Docker's schema 2): a push keeps the format.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub oci: bool,
+}
+
+impl ImageRecord {
+    /// Pad older images that have no recorded history for some or all of their layers.
+    pub(crate) fn history_with_layers(&self) -> Vec<manifest::HistoryEntry> {
+        let recorded = self
+            .history
+            .iter()
+            .filter(|entry| !entry.empty_layer)
+            .count();
+        let missing = self.diff_ids.len().saturating_sub(recorded);
+        let mut history = vec![manifest::HistoryEntry::default(); missing];
+        history.extend_from_slice(&self.history);
+        if self.history.is_empty() {
+            if let Some(last) = history.last_mut() {
+                last.created = Some(crate::client::time::rfc3339(self.created, 0));
+            }
+        }
+        history
+    }
 }
 
 /// The compressed blobs known to hold one stored layer, and where: what a push sends or
@@ -955,7 +977,8 @@ impl Store {
             .join("image.json")
             .exists()
         {
-            // Pulled before, maybe with the other mount method.
+            // Pulled before, maybe before history was stored or with another mount method.
+            self.remember_history(&resolved.manifest_digest, resolved.config.history.clone())?;
             return self.ensure_artifact(&resolved.manifest_digest);
         }
         for (i, desc) in resolved.layers.iter().enumerate() {
@@ -984,11 +1007,16 @@ impl Store {
             });
         }
         self.assemble(
-            &resolved.manifest_digest,
-            resolved.config.config.clone(),
-            resolved.config.diff_ids.clone(),
-            Some(resolved.config_digest.clone()),
-            resolved.oci,
+            ImageRecord {
+                digest: resolved.manifest_digest.clone(),
+                config_digest: Some(resolved.config_digest.clone()),
+                config: resolved.config.config.clone(),
+                diff_ids: resolved.config.diff_ids.clone(),
+                history: resolved.config.history.clone(),
+                created: now(),
+                size: 0,
+                oci: resolved.oci,
+            },
             true,
         )
     }
@@ -1055,6 +1083,11 @@ impl Store {
         if plain_digest != diff_id {
             return Err(source.mismatch(diff_id));
         }
+        self.write_layer_index(diff_id, entries)?;
+        Ok(compressed.count)
+    }
+
+    fn write_layer_index(&self, diff_id: &str, entries: Vec<layer::Entry>) -> Result<()> {
         // The objects reach the disk before the index that names them.
         self.objects.sync()?;
         write_json(
@@ -1063,52 +1096,20 @@ impl Store {
                 diff_id: diff_id.to_string(),
                 entries,
             },
-        )?;
-        Ok(compressed.count)
+        )
     }
 
     /// Merge stored layers into the image tree and write the image record.
     /// Without `artifact`, only the record: [`Store::ensure_artifact`] builds the rest
     /// when a container needs it (build steps that no `RUN` follows).
-    fn assemble(
-        &self,
-        digest: &str,
-        config: ImageConfig,
-        diff_ids: Vec<String>,
-        config_digest: Option<String>,
-        oci: bool,
-        artifact: bool,
-    ) -> Result<()> {
-        self.assemble_at(
-            digest,
-            config,
-            diff_ids,
-            config_digest,
-            oci,
-            artifact,
-            now(),
-        )
-    }
-
-    /// [`Store::assemble`] with the image's creation time.
-    #[allow(clippy::too_many_arguments)]
-    fn assemble_at(
-        &self,
-        digest: &str,
-        config: ImageConfig,
-        diff_ids: Vec<String>,
-        config_digest: Option<String>,
-        oci: bool,
-        artifact: bool,
-        created: u64,
-    ) -> Result<()> {
+    fn assemble(&self, mut record: ImageRecord, artifact: bool) -> Result<()> {
         let mut layers = Vec::new();
-        for id in &diff_ids {
+        for id in &record.diff_ids {
             layers.push(self.read_layer_index(id)?.entries);
         }
         let tree = tree::merge(&layers)?;
         let mut seen = HashSet::new();
-        let size = tree
+        record.size = tree
             .entries
             .values()
             .filter_map(|e| match &e.kind {
@@ -1117,6 +1118,7 @@ impl Store {
             })
             .sum();
 
+        let digest = &record.digest;
         let dir = self.image_dir(digest);
         // Unique per process: two pulls of the same image may assemble at the same time.
         let staging =
@@ -1131,17 +1133,8 @@ impl Store {
                 MountMethod::Hardlink => Artifact::Tree,
             };
             if artifact {
-                self.build_in(&staging, want, &tree, created)?;
+                self.build_in(&staging, want, &tree, record.created)?;
             }
-            let record = ImageRecord {
-                digest: digest.to_string(),
-                config_digest,
-                config,
-                diff_ids,
-                size,
-                created,
-                oci,
-            };
             write_json(&staging.join("image.json"), &record)?;
             match std::fs::rename(&staging, &dir) {
                 Ok(()) => Ok(()),
@@ -2055,6 +2048,61 @@ impl Store {
             .join(format!("{}.json", hex_of(diff_id)))
     }
 
+    /// Present usable layer sizes even for images stored without historical commands.
+    pub fn image_history(&self, record: &ImageRecord) -> Result<Vec<HistoryItem>> {
+        let names = self
+            .read_refs()?
+            .into_iter()
+            .filter(|(name, entry)| entry.digest == record.digest && !name.contains('@'))
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>();
+        let mut ids = record.diff_ids.iter();
+        let mut rows = Vec::new();
+        for entry in record.history_with_layers() {
+            let size = match if entry.empty_layer { None } else { ids.next() } {
+                Some(id) => self
+                    .read_layer_index(id)?
+                    .entries
+                    .iter()
+                    .map(|entry| match entry.kind {
+                        EntryKind::File { size, .. } => size,
+                        _ => 0,
+                    })
+                    .sum(),
+                None => 0,
+            };
+            rows.push(HistoryItem {
+                id: "<missing>".to_string(),
+                created: entry
+                    .created
+                    .as_deref()
+                    .and_then(crate::client::time::epoch_of)
+                    .map_or(0, |time| time.floor() as i64),
+                created_by: entry.created_by,
+                tags: Vec::new(),
+                size,
+                comment: entry.comment,
+            });
+        }
+        if let Some(top) = rows.last_mut() {
+            top.id = record.digest.clone();
+            top.tags = names;
+        }
+        rows.reverse();
+        Ok(rows)
+    }
+
+    fn remember_history(&self, digest: &str, history: Vec<manifest::HistoryEntry>) -> Result<()> {
+        if !history.is_empty() {
+            let mut image = self.read_record(digest)?;
+            if image.history.is_empty() {
+                image.history = history;
+                write_json(&self.image_dir(digest).join("image.json"), &image)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Load a layer index and check it again: paths must be normalized and object keys
     /// well formed, so a tampered file cannot point outside the store.
     fn read_layer_index(&self, diff_id: &str) -> Result<LayerIndex> {
@@ -2151,7 +2199,19 @@ impl Store {
             }
         }
         if !self.image_dir(&digest).exists() {
-            self.assemble(&digest, ImageConfig::default(), diff_ids, None, false, true)?;
+            self.assemble(
+                ImageRecord {
+                    digest: digest.clone(),
+                    config_digest: None,
+                    config: ImageConfig::default(),
+                    diff_ids,
+                    history: Vec::new(),
+                    created: now(),
+                    size: 0,
+                    oci: false,
+                },
+                true,
+            )?;
         } else {
             self.ensure_artifact(&digest)?;
         }

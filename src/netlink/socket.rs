@@ -136,14 +136,34 @@ impl Socket {
 
     /// The index of link `name`, or `None` if there is no such link.
     pub fn link_index(&mut self, name: &str) -> io::Result<Option<u32>> {
+        Ok(self.link(name)?.map(|(index, _)| index))
+    }
+
+    /// The interface index and its bridge index, if it is attached to a bridge.
+    pub(crate) fn link(&mut self, name: &str) -> io::Result<Option<(u32, Option<u32>)>> {
         let seq = self.next_seq();
-        match self.exchange(&super::route::get_link(name).finish(seq), 0) {
-            Ok(answers) => Ok(answers
-                .first()
-                .filter(|a| a.len() >= 8)
-                .map(|a| i32::from_ne_bytes(a[4..8].try_into().unwrap()) as u32)),
-            Err(e) if e.raw_os_error() == Some(libc::ENODEV) => Ok(None),
-            Err(e) => Err(e),
+        let answers = match self.exchange(&super::route::get_link(name).finish(seq), 0) {
+            Ok(answers) => answers,
+            Err(e) if e.raw_os_error() == Some(libc::ENODEV) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let Some(answer) = answers.first().filter(|a| a.len() >= 16) else {
+            return Err(io::Error::other("missing netlink interface information"));
+        };
+        let index = u32::from_ne_bytes(answer[4..8].try_into().unwrap());
+        let mut attrs = &answer[16..];
+        while attrs.len() >= 4 {
+            let len = u16::from_ne_bytes(attrs[..2].try_into().unwrap()) as usize;
+            let kind = u16::from_ne_bytes(attrs[2..4].try_into().unwrap());
+            if len < 4 || (len + 3) & !3 > attrs.len() {
+                return Err(io::Error::other("invalid netlink interface attribute"));
+            }
+            if kind == super::route::IFLA_MASTER && len == 8 {
+                let master = u32::from_ne_bytes(attrs[4..8].try_into().unwrap());
+                return Ok(Some((index, Some(master))));
+            }
+            attrs = &attrs[(len + 3) & !3..];
         }
+        Ok(Some((index, None)))
     }
 }

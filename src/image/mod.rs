@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod manifest;
+pub mod proxy;
 pub mod reference;
 pub mod registry;
 
@@ -9,6 +10,26 @@ use crate::paths;
 use crate::store::Store;
 use crate::{Error, ErrorKind, Result};
 use serde::{Deserialize, Serialize};
+
+/// The settings for making an image from a root filesystem tar.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImportOptions {
+    pub name: Option<String>,
+    pub message: String,
+    pub changes: Vec<String>,
+}
+
+/// One row of image history, newest first when displayed.
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub struct HistoryItem {
+    pub id: String,
+    pub created: i64,
+    pub created_by: String,
+    pub tags: Vec<String>,
+    pub size: u64,
+    pub comment: String,
+}
 
 /// A pulled image.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -87,6 +108,11 @@ pub fn short_id(digest: &str) -> String {
         .collect()
 }
 
+/// Whether an import source is an HTTP(S) URL rather than a file.
+pub fn archive_url(source: &str) -> bool {
+    source.starts_with("https://") || source.starts_with("http://")
+}
+
 impl Image {
     /// Find programs and libraries in a stored image that cannot run: built for another
     /// C library or CPU, or missing a library. Files are read, never run.
@@ -160,6 +186,51 @@ impl Image {
                 }
             }),
         )?)
+    }
+
+    /// Read the history of an image in the local store, newest first.
+    pub fn history(name: &str) -> Result<Vec<HistoryItem>> {
+        let dirs = paths::dirs()?;
+        let store = Store::open_existing(&dirs).ok_or_else(|| not_pulled(name))?;
+        let (_, record) = store.find(name)?;
+        store.image_history(&record)
+    }
+
+    /// Make one image from a root filesystem tar stream, optionally compressed.
+    pub fn import(input: &mut dyn std::io::Read, options: ImportOptions) -> Result<String> {
+        #[cfg(unix)]
+        {
+            from_output(crate::helper::run_store_op_with_input(
+                &crate::store::ops::StoreOp::Import { options },
+                input,
+            )?)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (input, options);
+            Err(Error::unsupported_os())
+        }
+    }
+
+    /// Fetch a root filesystem archive over HTTP(S) and import it.
+    pub fn import_url(url: &str, options: ImportOptions) -> Result<String> {
+        if !archive_url(url) {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "cannot import the root filesystem",
+                "the archive URL must use HTTP or HTTPS",
+                "give an HTTP(S) URL or a local tar archive",
+            ));
+        }
+        let mut response = ureq::get(url).call().map_err(|e| {
+            Error::new(
+                ErrorKind::Runtime,
+                "cannot download the root filesystem archive",
+                e.to_string(),
+                "check the archive URL",
+            )
+        })?;
+        Image::import(&mut response.body_mut().as_reader(), options)
     }
 
     /// Store the images of an archive read from `input`: `docker save`'s format, an OCI

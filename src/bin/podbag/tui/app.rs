@@ -7,6 +7,7 @@ use podbag::client::{
     ApiError, ContainerSummary, DockerTarget, Features, ImageSummary, Kind, Location,
     NetworkSummary, SearchResult, VolumeSummary, short_id,
 };
+use podbag::volume_lesson::course::OPEN_WEB;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashMap;
 use std::time::Instant;
@@ -141,6 +142,14 @@ pub enum Effect {
     DockerCli {
         to_podbag: bool,
     },
+    /// `:` in training mode: the practice shell, then back.
+    TrainingShell,
+    /// Tell the course engine of a UI action that changes nothing here (`o` on a browser
+    /// step: "open-web"; a created volume: "create-volume").
+    Report {
+        action: &'static str,
+        name: String,
+    },
 }
 
 /// What the runtime sends back.
@@ -169,6 +178,8 @@ pub enum Msg {
     Found(String, Result<Vec<SearchResult>, ApiError>),
     /// Where the `docker` command goes now, and the context `D` goes back to.
     DockerTarget(DockerTarget, Option<String>),
+    /// What the course engine said of a UI action of the current step.
+    Step(Result<(), String>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -256,6 +267,11 @@ pub struct App {
     pub log_generation: u64,
     /// The height of the text view, for page keys (set when drawn).
     pub page: usize,
+    /// The course attempt's steps, in a practice session's training mode.
+    pub training: Option<super::training::Panel>,
+    /// The message is the course engine's word on a step: the action's own `Done`, which
+    /// comes right after it, keeps it. A key or a click ends this.
+    step_said: bool,
 }
 
 pub(super) fn tab_index(k: Kind) -> usize {
@@ -315,6 +331,8 @@ impl App {
             now: 0,
             log_generation: 0,
             page: 10,
+            training: None,
+            step_said: false,
         }
     }
 
@@ -343,22 +361,36 @@ impl App {
                     builtin: false,
                 })
                 .collect(),
+            // In training mode a row for each tag, by its name: the tag a hint names is a
+            // row, and removing it removes only that tag.
             Kind::Images => self
                 .lists
                 .images
                 .iter()
-                .map(|i| Row {
-                    id: i.id.clone(),
-                    name: i.name(),
-                    cells: vec![
-                        i.name(),
-                        short_id(&i.id).to_string(),
-                        size(i.size),
-                        ago(self.now, i.created),
-                    ],
-                    tone: Tone::Normal,
-                    running: false,
-                    builtin: false,
+                .flat_map(|i| {
+                    let tags: Vec<String> = i
+                        .repo_tags
+                        .iter()
+                        .filter(|t| t.as_str() != "<none>:<none>")
+                        .cloned()
+                        .collect();
+                    let rows = match (&self.training, tags.is_empty()) {
+                        (Some(_), false) => tags.into_iter().map(|t| (t.clone(), t)).collect(),
+                        _ => vec![(i.id.clone(), i.name())],
+                    };
+                    rows.into_iter().map(|(id, name)| Row {
+                        id,
+                        cells: vec![
+                            name.clone(),
+                            short_id(&i.id).to_string(),
+                            size(i.size),
+                            ago(self.now, i.created),
+                        ],
+                        name,
+                        tone: Tone::Normal,
+                        running: false,
+                        builtin: false,
+                    })
                 })
                 .collect(),
             Kind::Volumes => self
@@ -413,7 +445,9 @@ impl App {
         all.into_iter()
             .enumerate()
             .filter(|(index, r)| {
+                // Training mode has a row for each tag (not one for each image).
                 (kind == Kind::Images
+                    && self.training.is_none()
                     && self.lists.images[*index]
                         .repo_tags
                         .iter()
@@ -535,7 +569,9 @@ impl App {
             Msg::Features(f) => self.features = f,
             Msg::Done(text, error) => {
                 self.busy = None;
-                self.say(text, error);
+                if !std::mem::take(&mut self.step_said) || error {
+                    self.say(text, error);
+                }
             }
             Msg::Text(title, lines) => {
                 self.mode = Mode::Text {
@@ -577,7 +613,29 @@ impl App {
                 self.docker = Some(target);
                 self.docker_previous = previous;
             }
+            Msg::Step(Ok(())) => {
+                let Some(panel) = &self.training else { return };
+                let text = if panel.finished() {
+                    self.appearance.text("training.finished")
+                } else {
+                    let done = panel.current.saturating_sub(1);
+                    self.appearance
+                        .text("training.stepDone")
+                        .replace("{name}", &panel.name(done, self.appearance.lang()))
+                };
+                self.say(text, false);
+                self.step_said = true;
+            }
+            Msg::Step(Err(e)) => {
+                self.say(e, true);
+                self.step_said = true;
+            }
         }
+    }
+
+    /// A key or a click: what the course engine said may give way to the next message.
+    pub(super) fn acted(&mut self) {
+        self.step_said = false;
     }
 
     /// Open the log view (a new generation); the runtime starts the stream.
@@ -612,6 +670,7 @@ impl App {
     }
 
     pub fn on_key(&mut self, key: KeyEvent) -> Effect {
+        self.acted();
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return Effect::Quit;
         }
@@ -830,6 +889,8 @@ impl App {
                 return Effect::Mouse(self.mouse);
             }
             KeyCode::Char('c') => return self.confirm_prune(),
+            KeyCode::Char(':') if self.training.is_some() => return Effect::TrainingShell,
+            KeyCode::Char('o') => return self.open_web(),
             KeyCode::Char('p') if self.tab == Kind::Images => {
                 return self.open_pull();
             }
@@ -897,7 +958,12 @@ impl App {
                 };
                 self.mode = Mode::Confirm {
                     question,
-                    then: act(Verb::Remove { force }),
+                    then: Effect::Act {
+                        kind,
+                        id: row.id,
+                        name: row.name,
+                        verb: Verb::Remove { force },
+                    },
                 };
                 Effect::None
             }
@@ -941,6 +1007,17 @@ impl App {
                     Effect::None
                 }
             }
+            _ => Effect::None,
+        }
+    }
+
+    /// `o`: the page of a browser step shows.
+    fn open_web(&self) -> Effect {
+        match self.training.as_ref().and_then(|p| p.expected()) {
+            Some((OPEN_WEB, name)) => Effect::Report {
+                action: OPEN_WEB,
+                name,
+            },
             _ => Effect::None,
         }
     }
@@ -1030,6 +1107,9 @@ impl App {
                     keys.push(("⏎", "inspect"));
                 }
                 keys.insert(0, ("a", "actions"));
+                if self.training.is_some() {
+                    keys.insert(1, (":", "training"));
+                }
                 if self.tab == Kind::Volumes {
                     keys.push(("v", "create"));
                 }
@@ -1042,9 +1122,12 @@ impl App {
 
 #[cfg(all(test, unix))]
 pub mod tests {
+    use super::super::training::Panel;
     use super::*;
     use podbag::client::DockerTarget;
+    use podbag::volume_lesson::course::{Check, StepDef, Ui, UiAction};
     use ratatui::crossterm::event::KeyEvent;
+    use std::collections::BTreeMap;
 
     pub fn key(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
@@ -1252,6 +1335,166 @@ pub mod tests {
         assert!(!follow);
         assert_eq!(*scroll, 2);
         assert_eq!(app.on_key(code(KeyCode::Esc)), Effect::CloseLogs);
+    }
+
+    /// A training panel whose only step (before finish) is checked by CHECK, done in a UI by UI.
+    fn training_at(check: Check, ui: Option<Ui>) -> Panel {
+        let step = |key: &str, check, ui| StepDef {
+            key: key.into(),
+            names: BTreeMap::from([("en".to_string(), format!("Step {key}"))]),
+            command: None,
+            check,
+            ui,
+        };
+        Panel {
+            title: "Web basics".into(),
+            steps: vec![step("one", check, ui), step("finish", Check::Finish, None)],
+            current: 0,
+            port: 18080,
+        }
+    }
+
+    fn browser_step() -> Panel {
+        let check = Check::DesktopBrowser {
+            name: "web".into(),
+            page: "Hello".into(),
+        };
+        training_at(check, None)
+    }
+
+    #[test]
+    fn training_keys_open_the_shell_and_confirm_the_page() {
+        let mut app = sample();
+        // Not in training mode.
+        assert_eq!(app.on_key(key(':')), Effect::None);
+        assert_eq!(app.on_key(key('o')), Effect::None);
+        assert!(!app.key_help().contains(&(":", "training")));
+        app.training = Some(browser_step());
+        assert_eq!(app.on_key(key(':')), Effect::TrainingShell);
+        assert_eq!(
+            app.on_key(key('o')),
+            Effect::Report {
+                action: "open-web",
+                name: "web".into()
+            }
+        );
+        let keys = app.key_help();
+        assert_eq!(&keys[..2], [("a", "actions"), (":", "training")]);
+        // `o` confirms only a browser step.
+        app.training = Some(training_at(Check::DesktopStop { name: "web".into() }, None));
+        assert_eq!(app.on_key(key('o')), Effect::None);
+        // `:` is a list key: in a question it is not.
+        app.on_key(key('d'));
+        assert_eq!(app.on_key(key(':')), Effect::None);
+    }
+
+    #[test]
+    fn training_lists_an_image_once_per_tag() {
+        let mut app = sample();
+        app.lists.images[0].repo_tags = vec!["my-busybox:1".into(), "busybox:1.37".into()];
+        let shown = |app: &App| -> Vec<(String, String, String)> {
+            app.rows(Kind::Images)
+                .into_iter()
+                .map(|r| (r.id, r.name, r.cells[0].clone()))
+                .collect()
+        };
+        let row = |id: &str, name: &str| (id.to_string(), name.to_string(), name.to_string());
+        // Outside training mode: one row, the image by its ID.
+        assert_eq!(
+            shown(&app),
+            [row("sha256:2222222222222222", "my-busybox:1")]
+        );
+        app.switch(Kind::Images);
+        app.on_key(key('d'));
+        assert!(matches!(
+            app.on_key(key('y')),
+            Effect::Act { ref id, .. } if id == "sha256:2222222222222222"
+        ));
+        // Training mode: a row for each tag, named by it, so a hint's tag is a row.
+        app.training = Some(training_at(
+            Check::ImageAbsent {
+                name: "my-busybox:1".into(),
+            },
+            Some(Ui {
+                action: UiAction::RemoveImage,
+                name: "my-busybox:1".into(),
+            }),
+        ));
+        assert_eq!(
+            shown(&app),
+            [
+                row("my-busybox:1", "my-busybox:1"),
+                row("busybox:1.37", "busybox:1.37")
+            ]
+        );
+        // The details under the list are the image's.
+        let mut t = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        t.draw(|f| super::super::view::draw(f, &mut app)).unwrap();
+        let s = super::super::view::buffer_text(t.backend().buffer());
+        assert!(s.contains("sha256:2222222222222222"), "{s}");
+        // A search finds a tag's row.
+        app.search = "1.37".into();
+        assert_eq!(shown(&app), [row("busybox:1.37", "busybox:1.37")]);
+        app.search.clear();
+        // Removing a row removes only its tag, by its name.
+        app.on_key(key('d'));
+        let Mode::Confirm { question, .. } = &app.mode else {
+            panic!("no question")
+        };
+        assert_eq!(question, "Remove image my-busybox:1?");
+        assert_eq!(
+            app.on_key(key('y')),
+            Effect::Act {
+                kind: Kind::Images,
+                id: "my-busybox:1".into(),
+                name: "my-busybox:1".into(),
+                verb: Verb::Remove { force: false }
+            }
+        );
+        app.on_key(key('j'));
+        app.on_key(key('d'));
+        assert!(matches!(
+            app.on_key(key('y')),
+            Effect::Act { ref id, .. } if id == "busybox:1.37"
+        ));
+        // An image without a tag: one row, by its ID.
+        app.lists.images[0].repo_tags = vec!["<none>:<none>".into()];
+        assert_eq!(
+            shown(&app),
+            [row("sha256:2222222222222222", "222222222222")]
+        );
+    }
+
+    #[test]
+    fn a_done_step_stays_said_over_its_actions_message() {
+        let mut app = sample();
+        let mut panel = browser_step();
+        panel.current = 1;
+        app.training = Some(panel);
+        app.on_msg(Msg::Step(Ok(())));
+        let finished = "All steps are done. Press q to end the session.";
+        assert_eq!(app.message, Some((finished.into(), false)));
+        // The action's own Done comes right after: the step's message stays.
+        app.busy = Some("Removing web".into());
+        app.on_msg(Msg::Done("Removed web".into(), false));
+        assert_eq!(app.message, Some((finished.into(), false)));
+        assert!(app.busy.is_none());
+        // The next action's message shows again.
+        app.on_key(key('j'));
+        app.on_msg(Msg::Done("Stopped job".into(), false));
+        assert_eq!(app.message, Some(("Stopped job".into(), false)));
+        // A step before finish: its name.
+        let mut panel = training_at(Check::DesktopStop { name: "web".into() }, None);
+        panel.steps.insert(0, panel.steps[0].clone());
+        panel.current = 1;
+        app.training = Some(panel);
+        app.on_msg(Msg::Step(Ok(())));
+        assert_eq!(app.message, Some(("Step done: Step one".into(), false)));
+        // An error of the engine.
+        app.on_msg(Msg::Step(Err("This step is stop web.".into())));
+        assert_eq!(app.message, Some(("This step is stop web.".into(), true)));
+        app.on_msg(Msg::Done("Started web".into(), false));
+        assert_eq!(app.message, Some(("This step is stop web.".into(), true)));
     }
 
     fn docker_at(name: &str, is_podbag: bool, from_env: bool) -> DockerTarget {

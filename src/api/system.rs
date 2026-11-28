@@ -113,7 +113,7 @@ pub fn info(ctx: &Ctx) -> Reply {
                 "IndexConfigs": {"docker.io": {"Name": "docker.io", "Mirrors": [], "Secure": true, "Official": true}},
                 "Mirrors": [],
             },
-            "Plugins": {"Volume": ["local"], "Network": ["bridge", "host", "null", "overlay"], "Log": ["json-file"]},
+            "Plugins": {"Volume": ["local"], "Network": ["bridge", "host", "null", "overlay"], "Log": ["json-file", "syslog", "journald"]},
             "Warnings": [],
         }),
     )

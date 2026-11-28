@@ -253,22 +253,14 @@ fn update_node(req: &Request, ctx: &Ctx, id: &str) -> Reply {
 
 /// Bind mounts must come from under the shared directory in the macOS VM.
 fn check_binds(ctx: &Ctx, spec: &Value) -> Result<(), Reply> {
-    let Some(root) = &ctx.binds_under else {
+    let Some(roots) = &ctx.binds_under else {
         return Ok(());
     };
     let mounts = &spec["TaskTemplate"]["ContainerSpec"]["Mounts"];
     let body = json!({"HostConfig": {"Mounts": mounts}});
     let sources = crate::api::create::bind_sources(&body).map_err(|e| reply(&e))?;
     for source in sources {
-        if !crate::api::create::lies_under(std::path::Path::new(&source), root) {
-            return Err(message(
-                400,
-                format!(
-                    "mounts denied: {source} is not under {}, the only Mac directory the VM sees",
-                    root.display()
-                ),
-            ));
-        }
+        crate::api::create::check_shared_bind(&source, roots)?;
     }
     Ok(())
 }

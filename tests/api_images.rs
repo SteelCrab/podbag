@@ -323,3 +323,120 @@ fn compressed_images_report_their_sizes() {
     let inspected: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert!(inspected.get("PodbagCompression").is_none(), "{inspected}");
 }
+
+#[test]
+fn import_and_history_through_the_cli_and_docker_api() {
+    use std::io::Write;
+
+    let sb = Sandbox::new();
+    let service = Service::start(&sb, &["--timeout", "0"]);
+    let docker = |args: &[&str]| docker_out(&sb, &service, args);
+    let rootfs = layer(&[TarEntry::file("hello", b"hi\n")]);
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder.write_all(&rootfs).unwrap();
+    let file = sb.tmp.path().join("rootfs.tar.gz");
+    std::fs::write(&file, encoder.finish().unwrap()).unwrap();
+    let file = file.to_str().unwrap();
+
+    let id = ok(&docker(&[
+        "import",
+        "-m",
+        "Initial filesystem",
+        "-c",
+        "CMD [\"/bin/sh\"]",
+        file,
+        "local/imported:1",
+    ]));
+    assert!(id.starts_with("sha256:"), "{id}");
+    let history = ok(&sb
+        .podbag()
+        .args(["image", "history", "--no-trunc", "local/imported:1"])
+        .output()
+        .unwrap());
+    assert!(history.contains(&id), "{history}");
+    assert!(history.contains("Initial filesystem"), "{history}");
+    let (body, headers) = curl(&service.socket, &["/images/local/imported:1/history"]);
+    assert!(headers.contains("200 OK"), "{headers}\n{body}");
+    let rows: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(rows.as_array().unwrap().len(), 1, "{rows}");
+    assert_eq!(rows[0]["Id"], id);
+    assert_eq!(rows[0]["Size"], 3);
+    assert_eq!(rows[0]["Tags"], serde_json::json!(["local/imported:1"]));
+    let docker_history = ok(&docker(&[
+        "history",
+        "--no-trunc",
+        "--format",
+        "{{.ID}} {{.Comment}}",
+        "local/imported:1",
+    ]));
+    assert_eq!(docker_history, format!("{id} Initial filesystem"));
+    let cmd = ok(&docker(&[
+        "image",
+        "inspect",
+        "--format",
+        "{{json .Config.Cmd}}",
+        "local/imported:1",
+    ]));
+    assert_eq!(cmd, r#"["/bin/sh"]"#);
+
+    let bad = sb.tmp.path().join("bad.tar");
+    std::fs::write(&bad, b"not a tar").unwrap();
+    let failed = docker(&["import", bad.to_str().unwrap(), "local/imported:1"]);
+    assert_ne!(failed.status.code(), Some(0));
+    let unchanged = ok(&docker(&[
+        "inspect",
+        "--format",
+        "{{.Id}}",
+        "local/imported:1",
+    ]));
+    assert_eq!(unchanged, id);
+
+    let cli_id = ok(&sb
+        .podbag()
+        .args(["image", "import", file, "local/imported:cli"])
+        .output()
+        .unwrap());
+    assert!(cli_id.starts_with("sha256:"), "{cli_id}");
+}
+
+#[test]
+fn build_history_survives_a_cache_hit_and_save_load() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let sb = Sandbox::new();
+    let service = Service::start(&sb, &["--timeout", "0"]);
+    let docker = |args: &[&str]| docker_out(&sb, &service, args);
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::write(dir.path().join("message"), b"hi\n").unwrap();
+    std::fs::write(
+        dir.path().join("Dockerfile"),
+        "FROM scratch\nCOPY message /message\nLABEL test=history\n",
+    )
+    .unwrap();
+    let name = "local/history:1";
+    for _ in 0..2 {
+        ok(&sb
+            .podbag()
+            .args(["build", "-t", name, dir.path().to_str().unwrap()])
+            .output()
+            .unwrap());
+    }
+    let check_history = || {
+        let (body, headers) = curl(&service.socket, &["/images/local/history:1/history"]);
+        assert!(headers.contains("200 OK"), "{headers}\n{body}");
+        let rows: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(rows.as_array().unwrap().len(), 2, "{rows}");
+        assert_eq!(rows[0]["CreatedBy"], "LABEL test=history");
+        assert_eq!(rows[0]["Size"], 0);
+        assert_eq!(rows[1]["CreatedBy"], "COPY message /message");
+        assert_eq!(rows[1]["Size"], 3);
+    };
+    check_history();
+    let archive = sb.tmp.path().join("image.tar");
+    let archive = archive.to_str().unwrap();
+    ok(&docker(&["save", "-o", archive, name]));
+    ok(&docker(&["rmi", name]));
+    ok(&docker(&["load", "-i", archive]));
+    check_history();
+}

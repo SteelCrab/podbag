@@ -43,15 +43,18 @@ fn engine_picker(
     }
 }
 
-pub fn volume(ui: &mut Screen, client: &Client) -> Result<()> {
+/// Asks for a name and creates the volume; the created name.
+pub fn volume(ui: &mut Screen, client: &Client) -> Result<String> {
     let title = ui.t("volume.create");
     let name = ui.input(&title, "", false, false)?;
-    if name.trim().is_empty() {
+    let name = name.trim();
+    if name.is_empty() {
         return Err(Error::Failed("Enter a volume name".into()));
     }
     ui.work(&title, |_| {
-        client.create_volume(name.trim()).map_err(|e| e.message)
-    })
+        client.create_volume(name).map_err(|e| e.message)
+    })?;
+    Ok(name.to_owned())
 }
 
 pub(super) fn saved_registry_host(place: &Location) -> String {

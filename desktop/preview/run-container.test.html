@@ -24,7 +24,7 @@ function frame(query) {
   const el = document.getElementById("page");
   return new Promise((resolve) => {
     el.addEventListener("load", async () => {
-      await until(() => el.contentDocument?.documentElement.dataset.ready === "1", `${query} ready`);
+      await until(() => el.contentDocument?.documentElement?.dataset.ready === "1", `${query} ready`);
       resolve(el.contentWindow);
     }, { once: true });
     el.src = `preview.html?${query}&lang=en`;

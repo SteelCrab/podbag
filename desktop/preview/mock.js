@@ -37,6 +37,10 @@
     { Name: "host", Id: "6a3e2d0c4b8f1a9e", Driver: "host", Scope: "local", IPAM: { Config: [] } },
     { Name: "none", Id: "7b4f3e1d5c9a2b0f", Driver: "null", Scope: "local", IPAM: { Config: [] } },
   ];
+  if (view.startsWith("analysis")) {
+    images[0].Id = `sha256:${"1".repeat(64)}`;
+    images[1].Id = `sha256:${"2".repeat(64)}`;
+  }
   const lists = { containers, images, volumes, networks };
   if (view === "empty") { lists.containers = []; lists.volumes = []; }
 
@@ -67,14 +71,15 @@
     throw 'kubectl (exit status: 1): error: the server doesn\'t have a resource type "routes"';
   };
   const docker = view.startsWith("docker");
+  const platform = params.get("platform") || "macos";
   const engine = {
-    platform: "macos",
+    platform,
     engine: docker ? "docker" : "podbag",
     engineName: docker ? "Docker" : "podbag",
     shell: true,
     endpoint: "unix:///Users/me/.podbag/run/docker.sock",
     reachable: !["offline", "vm"].includes(view),
-    vm: view === "vm" ? "stopped" : "running",
+    vm: platform === "linux" ? null : view === "vm" ? "stopped" : "running",
     version: "podbag 0.1.0 (API 1.47)",
     error: view === "vm" ? "vm-stopped" : view === "offline" ? "cannot connect to unix:///Users/me/.podbag/run/docker.sock: No such file or directory" : null,
   };
@@ -103,6 +108,7 @@
     platform: "macos", state: "stopped", resourcesEditable: true, inUse: null,
     next: { cpus: 4, memoryMiB: 4096, idleSeconds: 300 }, saved: { cpus: 4, memoryMiB: 4096, idleSeconds: null },
     overriddenBy: [], pending: false,
+    sharedPaths: { inUse: null, next: ["/Users"] },
     limits: { cpusMin: 1, cpusMax: 10, memoryMinMiB: 1024, memoryMaxMiB: 20480, macMemoryMiB: 24576 },
     uptimeSeconds: null, containers: null, cpuPercent: null, memoryUsedMiB: null, memoryTotalMiB: null,
     disk: { path: "/Users/me/.podbag/vm/disk.img", allocatedBytes: 3_400_000_000, sizeBytes: 68_719_476_736 },
@@ -111,10 +117,26 @@
     inUse: { cpus: 4, memoryMiB: 4096, idleSeconds: 300 },
     next: { cpus: 4, memoryMiB: 6144, idleSeconds: 300 }, saved: { cpus: null, memoryMiB: 6144, idleSeconds: null },
     overriddenBy: view === "settings-vm" ? ["PODBAG_VM_CPUS"] : [], pending: true,
+    sharedPaths: { inUse: ["/Users"], next: ["/Users"] },
     limits: { cpusMin: 1, cpusMax: 10, memoryMinMiB: 1024, memoryMaxMiB: 20480, macMemoryMiB: 24576 },
     uptimeSeconds: 7560, containers: 3, cpuPercent: 12.5, memoryUsedMiB: 1350, memoryTotalMiB: 3900,
     disk: { path: "/Users/me/.podbag/vm/disk.img", allocatedBytes: 5_800_000_000, sizeBytes: 68_719_476_736 },
   };
+  const storageStopped = params.get("vmStorage") === "stopped";
+  if (storageStopped) {
+    engine.vm = "stopped";
+    Object.assign(vmStatus, {
+      state: "stopped", inUse: null, uptimeSeconds: null, containers: null,
+      cpuPercent: null, memoryUsedMiB: null, memoryTotalMiB: null,
+    });
+  }
+  const storageGib = 2 ** 30;
+  const vmStorage = {
+    path: "/Users/sam/.podbag/disk.img", exists: true, configured: false, editable: storageStopped,
+    sizeBytes: 64 * storageGib, filesystemBytes: 64 * storageGib, allocatedBytes: 4 * storageGib,
+    growthPending: false, maxSizeGib: 1024,
+  };
+  if (platform === "windows") Object.assign(vmStatus, { platform, resourcesEditable: false });
   // A packaged app with a separate podbag for the terminal; update-source: a build of its own.
   const packaged = { installer: "macos-app", terminal: "/usr/local/bin/podbag", terminalVersion: "0.1.0", appNewer: true, cliNewer: true };
   const source = { installer: null, terminal: null, terminalVersion: null, appNewer: false, cliNewer: true };
@@ -168,6 +190,19 @@
     { id: "gitlab-self", label: "GitLab Self-Managed", host: "", hostExample: "registry.example.com", needsHost: true },
     { id: "custom", label: "Other registry", host: "", needsHost: true, account: null, hint: null },
   ];
+  const migrationImages = [
+    { Id: "sha256:103afa055a409b34", RepoTags: ["example/api:1.5", "registry.gitlab.com/example/api:1.5"] },
+    { Id: "sha256:158bb8104d657e3f", RepoTags: ["ghcr.io/example/frontend:2.0"] },
+    { Id: "sha256:498bdb036ad35429", RepoTags: ["quay.io/example/proxy:0.8"] },
+    { Id: "sha256:8ab61e38dd2ac135", RepoTags: ["<none>:<none>"] },
+  ];
+  function migrationRegistry(reference, hosts) {
+    const host = reference.includes("/") ? reference.split("/")[0] : "";
+    const configured = hosts.find(([, address]) => address && address === host)?.[0];
+    const registry = registries.find(r => configured ? r.id === configured : r.host && r.host === host)
+      || registries.find(r => r.id === (host.includes(".") ? "custom" : "dockerhub"));
+    return { id: registry.id, label: registry.label };
+  }
   const elsewhere = ["banner", "settings-docker", "pull", "pull-locations"].includes(view);
   const desktopContext = { installed: true, name: "Docker Desktop", isPodbag: false, fromEnv: false, context: "desktop-linux", previous: null };
   const podbagContext = { installed: true, name: "podbag", isPodbag: true, fromEnv: false, context: "podbag", previous: "desktop-linux" };
@@ -180,17 +215,90 @@
       endpoint: selected === "kiri" ? "unix:///Users/me/.kiri/run/docker.sock" : selected, vm: null, version: selected });
   }
   let launchAtLogin = false;
+  const networkSettings = {
+    revision: "0",
+    preferences: {
+      defaultSubnet: "10.77.0.0/16",
+      defaultIpv6Subnet: "fd77:706f:6462::/64",
+      embeddedDns: true,
+      dnsFilter: "none",
+    },
+    activeSubnet: "10.77.0.0/16",
+    activeIpv6Subnet: null,
+    overrides: [],
+  };
   // podbag system compression --json. URL: compression=idle (already on), compression=broken
   // (a reply without a mode), override (an environment setting keeps the mode as it is),
   // after (seconds an image stays unused; 0: at once), vm-error (vm status fails), busy
   // (another dialog is open when the window first asks for the VM's state).
   const compression = { mode: params.get("compression") === "idle" ? "idle" : "off", after: Number(params.get("after") ?? 604800) };
+  let registryProxy = params.get("registryProxy") === "manual"
+    ? { mode: "manual", url: "http://proxy.example.com:3128", bypass: "localhost, .example.com" }
+    : { mode: "inherited", url: "", bypass: "" };
   const practiceModules = new Map();
   let localCluster = null;
+  window.practiceUi = { action: "remove-image", name: "my-busybox:1" };
+  window.practiceCalls = [];
+  const checklist = {
+    apiVersion: 1, id: "example.workspace-checklist", name: "Workspace checklist", version: "1.0.0",
+    description: "Review local resources before changing the workspace.", permissions: ["engineSummary"],
+    content: [
+      { type: "heading", text: "Before you replace a container" },
+      { type: "list", items: ["Check which containers use the image.", "Keep the volumes that contain application data."] },
+      { type: "code", text: "podbag ps" },
+      { type: "engineSummary" },
+    ],
+  };
+  let extensions = view === "extension-view" ? [{ manifest: checklist, enabled: true, engineSummary: true }] : [];
+  const synchronized = view === "settings-sync" ? [{ name: "project", source: "/Users/me/projects/app", volume: "podbag-sync-project", conflicts: [], lastError: null }] : [];
+  const demoModel = { name: "smollm2:135m", size: 92_078_644, loaded: true };
+  const models = view === "models-report" ? [{ ...demoModel }] : [];
+  let modelRunner = view === "models-report";
+  const builderAvailability = params.get("builders") || "ready";
+  const demoBuilders = new Map([
+    ["podbag", { driver: "docker", managed: false, status: "running" }],
+    ["ci-builder", { driver: "docker-container", managed: true, status: "running" }],
+  ]);
+  let currentBuilder = "podbag";
+  const builderScope = `preview-buildx-${selected}`;
+  const getBuilder = (scope, name) => {
+    if (scope !== builderScope || !demoBuilders.has(name)) throw Error("Builder is outside this context");
+    return demoBuilders.get(name);
+  };
+  let engineConfigText = "# Local engine settings\nstore_limit = \"10GiB\"\nembedded_dns = true\n";
   const commands = {
+    builder_list: () => ({
+      availability: builderAvailability, context: selected, scope: builderScope, outsideScope: false,
+      builders: builderAvailability === "ready" ? [...demoBuilders].map(([name, builder]) => ({
+        name, driver: builder.driver, managed: builder.managed, current: name === currentBuilder,
+      })) : [],
+    }),
+    builder_inspect: ({ scope, name }) => {
+      const builder = getBuilder(scope, name);
+      return { error: "", nodes: [{ name: builder.managed ? name + "0" : name, endpoint: selected, status: builder.status,
+        buildkit: builder.status === "running" ? "v0.33.1" : "", platforms: "linux/arm64, linux/amd64", error: "" }] };
+    },
+    builder_action: ({ scope, name, action }) => {
+      const builder = getBuilder(scope, name);
+      if (action !== "select" && !builder.managed) throw Error("Only docker-container builders can be controlled");
+      if (action === "select") currentBuilder = name;
+      if (action === "start") builder.status = "running";
+      if (action === "stop") builder.status = "stopped";
+      if (action === "remove") {
+        demoBuilders.delete(name);
+        if (currentBuilder === name) currentBuilder = "podbag";
+      }
+    },
     "plugin:autostart|is_enabled": () => launchAtLogin,
     "plugin:autostart|enable": () => { launchAtLogin = true; },
     "plugin:autostart|disable": () => { launchAtLogin = false; },
+    registry_proxy: ({ values }) => {
+      if (values) {
+        (window.previewRegistryProxyWrites ||= []).push(values);
+        registryProxy = values.mode === "manual" ? values : { mode: values.mode, url: "", bypass: "" };
+      }
+      return { ...registryProxy };
+    },
     connection: () => [token, selected, selected === "podbag"],
     contexts: () => ["desktop-linux", "orbstack"],
     kube_contexts: () => ["dev", "staging", "ocp", ...(localCluster ? [localCluster.context] : [])],
@@ -206,7 +314,16 @@
     migration_sources: () => ["docker", "podman", "kiri", "podbag"],
     kube_counts: ({ allNamespaces, context }) => Object.fromEntries(Object.keys(context === "ocp" ? { ...kube, routes } : kube).map((kind) =>
       [kind, kubeItems(kind, context).filter(i=>allNamespaces||i.metadata.namespace==="default").length])),
-    migration_list: ({ kind }) => lists[kind],
+    migration_list: ({ kind, hosts = [] }) => {
+      if (kind === "images") return [...lists.images, ...migrationImages].map(image => ({
+        ...image, MigrationRegistries: Object.fromEntries(image.RepoTags.filter(tag => tag !== "<none>:<none>")
+          .map(tag => [tag, migrationRegistry(tag, hosts)])),
+      }));
+      if (kind === "containers") return lists.containers.map(container => ({
+        ...container, MigrationRegistry: migrationRegistry(container.Image, hosts),
+      }));
+      return lists[kind];
+    },
     migrate: async ({ request, updates }) => {
       for (const phase of ["prepare", request.kind === "images" ? "image" : "files", "verify"]) {
         updates.onmessage(phase);
@@ -214,7 +331,58 @@
       }
     },
     create_volume: ({ name }) => { volumes.push({ Name: name, Driver: "local" }); },
+    desktop_extensions: ({ request }) => {
+      (window.previewExtensionActions ||= []).push(request);
+      const { action, id } = request;
+      if (action === "install") {
+        let manifest;
+        try { manifest = JSON.parse(request.source); } catch { throw { kind: "manifest" }; }
+        if (extensions.some((item) => item.manifest.id === manifest.id)) throw { kind: "duplicate" };
+        extensions.push({ manifest, enabled: false, engineSummary: false });
+      } else if (action !== "list") {
+        const item = extensions.find((ext) => ext.manifest.id === id);
+        if (!item) throw { kind: "notFound" };
+        if (action === "setEnabled") {
+          item.enabled = request.enabled;
+          if (!item.enabled) item.engineSummary = false;
+        } else if (action === "setEngineSummary") {
+          if (!item.enabled || !item.manifest.permissions.includes("engineSummary")) throw { kind: "permission" };
+          item.engineSummary = request.allow;
+        } else if (action === "remove") {
+          extensions = extensions.filter((ext) => ext.manifest.id !== id);
+        }
+      }
+      return structuredClone(extensions);
+    },
+    models: ({ request }) => {
+      (window.previewModelActions ||= []).push(request);
+      const { action, model } = request;
+      if (action === "start") {
+        if (params.get("ollama") === "missing") throw { kind: "missing" };
+        modelRunner = true;
+      } else if (action === "stop") {
+        modelRunner = false;
+        models.forEach((item) => { item.loaded = false; });
+      } else if (action === "pull") {
+        if (!models.some((item) => item.name === model)) models.push({ ...demoModel, name: model, loaded: false });
+      } else if (action === "run" || action === "unload") {
+        const selected = models.find((item) => item.name === model);
+        if (!selected) throw { kind: "notInstalled" };
+        selected.loaded = action === "run";
+        if (selected.loaded) return { response: "Blue." };
+      }
+      return { running: modelRunner, version: modelRunner ? "0.40.17" : "", models: modelRunner ? models.map((item) => ({ ...item })) : [] };
+    },
     engine: () => engine,
+    engine_config: ({ request }) => {
+      if ((request.edit?.text ?? request.text)?.includes("invalid_setting")) throw "line 2: unknown setting invalid_setting";
+      if (request.action === "check") return null;
+      if (request.action === "save") {
+        if (request.edit.original !== engineConfigText) throw "config.toml changed after it was opened";
+        engineConfigText = request.edit.text;
+      }
+      return { path: "/home/podbag/.config/podbag/config.toml", text: engineConfigText };
+    },
     list: ({ kind }) => lists[kind],
     kube_list: ({ kind, allNamespaces, context }) => ({
       context: context || "dev", namespace: "default",
@@ -225,6 +393,28 @@
     remove: () => null,
     prune: () => ({ count: 2, bytes: 61_000_000 }),
     rename: () => null,
+    analyze_image: ({ id, token: requestToken }) => {
+      (window.previewScans ||= []).push({ id, token: requestToken });
+      if (requestToken !== token) throw "engineChanged";
+      if (!images.some((image) => image.Id === id)) throw "imageUnavailable";
+      const mode = params.get("scan");
+      if (mode === "missing") throw "scannerMissing";
+      const target = "Alpine Linux 3.22";
+      return {
+        imageId: id,
+        packages: mode === "empty" ? [] : [
+          { target, name: "busybox", version: "1.37.0-r18" },
+          { target, name: "libssl3", version: "3.5.1-r0" },
+          { target, name: "musl", version: "1.2.5-r10" },
+          { target, name: "zlib", version: "1.3.1-r2" },
+        ],
+        findings: mode === "empty" ? [] : [
+          { target, severity: "high", advisory: "DEMO-2026-0001", package: "libssl3", installed: "3.5.1-r0", fixed: "3.5.2-r0" },
+          { target, severity: "medium", advisory: "DEMO-2026-0002", package: "zlib", installed: "1.3.1-r2", fixed: "" },
+          { target, severity: "low", advisory: "DEMO-2026-0003", package: "busybox", installed: "1.37.0-r18", fixed: "1.37.0-r19" },
+        ],
+      };
+    },
     container_json: () => { throw "not supported"; },
     features: () => ({ stats: false, top: false, pause: false, rename: false }),
     pull: () => new Promise(() => {}),
@@ -253,6 +443,23 @@
       vmStatus.state = engine.vm;
       emit("engine-changed", action);
     },
+    vm_storage: ({ edit }) => {
+      if (!edit) return { ...vmStorage };
+      if (!vmStorage.editable) throw "Stop the VM before changing its storage.";
+      (window.previewVmStorageWrites ||= []).push(edit);
+      const previous = vmStorage.path;
+      if (edit.action === "grow") {
+        vmStorage.sizeBytes = edit.gib * storageGib;
+        vmStorage.growthPending = true;
+        return { ...vmStorage, backupPath: "/Users/sam/.podbag/podbag-disk-backup-preview/disk.img" };
+      }
+      if (edit.action === "move") {
+        vmStorage.path = edit.path;
+        vmStorage.configured = true;
+        return { ...vmStorage, backupPath: previous };
+      }
+      throw "Unknown storage change";
+    },
     vm_status: () => {
       if (params.has("busy") && !document.getElementById("busy-dialog")) {
         const busy = document.createElement("dialog");
@@ -270,7 +477,40 @@
       if (!mode) window.previewCompressionReads = (window.previewCompressionReads || 0) + 1;
       return params.get("compression") === "broken" ? null : { ...compression };
     },
-    vm_set: () => "Saved.",
+    network_settings: ({ values, expectedRevision }) => {
+      if (selected !== "podbag") throw "Network settings require the local podbag engine";
+      if (!values && params.has("network-settings-error")) {
+        params.delete("network-settings-error");
+        throw "Cannot read the network configuration.";
+      }
+      if (values?.defaultSubnet === "10.79.4.1/24") throw "The IPv4 subnet has host bits set.";
+      if (values) {
+        if (expectedRevision !== networkSettings.revision) {
+          throw "Network settings changed after they were opened.";
+        }
+        networkSettings.preferences = values;
+        networkSettings.revision = String(Number(networkSettings.revision) + 1);
+      }
+      return structuredClone(networkSettings);
+    },
+    vm_set: ({ settings }) => {
+      if (settings.sharedPaths) vmStatus.sharedPaths.next = settings.sharedPaths;
+      if (settings.restart) vmStatus.sharedPaths.inUse = vmStatus.sharedPaths.next;
+      return "Saved.";
+    },
+    vm_sync: ({ action, name, path }) => {
+      if (action === "list") return synchronized.map(share => ({ ...share }));
+      const existing = synchronized.find(share => share.name === name);
+      if (action === "add") {
+        if (existing) throw "Share already exists";
+        const share = { name, source: path, volume: `podbag-sync-${name}`, conflicts: [], lastError: null };
+        synchronized.push(share);
+        return share;
+      }
+      if (!existing) throw "Share not found";
+      if (action === "remove") synchronized.splice(synchronized.indexOf(existing), 1);
+      return existing;
+    },
     set_engine: ({ engine }) => {
       sessionStorage.setItem("preview-engine", engine);
       sessionStorage.setItem("preview-token", String(token + 1));
@@ -320,7 +560,26 @@
     },
     open_repository: () => null,
     open_training_guide: () => null,
-    practice_volumes: () => null,
+    // practice-tracks: a course session at a module `ui` step. A test sets window.practiceUi to
+    // switch the step (window.practiceStage, window.practiceContainers and window.practiceSession
+    // change the stage, the containers and the session), and reads window.practiceCalls:
+    // [action, session, name] of each request. An inspect of a name other than the volume's
+    // shows a network. window.practiceAfterCall runs after a request is recorded (the reply
+    // keeps the state from before it).
+    practice_volumes: ({ action, session, name, course }) => {
+      if (view !== "practice-tracks" || !course) return null;
+      const volume = { Name: "data", Driver: "local", Mountpoint: "/var/lib/podbag/volumes/data/_data", CreatedAt: new Date(now * 1000).toISOString() };
+      const state = {
+        module: "image-basics", session: window.practiceSession ?? "podbag-container-abc", stage: window.practiceStage ?? "removeTag", command: "podbag rmi my-busybox:1",
+        containers: window.practiceContainers ?? [{ Id: "c1", Names: ["/web"], Image: "busybox:1.37.0", Command: "httpd -f", Created: now, State: "running", Status: "Up 1 minute", Ports: [] }],
+        volumes: [volume], ui: window.practiceUi, text: null, detail: null,
+      };
+      if (action === "status") return state;
+      window.practiceCalls.push([action, session, name]);
+      window.practiceAfterCall?.();
+      const network = { Name: name, Id: "n1", Driver: "bridge", Scope: "local", IPAM: { Config: [{ Subnet: "10.89.0.0/24", Gateway: "10.89.0.1" }] } };
+      return { ...state, text: action === "logs" ? "hello from web\n" : null, detail: action === "inspect" ? (name === volume.Name ? volume : network) : null };
+    },
     volume_tools_lab: ({ action, package: file, id }) => {
       if (action === "install") {
         const pack = JSON.parse(file);
@@ -333,6 +592,22 @@
         practiceModules.set(key, { id: key, package: pack, completed: false });
       }
       if (action === "remove") practiceModules.delete(id);
+      // practice-tracks: a course whose steps carry the module default `ui` (the course's port).
+      if (view === "practice-tracks" && !practiceModules.size) {
+        const words = { title: "Podbag Training · Image basics", goal: "", guide: "" };
+        const names = (en) => ({ en });
+        practiceModules.set("image-basics", { id: "image-basics", completed: false,
+          package: { format: "podbag-image-basics-v1", translations: { en: words } },
+          steps: [
+            { key: "pullImage", command: "podbag pull busybox:1.37.0", names: names("Pull the image"),
+              ui: { action: "pull", name: "busybox:1.37.0" } },
+            { key: "removeTag", command: "podbag rmi my-busybox:1", names: names("Remove the tag"),
+              ui: { action: "remove-image", name: "my-busybox:old" } },
+            { key: "stopWeb", command: "podbag stop web", names: names("Stop the server"),
+              ui: { action: "stop", name: "web" } },
+            { key: "checkList", command: "podbag ps -a", names: names("Check the list") },
+          ] });
+      }
       return [...practiceModules.values()].filter(record => action !== "summary" || !id || record.id === id);
     },
     tutorial_lab: ({ action }) => {
@@ -369,14 +644,61 @@
       images: () => app.go("images"),
       volumes: () => app.go("volumes"),
       networks: () => app.go("networks"),
+      models: () => app.go("models"),
+      "models-report": async () => {
+        await app.go("models");
+        const until = performance.now() + 1500;
+        let prompt;
+        while (!(prompt = document.getElementById("model-prompt")) && performance.now() < until) {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        if (!prompt) return;
+        prompt.value = "Name the color of a clear daytime sky.";
+        prompt.dispatchEvent(new Event("input"));
+        prompt.form.requestSubmit();
+      },
       settings: () => app.go("settings"),
+      "settings-engine-config": async () => {
+        await app.openSettingsSection("engine-settings");
+        document.getElementById("edit-engine-configuration")?.click();
+      },
+      "settings-search": async () => {
+        await app.go("settings");
+        const input = document.getElementById("settings-search");
+        input.value = "Virtual machine";
+        input.dispatchEvent(new Event("input"));
+        input.focus();
+      },
       tutorials: () => app.go("tutorials"),
+      "settings-builders": async () => {
+        await app.openSettingsSection("builder-settings");
+        const until = performance.now() + 1500;
+        let row;
+        while (!(row = document.querySelector('[data-builder="ci-builder"]')) && performance.now() < until) {
+          await new Promise(resolve => setTimeout(resolve, 20));
+        }
+        row?.click();
+      },
+      extensions: () => app.go("extensions"),
+      "extension-view": () => app.go("extensions"),
       "settings-vm": () => app.openSettingsSection("vm-settings"),
+      "settings-notifications": () => app.openSettingsSection("notification-settings"),
+      "settings-sync": () => app.openSettingsSection("sync-settings"),
+      "settings-network": () => app.openSettingsSection("network-settings"),
       "settings-cli": () => app.openSettingsSection("terminal-command"),
       "settings-updates": app.openUpdates,
       "update-source": app.openUpdates,
       "update-admin": async () => { await app.openUpdates(); await app.runUpgrade(); },
       "docker-settings": () => app.openSettingsSection("engine-settings"),
+      analysis: async () => {
+        await app.go("images");
+        app.openDetail("images", images[0].Id, "analysis");
+      },
+      "analysis-report": async () => {
+        await app.go("images");
+        app.openDetail("images", images[0].Id, "analysis");
+        document.querySelector(".image-analysis .primary").click();
+      },
       detail: () => app.openDetail("containers", containers[0].Id, "info"),
       logs: () => app.openDetail("containers", containers[0].Id, "logs"),
       inspect: () => app.openDetail("containers", containers[0].Id, "inspect"),
@@ -394,6 +716,7 @@
       banner: () => {},
       "settings-docker": () => app.openSettingsSection("engine-settings"),
       import: async () => { app.go("images"); await app.importFromDocker(); },
+      "practice-tracks": () => app.go("lab-containers"),
       "empty-volumes": () => app.go("volumes"),
       // The run form, filled in, with the options open.
       "run-container": () => {

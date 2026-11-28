@@ -10,9 +10,11 @@
 //! connection starts a VM again. When asked (`podbag vm stop`: SIGTERM, or `STOP`), and
 //! on SIGTERM, SIGINT or SIGHUP (a logout), it powers the VM off and ends.
 
-use super::settings;
 use super::vm::{Vm, VmSpec};
+use super::{disk, settings};
+use crate::network::Proto;
 use crate::vm::proto::{API_PORT, CLI_PORT, CliRequest, FORWARD_PORT, Frame};
+use crate::vm::{shares, udp};
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -29,6 +31,7 @@ pub struct Paths {
     pub run: PathBuf,
     /// The guest: `Image`, `initramfs.gz`, `disk.zst`.
     pub guest: PathBuf,
+    /// The default data image when no other location is configured.
     pub disk: PathBuf,
     pub console: PathBuf,
     pub vm_sock: PathBuf,
@@ -56,9 +59,12 @@ pub(super) fn home() -> Result<PathBuf, String> {
 }
 
 pub fn paths() -> Result<Paths, String> {
-    let home = home()?;
+    home().map(paths_in)
+}
+
+pub(super) fn paths_in(home: PathBuf) -> Paths {
     let run = home.join("run");
-    Ok(Paths {
+    Paths {
         guest: guest_dir(&home),
         disk: home.join("disk.img"),
         console: home.join("console.log"),
@@ -71,7 +77,7 @@ pub fn paths() -> Result<Paths, String> {
         running: run.join("vm.json"),
         run,
         home,
-    })
+    }
 }
 
 /// Where the guest files are: `PODBAG_VM_GUEST`, then the guest this binary carries
@@ -298,8 +304,7 @@ fn run() -> Result<(), String> {
         // SAFETY: the standby handed over these descriptors, which nothing else owns.
         Some(fds) => unsafe { std::fs::File::from_raw_fd(fds.lock) },
         None => {
-            let lock =
-                std::fs::File::create(&p.lock).map_err(|e| format!("{}: {e}", p.lock.display()))?;
+            let lock = disk::open_host_lock(&p)?;
             if !take_lock(&lock) {
                 // Another host runs (or starts, or stops): the CLI waits for it.
                 return Ok(());
@@ -389,10 +394,30 @@ fn serve_vm(p: &Paths, lock: &std::fs::File, inherited: Option<&Inherited>) -> R
         }
     }
     super::cpu::check_guest(&p.guest.join("Image"))?;
-    make_disk(p)?;
+    let disk = disk::for_boot(p)?;
     let env = |k: &str| std::env::var(k).ok();
-    let (resources, _) =
-        settings::effective(&settings::read(&p.home)?, &env, &settings::Mac::this());
+    let saved = settings::read(&p.home)?;
+    let (resources, _) = settings::effective(&saved, &env, &settings::Mac::this());
+    let shared_paths = saved.shared_paths();
+    let config = if shared_paths == shares::defaults() {
+        None
+    } else {
+        // A replaced directory must not redirect a previously approved share.
+        if settings::normalize_shares(&shared_paths)? != shared_paths {
+            return Err("a shared folder moved; review the file sharing settings".into());
+        }
+        let config =
+            tempfile::tempdir_in(&p.run).map_err(|e| format!("share configuration: {e}"))?;
+        let paths = serde_json::to_vec(&shared_paths).map_err(|e| e.to_string())?;
+        std::fs::write(config.path().join(shares::MANIFEST), paths)
+            .map_err(|e| format!("share configuration: {e}"))?;
+        Some(config)
+    };
+    let share_boot = if config.is_some() {
+        " podbag.shares=1"
+    } else {
+        ""
+    };
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
@@ -403,7 +428,7 @@ fn serve_vm(p: &Paths, lock: &std::fs::File, inherited: Option<&Inherited>) -> R
     let spec = VmSpec {
         kernel: p.guest.join("Image"),
         initrd: p.guest.join("initramfs.gz"),
-        disk: p.disk.clone(),
+        disk,
         console: p.console.clone(),
         cpus: resources.cpus as usize,
         memory,
@@ -412,12 +437,13 @@ fn serve_vm(p: &Paths, lock: &std::fs::File, inherited: Option<&Inherited>) -> R
         // boot, so the Mac holds them), and nothing uses them: virtio here does not go
         // through the DMA API.
         cmdline: format!(
-            "console=hvc0 ip=dhcp loglevel=4 panic=-1 swiotlb=2048 podbag.time={}.{:09} -- {}",
+            "console=hvc0 ip=dhcp loglevel=4 panic=-1 swiotlb=2048 podbag.time={}.{:09}{share_boot} -- {}",
             now.as_secs(),
             now.subsec_nanos(),
             crate::vm::proto::INIT_ARG
         ),
-        share: PathBuf::from("/Users"),
+        share_config: config.as_ref().map(|dir| dir.path().to_owned()),
+        shared_paths: shared_paths.clone(),
         mac: mac_address(&p.home),
     };
     let vm = Arc::new(Vm::start(&spec).map_err(start_error)?);
@@ -436,6 +462,7 @@ fn serve_vm(p: &Paths, lock: &std::fs::File, inherited: Option<&Inherited>) -> R
         seen: Mutex::new(settings::Running {
             started: now.as_secs(),
             resources: Some(resources),
+            shared_paths: Some(shared_paths),
             ..Default::default()
         }),
     });
@@ -599,24 +626,6 @@ fn wait_for(signals: &[i32]) -> i32 {
     }
 }
 
-/// The data disk, from the template when there is none: written beside it, flushed,
-/// then renamed, so a host that dies meanwhile leaves no half disk behind.
-fn make_disk(p: &Paths) -> Result<(), String> {
-    if p.disk.exists() {
-        return Ok(());
-    }
-    let template = p.guest.join("disk.zst");
-    let part = p.disk.with_extension("img.part");
-    let _ = std::fs::remove_file(&part);
-    let err = |path: &Path, e: std::io::Error| format!("{}: {e}", path.display());
-    let mut t = std::fs::File::open(&template).map_err(|e| err(&template, e))?;
-    crate::vm::template::expand(&mut t, &part).map_err(|e| e.to_string())?;
-    std::fs::File::open(&part)
-        .and_then(|f| f.sync_all())
-        .map_err(|e| err(&part, e))?;
-    std::fs::rename(&part, &p.disk).map_err(|e| err(&p.disk, e))
-}
-
 /// What the running VM started with and what it does, in `run/vm.json` for
 /// `podbag vm status` (which must not connect: a connection keeps the VM up).
 struct Monitor {
@@ -732,6 +741,7 @@ fn guest_command(vm: &Vm, what: &str) -> std::io::Result<(i32, String)> {
         argv: vec![what.into()],
         env: Vec::new(),
         cwd: "/".into(),
+        paths: Vec::new(),
         tty: false,
         rows: 0,
         cols: 0,
@@ -862,14 +872,13 @@ fn serve(
 }
 
 /// The Mac's side of published ports: every second, and right after a client connection
-/// closes (a `run -p` that just ended), the published TCP ports of the running
-/// containers, and a listener on the Mac's 127.0.0.1 for each (not on its
-/// network). A port the Mac does not give is reported once and tried again.
+/// closes (a `run -p` that just ended), the published TCP and UDP ports of the running
+/// containers, and a socket on the Mac's 127.0.0.1 for each (not on its network). A port
+/// the Mac does not give is reported once and tried again.
 fn watch_ports(vm: &Arc<Vm>, refresh: &mpsc::Receiver<()>, monitor: &Monitor) {
     use std::sync::atomic::{AtomicBool, Ordering};
-    let mut open: std::collections::HashMap<u16, Arc<AtomicBool>> = Default::default();
+    let mut open: std::collections::HashMap<(u16, Proto), Arc<AtomicBool>> = Default::default();
     let mut reported = std::collections::HashSet::new();
-    let mut udp_reported = std::collections::HashSet::new();
     loop {
         if let Err(mpsc::RecvTimeoutError::Disconnected) =
             refresh.recv_timeout(Duration::from_secs(1))
@@ -877,17 +886,15 @@ fn watch_ports(vm: &Arc<Vm>, refresh: &mpsc::Receiver<()>, monitor: &Monitor) {
             std::thread::sleep(Duration::from_secs(1));
         }
         while refresh.try_recv().is_ok() {}
-        let Some((wanted, udp, running)) = published_ports(vm) else {
+        let Some((tcp, udp, running)) = published_ports(vm) else {
             continue;
         };
         monitor.update(|r| r.containers = Some(running));
-        for port in udp {
-            if udp_reported.insert(port) {
-                note(&format!(
-                    "port {port}/udp is not forwarded to this Mac: TCP only"
-                ));
-            }
-        }
+        let wanted: std::collections::HashSet<(u16, Proto)> = tcp
+            .into_iter()
+            .map(|p| (p, Proto::Tcp))
+            .chain(udp.into_iter().map(|p| (p, Proto::Udp)))
+            .collect();
         open.retain(|port, stop| {
             let keep = wanted.contains(port);
             if !keep {
@@ -895,30 +902,73 @@ fn watch_ports(vm: &Arc<Vm>, refresh: &mpsc::Receiver<()>, monitor: &Monitor) {
             }
             keep
         });
-        for port in wanted {
-            if open.contains_key(&port) {
+        for (port, proto) in wanted {
+            if open.contains_key(&(port, proto)) {
                 continue;
             }
-            match mac_listeners(port) {
-                Ok(listeners) => {
-                    reported.remove(&port);
-                    let stop = Arc::new(AtomicBool::new(false));
-                    open.insert(port, stop.clone());
-                    for (listener, loopback_only) in listeners {
-                        let (vm, stop) = (vm.clone(), stop.clone());
-                        std::thread::spawn(move || {
-                            serve_port(port, &listener, loopback_only, &vm, &stop);
-                        });
-                    }
+            match open_port(port, proto, vm) {
+                Ok(stop) => {
+                    reported.remove(&(port, proto));
+                    open.insert((port, proto), stop);
                 }
                 Err(e) => {
-                    if reported.insert(port) {
-                        note(&format!("cannot forward port {port} on this Mac: {e}"));
+                    if reported.insert((port, proto)) {
+                        note(&format!(
+                            "cannot forward port {} on this Mac: {}",
+                            port_name(port, proto),
+                            port_error(&e)
+                        ));
                     }
                 }
             }
         }
     }
+}
+
+/// `8080` for TCP, `5353/udp` for UDP.
+fn port_name(port: u16, proto: Proto) -> String {
+    match proto {
+        Proto::Tcp => port.to_string(),
+        Proto::Udp => format!("{port}/udp"),
+    }
+}
+
+/// Why a Mac port cannot be had, with what to do when another program holds it.
+fn port_error(e: &std::io::Error) -> String {
+    if e.kind() == std::io::ErrorKind::AddrInUse {
+        format!("{e}: another program on this Mac uses it (stop it, or publish another port)")
+    } else {
+        e.to_string()
+    }
+}
+
+/// Bind the Mac's sockets for a published port and serve each, until the returned flag
+/// is set.
+fn open_port(
+    port: u16,
+    proto: Proto,
+    vm: &Arc<Vm>,
+) -> std::io::Result<Arc<std::sync::atomic::AtomicBool>> {
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    match proto {
+        Proto::Tcp => {
+            for (listener, loopback_only) in mac_sockets(port, std::net::TcpListener::bind)? {
+                let (vm, stop) = (vm.clone(), stop.clone());
+                std::thread::spawn(move || {
+                    serve_port(port, &listener, loopback_only, &vm, &stop);
+                });
+            }
+        }
+        Proto::Udp => {
+            for (socket, loopback_only) in mac_sockets(port, std::net::UdpSocket::bind)? {
+                let (vm, stop) = (vm.clone(), stop.clone());
+                std::thread::spawn(move || {
+                    serve_udp(port, socket, loopback_only, &vm, &stop);
+                });
+            }
+        }
+    }
+    Ok(stop)
 }
 
 /// The published TCP and UDP ports of the running containers, from the VM's Docker API;
@@ -957,27 +1007,35 @@ fn published_ports(vm: &Vm) -> Option<Published> {
     Some((of("tcp"), of("udp"), running))
 }
 
-/// One Mac port: each connection goes to the VM's forwarder, until `stop`.
-/// The Mac's listeners for `port`, each with whether it must turn away callers that are
-/// not on this Mac: 127.0.0.1 (macOS gives a port below 1024 there only to root: then
-/// every address, with that filter), and ::1 when the Mac gives it (`localhost` is ::1
-/// first on macOS, and some clients do not fall back).
-fn mac_listeners(port: u16) -> std::io::Result<Vec<(std::net::TcpListener, bool)>> {
-    use std::net::{Ipv4Addr, Ipv6Addr, TcpListener};
-    let v4 = match TcpListener::bind((Ipv4Addr::LOCALHOST, port)) {
-        Ok(l) => (l, false),
+/// The Mac's sockets for `port` (TCP listeners or UDP sockets, made by `bind`), each with
+/// whether it must turn away callers that are not on this Mac: 127.0.0.1 (macOS gives a
+/// port below 1024 there only to root: then every address, with that filter), and ::1
+/// when the Mac gives it (`localhost` is ::1 first on macOS, and some clients do not fall
+/// back).
+fn mac_sockets<S>(
+    port: u16,
+    bind: impl Fn(std::net::SocketAddr) -> std::io::Result<S>,
+) -> std::io::Result<Vec<(S, bool)>> {
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+    let v4 = match bind(SocketAddr::from((Ipv4Addr::LOCALHOST, port))) {
+        Ok(s) => (s, false),
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            (TcpListener::bind((Ipv4Addr::UNSPECIFIED, port))?, true)
+            (bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)))?, true)
         }
         Err(e) => return Err(e),
     };
     let mut all = vec![v4];
-    if let Ok(v6) = TcpListener::bind((Ipv6Addr::LOCALHOST, port)) {
-        all.push((v6, false));
+    match bind(SocketAddr::from((Ipv6Addr::LOCALHOST, port))) {
+        Ok(v6) => all.push((v6, false)),
+        // Another program holds ::1: report it and try again later, as for IPv4.
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => return Err(e),
+        // A Mac without IPv6 on loopback serves IPv4 only.
+        Err(_) => {}
     }
     Ok(all)
 }
 
+/// One Mac port: each connection goes to the VM's forwarder, until `stop`.
 fn serve_port(
     port: u16,
     listener: &std::net::TcpListener,
@@ -1007,27 +1065,32 @@ fn serve_port(
     }
 }
 
-/// A Mac connection to the VM's forwarder for `port`.
-fn forward_to_vm(client: std::net::TcpStream, port: u16, vm: &Vm) {
-    let Ok(fd) = vm.connect(FORWARD_PORT) else {
-        return;
-    };
-    let mut guest = UnixStream::from(fd);
-    if guest.write_all(format!("TCP {port}\n").as_bytes()).is_err() {
-        return;
-    }
+/// A connection to the VM's forwarder, which answered `OK` to `request` (`TCP <port>`
+/// or `UDP <port>`).
+fn open_forward(vm: &Vm, request: &str) -> Option<UnixStream> {
+    let mut guest = UnixStream::from(vm.connect(FORWARD_PORT).ok()?);
+    // The forwarder answers at once. One that does not must not hold up the caller: for
+    // UDP, that is the loop that serves every client of the port.
+    guest.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
+    guest.write_all(format!("{request}\n").as_bytes()).ok()?;
     let mut answer = Vec::new();
     let mut byte = [0u8; 1];
     while answer.len() < 256 {
         match guest.read(&mut byte) {
             Ok(1) if byte[0] == b'\n' => break,
             Ok(1) => answer.push(byte[0]),
-            _ => return,
+            _ => return None,
         }
     }
-    if answer != b"OK" {
+    guest.set_read_timeout(None).ok()?;
+    (answer == b"OK").then_some(guest)
+}
+
+/// A Mac connection to the VM's forwarder for `port`.
+fn forward_to_vm(client: std::net::TcpStream, port: u16, vm: &Vm) {
+    let Some(guest) = open_forward(vm, &format!("TCP {port}")) else {
         return;
-    }
+    };
     let (Ok(mut client_r), Ok(mut guest_w)) = (client.try_clone(), guest.try_clone()) else {
         return;
     };
@@ -1039,6 +1102,93 @@ fn forward_to_vm(client: std::net::TcpStream, port: u16, vm: &Vm) {
     let _ = std::io::copy(&mut guest_r, &mut client_w);
     let _ = client_w.shutdown(std::net::Shutdown::Write);
     let _ = up.join();
+}
+
+/// One Mac UDP socket for `port`, until `stop`: the datagrams of each client go to the VM
+/// in a flow of their own, and the replies come back to that client (see
+/// [`crate::vm::udp`]).
+fn serve_udp(
+    port: u16,
+    socket: std::net::UdpSocket,
+    loopback_only: bool,
+    vm: &Arc<Vm>,
+    stop: &std::sync::atomic::AtomicBool,
+) {
+    let socket = Arc::new(socket);
+    // A timeout lets the loop see a stop, and end quiet flows.
+    let _ = socket.set_read_timeout(Some(Duration::from_millis(250)));
+    let mut flows: udp::Flows<Arc<UnixStream>> = udp::Flows::new(udp::MAX_FLOWS);
+    let mut swept = Instant::now();
+    let mut buf = vec![0u8; udp::MAX_DATAGRAM];
+    while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+        if swept.elapsed() >= Duration::from_secs(1) {
+            swept = Instant::now();
+            flows.expire(swept).iter().for_each(|f| end_flow(f));
+        }
+        let (n, client) = match socket.recv_from(&mut buf) {
+            Ok(got) => got,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                continue;
+            }
+            Err(_) => {
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+        };
+        // A low port listens on every address: only this Mac's callers are served.
+        if loopback_only && !client.ip().is_loopback() {
+            continue;
+        }
+        let now = Instant::now();
+        if flows.get(&client, now).is_none() {
+            let last = udp::LastUse::new(now);
+            let Some(flow) = open_flow(port, client, &socket, vm, &last) else {
+                continue;
+            };
+            if let Some(old) = flows.add(client, flow, last) {
+                end_flow(&old);
+            }
+        }
+        let sent = flows
+            .get(&client, now)
+            .is_some_and(|flow| udp::write_datagram(&mut &**flow, &buf[..n]).is_ok());
+        if !sent && let Some(flow) = flows.remove(&client) {
+            end_flow(&flow);
+        }
+    }
+    flows.drain().iter().for_each(|f| end_flow(f));
+}
+
+/// A new flow to the VM for `client`, whose replies a thread of its own sends back.
+fn open_flow(
+    port: u16,
+    client: std::net::SocketAddr,
+    socket: &Arc<std::net::UdpSocket>,
+    vm: &Vm,
+    last: &udp::LastUse,
+) -> Option<Arc<UnixStream>> {
+    let guest = Arc::new(open_forward(vm, &format!("UDP {port}"))?);
+    // A VM that stops reading must not hold up the port's other clients.
+    guest.set_write_timeout(Some(Duration::from_secs(1))).ok()?;
+    let (reader, socket, last) = (guest.clone(), socket.clone(), last.clone());
+    std::thread::spawn(move || {
+        let mut buf = vec![0u8; udp::MAX_DATAGRAM];
+        while let Ok(Some(n)) = udp::read_datagram(&mut &*reader, &mut buf) {
+            last.touch(Instant::now());
+            let _ = socket.send_to(&buf[..n], client);
+        }
+    });
+    Some(guest)
+}
+
+/// End a flow: the VM's side ends, and so does the thread of its replies.
+fn end_flow(flow: &UnixStream) {
+    let _ = flow.shutdown(std::net::Shutdown::Both);
 }
 
 /// Docker clients send no clock: before one's request, the VM gets the Mac's when it is
@@ -1107,6 +1257,26 @@ fn power_off(vm: &Vm) {
 mod tests {
     use super::*;
     use std::time::SystemTime;
+
+    #[test]
+    fn an_occupied_ipv6_port_is_reported_and_a_missing_one_is_not() {
+        use std::io::{Error, ErrorKind};
+        use std::net::SocketAddr;
+        let v6_says = |kind: ErrorKind| {
+            move |a: SocketAddr| {
+                if a.is_ipv6() {
+                    Err(Error::from(kind))
+                } else {
+                    Ok(a)
+                }
+            }
+        };
+        let held = mac_sockets(8080, v6_says(ErrorKind::AddrInUse));
+        assert_eq!(held.unwrap_err().kind(), ErrorKind::AddrInUse);
+        let missing = mac_sockets(8080, v6_says(ErrorKind::AddrNotAvailable)).unwrap();
+        assert_eq!(missing.len(), 1);
+        assert!(missing[0].0.is_ipv4());
+    }
 
     #[test]
     fn the_guest_comes_from_the_setting_then_the_binary_then_beside_it_then_home() {

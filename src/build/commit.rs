@@ -22,11 +22,12 @@ pub struct CommitOptions {
 }
 
 /// The `--change` instructions Docker allows.
-const CHANGES: [&str; 10] = [
+const CHANGES: [&str; 11] = [
     "CMD",
     "ENTRYPOINT",
     "ENV",
     "EXPOSE",
+    "HEALTHCHECK",
     "LABEL",
     "ONBUILD",
     "USER",
@@ -48,15 +49,15 @@ pub fn apply_changes(config: &mut ImageConfig, changes: &[String]) -> Result<()>
         if !CHANGES.contains(&keyword.as_str()) {
             return Err(Error::new(
                 ErrorKind::InvalidInput,
-                "cannot commit the container",
-                format!("{keyword} is not a change commit can make"),
+                "cannot change the image configuration",
+                format!("{keyword} is not a configuration instruction"),
                 format!("use one of {}", CHANGES.join(", ")),
             ));
         }
         let ins = super::dockerfile::parse_line(change, '\\').map_err(|why| {
             Error::new(
                 ErrorKind::InvalidInput,
-                "cannot commit the container",
+                "cannot change the image configuration",
                 format!("{change}: {why}"),
                 "fix the change",
             )
@@ -93,6 +94,17 @@ pub fn config_of(image: &ImageConfig, spec: &crate::spec::ContainerSpec) -> Imag
 /// Make an image of the container's changes.
 #[cfg(target_os = "linux")]
 pub fn commit(handle: &ContainerHandle, opts: &CommitOptions) -> Result<Built> {
+    commit_with_metadata(handle, opts, "", "")
+}
+
+/// Commit with metadata from the CLI or Engine API.
+#[cfg(target_os = "linux")]
+pub fn commit_with_metadata(
+    handle: &ContainerHandle,
+    opts: &CommitOptions,
+    author: &str,
+    message: &str,
+) -> Result<Built> {
     let dirs = crate::paths::dirs()?;
     let spec = crate::state::read_config(&dirs, handle.id())?;
     let Some(image) = &spec.image else {
@@ -120,6 +132,14 @@ pub fn commit(handle: &ContainerHandle, opts: &CommitOptions) -> Result<Built> {
         },
         &mut layer,
     )?)?;
+    let mut history = record.history_with_layers();
+    history.push(crate::image::manifest::HistoryEntry {
+        created: Some(crate::shim::logbook::rfc3339(created, 0)),
+        created_by: spec.command.join(" "),
+        author: author.to_string(),
+        comment: message.to_string(),
+        ..Default::default()
+    });
     let mut diff_ids = record.diff_ids;
     diff_ids.push(committed.diff_id);
     let id: String = from_value(crate::helper::run_store_op(
@@ -128,6 +148,7 @@ pub fn commit(handle: &ContainerHandle, opts: &CommitOptions) -> Result<Built> {
             diff_ids,
             created,
             artifact: true,
+            history,
         },
         false,
     )?)?;
