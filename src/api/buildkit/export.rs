@@ -10,8 +10,10 @@ use prost::{
 };
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{self, Read, Seek, Write};
-use std::sync::{Arc, Mutex};
+use std::io::{self, Read, Write};
+use std::os::unix::fs::MetadataExt;
+use std::path::Path;
+use std::sync::{Arc, LazyLock, Mutex, Weak};
 
 pub(super) const SOLVE: &str = "/moby.buildkit.v1.Control/Solve";
 pub(super) const FILE_SEND: &str = "/moby.filesync.v1.FileSend/DiffCopy";
@@ -35,7 +37,7 @@ enum ArchiveState {
     #[default]
     Waiting,
     Receiving,
-    Complete(File),
+    Complete(StagedArchive),
 }
 
 struct Lease {
@@ -348,16 +350,22 @@ pub(super) async fn solve(
 impl Archive {
     async fn load(&self) -> io::Result<()> {
         let archive = std::mem::take(&mut *self.0.lock().unwrap());
-        let ArchiveState::Complete(mut file) = archive else {
+        let ArchiveState::Complete(archive) = archive else {
             return Err(io::Error::other(
                 "BuildKit did not send the Engine image archive",
             ));
         };
         tokio::task::spawn_blocking(move || {
-            file.rewind()?;
-            crate::Image::load(&mut file).map(|_| ()).map_err(|error| {
-                io::Error::other(format!("cannot load the BuildKit image: {error}"))
-            })
+            let cleanup =
+                crate::helper::load_staged_archive(archive.file.try_clone()?).map_err(|error| {
+                    io::Error::other(format!("cannot load the BuildKit image: {error}"))
+                })?;
+            if let Some(error) = cleanup {
+                eprintln!("podbag: BuildKit image loaded. Image store maintenance failed: {error}");
+            }
+            // Keep the file and its reservation until the helper exits.
+            drop(archive);
+            Ok(())
         })
         .await
         .map_err(io::Error::other)?
@@ -375,15 +383,8 @@ impl Archive {
         let limit = crate::config::load(&dirs)
             .map_err(io::Error::other)?
             .store_limit;
-        let mut file = tempfile::tempfile_in(&dirs.data)?;
-        let free = rustix::fs::fstatvfs(&file)?;
-        let capacity = limit.min(
-            free.f_bavail
-                .saturating_mul(free.f_frsize)
-                .saturating_sub(512 << 20),
-        );
+        let mut archive = StagedArchive::new(&dirs.data, limit)?;
         let mut buffer = BytesMut::new();
-        let mut written = 0u64;
         while let Some(chunk) = grpc::data(&mut body).await? {
             buffer.extend_from_slice(&chunk);
             while let Some((compressed, message)) = grpc::read_frame(&mut buffer)? {
@@ -395,21 +396,107 @@ impl Archive {
                 let data = SessionBytes::decode(message)
                     .map_err(io::Error::other)?
                     .data;
-                written = written.saturating_add(data.len() as u64);
-                if written > capacity {
-                    return Err(io::Error::other(
-                        "the BuildKit archive exceeds available image store space",
-                    ));
-                }
-                file.write_all(&data)?;
+                archive.append(&data)?;
             }
         }
-        if !buffer.is_empty() || written == 0 {
+        if !buffer.is_empty() || archive.written == 0 {
             return Err(io::Error::other("incomplete BuildKit image archive"));
         }
-        *self.0.lock().unwrap() = ArchiveState::Complete(file);
+        *self.0.lock().unwrap() = ArchiveState::Complete(archive);
         Ok(())
     }
+}
+
+struct StagedArchive {
+    // Field drop order keeps the reservation until the file has closed.
+    file: File,
+    reservation: Reservation,
+    limit: u64,
+    written: u64,
+    fragment_size: u64,
+}
+
+struct SpaceBudget {
+    capacity: u64,
+    reserved: u64,
+}
+
+struct Reservation {
+    budget: Arc<Mutex<SpaceBudget>>,
+    bytes: u64,
+}
+
+static ARCHIVE_BUDGETS: LazyLock<Mutex<HashMap<u64, Weak<Mutex<SpaceBudget>>>>> =
+    LazyLock::new(Mutex::default);
+
+impl StagedArchive {
+    fn new(dir: &Path, limit: u64) -> io::Result<Self> {
+        let file = tempfile::tempfile_in(dir)?;
+        let device = file.metadata()?.dev();
+        let mut devices = ARCHIVE_BUDGETS.lock().unwrap();
+        let fs = rustix::fs::fstatvfs(&file)?;
+        devices.retain(|_, budget| budget.strong_count() != 0);
+        let entry = devices.entry(device).or_default();
+        let budget = entry.upgrade().unwrap_or_else(|| {
+            let budget = Arc::new(Mutex::new(SpaceBudget {
+                capacity: usable_space(&fs),
+                reserved: 0,
+            }));
+            *entry = Arc::downgrade(&budget);
+            budget
+        });
+        Ok(Self {
+            file,
+            reservation: Reservation { budget, bytes: 0 },
+            written: 0,
+            limit,
+            fragment_size: fs.f_frsize.max(1),
+        })
+    }
+
+    fn append(&mut self, bytes: &[u8]) -> io::Result<()> {
+        let written = self.written.saturating_add(bytes.len() as u64);
+        if written > self.limit {
+            return Err(space_error());
+        }
+        let rounded = written
+            .div_ceil(self.fragment_size)
+            .saturating_mul(self.fragment_size);
+        let mut budget = self.reservation.budget.lock().unwrap();
+        let available = usable_space(&rustix::fs::fstatvfs(&self.file)?);
+        let extra = rounded - self.reservation.bytes;
+        budget.reserve(extra, available)?;
+        self.reservation.bytes = rounded;
+        self.file.write_all(bytes)?;
+        self.written = written;
+        Ok(())
+    }
+}
+
+impl SpaceBudget {
+    fn reserve(&mut self, bytes: u64, available: u64) -> io::Result<()> {
+        if bytes > available.min(self.capacity.saturating_sub(self.reserved)) {
+            return Err(space_error());
+        }
+        self.reserved += bytes;
+        Ok(())
+    }
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        self.budget.lock().unwrap().reserved -= self.bytes;
+    }
+}
+
+fn usable_space(fs: &rustix::fs::StatVfs) -> u64 {
+    fs.f_bavail
+        .saturating_mul(fs.f_frsize)
+        .saturating_sub(crate::store::DISK_RESERVE)
+}
+
+fn space_error() -> io::Error {
+    io::Error::other("the BuildKit archive exceeds available image store space")
 }
 
 pub(super) async fn session(
@@ -437,6 +524,51 @@ pub(super) async fn session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn staged_files_on_the_same_device_share_a_budget() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = StagedArchive::new(tmp.path(), u64::MAX).unwrap();
+        let second = StagedArchive::new(tmp.path(), u64::MAX).unwrap();
+        assert!(Arc::ptr_eq(
+            &first.reservation.budget,
+            &second.reservation.budget
+        ));
+    }
+
+    #[test]
+    fn simultaneous_archives_share_the_filesystem_reserve_until_drop() {
+        const MIB: u64 = 1 << 20;
+        let free = 1536 * MIB;
+        let available = free - crate::store::DISK_RESERVE;
+        let budget = Arc::new(Mutex::new(SpaceBudget {
+            capacity: available,
+            reserved: 0,
+        }));
+        let ready = std::sync::Barrier::new(2);
+        let attempted = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            let receive = || {
+                ready.wait();
+                let bytes = 700 * MIB;
+                let accepted = budget.lock().unwrap().reserve(bytes, available).is_ok();
+                let reservation = accepted.then(|| Reservation {
+                    budget: budget.clone(),
+                    bytes,
+                });
+                attempted.wait();
+                drop(reservation);
+                accepted
+            };
+            let first = scope.spawn(receive);
+            let second = scope.spawn(receive);
+            assert_ne!(first.join().unwrap(), second.join().unwrap());
+        });
+        let mut budget = budget.lock().unwrap();
+        assert_eq!(budget.reserved, 0);
+        budget.reserve(700 * MIB, available).unwrap();
+        assert!(budget.reserve(400 * MIB, available).is_err());
+    }
 
     #[test]
     fn changes_only_the_selected_exporter_type() {

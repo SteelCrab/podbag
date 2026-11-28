@@ -52,6 +52,9 @@ pub enum StoreOp {
     },
     /// Store the images of the archive on stdin (`docker load`).
     Load,
+    /// Store the images from a raw tar file on stdin, without extracting a copy.
+    #[cfg(target_os = "linux")]
+    LoadStaged,
     /// Store a root filesystem tar on stdin as one image (`docker import`).
     Import {
         options: crate::image::ImportOptions,
@@ -269,13 +272,22 @@ mod linux_ops {
                     config: record.config,
                 })
             }
-            StoreOp::Load => {
+            op @ (StoreOp::Load | StoreOp::LoadStaged) => {
                 let mut store = Store::open(dirs, !rootless)?;
                 let config = config::load(dirs)?;
                 store.use_mount_method(rootless, config.image_mount);
                 store.use_compression(config.image_compression, config.compress_idle_after);
-                let mut input = crate::helper::FramedInput::new(std::io::stdin().lock());
-                to_json(&store.load(&mut input, config.store_limit, &|| images_in_use(dirs))?)
+                let in_use = || images_in_use(dirs);
+                if matches!(op, StoreOp::LoadStaged) {
+                    use std::os::fd::AsFd;
+                    let input = std::io::stdin().as_fd().try_clone_to_owned().map_err(|e| {
+                        crate::Error::io("cannot open the staged archive", &e, "retry the build")
+                    })?;
+                    to_json(&store.load_staged(input.into(), config.store_limit, &in_use)?)
+                } else {
+                    let mut input = crate::helper::FramedInput::new(std::io::stdin().lock());
+                    to_json(&store.load(&mut input, config.store_limit, &in_use)?)
+                }
             }
             StoreOp::Import { options } => {
                 let mut store = Store::open(dirs, !rootless)?;

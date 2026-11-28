@@ -8,7 +8,7 @@
 
 #[cfg(unix)]
 use super::HashingReader;
-use super::{Source, Store, io_error, now, remove_tree};
+use super::{RefEntry, Source, Store, io_error, now, remove_tree};
 use crate::config::ImageCompression;
 use crate::image::manifest::{self, Compression, Descriptor, Fetched, Platform};
 use crate::image::reference::{Reference, is_digest};
@@ -21,6 +21,8 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::{os::unix::fs::FileExt, sync::Arc};
 
 /// What a load stored.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,7 +38,7 @@ const MAX_JSON: u64 = 16 * 1024 * 1024;
 /// How many links one archive path may pass through.
 const MAX_LINKS: usize = 40;
 /// Space an unpacking archive leaves free on the store's disk.
-const DISK_RESERVE: u64 = 512 * 1024 * 1024;
+pub(crate) const DISK_RESERVE: u64 = 512 * 1024 * 1024;
 
 /// One image of the archive, as its index or manifest names it.
 #[derive(Debug)]
@@ -68,6 +70,32 @@ impl Store {
         limit: u64,
         in_use: &dyn Fn() -> HashMap<String, String>,
     ) -> Result<LoadReport> {
+        let (report, maintenance) = self.load_archive(limit, in_use, |scratch| {
+            Files::unpack(input, scratch, limit)
+        })?;
+        maintenance?;
+        Ok(report)
+    }
+
+    /// Read a raw tar already staged by the BuildKit exporter. Report failures
+    /// of store maintenance separately from failures before the image is installed.
+    #[cfg(target_os = "linux")]
+    pub(super) fn load_staged(
+        &self,
+        file: File,
+        limit: u64,
+        in_use: &dyn Fn() -> HashMap<String, String>,
+    ) -> Result<Option<Error>> {
+        let (_, maintenance) = self.load_archive(limit, in_use, |_| Files::index(file, limit))?;
+        Ok(maintenance.err())
+    }
+
+    fn load_archive(
+        &self,
+        limit: u64,
+        in_use: &dyn Fn() -> HashMap<String, String>,
+        read: impl FnOnce(&Path) -> Result<Files>,
+    ) -> Result<(LoadReport, Result<()>)> {
         let scratch = self.scratch_dir(&format!("load.{}", std::process::id()));
         let stored = {
             // Shared for the whole load: an exclusive holder (garbage collection) empties
@@ -75,7 +103,7 @@ impl Store {
             let _shared = self.lock(false)?;
             let _ = remove_tree(&scratch);
             std::fs::create_dir_all(&scratch).map_err(|e| io_error(&scratch, e))?;
-            let stored = Files::unpack(input, &scratch, limit).and_then(|files| {
+            let stored = read(&scratch).and_then(|files| {
                 let images = find_images(&files)?;
                 self.store_loaded(&files, &images)
             });
@@ -83,10 +111,10 @@ impl Store {
             stored
         };
         match stored {
-            Ok((report, digests, replaced)) => {
-                self.after_naming(&replaced, &digests, limit, in_use)?;
-                Ok(report)
-            }
+            Ok((report, digests, replaced)) => Ok((
+                report,
+                self.after_naming(&replaced, &digests, limit, in_use),
+            )),
             Err(e) => {
                 // What this load left behind goes, as after a failed pull.
                 if let Ok(_exclusive) = self.lock(true) {
@@ -256,7 +284,7 @@ impl Store {
     ) -> Result<(LoadReport, Vec<String>, Vec<String>)> {
         let mut report = LoadReport::default();
         let mut digests = Vec::new();
-        let mut replaced = Vec::new();
+        let mut names = Vec::new();
         for image in images {
             let config_bytes = files.read_small(&image.config)?;
             let config_digest = format!("sha256:{}", sha256_hex(&config_bytes));
@@ -277,8 +305,7 @@ impl Store {
                 if self.has_layer(diff_id) {
                     continue;
                 }
-                let path = files.find(&blob.path)?;
-                let (digest, size) = file_digest(path)?;
+                let (digest, size) = file_digest(files.open(&blob.path)?)?;
                 if let Some(want) = &blob.digest {
                     if *want != digest {
                         return Err(Source::Archive.mismatch(want));
@@ -293,17 +320,10 @@ impl Store {
                 }
                 let compression = match blob.compression {
                     Some(c) => c,
-                    None => sniff(path)?,
+                    None => sniff(files.open(&blob.path)?)?,
                 };
-                let file = File::open(path).map_err(|e| io_error(path, e))?;
-                self.ingest_layer(
-                    Source::Archive,
-                    Box::new(file),
-                    compression,
-                    &digest,
-                    size,
-                    diff_id,
-                )?;
+                let file = files.open(&blob.path)?;
+                self.ingest_layer(Source::Archive, file, compression, &digest, size, diff_id)?;
             }
             // Its ID: the manifest's digest when the archive has the manifest, as a pull
             // would give it; else the config's, as Docker shows image IDs.
@@ -331,11 +351,7 @@ impl Store {
             }
             for name in &image.names {
                 let full = Reference::parse(name)?.name();
-                let before = self.read_refs()?.get(&full).map(|r| r.digest.clone());
-                if let Some(old) = before.filter(|old| *old != digest) {
-                    replaced.push(old);
-                }
-                self.set_ref(&full, &digest, now())?;
+                names.push((full.clone(), digest.clone()));
                 report.names.push(full);
             }
             if image.names.is_empty() {
@@ -343,6 +359,28 @@ impl Store {
             }
             digests.push(digest);
         }
+        let replaced = if names.is_empty() {
+            Vec::new()
+        } else {
+            // Publish all tags in one refs update after validating the entire archive.
+            let last_used = now();
+            self.update_refs(|refs| {
+                let mut replaced = Vec::new();
+                for (name, digest) in names {
+                    let old = refs.insert(
+                        name,
+                        RefEntry {
+                            digest: digest.clone(),
+                            last_used,
+                        },
+                    );
+                    if let Some(old) = old.filter(|old| old.digest != digest) {
+                        replaced.push(old.digest);
+                    }
+                }
+                replaced
+            })?
+        };
         Ok((report, digests, replaced))
     }
 }
@@ -526,11 +564,8 @@ fn read_magic(input: &mut dyn Read) -> std::io::Result<([u8; 4], usize)> {
 }
 
 /// How a layer file is compressed, from its first bytes.
-fn sniff(path: &Path) -> Result<Compression> {
-    let mut magic = [0u8; 4];
-    let n = File::open(path)
-        .and_then(|mut f| f.read(&mut magic))
-        .map_err(|e| io_error(path, e))?;
+fn sniff(mut input: impl Read) -> Result<Compression> {
+    let (magic, n) = read_magic(&mut input).map_err(|e| bad(e.to_string()))?;
     Ok(match &magic[..n] {
         [0x1f, 0x8b, ..] => Compression::Gzip,
         [0x28, 0xb5, 0x2f, 0xfd] => Compression::Zstd,
@@ -538,14 +573,13 @@ fn sniff(path: &Path) -> Result<Compression> {
     })
 }
 
-fn file_digest(path: &Path) -> Result<(String, u64)> {
+fn file_digest(mut file: impl Read) -> Result<(String, u64)> {
     use sha2::{Digest, Sha256};
-    let mut file = File::open(path).map_err(|e| io_error(path, e))?;
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 256 * 1024];
     let mut size = 0u64;
     loop {
-        let n = file.read(&mut buf).map_err(|e| io_error(path, e))?;
+        let n = file.read(&mut buf).map_err(|e| bad(e.to_string()))?;
         if n == 0 {
             break;
         }
@@ -571,8 +605,41 @@ fn bad(why: String) -> Error {
 
 /// The archive's regular files, by their cleaned path, and its links.
 struct Files {
-    paths: HashMap<String, PathBuf>,
+    paths: HashMap<String, ArchiveFile>,
     links: HashMap<String, String>,
+}
+
+enum ArchiveFile {
+    Scratch(PathBuf),
+    #[cfg(target_os = "linux")]
+    Staged(StagedEntry),
+}
+
+/// A bounded file range in a staged tar. Reads do not change the descriptor's
+/// position or copy a layer to a second temporary file.
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+struct StagedEntry {
+    file: Arc<File>,
+    at: u64,
+    left: u64,
+}
+
+#[cfg(target_os = "linux")]
+impl Read for StagedEntry {
+    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+        let length = self.left.min(output.len() as u64) as usize;
+        if length == 0 {
+            return Ok(0);
+        }
+        let count = self.file.read_at(&mut output[..length], self.at)?;
+        if count == 0 {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        self.at += count as u64;
+        self.left -= count as u64;
+        Ok(count)
+    }
 }
 
 impl Files {
@@ -589,13 +656,64 @@ impl Files {
             Box::new(input)
         };
         let mut archive = tar::Archive::new(reader);
+        let mut checked = 0;
+        let entries = archive.entries().map_err(|e| bad(e.to_string()))?;
+        Self::collect(entries, limit, |n, entry, size, total| {
+            if total - checked >= 64 * 1024 * 1024 || checked == 0 {
+                checked = total;
+                if free_space(scratch).is_some_and(|free| free < size.saturating_add(DISK_RESERVE))
+                {
+                    return Err(Error::new(
+                        ErrorKind::Runtime,
+                        "cannot load the image archive",
+                        "the store's disk is nearly full",
+                        "free some space (`podbag system prune`), then try again",
+                    ));
+                }
+            }
+            let dest = scratch.join(n.to_string());
+            let mut out = File::create(&dest).map_err(|e| io_error(&dest, e))?;
+            std::io::copy(&mut entry.take(size), &mut out).map_err(|e| bad(e.to_string()))?;
+            Ok(ArchiveFile::Scratch(dest))
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    fn index(mut file: File, limit: u64) -> Result<Files> {
+        use std::io::Seek;
+        let info = file.metadata().map_err(|e| bad(e.to_string()))?;
+        if !info.is_file() {
+            return Err(bad("the staged tar must be a regular file".into()));
+        }
+        file.rewind().map_err(|e| bad(e.to_string()))?;
+        let file = Arc::new(file);
+        let mut archive = tar::Archive::new(BufReader::new(&*file));
+        let entries = archive
+            .entries_with_seek()
+            .map_err(|e| bad(e.to_string()))?;
+        Self::collect(entries, limit, |_, entry, size, _| {
+            let at = entry.raw_file_position();
+            if size > info.len().saturating_sub(at) || at > info.len() {
+                return Err(bad("a staged archive entry is incomplete".into()));
+            }
+            Ok(ArchiveFile::Staged(StagedEntry {
+                file: file.clone(),
+                at,
+                left: size,
+            }))
+        })
+    }
+
+    fn collect<R: Read>(
+        entries: tar::Entries<'_, R>,
+        limit: u64,
+        mut save: impl FnMut(usize, &mut tar::Entry<'_, R>, u64, u64) -> Result<ArchiveFile>,
+    ) -> Result<Files> {
         let mut files = Files {
             paths: HashMap::new(),
             links: HashMap::new(),
         };
-        let entries = archive.entries().map_err(|e| bad(e.to_string()))?;
         let mut total = 0u64;
-        let mut checked = 0u64;
         for (n, entry) in entries.enumerate() {
             let mut entry = entry.map_err(|e| bad(e.to_string()))?;
             let raw = entry.path_bytes().into_owned();
@@ -604,30 +722,14 @@ impl Files {
             };
             let kind = entry.header().entry_type();
             if kind.is_file() || kind == tar::EntryType::Continuous {
-                let size = entry.header().size().map_err(|e| bad(e.to_string()))?;
+                let size = entry.size();
                 total = total.saturating_add(size);
                 if total > limit {
                     return Err(bad(format!(
                         "it unpacks to more than the store limit ({limit} bytes)"
                     )));
                 }
-                if total - checked >= 64 * 1024 * 1024 || checked == 0 {
-                    checked = total.max(1);
-                    if free_space(scratch).is_some_and(|free| free < size + DISK_RESERVE) {
-                        return Err(Error::new(
-                            ErrorKind::Runtime,
-                            "cannot load the image archive",
-                            "the store's disk is nearly full",
-                            "free some space (`podbag system prune`), then try again",
-                        ));
-                    }
-                }
-                let dest = scratch.join(n.to_string());
-                let mut out = File::create(&dest).map_err(|e| io_error(&dest, e))?;
-                // Never more than the header says, whatever the stream holds.
-                std::io::copy(&mut (&mut entry).take(size), &mut out)
-                    .map_err(|e| bad(e.to_string()))?;
-                files.paths.insert(path, dest);
+                files.paths.insert(path, save(n, &mut entry, size, total)?);
             } else if kind.is_symlink() || kind.is_hard_link() {
                 let target = entry
                     .link_name_bytes()
@@ -648,8 +750,8 @@ impl Files {
         Ok(files)
     }
 
-    /// The scratch file of an archive path, through its links.
-    fn find(&self, path: &str) -> Result<&Path> {
+    /// The contents of an archive path, through its links.
+    fn find(&self, path: &str) -> Result<&ArchiveFile> {
         let mut at = clean(path.as_bytes(), "", false)?.unwrap_or_default();
         for _ in 0..MAX_LINKS {
             if let Some(file) = self.paths.get(&at) {
@@ -663,12 +765,22 @@ impl Files {
         Err(bad(format!("it names {path}, which it does not hold")))
     }
 
+    fn open(&self, path: &str) -> Result<Box<dyn Read + Send>> {
+        match self.find(path)? {
+            ArchiveFile::Scratch(file) => {
+                Ok(Box::new(File::open(file).map_err(|e| io_error(file, e))?))
+            }
+            #[cfg(target_os = "linux")]
+            ArchiveFile::Staged(entry) => Ok(Box::new(entry.clone())),
+        }
+    }
+
     fn read_small(&self, path: &str) -> Result<Vec<u8>> {
-        let file = self.find(path)?;
         let mut data = Vec::new();
-        File::open(file)
-            .and_then(|f| f.take(MAX_JSON + 1).read_to_end(&mut data))
-            .map_err(|e| io_error(file, e))?;
+        self.open(path)?
+            .take(MAX_JSON + 1)
+            .read_to_end(&mut data)
+            .map_err(|e| bad(e.to_string()))?;
         if data.len() as u64 > MAX_JSON {
             return Err(bad(format!("{path} is larger than 16 MiB")));
         }
@@ -992,6 +1104,111 @@ mod tests {
         assert_eq!(name, "docker.io/local/oci:v1");
         let (_, by_prefix) = store.find(&config_digest["sha256:".len()..][..12]).unwrap();
         assert_eq!(by_prefix.digest, manifest_digest);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn stage(archive: &[u8]) -> File {
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(archive).unwrap();
+        file
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn staged_load_imports_an_oci_layout_with_gzip_layers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = open(&tmp);
+        let layer = tar_of(&[("etc/example", b"staged")]);
+        let (archive, image_digest) = oci_layout(&layer, "local/staged:latest");
+        let warning = store.load_staged(stage(&archive), u64::MAX, &none).unwrap();
+        assert!(warning.is_none());
+        let (_, image) = store.find("local/staged:latest").unwrap();
+        assert_eq!(image.digest, image_digest);
+        assert_eq!(image.diff_ids, [digest(&layer)]);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn staged_load_reports_maintenance_failure_after_installing_all_tags() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = open(&tmp);
+        let layer = tar_of(&[("etc/example", b"same data")]);
+        let first = docker_archive(&layer, "/first", serde_json::json!(["demo:latest"]));
+        let second = docker_archive(
+            &layer,
+            "/second",
+            serde_json::json!(["demo:latest", "demo:alias"]),
+        );
+        store.load_staged(stage(&first), u64::MAX, &none).unwrap();
+        let old = store.find("demo:latest").unwrap().1.digest;
+
+        let images = store.root.join("images");
+        let saved = store.root.join("saved-images");
+        let unavailable = || {
+            // Maintenance reads the image directory after publishing the new tags.
+            std::fs::rename(&images, &saved).unwrap();
+            std::fs::File::create(&images).unwrap();
+            none()
+        };
+        let warning = store
+            .load_staged(stage(&second), u64::MAX, &unavailable)
+            .unwrap()
+            .unwrap();
+        std::fs::remove_file(&images).unwrap();
+        std::fs::rename(&saved, &images).unwrap();
+
+        assert_eq!(warning.kind, ErrorKind::Runtime);
+        let current = store.find("demo:latest").unwrap().1.digest;
+        assert_ne!(current, old);
+        assert_eq!(store.find("demo:alias").unwrap().1.digest, current);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn staged_load_keeps_the_old_tag_if_the_archive_cannot_be_installed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = open(&tmp);
+        let layer = tar_of(&[("etc/example", b"data")]);
+        let first = docker_archive(&layer, "/first", serde_json::json!(["demo:latest"]));
+        let invalid = docker_archive(
+            &layer,
+            "/second",
+            serde_json::json!(["demo:latest", "invalid tag"]),
+        );
+        store.load_staged(stage(&first), u64::MAX, &none).unwrap();
+        let old = store.find("demo:latest").unwrap().1.digest;
+        assert!(store.load_staged(stage(&invalid), u64::MAX, &none).is_err());
+        assert_eq!(store.find("demo:latest").unwrap().1.digest, old);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn staged_tar_indexes_large_entries_without_extracting_them() {
+        use std::io::{Seek, SeekFrom};
+
+        let mut file = tempfile::tempfile().unwrap();
+        let large = 760 << 20;
+        let mut header = tar::Header::new_gnu();
+        header.set_path("large-layer").unwrap();
+        header.set_size(large);
+        header.set_cksum();
+        file.write_all(header.as_bytes()).unwrap();
+        file.seek(SeekFrom::Current(large as i64)).unwrap();
+        file.write_all(&tar_of(&[("manifest.json", b"following entry")]))
+            .unwrap();
+
+        let files = Files::index(file, large + 32).unwrap();
+        assert_eq!(
+            files.read_small("manifest.json").unwrap(),
+            b"following entry"
+        );
+        let mut bytes = [0xff; 16];
+        files
+            .open("large-layer")
+            .unwrap()
+            .read_exact(&mut bytes)
+            .unwrap();
+        assert_eq!(bytes, [0; 16]);
     }
 
     #[test]
