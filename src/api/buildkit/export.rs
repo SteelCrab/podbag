@@ -409,21 +409,40 @@ impl Archive {
 
 struct StagedArchive {
     // Field drop order keeps the reservation until the file has closed.
-    file: File,
+    file: Arc<File>,
     reservation: Reservation,
     limit: u64,
     written: u64,
     fragment_size: u64,
 }
 
+#[derive(Default)]
 struct SpaceBudget {
-    capacity: u64,
-    reserved: u64,
+    files: HashMap<usize, ReservedFile>,
+    next_id: usize,
+    pending: u64,
+}
+
+struct ReservedFile {
+    file: Weak<File>,
+    bytes: u64,
+    pending: u64,
+}
+
+impl ReservedFile {
+    fn refresh(&mut self) {
+        let allocated = self
+            .file
+            .upgrade()
+            .and_then(|file| file.metadata().ok())
+            .map_or(0, |info| info.blocks().saturating_mul(512));
+        self.pending = self.bytes.saturating_sub(allocated);
+    }
 }
 
 struct Reservation {
     budget: Arc<Mutex<SpaceBudget>>,
-    bytes: u64,
+    id: usize,
 }
 
 static ARCHIVE_BUDGETS: LazyLock<Mutex<HashMap<u64, Weak<Mutex<SpaceBudget>>>>> =
@@ -431,23 +450,22 @@ static ARCHIVE_BUDGETS: LazyLock<Mutex<HashMap<u64, Weak<Mutex<SpaceBudget>>>>> 
 
 impl StagedArchive {
     fn new(dir: &Path, limit: u64) -> io::Result<Self> {
-        let file = tempfile::tempfile_in(dir)?;
+        let file = Arc::new(tempfile::tempfile_in(dir)?);
         let device = file.metadata()?.dev();
+        let fs = rustix::fs::fstatvfs(&*file)?;
         let mut devices = ARCHIVE_BUDGETS.lock().unwrap();
-        let fs = rustix::fs::fstatvfs(&file)?;
         devices.retain(|_, budget| budget.strong_count() != 0);
         let entry = devices.entry(device).or_default();
         let budget = entry.upgrade().unwrap_or_else(|| {
-            let budget = Arc::new(Mutex::new(SpaceBudget {
-                capacity: usable_space(&fs),
-                reserved: 0,
-            }));
+            let budget = Arc::new(Mutex::new(SpaceBudget::default()));
             *entry = Arc::downgrade(&budget);
             budget
         });
+        drop(devices);
+        let reservation = Reservation::new(budget, &file);
         Ok(Self {
             file,
-            reservation: Reservation { budget, bytes: 0 },
+            reservation,
             written: 0,
             limit,
             fragment_size: fs.f_frsize.max(1),
@@ -463,29 +481,87 @@ impl StagedArchive {
             .div_ceil(self.fragment_size)
             .saturating_mul(self.fragment_size);
         let mut budget = self.reservation.budget.lock().unwrap();
-        let available = usable_space(&rustix::fs::fstatvfs(&self.file)?);
-        let extra = rounded - self.reservation.bytes;
-        budget.reserve(extra, available)?;
-        self.reservation.bytes = rounded;
-        self.file.write_all(bytes)?;
+        let id = self.reservation.id;
+        budget.reserve(id, rounded, || {
+            Ok(usable_space(&rustix::fs::fstatvfs(&*self.file)?))
+        })?;
+        (&*self.file).write_all(bytes)?;
+        budget.refresh_file(id);
         self.written = written;
         Ok(())
     }
 }
 
 impl SpaceBudget {
-    fn reserve(&mut self, bytes: u64, available: u64) -> io::Result<()> {
-        if bytes > available.min(self.capacity.saturating_sub(self.reserved)) {
+    fn reserve(
+        &mut self,
+        id: usize,
+        total: u64,
+        free: impl Fn() -> io::Result<u64>,
+    ) -> io::Result<()> {
+        let extra = total - self.files[&id].bytes;
+        if extra == 0 {
+            return Ok(());
+        }
+        let mut available = free()?;
+        if extra <= available && extra > available.saturating_sub(self.pending) {
+            // Another file's delayed allocation may now be reflected. Only
+            // scan the other files under pressure. Sample free space again
+            // *after* the file stats, so newer allocations count against us.
+            self.pending = self
+                .files
+                .values_mut()
+                .map(|file| {
+                    file.refresh();
+                    file.pending
+                })
+                .sum();
+            available = free()?;
+        }
+        if extra > available.saturating_sub(self.pending) {
             return Err(space_error());
         }
-        self.reserved += bytes;
+        let file = self.files.get_mut(&id).unwrap();
+        file.bytes = total;
+        file.pending += extra;
+        self.pending += extra;
         Ok(())
+    }
+
+    fn refresh_file(&mut self, id: usize) {
+        let file = self.files.get_mut(&id).unwrap();
+        self.pending -= file.pending;
+        file.refresh();
+        self.pending += file.pending;
+    }
+}
+
+impl Reservation {
+    fn new(budget: Arc<Mutex<SpaceBudget>>, file: &Arc<File>) -> Self {
+        let id = {
+            let mut budget = budget.lock().unwrap();
+            let id = budget.next_id;
+            budget.next_id += 1;
+            budget.files.insert(
+                id,
+                ReservedFile {
+                    file: Arc::downgrade(file),
+                    bytes: 0,
+                    pending: 0,
+                },
+            );
+            id
+        };
+        Self { budget, id }
     }
 }
 
 impl Drop for Reservation {
     fn drop(&mut self) {
-        self.budget.lock().unwrap().reserved -= self.bytes;
+        let mut budget = self.budget.lock().unwrap();
+        if let Some(file) = budget.files.remove(&self.id) {
+            budget.pending -= file.pending;
+        }
     }
 }
 
@@ -536,27 +612,103 @@ mod tests {
         ));
     }
 
+    const MIB: u64 = 1 << 20;
+
+    #[test]
+    fn the_budget_refreshes_free_space_and_keeps_pending_reservations() {
+        let budget = Arc::new(Mutex::new(SpaceBudget::default()));
+        let first_file = Arc::new(tempfile::tempfile().unwrap());
+        let first = Reservation::new(budget.clone(), &first_file);
+        let second_file = Arc::new(tempfile::tempfile().unwrap());
+        let second = Reservation::new(budget.clone(), &second_file);
+        let mut shared = budget.lock().unwrap();
+
+        shared
+            .reserve(first.id, 128 * MIB, || Ok(256 * MIB))
+            .unwrap();
+        assert!(
+            shared
+                .reserve(second.id, 300 * MIB, || Ok(256 * MIB))
+                .is_err()
+        );
+        shared
+            .reserve(second.id, 300 * MIB, || Ok(2304 * MIB))
+            .unwrap();
+        assert!(
+            shared
+                .reserve(second.id, 2200 * MIB, || Ok(2304 * MIB))
+                .is_err()
+        );
+        drop(shared);
+        drop(first_file);
+        drop(first);
+
+        budget
+            .lock()
+            .unwrap()
+            .reserve(second.id, 2200 * MIB, || Ok(2304 * MIB))
+            .unwrap();
+    }
+
+    #[test]
+    fn the_budget_rechecks_delayed_allocations_before_declining_a_write() {
+        use std::cell::Cell;
+
+        let budget = Arc::new(Mutex::new(SpaceBudget::default()));
+        let written = Arc::new(tempfile::tempfile().unwrap());
+        let first = Reservation::new(budget.clone(), &written);
+        let empty = Arc::new(tempfile::tempfile().unwrap());
+        let second = Reservation::new(budget.clone(), &empty);
+        let mut shared = budget.lock().unwrap();
+
+        shared.reserve(first.id, 2 * MIB, || Ok(3 * MIB)).unwrap();
+        (&*written).write_all(&vec![0x53; MIB as usize]).unwrap();
+        written.sync_data().unwrap();
+        let allocated = written.metadata().unwrap().blocks() * 512;
+        assert!(allocated > 0 && allocated <= 2 * MIB);
+
+        // This is the old free-space snapshot, followed by a newer one in
+        // which the first file's allocation is reflected. Its pending bytes
+        // still count after refreshing this snapshot.
+        let reads = Cell::new(0);
+        let free = || {
+            let count = reads.get();
+            reads.set(count + 1);
+            Ok(if count == 0 {
+                2 * MIB
+            } else {
+                3 * MIB - allocated
+            })
+        };
+        shared.reserve(second.id, MIB, free).unwrap();
+        assert_eq!(reads.get(), 2);
+        assert_eq!(shared.pending, 3 * MIB - allocated);
+        assert!(
+            shared
+                .reserve(second.id, MIB + 1, || Ok(3 * MIB - allocated))
+                .is_err()
+        );
+    }
+
     #[test]
     fn simultaneous_archives_share_the_filesystem_reserve_until_drop() {
-        const MIB: u64 = 1 << 20;
         let free = 1536 * MIB;
         let available = free - crate::store::DISK_RESERVE;
-        let budget = Arc::new(Mutex::new(SpaceBudget {
-            capacity: available,
-            reserved: 0,
-        }));
+        let budget = Arc::new(Mutex::new(SpaceBudget::default()));
         let ready = std::sync::Barrier::new(2);
         let attempted = std::sync::Barrier::new(2);
         std::thread::scope(|scope| {
             let receive = || {
+                let file = Arc::new(tempfile::tempfile().unwrap());
+                let reservation = Reservation::new(budget.clone(), &file);
                 ready.wait();
-                let bytes = 700 * MIB;
-                let accepted = budget.lock().unwrap().reserve(bytes, available).is_ok();
-                let reservation = accepted.then(|| Reservation {
-                    budget: budget.clone(),
-                    bytes,
-                });
+                let accepted = budget
+                    .lock()
+                    .unwrap()
+                    .reserve(reservation.id, 700 * MIB, || Ok(available))
+                    .is_ok();
                 attempted.wait();
+                drop(file);
                 drop(reservation);
                 accepted
             };
@@ -564,10 +716,14 @@ mod tests {
             let second = scope.spawn(receive);
             assert_ne!(first.join().unwrap(), second.join().unwrap());
         });
-        let mut budget = budget.lock().unwrap();
-        assert_eq!(budget.reserved, 0);
-        budget.reserve(700 * MIB, available).unwrap();
-        assert!(budget.reserve(400 * MIB, available).is_err());
+        assert_eq!(budget.lock().unwrap().pending, 0);
+        let file = Arc::new(tempfile::tempfile().unwrap());
+        let next = Reservation::new(budget.clone(), &file);
+        budget
+            .lock()
+            .unwrap()
+            .reserve(next.id, 700 * MIB, || Ok(available))
+            .unwrap();
     }
 
     #[test]
