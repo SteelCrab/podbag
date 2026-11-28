@@ -2498,7 +2498,14 @@ mod tests {
                     let end = std::time::Instant::now() + std::time::Duration::from_millis(200);
                     while std::time::Instant::now() < end {
                         if let Err(err) = std::fs::write(&file, b"") {
-                            assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+                            // macOS can return EINVAL when the parent is unlinked
+                            // during open. Verify the directory is gone in that case.
+                            assert!(
+                                err.kind() == std::io::ErrorKind::NotFound
+                                    || (err.kind() == std::io::ErrorKind::InvalidInput
+                                        && !file.parent().unwrap().try_exists().unwrap()),
+                                "could not write {file:?}: {err}"
+                            );
                             break;
                         }
                     }
