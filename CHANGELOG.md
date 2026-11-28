@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.4.0 (2026-11-28)
 
 ### Desktop
 
@@ -17,6 +17,13 @@
 - On macOS, the window has a standard title bar. Drag the title bar, not the toolbar, to
   move the window.
 - Screen readers cannot read the window yet.
+- Run a container from the Containers or Images page. The form accepts the image, name,
+  ports, environment variables, volumes, command, restart policy and auto-remove option.
+  Desktop pulls a missing image and opens the container's logs after it starts.
+- Search Settings by name. Configure local engine options, network and DNS defaults,
+  registry proxies, task notifications and Buildx builders.
+- Migrate shows icons for source and resource types. Desktop can also analyze image
+  security, run local models and install declarative extensions.
 
 ### Training
 
@@ -35,10 +42,14 @@
 - Module format `podbag-course-v2`: checks for images, container states, health, restarts
   and networks; text files for the practice directory; steps with the Docker CLI and
   Compose. Training modules for every podbag feature use it.
+- Do supported Training actions in Desktop, including logs, inspection, and operations
+  on containers, images, volumes and networks.
 - All modules and their guides: https://podbag.dev/training/.
 
 ### Images
 
+- View image history with `podbag history` and import a root filesystem archive with
+  `podbag import`. Both operations are available through the Docker API.
 - podbag can compress images that no container uses, file by file with zstd. It is off
   by default. Files that two images share stay shared. In our test the store went from
   725 MB to 337 MB.
@@ -58,6 +69,9 @@
 
 ### Kubernetes
 
+- Create, reset and remove a private local Kind cluster from Podbag Desktop. On macOS
+  it can use the Podbag VM. Desktop keeps the managed context separate from the user's
+  existing kubeconfig.
 - Show OpenShift Routes in Podbag Desktop, the TUI and `podbag kube`. They appear only
   when the context's API serves `route.openshift.io/v1`.
 - In Podbag Desktop, the Routes tab shows each Route's host, path, Service and TLS mode.
@@ -67,6 +81,8 @@
 
 ### Networking
 
+- Attach and detach networks on running containers. Set static addresses on bridge
+  networks and use the embedded DNS service for container names.
 - `podbag run` and `podbag create` take `--add-host NAME:IP`, `--dns`, `--dns-search` and
   `--dns-option`, as Docker does. `host-gateway` stands for the host.
 - The Docker API applies `ExtraHosts`, `Dns`, `DnsSearch` and `DnsOptions`, and inspect
@@ -76,6 +92,9 @@
 
 ### Builds
 
+- Opt in to managed BuildKit on native Linux with `podbag build --buildkit` or enable it
+  in the Docker API service for Buildx. The CLI supports build secrets, SSH agents,
+  cache mounts and external cache, and local or multi-platform OCI exports.
 - `podbag build` and `docker build` pull private base images with the login for each
   image's registry. Before, base images were pulled anonymously.
 - The Docker API reads the `X-Registry-Config` header from the docker CLI and falls back
@@ -83,16 +102,18 @@
 - On macOS and Windows, `podbag build` sends the host's logins for the registries in the
   Dockerfile to the engine. A Dockerfile on stdin sends none.
 
-### Desktop
+### Container runtime
 
-- Run a container from Podbag Desktop: Run container on the Containers page, and Run on
-  each image row. The form takes the image, a name and ports.
-- More options set environment variables, volumes, the command, a restart policy and
-  auto-remove.
-- A missing image is pulled first. The new container then opens with its logs.
+- Use Linux device mappings, DRM or NVIDIA GPU selection and read-only container root
+  filesystems with the Podbag CLI and Docker API.
+- Use NFS and trusted local Unix-socket volume drivers with a rootful Linux engine.
+- Forward container logs to syslog or journald on Linux.
+- Run Swarm service replicas on registered SSH workers and inspect their placement
+  from the manager.
 
 ### macOS
 
+- Configure shared folders, synchronized shares and the VM disk from Desktop Settings.
 - Published UDP ports, such as `-p 5353:53/udp`, answer on the Mac's localhost, like TCP
   ports.
 - A UDP client's flow ends after 90 seconds without traffic, as with Docker.
