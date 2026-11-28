@@ -133,6 +133,12 @@ pub trait Api: Send + Sync {
     /// it runs in the VM, which it starts when it is stopped. Slow.
     fn compression(&self, mode: Option<compression::Mode>) -> Result<Compression, String>;
 
+    /// Read or change the local macOS VM's data disk using the host CLI.
+    fn vm_storage(
+        &self,
+        session: u64,
+        edit: Option<crate::VmStorageEdit>,
+    ) -> Result<crate::DiskStorage, String>;
     /// Read, validate or save the configuration file on the selected local engine.
     fn engine_config(
         &self,
@@ -412,6 +418,19 @@ impl Api for Desktop {
             .current()
             .compression(mode.map(compression::Mode::as_str))?;
         Ok(Compression::from_json(&reply))
+    }
+
+    fn vm_storage(
+        &self,
+        session: u64,
+        edit: Option<crate::VmStorageEdit>,
+    ) -> Result<crate::DiskStorage, String> {
+        if !cfg!(target_os = "macos")
+            || self.session(session)?.target.choice != podbag::client::Choice::Podbag
+        {
+            return Err("VM storage requires the local macOS Podbag engine".into());
+        }
+        podbag::dashboard::cli::vm_storage(self.podbag(), edit)
     }
 
     fn engine_config(

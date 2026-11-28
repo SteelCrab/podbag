@@ -1,8 +1,8 @@
 //! Offline storage changes for the macOS VM. The host lock excludes boot and other edits.
 
 use super::host::Paths;
+use crate::vm::DiskStorage as Status;
 use crate::vm::ext4;
-use serde::Serialize;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind, Write};
 use std::os::fd::AsRawFd;
@@ -12,22 +12,6 @@ use std::path::{Path, PathBuf};
 const LOCATION: &str = "vm-disk-location.json";
 const GIB: u64 = 1 << 30;
 const MAX_GIB: u64 = 1024;
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct Status {
-    path: PathBuf,
-    pub(super) exists: bool,
-    configured: bool,
-    pub(super) editable: bool,
-    size_bytes: u64,
-    allocated_bytes: u64,
-    filesystem_bytes: Option<u64>,
-    growth_pending: bool,
-    max_size_gib: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    backup_path: Option<PathBuf>,
-}
 
 fn explain(path: &Path, error: impl std::fmt::Display) -> String {
     format!("{}: {error}", path.display())

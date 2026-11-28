@@ -248,6 +248,7 @@ struct State {
     logs_following: bool,
     update_found: bool,
     compression: Compression,
+    disk: crate::DiskStorage,
     config_text: Option<String>,
     network_settings: NetworkSettings,
     registry_proxy: RegistryProxySettings,
@@ -829,6 +830,18 @@ impl Mock {
                     Mode::Off
                 }),
                 after: Some(opts.compression.after),
+            },
+            disk: crate::DiskStorage {
+                path: "/Users/me/.podbag/vm/disk.img".into(),
+                exists: true,
+                configured: false,
+                editable: false,
+                size_bytes: 32 << 30,
+                allocated_bytes: 5 << 30,
+                filesystem_bytes: Some(32 << 30),
+                growth_pending: false,
+                max_size_gib: 1024,
+                backup_path: None,
             },
             config_text: Some("# Local engine settings\nstore_limit = \"4 GiB\"\n".into()),
             network_settings: NetworkSettings {
@@ -1561,6 +1574,44 @@ impl Api for Mock {
             _ if o.broken => Ok(Compression::default()),
             _ => Ok(state),
         }
+    }
+
+    fn vm_storage(
+        &self,
+        session: u64,
+        edit: Option<crate::VmStorageEdit>,
+    ) -> Result<crate::DiskStorage, String> {
+        let mut state = self.st();
+        if state.token != session || state.selected != "podbag" || state.engine.platform != "macos"
+        {
+            return Err("VM storage requires the local macOS Podbag engine".into());
+        }
+        let stopped = state.vm.state == "stopped";
+        let disk = &mut state.disk;
+        disk.editable = stopped;
+        disk.backup_path = None;
+        if let Some(edit) = edit {
+            if !disk.editable {
+                return Err("Stop the VM before changing its storage".into());
+            }
+            match edit {
+                crate::VmStorageEdit::Grow { gib }
+                    if gib <= disk.max_size_gib && gib > disk.size_bytes >> 30 =>
+                {
+                    disk.size_bytes = gib << 30;
+                    disk.growth_pending = true;
+                    disk.backup_path = Some(disk.path.with_extension("bak"));
+                }
+                crate::VmStorageEdit::Move { path }
+                    if path.starts_with('/') && std::path::Path::new(&path) != disk.path =>
+                {
+                    disk.backup_path = Some(std::mem::replace(&mut disk.path, path.into()));
+                    disk.configured = true;
+                }
+                _ => return Err("Invalid VM storage change".into()),
+            }
+        }
+        Ok(disk.clone())
     }
 
     fn engine_config(

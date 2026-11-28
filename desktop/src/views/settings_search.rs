@@ -151,6 +151,9 @@ fn entries(d: &Desktop) -> Vec<Entry> {
             &["settings.search.terms.registryProxy"],
         ));
     }
+    if super::vm_storage::shown(d) {
+        out.push(section("vmStorage", &["settings.search.terms.vmStorage"]));
+    }
     if let Some(vm) = d.vm.as_ref().filter(|_| d.has_vm()) {
         out.push(section("vm", &["settings.search.terms.vm"]));
         if vm.resources_editable {
@@ -221,6 +224,7 @@ fn section_key(key: &'static str) -> &'static str {
         "engine" => "settings.engine",
         "network" => "settings.network",
         "registryProxy" => "settings.registryProxy",
+        "vmStorage" => "settings.vmStorage",
         "vm" => "settings.vm",
         "syncShares" => "settings.syncShares",
         "updates" => "settings.updates",

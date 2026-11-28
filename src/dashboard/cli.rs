@@ -195,7 +195,10 @@ pub enum VmStorageEdit {
 }
 
 /// Read or edit the storage of the macOS VM without connecting to the guest.
-pub fn vm_storage(podbag: &Path, edit: Option<VmStorageEdit>) -> Result<Value, String> {
+pub fn vm_storage(
+    podbag: &Path,
+    edit: Option<VmStorageEdit>,
+) -> Result<crate::vm::DiskStorage, String> {
     let base = ["vm", "storage"];
     let output = match edit {
         None => run_ok(podbag, &base)?,

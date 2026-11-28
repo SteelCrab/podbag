@@ -308,6 +308,17 @@ fn second_card(d: &mut Desktop, ui: &mut Ui, x: f32, y0: f32, w: f32) -> f32 {
             y += vm_body(d, ui, bx, y, bw, &vm) + 18.;
         }
     }
+    if super::vm_storage::shown(d) {
+        separator(ui, x, y, w);
+        let value = super::vm_storage::summary(d);
+        let (h, open) = section(d, ui, x, y, w, "vmStorage", Icon::Volumes, &value);
+        y += h;
+        if open {
+            y += super::vm_storage::body(d, ui, bx, y, bw) + 18.;
+        } else {
+            d.vm_storage.closed();
+        }
+    }
     // Synchronized shares, for podbag's VM on a Mac.
     if crate::views::sync_shares::shown(d) {
         separator(ui, x, y, w);

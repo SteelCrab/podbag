@@ -63,6 +63,7 @@ const VIEW_SHOTS: &[(&str, &[&str], f32)] = &[
         &["nav settings", "section engine"],
         1200.,
     ),
+    ("settings-storage", &["section vmStorage"], 1200.),
     ("settings-search", &["search Virtual machine"], 1200.),
     // The same in Korean.
     ("settings-search-vm", &["search 가상 머신"], 1200.),
@@ -415,7 +416,9 @@ fn views(out: &Path, filter: &str, scale: f32) {
                 continue;
             }
             // A `-offline` picture: the engine and podbag.dev do not answer.
-            let scenario = if shot.ends_with("-offline") {
+            let scenario = if *shot == "settings-storage" {
+                Scenario::VmStopped
+            } else if shot.ends_with("-offline") {
                 Scenario::Offline
             } else {
                 Scenario::Default

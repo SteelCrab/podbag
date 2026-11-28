@@ -22,6 +22,7 @@ pub mod settings_search;
 pub mod sync_shares;
 pub mod training;
 pub mod updates;
+pub mod vm_storage;
 
 use podbag_ui::ui::Ui;
 use podbag_ui::widgets::button::{self, IconKind, Kind as ButtonKind};

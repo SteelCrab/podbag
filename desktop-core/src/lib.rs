@@ -50,10 +50,11 @@ pub use podbag::client::{
     PublishedPort, RESTART_POLICIES, RunSpec, SearchResult, VolumeMount, VolumeSummary,
 };
 pub use podbag::config::{DnsFilter, Document as ConfigDocument, Edit as ConfigEdit};
-pub use podbag::dashboard::cli::EngineConfigRequest;
+pub use podbag::dashboard::cli::{EngineConfigRequest, VmStorageEdit};
 pub use podbag::dashboard::lab;
 pub use podbag::image::proxy::{Mode as RegistryProxyMode, Settings as RegistryProxySettings};
 pub use podbag::network::NetworkPreferences;
+pub use podbag::vm::DiskStorage;
 
 use std::sync::{Mutex, MutexGuard};
 
