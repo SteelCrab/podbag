@@ -2922,7 +2922,7 @@ dependencies = [
 
 [[package]]
 name = "podbag"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "auto-launch",
  "block2 0.6.2",
@@ -2959,7 +2959,7 @@ dependencies = [
 
 [[package]]
 name = "podbag-desktop"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "embed-resource",
  "gtk",
