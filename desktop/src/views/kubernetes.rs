@@ -188,6 +188,22 @@ pub fn paint(d: &mut Desktop, ui: &mut Ui, r: Rect) {
     let title_right = title_bar(ui, bar, &title);
     let mut row = Row::new(bar.inset(20., 14., 20., 15.), 8.);
     let refresh = row.right_h(30., 30.);
+    let label = d.t("kube.localTitle");
+    let width = button::width(ui, &label, None, false);
+    let local = row.right_h(width, 32.);
+    if button::button(
+        ui,
+        super::local_kubernetes::OPEN,
+        local,
+        &label,
+        None,
+        button::Kind::Normal,
+        true,
+    ) {
+        let key = super::local_kubernetes::SECTION;
+        d.open_section(key);
+        d.focus_next = Some(super::settings::section_id(key));
+    }
     let x = title_right + 12.;
     let w = (row.rest().right() - x - 12.).clamp(0., 280.);
     let ready = d.kube.error.is_none() && !d.kube.loading;

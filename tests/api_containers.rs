@@ -965,6 +965,31 @@ fn privileged_through_the_api() {
         serde_json::from_str::<serde_json::Value>(&s.ok(&["inspect", "p"])).unwrap()[0].clone();
     assert_eq!(inspect["HostConfig"]["Privileged"], true);
     s.ok(&["rm", "p"]);
+
+    s.ok(&[
+        "run",
+        "-d",
+        "--name",
+        "p",
+        "--privileged",
+        &s.image,
+        "sleep",
+        "60",
+    ]);
+    let inherited = s.ok(&[
+        "exec",
+        "--privileged",
+        "p",
+        "grep",
+        "CapEff",
+        "/proc/self/status",
+    ]);
+    assert!(inherited.contains(&all), "{inherited}");
+    s.ok(&["run", "-d", "--name", "ordinary", &s.image, "sleep", "60"]);
+    let denied = s.docker(&["exec", "--privileged", "ordinary", "true"]);
+    assert!(!denied.status.success());
+    assert!(stderr(&denied).contains("was not started with --privileged"));
+    s.ok(&["rm", "-f", "p", "ordinary"]);
 }
 
 #[test]

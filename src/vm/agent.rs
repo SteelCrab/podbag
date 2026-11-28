@@ -4,7 +4,7 @@
 //! `podbag system service`. Only the Mac (vsock CID 2) may connect: a container that
 //! reaches vsock gets nothing.
 
-use super::proto::{API_PORT, CLI_PORT, CliRequest, FORWARD_PORT, Frame};
+use super::proto::{API_PORT, CLI_PORT, CliRequest, FORWARD_PORT, Frame, KIND_API_PORT};
 use crate::{Error, Result};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -40,16 +40,21 @@ fn run() -> Result<()> {
         eprintln!("podbag: cannot protect the VM agent from OOM kills: {e}");
     }
     let api = listen(API_PORT)?;
+    let kind_api = listen(KIND_API_PORT)?;
     let cli = listen(CLI_PORT)?;
     let forwarder = listen(FORWARD_PORT)?;
     let dirs = crate::paths::dirs()?;
     let sync_dirs = dirs.clone();
     std::thread::spawn(move || super::sync::watch(sync_dirs));
-    let mut ctx = crate::api::router::Ctx::new(dirs);
+    let mut ctx = crate::api::router::Ctx::new(dirs.clone());
     // Use only folders that the init process mounted successfully.
     ctx.binds_under = Some(super::shares::active().unwrap_or_default());
     let shares = ctx.binds_under.clone().unwrap_or_default();
     let ctx = Arc::new(ctx);
+    let mut kind_ctx = crate::api::router::Ctx::new(dirs);
+    kind_ctx.binds_under = Some(shares.clone());
+    kind_ctx.kind_node_binds = true;
+    let kind_ctx = Arc::new(kind_ctx);
     crate::helper::helpers_in_own_group();
     crate::helper::raise_descriptor_limit();
     std::thread::spawn(keep_lease);
@@ -58,6 +63,12 @@ fn run() -> Result<()> {
     std::thread::spawn(move || {
         accept_each(&api, |stream| {
             let ctx = ctx.clone();
+            std::thread::spawn(move || crate::api::handle_connection(stream, &ctx));
+        })
+    });
+    std::thread::spawn(move || {
+        accept_each(&kind_api, |stream| {
+            let ctx = kind_ctx.clone();
             std::thread::spawn(move || crate::api::handle_connection(stream, &ctx));
         })
     });

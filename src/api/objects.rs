@@ -399,7 +399,7 @@ fn list_networks(req: &Request, ctx: &Ctx) -> Reply {
     let out: Vec<Value> = all
         .into_iter()
         .filter(|(.., labels)| labels_match(labels, &filters))
-        .filter(|(name, ..)| any("name", &|want| name.contains(want)))
+        .filter(|(name, ..)| any("name", &|want| super::containers::name_matches(want, name)))
         .filter(|(_, id, ..)| any("id", &|want| id.starts_with(want)))
         .filter(|(_, _, driver, ..)| any("driver", &|want| want == *driver))
         .filter(|(name, ..)| {

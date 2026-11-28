@@ -1464,6 +1464,45 @@ podbag lab remove container-network
 - Languages: English, 한국어, 日本語, 简体中文, Filipino, Español and Tiếng Việt. The app
   follows the system language. Settings can change it.
 
+#### Local development cluster
+
+- Install [kind](https://kind.sigs.k8s.io/docs/user/quick-start/), `kubectl`, and the
+  Docker CLI on the desktop host. To use a separate Docker engine, select a local Docker
+  context that runs Linux containers.
+- Open **Local cluster** in Settings, or select it from the Kubernetes page. Enter a
+  Kubernetes release tag supported by your kind version, or keep the kind default.
+  Choose the node count and select **Create cluster**. The first node is the control
+  plane, and the remaining nodes are workers.
+- The API server listens on loopback. The app stores the kubeconfig in its private
+  `local-kubernetes` directory and includes that context in the cluster selector. Your
+  normal kubeconfig and its current context are left alone.
+- **Reset cluster** deletes the Podbag-managed cluster and recreates it with the same
+  settings. **Remove** deletes it and its private kubeconfig. Both erase the local
+  workloads and data. Podbag checks the original engine before deleting anything.
+
+**Podbag VM on macOS**
+
+- Choose **Podbag virtual machine** in the **Local cluster** form. Desktop starts its
+  VM and uses a private Docker socket for the Kind operation. The Kubernetes API is
+  available on the Mac's loopback address. The Docker CLI is required for Kind.
+- Use an updated Podbag build and VM guest. The guest exposes its kernel modules
+  directory and `/dev/kmsg` as read-only mounts to the Kind nodes. The ordinary Docker
+  socket keeps its Mac folder-sharing rules.
+- On Windows, use a separate local Docker engine. The Podbag app's WSL transport
+  does not expose a Docker socket for Kind.
+
+**Rootful Linux Podbag provider**
+
+- Point the Docker CLI at an already configured local Podbag Unix socket. The engine needs
+  cgroup v2 and dual-stack IPv4 and IPv6 bridge support. Start Desktop with
+  `PODBAG_KUBERNETES_NATIVE=1` to create a cluster on that engine.
+- The kernel must meet the kubelet's protected defaults. These include
+  `vm.overcommit_memory=1`, `kernel.panic=10`, and `kernel.panic_on_oops=1`. Configure
+  the engine host separately. Desktop uses `protectKernelDefaults` so the kubelet
+  checks these settings during startup.
+- The engine host must provide `/dev/kmsg`. Each Kind node receives a read-only mount of
+  this device. The Kubernetes pods use the containerd bundled in the Kind nodes.
+
 #### Image security analysis
 
 Open an image's **Security** tab and select **Scan image** to see installed packages and

@@ -448,6 +448,23 @@ fn labels_on_networks_and_volumes() {
 }
 
 #[test]
+fn docker_network_list_can_match_an_exact_name() {
+    let _turn = network_turn();
+    let s = bare();
+    s.ok(&["network", "create", "kind.local"]);
+    s.ok(&["network", "create", "kind.local-extra"]);
+    let names = s.lines(&[
+        "network",
+        "ls",
+        "--filter",
+        r"name=^kind\.local$",
+        "--format",
+        "{{.Name}}",
+    ]);
+    assert_eq!(names, ["kind.local"]);
+}
+
+#[test]
 fn label_filters_in_every_form() {
     let _turn = network_turn();
     let s = bare();

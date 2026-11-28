@@ -44,7 +44,28 @@ pub struct Snapshot {
 }
 
 pub(super) fn kubectl_command() -> Result<Command, String> {
-    let cmd = Command::new("kubectl");
+    let mut command = host_command("kubectl")?;
+    if let Some(config) = super::local_kubernetes::kubeconfig() {
+        let mut paths: Vec<_> = std::env::var_os("KUBECONFIG")
+            .filter(|value| !value.is_empty())
+            .map(|value| std::env::split_paths(&value).collect())
+            .unwrap_or_else(|| {
+                std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+                    .map(|home| std::path::PathBuf::from(home).join(".kube").join("config"))
+                    .into_iter()
+                    .collect()
+            });
+        paths.push(config);
+        command.env(
+            "KUBECONFIG",
+            std::env::join_paths(paths).map_err(|e| e.to_string())?,
+        );
+    }
+    Ok(command)
+}
+
+pub(super) fn host_command(program: &str) -> Result<Command, String> {
+    let cmd = Command::new(program);
     #[cfg(any(target_os = "macos", windows))]
     let mut cmd = cmd;
     // Apps launched from Finder do not inherit the user's shell PATH.

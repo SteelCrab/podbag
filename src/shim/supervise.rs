@@ -101,6 +101,8 @@ struct Io {
     outputs: Vec<Output>,
     /// The terminal's controlling side, kept open for the container's life.
     master: Option<OwnedFd>,
+    /// The slave can be closed by PID 1 and reopened by name without ending output.
+    terminal_slave: Option<OwnedFd>,
     /// With `-t`: where the terminal arrives, whether the caller is attached, and `-i`.
     terminal_from: Option<(OwnedFd, bool, bool)>,
 }
@@ -128,6 +130,7 @@ impl Io {
                 child_ends: vec![child_end],
                 outputs: Vec::new(),
                 master: None,
+                terminal_slave: None,
                 terminal_from: Some((shim_end, attached, spec.interactive)),
             });
         }
@@ -175,6 +178,7 @@ impl Io {
                 },
             ],
             master: None,
+            terminal_slave: None,
             terminal_from: None,
         })
     }
@@ -191,6 +195,13 @@ impl Io {
                 "report this bug",
             )
         })?;
+        self.terminal_slave = Some(linux::pty::recv_fd(socket.as_raw_fd()).map_err(|e| {
+            Error::io(
+                "cannot receive the container terminal's slave",
+                &e,
+                "report this bug",
+            )
+        })?);
         // A terminal of the caller's own is the better guess (the container's init set
         // the size the settings ask for).
         if attached {
@@ -657,7 +668,10 @@ pub(super) fn run(
         // The listener, the lock and the output go to the keeper; this process ends.
         let mut fds = vec![listener.as_raw_fd(), lock.as_raw_fd()];
         match &io.master {
-            Some(master) => fds.push(master.as_raw_fd()),
+            Some(master) => {
+                fds.push(master.as_raw_fd());
+                fds.extend(io.terminal_slave.iter().map(|fd| fd.as_raw_fd()));
+            }
             None => fds.extend(io.outputs.iter().map(|o| o.fd.as_raw_fd())),
         }
         return match crate::keeper::handover::send(dirs, id, child.pid, spec.tty, &fds) {
@@ -875,6 +889,9 @@ fn serve(
     let mut probe_fd: Option<OwnedFd> = None;
 
     loop {
+        if exit.is_some() {
+            drop(io.terminal_slave.take());
+        }
         if exit.is_some()
             && (io.outputs.is_empty() || drain_until.is_some_and(|d| Instant::now() >= d))
         {

@@ -119,6 +119,10 @@ fn entries(d: &Desktop) -> Vec<Entry> {
         ),
         section("engine", &["settings.search.terms.engine"]),
         section("builders", &["settings.search.terms.builders"]),
+        section(
+            super::local_kubernetes::SECTION,
+            &["nav.kubernetes", "kube.localVersion", "kube.localNodes"],
+        ),
         section("notifications", &["settings.search.terms.notifications"]),
         entry(
             "notifications.status",
@@ -227,13 +231,14 @@ fn entries(d: &Desktop) -> Vec<Entry> {
 }
 
 /// The name's key of a section.
-fn section_key(key: &'static str) -> &'static str {
+pub(super) fn section_key(key: &'static str) -> &'static str {
     match key {
         "engine" => "settings.engine",
         "network" => "settings.network",
         "registryProxy" => "settings.registryProxy",
         "notifications" => "settings.notifications",
         "builders" => "settings.builders",
+        super::local_kubernetes::SECTION => "kube.localTitle",
         "vmStorage" => "settings.vmStorage",
         "vm" => "settings.vm",
         "syncShares" => "settings.syncShares",

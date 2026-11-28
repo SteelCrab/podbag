@@ -1,9 +1,42 @@
 //! Workloads and storage of a kubeconfig context, through `kubectl`.
 
 use podbag::dashboard::kubernetes;
+use podbag::dashboard::local_kubernetes;
 use std::collections::BTreeMap;
 
 pub use podbag::dashboard::kubernetes::{Resource, Snapshot, route_url};
+pub use podbag::dashboard::local_kubernetes::{LocalCluster, Provider};
+
+pub enum LocalAction {
+    Create {
+        version: Option<String>,
+        nodes: u8,
+        managed_vm: bool,
+    },
+    Reset(String),
+    Remove(String),
+}
+
+pub fn local_status() -> Result<Option<LocalCluster>, String> {
+    local_kubernetes::status()
+}
+
+pub fn local_change(action: LocalAction) -> Result<Option<LocalCluster>, String> {
+    match action {
+        LocalAction::Create {
+            version,
+            nodes,
+            managed_vm: true,
+        } => local_kubernetes::create_on_vm(version, nodes).map(Some),
+        LocalAction::Create {
+            version,
+            nodes,
+            managed_vm: false,
+        } => local_kubernetes::create(version, nodes).map(Some),
+        LocalAction::Reset(context) => local_kubernetes::reset_context(&context).map(Some),
+        LocalAction::Remove(context) => local_kubernetes::remove_context(&context).map(|()| None),
+    }
+}
 
 /// The contexts of the kubeconfig.
 pub fn contexts() -> Result<Vec<String>, String> {

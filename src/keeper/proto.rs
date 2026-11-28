@@ -58,7 +58,7 @@ pub enum Reply {
 
 /// A starter gives a running detached container to the keeper (its parent). The
 /// descriptors beside it, in order: the control listener, the shim lock, then the output
-/// (stdout and stderr pipes, or the terminal's controlling side with `tty`).
+/// (stdout and stderr pipes, or the terminal's master and slave with `tty`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Handover {
     pub id: String,

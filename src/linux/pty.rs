@@ -261,3 +261,27 @@ impl Drop for RawMode {
         unsafe { libc::tcsetattr(self.fd, libc::TCSANOW, &self.saved) };
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::fd::AsRawFd;
+
+    #[test]
+    fn tty_master_only_hangs_up_after_the_last_slave_closes() {
+        let (master, slave) = open(None).unwrap();
+        let keep_open = slave.try_clone().unwrap();
+        drop(slave);
+        let mut poll = libc::pollfd {
+            fd: master.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: a valid single pollfd and a nonblocking timeout.
+        assert_eq!(unsafe { libc::poll(&mut poll, 1, 0) }, 0);
+        drop(keep_open);
+        // SAFETY: the same pollfd still points to an open master.
+        assert_eq!(unsafe { libc::poll(&mut poll, 1, 0) }, 1);
+        assert_ne!(poll.revents & libc::POLLHUP, 0);
+    }
+}
