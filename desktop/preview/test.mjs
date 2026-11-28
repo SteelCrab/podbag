@@ -201,7 +201,8 @@ async function main() {
     await once(server, "listening");
     const origin = `http://127.0.0.1:${server.address().port}`;
     browser = startChrome(profile);
-    cdp = await connect(await timeout(browser.debuggerUrl, 15_000, "Chrome did not start DevTools"));
+    // A first Chrome start on a busy CI runner can take well over 15 seconds.
+    cdp = await connect(await timeout(browser.debuggerUrl, 60_000, "Chrome did not start DevTools"));
 
     let passed = 0;
     for (const file of tests) {
