@@ -304,7 +304,19 @@ fn provision(
     if let Some(version) = &record.version {
         command.args(["--image", &format!("kindest/node:{version}")]);
     }
-    run(&mut command)?;
+    #[cfg(all(test, target_os = "macos"))]
+    let capture = record.provider == Provider::PodbagVm
+        && std::env::var_os("PODBAG_TEST_KIND_DIAGNOSTICS").is_some();
+    #[cfg(all(test, target_os = "macos"))]
+    if capture {
+        command.arg("--retain");
+    }
+    let created = run(&mut command);
+    #[cfg(all(test, target_os = "macos"))]
+    if capture && created.is_err() {
+        tests::report_failed_control_plane(&host.socket, &record.name);
+    }
+    created?;
     if !dir.join("kubeconfig").is_file() {
         return Err("kind returned without creating a kubeconfig".into());
     }
@@ -729,6 +741,42 @@ mod tests {
             cleanup.unwrap();
         }
         assert!(read(dir.path()).unwrap().is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn report_failed_control_plane(host: &str, name: &str) {
+        let node = format!("{name}-control-plane");
+        let exec = |args: &[&str]| {
+            run(docker_command("docker", host)?
+                .args(["exec", "--privileged", &node])
+                .args(args))
+        };
+        let report = |args: &[&str]| {
+            eprintln!("== {} on {node}", args.join(" "));
+            match exec(args) {
+                Ok(output) => eprintln!("{}", output.trim_end()),
+                Err(error) => eprintln!("{error}"),
+            }
+        };
+
+        report(&[
+            "journalctl",
+            "--no-pager",
+            "--lines=100",
+            "--unit=kubelet",
+            "--unit=containerd",
+        ]);
+        report(&["crictl", "ps", "--all"]);
+        for component in ["etcd", "kube-apiserver"] {
+            match exec(&["crictl", "ps", "--all", "--name", component, "--quiet"]) {
+                Ok(ids) => {
+                    for id in ids.lines().take(2) {
+                        report(&["crictl", "logs", "--tail=60", id]);
+                    }
+                }
+                Err(error) => eprintln!("{component} logs: {error}"),
+            }
+        }
     }
 
     #[cfg(target_os = "macos")]

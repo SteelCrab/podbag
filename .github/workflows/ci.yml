@@ -343,6 +343,8 @@ jobs:
           vm_stop_ends_the_standby
       - name: Run the Desktop Kubernetes lifecycle in a private VM
         timeout-minutes: 25
+        env:
+          PODBAG_VM_CPUS: 3
         run: dev/ci/macos-local-kubernetes.sh target/release/podbag
       - name: VM logs
         if: failure()

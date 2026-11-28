@@ -37,6 +37,7 @@ export PODBAG_MAC_HOME="$scratch/engine" PODBAG_UI_DIR="$scratch/desktop"
 export PODBAG_VM_CPUS="${PODBAG_VM_CPUS:-2}" PODBAG_VM_MEMORY=6144 PODBAG_VM_IDLE=0
 export KUBECONFIG="$scratch/external-kubeconfig" DOCKER_CONFIG="$scratch/docker-config"
 export DOCKER_HOST="unix://$scratch/unused.sock"
+export PODBAG_TEST_KIND_DIAGNOSTICS=1
 unset DOCKER_CONTEXT DOCKER_TLS DOCKER_TLS_VERIFY DOCKER_CERT_PATH DOCKER_API_VERSION
 unset KIND_EXPERIMENTAL_DOCKER_NETWORK
 
