@@ -55,6 +55,14 @@ try {
         $value = Get-MsiProperty $Out $name
         if ($value -ne $want[$name]) { throw "$name is '$value', want '$($want[$name])'" }
     }
+    # The earlier Tauri MSIs register as language neutral.
+    $upgrade = @(Get-MsiRows $Out "SELECT ``UpgradeCode``, ``VersionMax``, ``Language``, ``Attributes`` FROM ``Upgrade`` WHERE ``ActionProperty`` = 'WIX_UPGRADE_DETECTED'")
+    if ($upgrade.Count -ne 1) { throw 'Expected one MSI upgrade rule' }
+    $upgradeCode, $maxVersion, $language, $attributes = $upgrade[0] -split "`t"
+    if ($upgradeCode -ne $PodbagUpgradeCode -or $maxVersion -ne $version -or
+        $language -ne '' -or (([int]$attributes -band 512) -eq 0)) {
+        throw "Upgrade rule must also replace language-neutral installs up to and including $version. Found $upgrade"
+    }
     $template = Get-MsiTemplate $Out
     $wantTemplate = @{ x86_64 = 'x64;1033'; aarch64 = 'Arm64;1033' }[$Arch]
     if ($template -ne $wantTemplate) { throw "The platform is '$template', want '$wantTemplate'" }

@@ -61,7 +61,12 @@ Invoke-Msi i $msi install
 try {
     # One Podbag Desktop: the product of this .msi, in the folder of the earlier one.
     $products = @(Get-RelatedProducts)
-    if ($products.Count -ne 1) { throw "Want one Podbag Desktop product, found $($products.Count): $products" }
+    if ($products.Count -ne 1) {
+        Select-String -Path (Join-Path $env:TEMP "podbag-msi-$Arch-install.log") `
+            -Pattern 'FindRelatedProducts|RemoveExistingProducts|WIX_UPGRADE_DETECTED|WIX_DOWNGRADE_DETECTED' |
+            ForEach-Object { Write-Output $_.Line }
+        throw "Want one Podbag Desktop product, found $($products.Count): $products"
+    }
     $code = Get-MsiProperty $msi ProductCode
     if ($products[0] -ne $code) { throw "The installed product is $($products[0]), not $code of the new .msi" }
     if ($Previous -and $products[0] -eq $old[0]) { throw 'The previous product is still installed' }
