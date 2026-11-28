@@ -11,7 +11,7 @@
 use crate::training::LessonRecord;
 use podbag::client::{ContainerSummary, Port, VolumeSummary};
 use podbag::dashboard::lab::{Reply, Snapshot};
-use podbag::volume_lesson::course::{self, Check};
+use podbag::volume_lesson::course::{self, Check, Ui, UiAction};
 use podbag::volume_lesson::{Installed, Module, Package, catalog, parse_package};
 use serde_json::{Value, json};
 
@@ -78,11 +78,12 @@ enum Flavor {
     Course,
 }
 
-/// A step of a session; only a course step has a check.
+/// A step of a session; only a course step has a check, and may have a module `ui`.
 struct Step {
     key: String,
     command: Option<String>,
     check: Option<Check>,
+    ui: Option<Ui>,
 }
 
 impl Step {
@@ -91,6 +92,7 @@ impl Step {
             key: key.into(),
             command: None,
             check: None,
+            ui: None,
         }
     }
 }
@@ -205,6 +207,7 @@ impl Session {
                     "module": self.module, "session": self.id, "stage": key,
                     "command": self.step().and_then(|s| s.command.clone()),
                     "containers": self.containers, "volumes": self.volumes, "detail": detail,
+                    "ui": self.step().and_then(|s| s.ui.clone()), "text": null,
                     "web": web,
                     "stop": named(|c| match c {
                         Check::DesktopStop { name } => Some(name),
@@ -269,9 +272,34 @@ impl Session {
         self.at += 1;
     }
 
-    /// The window's action on a course step, as `course::view` allows it.
-    fn course_action(&mut self, action: &str, target: &str) -> Result<Option<Value>, String> {
+    /// The window's action on a course step, as `course::view` allows it: the inspect
+    /// JSON and the log text it shows.
+    fn course_action(
+        &mut self,
+        action: &str,
+        target: &str,
+    ) -> Result<(Option<Value>, Option<String>), String> {
         let check = self.check().cloned();
+        // A step with a module `ui`: the window sends the name. An inspect of another
+        // listed volume only shows it, below.
+        let ui = self.step().and_then(|s| s.ui.clone()).filter(|ui| {
+            ui.action.as_str() == action
+                && !(ui.action == UiAction::Inspect
+                    && ui.name != target
+                    && self.volumes.iter().any(|v| v.name == target))
+        });
+        if let Some(ui) = ui {
+            if ui.name != target {
+                return Err(format!("This step is {action} {}.", ui.name));
+            }
+            let shown = match ui.action {
+                UiAction::Logs => (None, Some(logs(target, check.as_ref()))),
+                UiAction::Inspect => (Some(self.inspect_named(target)), None),
+                _ => (None, None),
+            };
+            self.advance();
+            return Ok(shown);
+        }
         let id_of = |s: &Session, name: &str| {
             s.row(name)
                 .map(|c| (c.id.clone(), c.state.clone()))
@@ -296,15 +324,42 @@ impl Session {
                 if matches!(&check, Some(Check::DesktopInspectVolume { name }) if name == target) {
                     self.advance();
                 }
-                return Ok(Some(inspect(self, target)));
+                return Ok((Some(inspect(self, target)), None));
             }
             ("remove", Some(Check::DesktopDeleteVolume { name })) if name == target => {
                 self.advance();
             }
             _ => return Err("This action is unavailable for the current practice step.".into()),
         }
-        Ok(None)
+        Ok((None, None))
     }
+
+    /// The inspect JSON of `name`: a container, a volume, else a network.
+    fn inspect_named(&self, name: &str) -> Value {
+        if let Some(c) = self.row(name) {
+            return json!({
+                "Id": c.id, "Name": format!("/{name}"), "Image": c.image,
+                "State": { "Status": c.state },
+            });
+        }
+        if self.volumes.iter().any(|v| v.name == name) {
+            return inspect(self, name);
+        }
+        json!({
+            "Name": name, "Id": format!("{:0>12x}", name.len() * 7919), "Driver": "bridge",
+            "Scope": "local",
+            "IPAM": { "Config": [{ "Subnet": "10.89.0.0/24", "Gateway": "10.89.0.1" }] },
+        })
+    }
+}
+
+/// The log text of the container `name`: it has the line an output check wants.
+fn logs(name: &str, check: Option<&Check>) -> String {
+    let line = match check {
+        Some(Check::OutputHasLine { text } | Check::OutputContains { text }) => text.as_str(),
+        _ => "ready",
+    };
+    format!("starting {name}\n{line}")
 }
 
 /// The inspect JSON of the session's volume `name`.
@@ -499,8 +554,10 @@ impl Training {
         }
         let target = name.unwrap_or_default();
         if s.flavor == Flavor::Course {
-            let detail = s.course_action(action, target)?;
-            return Ok(s.snapshot(detail));
+            let (detail, text) = s.course_action(action, target)?;
+            let mut v = s.snapshot(detail);
+            v["text"] = text.into();
+            return Ok(v);
         }
         let key = s.key().to_string();
         let mut detail = None;
@@ -556,6 +613,7 @@ impl Training {
                         key: s.key.clone(),
                         command: s.command(port),
                         check: Some(s.check.with_port(port)),
+                        ui: s.ui.as_ref().map(|ui| ui.with_port(port)),
                     })
                     .collect();
                 (Flavor::Course, steps, port)
@@ -756,6 +814,50 @@ mod tests {
             .unwrap();
         assert_eq!(stage(&s), "readRecoveryLogs");
         assert!(s["inspect_container"].is_null());
+    }
+
+    #[test]
+    fn a_module_ui_step_is_done_in_the_window_by_name() {
+        let mut t = Training::default();
+        t.practice("start", None, Some("web-service-recovery"), false, false)
+            .unwrap();
+        t.practice("advance", None, None, false, true).unwrap();
+        let s = t.practice("status", None, None, false, true).unwrap();
+        let session = s["session"].as_str().unwrap().to_string();
+        let id = s["containers"][0]["Id"].as_str().unwrap().to_string();
+        t.practice("inspect-failed", Some(&session), Some(&id), false, true)
+            .unwrap();
+        let s = t.practice("status", None, None, false, true).unwrap();
+        assert_eq!(stage(&s), "readRecoveryLogs");
+        assert_eq!(s["ui"], json!({ "action": "logs", "name": "lab-web" }));
+        assert!(s["text"].is_null());
+        // The name, not the ID; and only the step's own action.
+        let wrong = t.practice("logs", Some(&session), Some(&id), false, true);
+        assert_eq!(wrong.unwrap_err(), "This step is logs lab-web.");
+        assert!(
+            t.practice("remove", Some(&session), Some("lab-web"), false, true)
+                .is_err()
+        );
+        let s = t
+            .practice("logs", Some(&session), Some("lab-web"), false, true)
+            .unwrap();
+        assert_eq!(stage(&s), "removeFailed");
+        assert!(
+            s["text"]
+                .as_str()
+                .unwrap()
+                .contains("SITE_TITLE is required")
+        );
+        assert_eq!(s["ui"], json!({ "action": "remove", "name": "lab-web" }));
+        let s = t
+            .practice("remove", Some(&session), Some("lab-web"), false, true)
+            .unwrap();
+        assert_eq!(
+            (stage(&s), s["containers"].clone()),
+            ("runFixed", json!([]))
+        );
+        // A step without a `ui` has none.
+        assert!(s["ui"].is_null());
     }
 
     #[test]

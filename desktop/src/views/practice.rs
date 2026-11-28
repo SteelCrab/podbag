@@ -14,8 +14,8 @@ use serde_json::Value;
 use crate::app::{Desktop, Page};
 use crate::dialogs::{Dialog, Then};
 use crate::icons::Icon;
-use crate::views::blocks::{Buttons, card, code_box, heading, small, spawn, text};
-use crate::views::training::{self, Flavor, practice_state, start_command, title_of};
+use crate::views::blocks::{Buttons, card, code_box, heading, pre, small, spawn, text};
+use crate::views::training::{self, Flavor, StepUi, practice_state, start_command, title_of};
 use crate::views::{TOOLBAR_H, field, fields, pill};
 
 const POLL: Duration = Duration::from_millis(800);
@@ -25,6 +25,31 @@ pub const GUIDE: Id = Id(0x7072_6163_7402);
 pub const DETAIL_BACK: Id = Id(0x7072_6163_7403);
 pub const OPEN_WEB: Id = Id(0x7072_6163_7404);
 pub const VIEW_PORTS: Id = Id(0x7072_6163_7405);
+/// The toolbar button of a module `ui` step whose action has no row on the page.
+pub const STEP: Id = Id(0x7072_6163_7406);
+/// The action in the header of the container or volume shown.
+pub const DETAIL_ACTION: Id = Id(0x7072_6163_7407);
+
+/// The row buttons of a module `ui` step: on the row its `name` names.
+const ROW_STEPS: [(&str, Icon, &str); 7] = [
+    ("start", Icon::Start, "action.start"),
+    ("stop", Icon::Stop, "action.stop"),
+    ("restart", Icon::Restart, "action.restart"),
+    ("pause", Icon::Pause, "action.pause"),
+    ("resume", Icon::Start, "action.resume"),
+    ("remove", Icon::Remove, "action.remove"),
+    ("logs", Icon::Logs, "action.logs"),
+];
+
+/// The toolbar buttons of a module `ui` step.
+const TOOLBAR_STEPS: [(&str, Icon); 6] = [
+    ("pull", Icon::Pull),
+    ("remove-image", Icon::Remove),
+    ("create-volume", Icon::Volumes),
+    ("remove-network", Icon::Remove),
+    ("prune", Icon::Prune),
+    ("inspect", Icon::Inspect),
+];
 
 /// A row of the practice list (`row.with("remove")`, `row.with("stop")`).
 pub fn row_id(i: usize) -> Id {
@@ -40,12 +65,33 @@ pub struct PracticeState {
     pub volume: Option<Value>,
     /// The container shown (its id).
     pub container: Option<String>,
+    /// The text of a logs step.
+    pub log: Option<StepLog>,
+    /// The result of the toolbar's inspect step.
+    pub inspected: Option<Inspected>,
     pub busy: bool,
     polling: bool,
     poll_at: Option<Instant>,
     /// Polls of an earlier page do not count.
     generation: u64,
     pub scroll: ScrollState,
+}
+
+/// The text of a logs step: shown only under the container `id`, and dropped when the
+/// step moves on from `stage` or the container is gone.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StepLog {
+    pub id: String,
+    pub stage: String,
+    pub text: String,
+}
+
+/// The result of the toolbar's inspect step (a network or a volume): dropped when the
+/// step moves on from `stage`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Inspected {
+    pub stage: String,
+    pub detail: Value,
 }
 
 fn shown(d: &Desktop) -> Option<Flavor> {
@@ -75,6 +121,21 @@ fn session(d: &Desktop) -> Option<String> {
 
 fn is_course(d: &Desktop) -> bool {
     state(d).is_some_and(|s| s["module"].is_string())
+}
+
+/// The current step's module `ui`, in a course session.
+fn step_ui(s: &Value) -> Option<StepUi> {
+    s["module"]
+        .is_string()
+        .then(|| StepUi::of(&s["ui"]))
+        .flatten()
+}
+
+/// The step's row button on the row named `name`: its action, icon and label.
+fn row_step(s: &Value, name: &str) -> Option<(StepUi, Icon, &'static str)> {
+    let ui = step_ui(s).filter(|ui| ui.name == name)?;
+    let (_, icon, label) = ROW_STEPS.iter().find(|(a, ..)| *a == ui.action)?;
+    Some((ui, *icon, label))
 }
 
 pub fn entered(d: &mut Desktop) {
@@ -120,6 +181,23 @@ pub fn poll(d: &mut Desktop) {
                             .map_or(Value::Null, |s| s["session"].clone());
                     if !same {
                         p.container = None;
+                        p.log = None;
+                        p.inspected = None;
+                    }
+                    let stage = next["stage"].as_str().unwrap_or_default();
+                    if p.inspected.as_ref().is_some_and(|i| i.stage != stage) {
+                        p.inspected = None;
+                    }
+                    let listed = |id: &str| {
+                        next["containers"]
+                            .as_array()
+                            .is_some_and(|a| a.iter().any(|c| c["Id"] == id))
+                    };
+                    if p.log
+                        .as_ref()
+                        .is_some_and(|l| l.stage != stage || !listed(&l.id))
+                    {
+                        p.log = None;
                     }
                     let keep = p.volume.as_ref().is_some_and(|v| {
                         same && next["volumes"]
@@ -198,6 +276,227 @@ fn ask_remove(d: &mut Desktop, name: String, session: String) {
     let text = d.tv("confirm.removeVolume", &[("name", &name)]);
     let dialog = Dialog::confirm(&d.tr, text, None, Then::PracticeRemove { name, session });
     d.open_dialog(dialog);
+}
+
+/// Do the module `ui` step: ask first when it removes something (`running`: the
+/// container to remove is up).
+fn ask_step(d: &mut Desktop, ui: StepUi, session: String, running: bool) {
+    let name = ui.name.as_str();
+    let (key, yes) = match ui.action.as_str() {
+        "remove" if running => ("confirm.removeRunning", None),
+        "remove" => ("confirm.removeContainer", None),
+        "remove-image" => ("confirm.removeImage", None),
+        "remove-network" => ("confirm.removeNetwork", None),
+        "remove-volume" => ("confirm.removeVolume", None),
+        "prune" => (
+            match name {
+                "images" => "confirm.pruneImages",
+                "volumes" => "confirm.pruneVolumes",
+                "networks" => "confirm.pruneNetworks",
+                _ => "confirm.pruneContainers",
+            },
+            Some(d.t("action.prune")),
+        ),
+        _ => return step(d, ui.action, ui.name, session),
+    };
+    let text = d.tv(key, &[("name", name)]);
+    let then = Then::PracticeStep {
+        action: ui.action,
+        name: ui.name,
+        session,
+    };
+    d.open_dialog(Dialog::confirm(&d.tr, text, yes, then));
+}
+
+/// Do the module `ui` step `action` on `name` (never an ID) in the course session
+/// `session`. A logs step's text and a toolbar inspect's details stay on the page while
+/// the session is at the step the reply came back with.
+pub fn step(d: &mut Desktop, action: String, name: String, session: String) {
+    if shown(d).is_none()
+        || d.practice.busy
+        || self::session(d).as_deref() != Some(session.as_str())
+    {
+        return;
+    }
+    d.practice.busy = true;
+    let generation = d.practice.generation;
+    let (a, n, s) = (action.clone(), name.clone(), session.clone());
+    spawn(
+        d,
+        move |api| api.practice(&a, Some(&s), Some(&n), false, true),
+        move |d, r| {
+            d.practice.busy = false;
+            if generation != d.practice.generation {
+                return;
+            }
+            match r {
+                Ok(next) if next["session"] == session.as_str() => {
+                    let stage = next["stage"].as_str().unwrap_or_default().to_string();
+                    let row = next["containers"]
+                        .as_array()
+                        .and_then(|a| a.iter().find(|c| container_name(c) == name))
+                        .and_then(|c| c["Id"].as_str())
+                        .map(str::to_string);
+                    let p = &mut d.practice;
+                    if action == "logs"
+                        && let (Some(text), Some(id)) = (next["text"].as_str(), row.clone())
+                    {
+                        p.log = Some(StepLog {
+                            id: id.clone(),
+                            stage,
+                            text: text.to_string(),
+                        });
+                        p.container = Some(id);
+                    } else if action == "inspect" && row.is_none() && next["detail"].is_object() {
+                        p.inspected = Some(Inspected {
+                            stage,
+                            detail: next["detail"].clone(),
+                        });
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => d.toasts.push(e, true),
+            }
+            d.practice.polling = false;
+            poll(d);
+        },
+    );
+}
+
+/// The debug `lab step`: the module `ui` step, or the open of the failed container.
+pub fn debug_step(d: &mut Desktop) {
+    let Some(s) = state(d).cloned() else { return };
+    let session = s["session"].as_str().unwrap_or_default().to_string();
+    if let Some(u) = step_ui(&s) {
+        return step(d, u.action, u.name, session);
+    }
+    let failed = s["containers"].as_array().and_then(|a| {
+        a.iter()
+            .find(|c| s["inspect_container"] == container_name(c).as_str())
+    });
+    if let Some(c) = failed.cloned() {
+        open_container(d, &s, &c, session);
+    }
+}
+
+/// The toolbar button of the module `ui` step, when its action has no row on the page
+/// (`rows`: the names of the page's rows). Returns the height.
+fn step_button(
+    d: &mut Desktop,
+    ui: &mut Ui,
+    x: f32,
+    y: f32,
+    w: f32,
+    s: &Value,
+    rows: &[String],
+) -> f32 {
+    let Some(step_ui) = step_ui(s) else { return 0. };
+    let Some((_, icon)) = TOOLBAR_STEPS.iter().find(|(a, _)| *a == step_ui.action) else {
+        return 0.;
+    };
+    if step_ui.action == "inspect" && rows.contains(&step_ui.name) {
+        return 0.;
+    }
+    let label = d.tv(
+        &format!("training.ui.button.{}", step_ui.action),
+        &[("name", &step_ui.name)],
+    );
+    let mut row = Buttons::new(x, y, w);
+    let busy = d.practice.busy;
+    if row.add(ui, STEP, &label, Some(*icon), ButtonKind::Normal, !busy) {
+        let session = s["session"].as_str().unwrap_or_default().to_string();
+        ask_step(d, step_ui, session, false);
+    }
+    row.height(y) + 16.
+}
+
+/// The details the toolbar's inspect step showed: a volume or a network. Returns the
+/// height.
+fn inspected(d: &mut Desktop, ui: &mut Ui, x: f32, y0: f32, w: f32) -> f32 {
+    let Some(Inspected { detail: v, .. }) = d.practice.inspected.clone() else {
+        return 0.;
+    };
+    let mut y = y0;
+    let name = v["Name"].as_str().unwrap_or_default();
+    y += heading(ui, x, y, w, name, 16.) + 10.;
+    let rows = if v["Mountpoint"].is_string() {
+        volume_fields(d, &v)
+    } else {
+        let ipam = &v["IPAM"]["Config"][0];
+        vec![
+            field(d.t("col.name"), name, false),
+            field(
+                d.t("col.id"),
+                v["Id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .chars()
+                    .take(12)
+                    .collect::<String>(),
+                true,
+            ),
+            field(
+                d.t("col.driver"),
+                v["Driver"].as_str().unwrap_or_default(),
+                false,
+            ),
+            field(
+                d.t("col.subnet"),
+                ipam["Subnet"].as_str().unwrap_or_default(),
+                true,
+            ),
+            field(
+                d.t("detail.gateway"),
+                ipam["Gateway"].as_str().unwrap_or_default(),
+                true,
+            ),
+        ]
+    };
+    let none = d.t("detail.none");
+    y += card(
+        ui,
+        Id::of("practice-inspected"),
+        x,
+        y,
+        w.min(780.),
+        |ui, x, y, w| {
+            fields(
+                ui,
+                Id::of("practice-inspected-fields"),
+                x,
+                y,
+                w,
+                &rows,
+                &none,
+            )
+        },
+    ) + 16.;
+    y - y0
+}
+
+fn volume_fields(d: &Desktop, v: &Value) -> Vec<crate::views::Field> {
+    vec![
+        field(
+            d.t("col.name"),
+            v["Name"].as_str().unwrap_or_default(),
+            false,
+        ),
+        field(
+            d.t("col.driver"),
+            v["Driver"].as_str().unwrap_or_default(),
+            false,
+        ),
+        field(
+            d.t("detail.path"),
+            v["Mountpoint"].as_str().unwrap_or_default(),
+            true,
+        ),
+        field(
+            d.t("col.created"),
+            v["CreatedAt"].as_str().unwrap_or_default(),
+            false,
+        ),
+    ]
 }
 
 fn container_name(c: &Value) -> String {
@@ -382,13 +681,25 @@ fn volumes(d: &mut Desktop, ui: &mut Ui, x: f32, y0: f32, w: f32, s: &Value) -> 
     let session = s["session"].as_str().unwrap_or_default().to_string();
     let course = s["module"].is_string();
     let stage = s["stage"].as_str().unwrap_or_default();
+    // The module `ui` step that removes the row's volume.
+    let step_removes =
+        |name: &str| step_ui(s).filter(|u| u.action == "remove-volume" && u.name == name);
     let can_remove = |name: &str| {
         if course {
-            s["remove_volume"] == name
+            s["remove_volume"] == name || step_removes(name).is_some()
         } else {
             name != "my-api" || stage == "remove"
         }
     };
+    let remove = |d: &mut Desktop, name: String| match step_removes(&name) {
+        Some(u) => ask_step(d, u, session.clone(), false),
+        None => ask_remove(d, name, session.clone()),
+    };
+    let list = s["volumes"].as_array().cloned().unwrap_or_default();
+    let rows: Vec<String> = list
+        .iter()
+        .filter_map(|v| v["Name"].as_str().map(str::to_string))
+        .collect();
     let remove_label = d.t("action.remove");
     let mut y = y0;
     if let Some(v) = d.practice.volume.clone() {
@@ -409,34 +720,19 @@ fn volumes(d: &mut Desktop, ui: &mut Ui, x: f32, y0: f32, w: f32, s: &Value) -> 
         heading(ui, x + 40., y + 3., w - 90., &name, 16.);
         if button::icon_button(
             ui,
-            Id::of("practice-detail-remove"),
+            DETAIL_ACTION,
             Rect::new(x + w - 30., y, 30., 30.),
             Icon::Remove.id(),
             &remove_label,
             IconKind::Danger,
             can_remove(&name),
         ) {
-            ask_remove(d, name.clone(), session.clone());
+            remove(d, name.clone());
         }
         y += 46.;
-        let rows = vec![
-            field(d.t("col.name"), name.clone(), false),
-            field(
-                d.t("col.driver"),
-                v["Driver"].as_str().unwrap_or_default(),
-                false,
-            ),
-            field(
-                d.t("detail.path"),
-                v["Mountpoint"].as_str().unwrap_or_default(),
-                true,
-            ),
-            field(
-                d.t("col.created"),
-                v["CreatedAt"].as_str().unwrap_or_default(),
-                false,
-            ),
-        ];
+        y += step_button(d, ui, x, y, w, s, &rows);
+        y += inspected(d, ui, x, y, w);
+        let fields_of = volume_fields(d, &v);
         let none = d.t("detail.none");
         y += card(
             ui,
@@ -444,11 +740,22 @@ fn volumes(d: &mut Desktop, ui: &mut Ui, x: f32, y0: f32, w: f32, s: &Value) -> 
             x,
             y,
             w.min(780.),
-            |ui, x, y, w| fields(ui, Id::of("practice-volume-fields"), x, y, w, &rows, &none),
+            |ui, x, y, w| {
+                fields(
+                    ui,
+                    Id::of("practice-volume-fields"),
+                    x,
+                    y,
+                    w,
+                    &fields_of,
+                    &none,
+                )
+            },
         );
         return y - y0;
     }
-    let list = s["volumes"].as_array().cloned().unwrap_or_default();
+    y += step_button(d, ui, x, y, w, s, &rows);
+    y += inspected(d, ui, x, y, w);
     if list.is_empty() {
         y += text(ui, x, y, w, &d.t("empty.volumes.title"), t.muted) + 8.;
         return y - y0;
@@ -481,7 +788,7 @@ fn volumes(d: &mut Desktop, ui: &mut Ui, x: f32, y0: f32, w: f32, s: &Value) -> 
         let (open, acted) = list_row(ui, row_id(i), Rect::new(x, y, w, 44.), &cols, None, action);
         y += 44.;
         if acted {
-            ask_remove(d, name, session.clone());
+            remove(d, name);
         } else if open {
             act(d, "inspect", name, session.clone());
         }
@@ -502,7 +809,28 @@ fn containers(d: &mut Desktop, ui: &mut Ui, x: f32, y0: f32, w: f32, s: &Value) 
         }
     };
     let stop_label = d.t("action.stop");
+    // The row's action: the module `ui` step on the row it names, else the step's Stop.
+    let row_action = |d: &Desktop, c: &Value| {
+        if let Some((u, icon, label)) = row_step(s, &container_name(c)) {
+            return Some((icon, d.t(label), !d.practice.busy, u.action == "remove"));
+        }
+        can_stop(c).then(|| (Icon::Stop, stop_label.clone(), !d.practice.busy, false))
+    };
+    let do_row = |d: &mut Desktop, c: &Value| match row_step(s, &container_name(c)) {
+        Some((u, ..)) => {
+            let up = matches!(
+                c["State"].as_str(),
+                Some("running" | "paused" | "restarting")
+            );
+            ask_step(d, u, session.clone(), up);
+        }
+        None => {
+            let id = c["Id"].as_str().unwrap_or_default().to_string();
+            act(d, "stop", id, session.clone());
+        }
+    };
     let list = s["containers"].as_array().cloned().unwrap_or_default();
+    let rows: Vec<String> = list.iter().map(container_name).collect();
     let mut y = y0;
     let shown = d
         .practice
@@ -523,23 +851,24 @@ fn containers(d: &mut Desktop, ui: &mut Ui, x: f32, y0: f32, w: f32, s: &Value) 
             true,
         ) {
             d.practice.container = None;
+            d.practice.log = None;
             return 0.;
         }
         heading(ui, x + 40., y + 3., w - 90., &name, 16.);
-        if can_stop(&c)
-            && button::icon_button(
-                ui,
-                Id::of("practice-detail-stop"),
-                Rect::new(x + w - 30., y, 30., 30.),
-                Icon::Stop.id(),
-                &stop_label,
-                IconKind::Plain,
-                !d.practice.busy,
-            )
-        {
-            act(d, "stop", id.clone(), session.clone());
+        if let Some((icon, label, enabled, danger)) = row_action(d, &c) {
+            let kind = if danger {
+                IconKind::Danger
+            } else {
+                IconKind::Plain
+            };
+            let b = Rect::new(x + w - 30., y, 30., 30.);
+            if button::icon_button(ui, DETAIL_ACTION, b, icon.id(), &label, kind, enabled) {
+                do_row(d, &c);
+            }
         }
         y += 46.;
+        y += step_button(d, ui, x, y, w, s, &rows);
+        y += inspected(d, ui, x, y, w);
         let state_text = c["State"].as_str().unwrap_or_default().to_string();
         let rows = vec![
             field(d.t("col.name"), name.clone(), false),
@@ -569,6 +898,9 @@ fn containers(d: &mut Desktop, ui: &mut Ui, x: f32, y0: f32, w: f32, s: &Value) 
                 &none,
             )
         }) + 16.;
+        if let Some(log) = d.practice.log.clone().filter(|l| l.id == id) {
+            y += pre(ui, Id::of("practice-log"), x, y, cw, &log.text) + 16.;
+        }
         let web = s["web"].clone();
         if web["container"] == name.as_str() {
             y += card(ui, Id::of("practice-ports"), x, y, cw, |ui, x, y0, w| {
@@ -606,6 +938,8 @@ fn containers(d: &mut Desktop, ui: &mut Ui, x: f32, y0: f32, w: f32, s: &Value) 
         }
         return y - y0;
     }
+    y += step_button(d, ui, x, y, w, s, &rows);
+    y += inspected(d, ui, x, y, w);
     if list.is_empty() {
         y += text(ui, x, y, w, &d.t("empty.containers.title"), t.muted) + 8.;
         return y - y0;
@@ -622,7 +956,6 @@ fn containers(d: &mut Desktop, ui: &mut Ui, x: f32, y0: f32, w: f32, s: &Value) 
     }
     y += 28.;
     for (i, c) in list.iter().enumerate() {
-        let id = c["Id"].as_str().unwrap_or_default().to_string();
         let state_key = c["State"].as_str().unwrap_or_default().to_string();
         let cols = [
             (container_name(c), 0.4, false),
@@ -632,7 +965,7 @@ fn containers(d: &mut Desktop, ui: &mut Ui, x: f32, y0: f32, w: f32, s: &Value) 
                 true,
             ),
         ];
-        let action = can_stop(c).then(|| (Icon::Stop, stop_label.clone(), !d.practice.busy, false));
+        let action = row_action(d, c);
         let label = d.t(&format!("state.{state_key}"));
         let (open, acted) = list_row(
             ui,
@@ -644,15 +977,26 @@ fn containers(d: &mut Desktop, ui: &mut Ui, x: f32, y0: f32, w: f32, s: &Value) 
         );
         y += 44.;
         if acted {
-            act(d, "stop", id, session.clone());
+            do_row(d, c);
         } else if open {
-            // Opening the failed container is the
-            // step that asks for it.
-            d.practice.container = Some(id.clone());
-            if s["inspect_container"] == container_name(c).as_str() {
-                act(d, "inspect-failed", id, session.clone());
-            }
+            open_container(d, s, c, session.clone());
         }
     }
     y - y0
+}
+
+/// Show the container. Opening it is the step that asks for it: the failed container's
+/// inspect, or a module `ui` inspect of it.
+fn open_container(d: &mut Desktop, s: &Value, c: &Value, session: String) {
+    let id = c["Id"].as_str().unwrap_or_default().to_string();
+    let name = container_name(c);
+    if d.practice.log.as_ref().is_some_and(|l| l.id != id) {
+        d.practice.log = None;
+    }
+    d.practice.container = Some(id.clone());
+    if step_ui(s).is_some_and(|u| u.action == "inspect" && u.name == name) {
+        step(d, "inspect".into(), name, session);
+    } else if s["inspect_container"] == name.as_str() {
+        act(d, "inspect-failed", id, session);
+    }
 }
