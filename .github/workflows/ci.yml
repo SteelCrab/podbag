@@ -134,11 +134,12 @@ jobs:
         env:
           PODBAG_TEST_BUILDKIT: '1'
         run: |
-          sudo apt-get install -y busybox-static openssh-client
+          sudo apt-get install -y busybox-static iptables openssh-client
           fixtures="$RUNNER_TEMP/podbag-buildkit"
           dev/ci/setup-buildkit.sh "$fixtures"
           # sudo uses its own PATH for the rootful matrix entry.
-          sudo install -m 0755 "$fixtures/"{buildctl,buildkitd,rootlesskit,runc} /usr/local/bin/
+          sudo install -m 0755 "$fixtures/"{buildctl,buildkitd,rootlesskit,runc} \
+            "$fixtures"/buildkit-cni-* /usr/local/bin/
           # Rootless BuildKit needs a private location for its trace socket.
           XDG_RUNTIME_DIR="$(mktemp -d "$RUNNER_TEMP/podbag-buildkit-runtime.XXXXXX")"
           export XDG_RUNTIME_DIR

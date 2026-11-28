@@ -42,10 +42,12 @@ fetch "$upstream/docker/buildx/releases/download/$buildx_version/buildx-$buildx_
 fetch "$upstream/rootless-containers/rootlesskit/releases/download/$rootlesskit_version/rootlesskit-$machine.tar.gz" "$rootlesskit_sum" rootlesskit.tar.gz
 fetch "$upstream/opencontainers/runc/releases/download/$runc_version/runc.$arch" "$runc_sum" runc
 
-tar -xzf "$downloads/buildkit.tar.gz" -C "$downloads" bin/buildctl bin/buildkitd
+# The rootful worker's bridge uses the CNI binaries from the same release.
+tar -xzf "$downloads/buildkit.tar.gz" -C "$downloads" \
+  bin/{buildctl,buildkitd,buildkit-cni-{bridge,firewall,host-local,loopback}}
 tar -xzf "$downloads/rootlesskit.tar.gz" -C "$downloads" rootlesskit
 mkdir -p "$destination"
-install -m 0755 "$downloads/bin/"{buildctl,buildkitd} "$downloads/"{buildx,rootlesskit,runc} "$destination"
+install -m 0755 "$downloads/bin/"* "$downloads/"{buildx,rootlesskit,runc} "$destination"
 
 "$destination/buildkitd" --version
 "$destination/buildx" version
