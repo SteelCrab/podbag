@@ -1,6 +1,6 @@
 //! `pull`, `images`, `load`, `save`, `rmi` and `system`.
 
-use crate::args::SystemCmd;
+use crate::args::{ConfigCmd, SystemCmd};
 use podbag::config::{self, ImageCompression};
 use podbag::image::human_size;
 use podbag::{Error, ErrorKind, Image};
@@ -33,6 +33,59 @@ pub fn load(input: Option<&std::path::Path>, quiet: bool) -> i32 {
                     println!("Loaded image ID: {id}");
                 }
             }
+            0
+        }
+        Err(e) => report(&e),
+    }
+}
+
+#[cfg(unix)]
+pub fn import(source: &str, options: podbag::image::ImportOptions) -> i32 {
+    let imported = match source {
+        "-" => Image::import(&mut std::io::stdin().lock(), options),
+        url if podbag::image::archive_url(url) => Image::import_url(url, options),
+        path => std::fs::File::open(path)
+            .map_err(|e| Error::io(format!("cannot open {path}"), &e, "check the path"))
+            .and_then(|mut file| Image::import(&mut file, options)),
+    };
+    match imported {
+        Ok(id) => {
+            println!("{id}");
+            0
+        }
+        Err(e) => report(&e),
+    }
+}
+
+#[cfg(unix)]
+pub fn history(name: &str, no_trunc: bool) -> i32 {
+    match Image::history(name) {
+        Ok(history) => {
+            let rows = history
+                .into_iter()
+                .map(|row| {
+                    let id = if no_trunc || row.id == "<missing>" {
+                        row.id
+                    } else {
+                        short_digest(&row.id)
+                    };
+                    let created = if row.created > 0 {
+                        podbag::shim::logbook::rfc3339(row.created as u64, 0)
+                    } else {
+                        "-".to_string()
+                    };
+                    let command = if no_trunc || row.created_by.chars().count() <= 45 {
+                        row.created_by
+                    } else {
+                        format!("{}…", row.created_by.chars().take(44).collect::<String>())
+                    };
+                    [id, created, command, human_size(row.size), row.comment]
+                })
+                .collect::<Vec<_>>();
+            print_table(
+                &["IMAGE", "CREATED", "CREATED BY", "SIZE", "COMMENT"],
+                &rows,
+            );
             0
         }
         Err(e) => report(&e),
@@ -128,8 +181,48 @@ pub fn rmi(names: &[String]) -> i32 {
     code
 }
 
+fn engine_config(cmd: ConfigCmd) -> podbag::Result<()> {
+    let invalid = |why: String| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            "cannot read engine configuration input",
+            why,
+            "send the original and edited text in the expected format",
+        )
+    };
+    let dirs = podbag::paths::dirs()?;
+    let document = match cmd {
+        ConfigCmd::Show => config::document(&dirs)?,
+        ConfigCmd::Check => {
+            let text = std::io::read_to_string(std::io::stdin().lock())
+                .map_err(|e| invalid(e.to_string()))?;
+            config::parse(&text)?;
+            return Ok(());
+        }
+        ConfigCmd::Apply => {
+            let edit = serde_json::from_reader(std::io::stdin().lock())
+                .map_err(|e| invalid(e.to_string()))?;
+            config::apply_edit(&dirs, edit)?
+        }
+    };
+    serde_json::to_writer(std::io::stdout().lock(), &document).map_err(|e| {
+        Error::new(
+            ErrorKind::Runtime,
+            "cannot write engine configuration output",
+            e.to_string(),
+            "check stdout",
+        )
+    })?;
+    println!();
+    Ok(())
+}
+
 pub fn system(cmd: SystemCmd) -> i32 {
     match cmd {
+        SystemCmd::Config { cmd } => match engine_config(cmd) {
+            Ok(()) => 0,
+            Err(e) => report(&e),
+        },
         SystemCmd::Df => match podbag::disk_usage() {
             Ok(u) => {
                 let rows = [
@@ -221,6 +314,25 @@ pub fn system(cmd: SystemCmd) -> i32 {
             }
             Err(e) => report(&e),
         },
+        SystemCmd::RegistryProxy { set } => {
+            use podbag::image::proxy;
+            let result = podbag::paths::dirs().and_then(|dirs| {
+                if set {
+                    let settings = proxy::read_json(std::io::stdin().lock())?;
+                    proxy::save(&dirs, settings)
+                } else {
+                    proxy::load(&dirs)
+                }
+            });
+            match result {
+                Ok(settings) => {
+                    // No credentials or inherited environment values are returned.
+                    println!("{}", serde_json::to_string(&settings).unwrap());
+                    0
+                }
+                Err(error) => report(&error),
+            }
+        }
         SystemCmd::Compression { mode, after, json } => {
             match compression(mode.as_deref(), after.as_deref()) {
                 Ok(c) if json => {
@@ -244,6 +356,16 @@ pub fn system(cmd: SystemCmd) -> i32 {
                 Err(e) => report(&e),
             }
         }
+        SystemCmd::NetworkSettings {
+            set,
+            expect_revision,
+        } => match network_settings(set.as_deref(), expect_revision.as_deref()) {
+            Ok(settings) => {
+                println!("{}", serde_json::json!(settings));
+                0
+            }
+            Err(e) => report(&e),
+        },
         SystemCmd::Prune { force: true } => match podbag::prune() {
             Ok(r) => {
                 println!(
@@ -256,6 +378,25 @@ pub fn system(cmd: SystemCmd) -> i32 {
             Err(e) => report(&e),
         },
     }
+}
+
+fn network_settings(
+    set: Option<&str>,
+    expected_revision: Option<&str>,
+) -> podbag::Result<podbag::network::NetworkSettings> {
+    let dirs = podbag::paths::dirs()?;
+    let Some(set) = set else {
+        return podbag::network::settings(&dirs);
+    };
+    let requested = serde_json::from_str(set).map_err(|error| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            "cannot read the requested network settings",
+            error.to_string(),
+            "pass the network preferences as a JSON object",
+        )
+    })?;
+    podbag::network::save_settings(&dirs, requested, expected_revision)
 }
 
 /// Save what `system compression` was given, then the settings in effect (environment

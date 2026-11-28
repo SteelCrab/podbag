@@ -55,6 +55,8 @@ pub mod libc_check;
 #[cfg(target_os = "linux")]
 #[doc(hidden)]
 pub mod linux;
+/// Per-container log driver configuration.
+pub mod log_driver;
 /// podbag on macOS: the VM host and the CLI that forwards to it.
 #[cfg(target_os = "macos")]
 #[doc(hidden)]

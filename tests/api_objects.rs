@@ -63,6 +63,145 @@ impl Setup {
 }
 
 #[test]
+fn docker_dual_stack_bridge_assigns_ipv6_and_connects_peers() {
+    let s = setup();
+    let prefix = format!("fd89:{:x}::", std::process::id() % 65536);
+    let subnet = format!("{prefix}/64");
+    s.ok(&["network", "create", "--ipv6", "--subnet", &subnet, "dual"]);
+    s.ok(&[
+        "run",
+        "-d",
+        "--name",
+        "dual-peer",
+        "--network",
+        "dual",
+        &s.image,
+        "sleep",
+        "30",
+    ]);
+    let address = s.ok(&[
+        "inspect",
+        "--format",
+        "{{.NetworkSettings.Networks.dual.GlobalIPv6Address}}",
+        "dual-peer",
+    ]);
+    assert_eq!(address, format!("{prefix}2"));
+    let ipam = s.ok(&[
+        "network",
+        "inspect",
+        "--format",
+        "{{.EnableIPv6}} {{json .IPAM.Config}}",
+        "dual",
+    ]);
+    assert!(ipam.starts_with("true "), "{ipam}");
+    assert!(ipam.contains(&subnet), "{ipam}");
+    let output = s.ok(&[
+        "run",
+        "--rm",
+        "--network",
+        "dual",
+        &s.image,
+        "ping6",
+        "-c",
+        "1",
+        "-W",
+        "2",
+        "dual-peer",
+    ]);
+    assert!(output.contains(&address), "{output}");
+    s.ok(&["rm", "-f", "dual-peer"]);
+    s.ok(&["network", "rm", "dual"]);
+}
+
+#[test]
+fn docker_bridge_keeps_fixed_addresses_and_refuses_duplicates() {
+    let s = setup();
+    let prefix = format!("fd8a:{:x}::", std::process::id() % 65536);
+    let host = std::process::id() % 250;
+    let subnet4 = format!("10.73.{host}.0/24");
+    let subnet6 = format!("{prefix}/64");
+    let ipv4 = format!("10.73.{host}.42");
+    let ipv6 = format!("{prefix}42");
+    s.ok(&[
+        "network", "create", "--ipv6", "--subnet", &subnet4, "--subnet", &subnet6, "fixed",
+    ]);
+    s.ok(&[
+        "run",
+        "-d",
+        "--name",
+        "fixed-first",
+        "--network",
+        "fixed",
+        "--ip",
+        &ipv4,
+        "--ip6",
+        &ipv6,
+        &s.image,
+        "sleep",
+        "30",
+    ]);
+    let address = s.ok(&[
+        "inspect",
+        "--format",
+        "{{with .NetworkSettings.Networks.fixed}}{{.IPAddress}} {{.GlobalIPv6Address}}{{end}}",
+        "fixed-first",
+    ]);
+    assert_eq!(address, format!("{ipv4} {ipv6}"));
+    let duplicate = s.docker(&[
+        "run",
+        "--rm",
+        "--network",
+        "fixed",
+        "--ip6",
+        &ipv6,
+        &s.image,
+        "true",
+    ]);
+    assert!(
+        !duplicate.status.success(),
+        "duplicate address was assigned"
+    );
+    assert!(
+        stderr(&duplicate).contains("in use"),
+        "{}",
+        stderr(&duplicate)
+    );
+    s.ok(&["stop", "fixed-first"]);
+    s.ok(&["start", "fixed-first"]);
+    assert_eq!(
+        s.ok(&[
+            "inspect",
+            "--format",
+            "{{with .NetworkSettings.Networks.fixed}}{{.IPAddress}} {{.GlobalIPv6Address}}{{end}}",
+            "fixed-first",
+        ]),
+        address,
+    );
+    s.ok(&["create", "--name", "fixed-second", &s.image, "sleep", "30"]);
+    let other = format!("{prefix}43");
+    s.ok(&[
+        "network",
+        "connect",
+        "--ip6",
+        &other,
+        "fixed",
+        "fixed-second",
+    ]);
+    s.ok(&["start", "fixed-second"]);
+    assert_eq!(
+        s.ok(&[
+            "inspect",
+            "--format",
+            "{{.NetworkSettings.Networks.fixed.GlobalIPv6Address}}",
+            "fixed-second"
+        ]),
+        other,
+    );
+    s.ok(&["rm", "-f", "fixed-first", "fixed-second"]);
+    s.ok(&["network", "rm", "fixed"]);
+}
+
+#[test]
 fn docker_volume_lifecycle() {
     let s = setup();
     assert_eq!(s.ok(&["volume", "create", "v1"]), "v1");
@@ -507,22 +646,28 @@ fn connect_and_disconnect_through_the_api() {
             .is_some_and(|a| a.iter().any(|x| x == "w")),
         "{networks}"
     );
-    // A running container keeps its networks until it stops.
     s.ok(&["network", "create", "third"]);
+    let pid = s.inspect("web")["State"]["Pid"].clone();
+    s.ok(&["network", "connect", "--alias", "w3", "third", "web"]);
+    let live = s.inspect("web");
+    assert_eq!(live["State"]["Pid"], pid);
     assert!(
-        s.fails(&["network", "connect", "third", "web"])
-            .contains("stop")
+        live["NetworkSettings"]["Networks"]["third"]["IPAddress"]
+            .as_str()
+            .is_some_and(|ip| !ip.is_empty()),
+        "{live}"
     );
-    assert!(
-        s.fails(&["network", "disconnect", "back", "web"])
-            .contains("stop")
-    );
-    s.ok(&["stop", "-t", "0", "web"]);
+    s.ok(&["exec", "web", "ping", "-c1", "-W2", "w3"]);
     s.ok(&["network", "disconnect", "back", "web"]);
+    assert_eq!(s.inspect("web")["State"]["Pid"], pid);
     assert!(
         s.fails(&["network", "disconnect", "back", "web"])
             .contains("not connected")
     );
+    let links = s.ok(&["exec", "web", "ip", "-o", "link"]);
+    assert!(!links.contains("eth1") && links.contains("eth2"), "{links}");
+    s.ok(&["stop", "-t", "0", "web"]);
+    s.ok(&["network", "disconnect", "third", "web"]);
     // Its primary network stays; the host's network is not one to join.
     s.fails(&["network", "disconnect", "front", "web"]);
     s.fails(&["network", "connect", "host", "web"]);

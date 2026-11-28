@@ -94,9 +94,11 @@ fn shim_reports_unsupported_and_removes_the_container_directory() {
         health: None,
         console_size: None,
         extra_networks: Vec::new(),
+        fixed_addresses: Default::default(),
         namespaces: Default::default(),
         devices: Vec::new(),
         gpu_requests: Vec::new(),
+        log_config: Default::default(),
         cri_log: None,
         stdin_fifo: None,
     };

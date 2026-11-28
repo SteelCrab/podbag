@@ -113,7 +113,7 @@ pub fn info(ctx: &Ctx) -> Reply {
                 "IndexConfigs": {"docker.io": {"Name": "docker.io", "Mirrors": [], "Secure": true, "Official": true}},
                 "Mirrors": [],
             },
-            "Plugins": {"Volume": ["local"], "Network": ["bridge", "host", "null", "overlay"], "Log": ["json-file"]},
+            "Plugins": {"Volume": ["local"], "Network": ["bridge", "host", "null", "overlay"], "Log": ["json-file", "syslog", "journald"]},
             "Warnings": [],
         }),
     )
@@ -198,8 +198,12 @@ pub fn df() -> Reply {
                         .any(|m| m.kind == "volume" && m.source == v.name)
                 })
                 .count();
-            let size = dir_size(std::path::Path::new(&v.mountpoint));
-            json!({"Name": v.name, "Driver": "local", "Mountpoint": v.mountpoint,
+            let size = if v.plugin.is_some() {
+                0
+            } else {
+                dir_size(std::path::Path::new(&v.mountpoint))
+            };
+            json!({"Name": v.name, "Driver": v.driver(), "Mountpoint": v.mountpoint,
                    "Scope": "local", "UsageData": {"Size": size, "RefCount": users}})
         })
         .collect();

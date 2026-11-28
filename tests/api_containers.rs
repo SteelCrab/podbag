@@ -1312,3 +1312,84 @@ fn a_removal_is_answered_as_soon_as_it_happens() {
     }
     assert!(best < Duration::from_millis(40), "best of 3: {best:?}");
 }
+
+#[test]
+fn syslog_driver_forwards_to_loopback_and_keeps_docker_logs() {
+    use std::net::UdpSocket;
+
+    let s = setup();
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let address = format!("udp://{}", socket.local_addr().unwrap());
+    let id = s.ok(&[
+        "create",
+        "--name",
+        "syslog-probe",
+        "--log-driver",
+        "syslog",
+        "--log-opt",
+        &format!("syslog-address={address}"),
+        "--log-opt",
+        "syslog-format=rfc5424",
+        "--log-opt",
+        "syslog-facility=local0",
+        "--log-opt",
+        "tag=probe-{{.Name}}",
+        &s.image,
+        "sh",
+        "-c",
+        "echo to-stdout; echo to-stderr >&2",
+    ]);
+    let config = s.ok(&["inspect", "--format", "{{json .HostConfig.LogConfig}}", &id]);
+    let config: serde_json::Value = serde_json::from_str(&config).unwrap();
+    assert_eq!(config["Type"], "syslog");
+    assert_eq!(config["Config"]["syslog-address"], address);
+    assert_eq!(config["Config"]["tag"], "probe-{{.Name}}");
+    s.ok(&["start", &id]);
+    s.ok(&["wait", &id]);
+
+    let mut records = Vec::new();
+    for _ in 0..2 {
+        let mut data = [0; 1024];
+        let len = socket.recv(&mut data).unwrap();
+        records.push(String::from_utf8(data[..len].to_vec()).unwrap());
+    }
+    records.sort();
+    assert!(records[0].starts_with("<131>1 "), "{records:?}");
+    assert!(records[0].contains(" probe-syslog-probe "));
+    assert!(records[0].ends_with(" to-stderr\n"));
+    assert!(records[1].starts_with("<134>1 "), "{records:?}");
+    assert!(records[1].ends_with(" to-stdout\n"));
+
+    let logs = s.docker(&["logs", &id]);
+    assert!(logs.status.success());
+    assert_eq!(stdout(&logs), "to-stdout");
+    assert_eq!(stderr(&logs), "to-stderr\n");
+}
+
+#[test]
+fn syslog_driver_missing_socket_preserves_exit_and_logs() {
+    let s = setup();
+    let missing = s.sb.tmp.path().join("absent.sock");
+    let id = s.ok(&[
+        "run",
+        "-d",
+        "--log-driver",
+        "syslog",
+        "--log-opt",
+        &format!("syslog-address=unixgram://{}", missing.display()),
+        &s.image,
+        "sh",
+        "-c",
+        "printf 'one\\ntwo\\nthree'; exit 17",
+    ]);
+    assert_eq!(s.ok(&["wait", &id]), "17");
+    assert_eq!(s.ok(&["logs", &id]), "one\ntwo\nthree");
+    let (body, _) = curl(&s.service.socket, &[&format!("/containers/{id}/json")]);
+    let inspect: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let status = &inspect["PodbagLogDelivery"];
+    assert_eq!(status["Dropped"], 3);
+    assert!(!status["LastError"].as_str().unwrap().is_empty());
+}

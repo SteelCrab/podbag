@@ -71,9 +71,9 @@ pub struct Ctx {
     pub attachments: std::sync::Arc<super::stream::Attachments>,
     /// Commands made by `POST /containers/{id}/exec`.
     pub execs: super::exec::Execs,
-    /// Host paths a bind mount may come from (the macOS VM: `/Users`, the only Mac
-    /// directory it sees); any path when None.
-    pub binds_under: Option<std::path::PathBuf>,
+    /// Host paths a bind mount may come from (the macOS VM's shared folders).
+    /// None allows any path; an empty list allows no host paths.
+    pub binds_under: Option<Vec<std::path::PathBuf>>,
 }
 
 impl Ctx {
@@ -119,6 +119,9 @@ pub fn strip_version(path: &str) -> &str {
 pub fn streams_body(req: &Request) -> bool {
     let path = strip_version(&req.path);
     let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
+    if req.method == "POST" && segments == ["images", "create"] {
+        return req.query.get("fromSrc") == Some("-");
+    }
     matches!(
         (req.method.as_str(), segments.as_slice()),
         ("PUT", ["containers", _, "archive"]) | ("POST", ["images", "load"] | ["build"])

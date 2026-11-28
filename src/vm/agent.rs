@@ -43,9 +43,12 @@ fn run() -> Result<()> {
     let cli = listen(CLI_PORT)?;
     let forwarder = listen(FORWARD_PORT)?;
     let dirs = crate::paths::dirs()?;
+    let sync_dirs = dirs.clone();
+    std::thread::spawn(move || super::sync::watch(sync_dirs));
     let mut ctx = crate::api::router::Ctx::new(dirs);
-    // The Mac's paths: the VM sees only its /Users, at the same place.
-    ctx.binds_under = Some("/Users".into());
+    // Use only folders that the init process mounted successfully.
+    ctx.binds_under = Some(super::shares::active().unwrap_or_default());
+    let shares = ctx.binds_under.clone().unwrap_or_default();
     let ctx = Arc::new(ctx);
     crate::helper::helpers_in_own_group();
     crate::helper::raise_descriptor_limit();
@@ -63,9 +66,11 @@ fn run() -> Result<()> {
             std::thread::spawn(move || forward(stream));
         })
     });
+    let shares = Arc::new(shares);
     accept_each(&cli, |stream| {
+        let shares = shares.clone();
         std::thread::spawn(move || {
-            if let Err(e) = serve_cli(stream) {
+            if let Err(e) = serve_cli(stream, &shares) {
                 eprintln!("podbag: a command from the Mac failed: {e}");
             }
         });
@@ -164,7 +169,7 @@ fn broken() -> Option<String> {
 }
 
 /// Run one command for the Mac and stream it.
-fn serve_cli(stream: UnixStream) -> std::io::Result<()> {
+fn serve_cli(stream: UnixStream, shares: &[std::path::PathBuf]) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut line = String::new();
     reader.read_line(&mut line)?;
@@ -190,8 +195,30 @@ fn serve_cli(stream: UnixStream) -> std::io::Result<()> {
     let code = if let Some(why) = broken() {
         out.send(Frame::Stderr(format!("podbag: {why}\n").into_bytes()))?;
         125
+    } else if let Some(path) = req
+        .paths
+        .iter()
+        .find(|path| !super::shares::contains(shares, &Path::new(&req.cwd).join(path)))
+    {
+        out.send(Frame::Stderr(
+            format!("podbag: cannot use {path}: the path is outside the Mac folders shared with the VM\n").into_bytes(),
+        ))?;
+        125
     } else {
         match first {
+            Some("__vm-sync") => match super::sync::command(&req.argv[1..]) {
+                Ok(data) => {
+                    for part in data.as_bytes().chunks(64 * 1024) {
+                        out.send(Frame::Stdout(part.to_vec()))?;
+                    }
+                    out.send(Frame::Stdout(b"\n".to_vec()))?;
+                    0
+                }
+                Err(error) => {
+                    out.send(Frame::Stderr(format!("podbag: {error}\n").into_bytes()))?;
+                    1
+                }
+            },
             Some("__vm-check") => 0,
             Some("__vm-renew") => match super::dhcp::renew() {
                 Ok(secs) => {
@@ -259,8 +286,8 @@ fn stats_of(stat: &str, meminfo: &str) -> serde_json::Value {
     })
 }
 
-/// A connection the Mac forwards from one of its ports: `TCP <port>` names the port
-/// published in this VM, where the shim's proxy listens on every address.
+/// A connection the Mac forwards from one of its ports: `TCP <port>` or `UDP <port>`
+/// names the port published in this VM, where the shim's proxy listens on every address.
 fn forward(mut stream: UnixStream) {
     let mut line = Vec::new();
     let mut byte = [0u8; 1];
@@ -271,15 +298,30 @@ fn forward(mut stream: UnixStream) {
             _ => return,
         }
     }
-    let port: Option<u16> = String::from_utf8_lossy(&line)
+    let line = String::from_utf8_lossy(&line);
+    let port = |p: &str| p.trim().parse::<u16>().ok();
+    let local = |p: u16| std::net::SocketAddr::from(([127, 0, 0, 1], p));
+    if let Some(p) = line.strip_prefix("UDP ").and_then(port) {
+        let target = std::net::UdpSocket::bind(("0.0.0.0", 0)).and_then(|s| {
+            s.connect(local(p))?;
+            Ok(s)
+        });
+        match target {
+            Ok(target) => {
+                if stream.write_all(b"OK\n").is_ok() {
+                    carry_datagrams(stream, target);
+                }
+            }
+            Err(e) => {
+                let _ = stream.write_all(format!("ERR {e}\n").as_bytes());
+            }
+        }
+        return;
+    }
+    let target = line
         .strip_prefix("TCP ")
-        .and_then(|p| p.trim().parse().ok());
-    let target = port.map(|p| {
-        std::net::TcpStream::connect_timeout(
-            &std::net::SocketAddr::from(([127, 0, 0, 1], p)),
-            Duration::from_secs(5),
-        )
-    });
+        .and_then(port)
+        .map(|p| std::net::TcpStream::connect_timeout(&local(p), Duration::from_secs(5)));
     match target {
         Some(Ok(target)) => {
             if stream.write_all(b"OK\n").is_ok() {
@@ -293,6 +335,48 @@ fn forward(mut stream: UnixStream) {
             let _ = stream.write_all(b"ERR bad request\n");
         }
     }
+}
+
+/// One UDP flow of the Mac: its datagrams to the published port, and the replies back,
+/// until the Mac ends the flow.
+fn carry_datagrams(mac: UnixStream, target: std::net::UdpSocket) {
+    use super::udp::{MAX_DATAGRAM, read_datagram, write_datagram};
+    let (mac, target) = (Arc::new(mac), Arc::new(target));
+    let done = Arc::new(AtomicBool::new(false));
+    // A timeout lets the reply loop see that the flow ended.
+    let _ = target.set_read_timeout(Some(Duration::from_secs(1)));
+    let up = {
+        let (mac, target, done) = (mac.clone(), target.clone(), done.clone());
+        std::thread::spawn(move || {
+            let mut buf = vec![0u8; MAX_DATAGRAM];
+            while let Ok(Some(n)) = read_datagram(&mut &*mac, &mut buf) {
+                // Nothing listens yet: the datagram is lost, as UDP allows.
+                let _ = target.send(&buf[..n]);
+            }
+            done.store(true, Ordering::SeqCst);
+        })
+    };
+    let mut buf = vec![0u8; MAX_DATAGRAM];
+    while !done.load(Ordering::SeqCst) {
+        match target.recv(&mut buf) {
+            Ok(n) => {
+                if write_datagram(&mut &*mac, &buf[..n]).is_err() {
+                    break;
+                }
+            }
+            // A timeout, or an earlier datagram found no listener.
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::ConnectionRefused
+                ) => {}
+            Err(_) => break,
+        }
+    }
+    let _ = mac.shutdown(std::net::Shutdown::Both);
+    let _ = up.join();
 }
 
 /// Bytes both ways between the Mac and a TCP connection, until both directions end.
@@ -882,6 +966,7 @@ mod tests {
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
             cwd: "/".into(),
+            paths: Vec::new(),
             tty: false,
             rows: 0,
             cols: 0,

@@ -15,6 +15,7 @@ pub(super) fn enter_rootfs(
     own_netns: bool,
     rootless: bool,
     security: &crate::spec::Security,
+    nfs: &super::mounts::NfsMounts,
 ) -> Result<()> {
     let privileged = security.privileged;
     // Mounts of the host reach the container only through a mount that asks for them:
@@ -191,7 +192,7 @@ pub(super) fn enter_rootfs(
         )?;
     }
     // The container's own mounts come last, as with runc, so they may cover /dev/shm.
-    super::mounts::mount_all(rootless, rootfs, mounts)?;
+    super::mounts::mount_all(rootless, rootfs, mounts, nfs)?;
     // Other kernel paths a caller listed.
     mask(rootless, rootfs, &masked, "")?;
     for rel in read_only
@@ -337,6 +338,18 @@ fn mount_root(spec: &Rootfs, rootless: bool) -> Result<&Path> {
 /// process's own, mount its root filesystem and its volumes and bind mounts (not its tmpfs
 /// mounts: they would hold nothing afterwards) and make it this process's root.
 pub(super) fn enter_files(spec: &crate::spec::ContainerSpec, rootless: bool) -> Result<()> {
+    if spec
+        .mounts
+        .iter()
+        .any(|m| matches!(m.source, crate::volume::MountSource::Driver { .. }))
+    {
+        return Err(Error::new(
+            ErrorKind::Unsupported,
+            "cannot access files of a stopped container with an external volume",
+            "the volume driver supplies a mount only while the container runs",
+            "start the container before using copy operations",
+        ));
+    }
     step(
         rootless,
         "make mounts private",
@@ -356,7 +369,8 @@ pub(super) fn enter_files(spec: &crate::spec::ContainerSpec, rootless: bool) -> 
             ..m.clone()
         })
         .collect();
-    super::mounts::mount_all(rootless, rootfs, &lasting)?;
+    let nfs = super::mounts::prepare_nfs(rootless, &lasting)?;
+    super::mounts::mount_all(rootless, rootfs, &lasting, &nfs)?;
     step(
         rootless,
         "enter the root filesystem",

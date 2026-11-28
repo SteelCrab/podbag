@@ -106,6 +106,8 @@ pub struct ContainerSpec {
     /// Bridge networks beyond the one in `network`, in order: `eth1`, `eth2`, …
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_networks: Vec<Attachment>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub fixed_addresses: crate::network::FixedByNetwork,
     /// Namespaces the container shares with others (a Kubernetes pod's) instead of its own.
     #[serde(default, skip_serializing_if = "Namespaces::is_own")]
     pub namespaces: Namespaces,
@@ -115,6 +117,12 @@ pub struct ContainerSpec {
     /// GPU selections to resolve on the host when the container starts.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gpu_requests: Vec<crate::gpu::Request>,
+    /// Where to forward a copy of container output.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::log_driver::LogConfig::is_default"
+    )]
+    pub log_config: crate::log_driver::LogConfig,
     /// Write the output to this file in the Kubernetes log format, not to `log.json`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cri_log: Option<String>,
@@ -241,6 +249,28 @@ pub struct Attachment {
 
 /// At most this many networks for one container: `eth0` to `eth15`.
 pub const MAX_NETWORKS: usize = 16;
+
+pub(crate) fn check_address_networks(
+    primary: &crate::network::NetworkMode,
+    extra: &[Attachment],
+    addresses: &crate::network::FixedByNetwork,
+) -> Result<()> {
+    use crate::network::NetworkMode;
+    for (network, requested) in addresses {
+        if !requested.is_empty()
+            && !matches!(primary, NetworkMode::Bridge { network: name } if name == network)
+            && !extra.iter().any(|a| &a.network == network)
+        {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "cannot set a fixed address",
+                format!("the container does not join bridge network {network}"),
+                "choose a bridge network for the container and an address on it",
+            ));
+        }
+    }
+    Ok(())
+}
 
 /// Check a container's networks: further networks join a bridge network, no network
 /// comes twice, and aliases are host names on a user network (the default network gives
@@ -413,6 +443,7 @@ pub fn parse_security_opt(s: &str) -> Result<SecurityOpt> {
 
 impl ContainerSpec {
     pub fn validate(&self) -> Result<()> {
+        self.log_config.validate()?;
         let invalid = |why: &str, next: &str| {
             Err(Error::new(
                 ErrorKind::InvalidInput,
@@ -474,6 +505,7 @@ impl ContainerSpec {
             }
         }
         check_networks(&self.network, &self.aliases, &self.extra_networks)?;
+        check_address_networks(&self.network, &self.extra_networks, &self.fixed_addresses)?;
         self.extra_hosts.iter().try_for_each(|e| e.check())?;
         self.dns.check()?;
         self.check_namespaces()
@@ -589,9 +621,11 @@ pub(crate) fn spec_fixture() -> ContainerSpec {
         health: None,
         console_size: None,
         extra_networks: Vec::new(),
+        fixed_addresses: Default::default(),
         namespaces: Default::default(),
         devices: Vec::new(),
         gpu_requests: Vec::new(),
+        log_config: Default::default(),
         cri_log: None,
         stdin_fifo: None,
     }

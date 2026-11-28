@@ -3,14 +3,15 @@
 //! The kernel runs it as `/init __vm-init` (the command line ends in `-- __vm-init`): only
 //! then is podbag an init. It mounts the kernel's file systems, takes the clock from the
 //! Mac (the kernel command line's `podbag.time=`), writes the DNS servers the kernel's
-//! DHCP found, mounts the data disk and the Mac's `/Users`, starts the agent
+//! DHCP found, mounts the data disk and the shared Mac folders, starts the agent
 //! (`__vm-agent`, again whenever it ends), and then reaps orphans until it is told to power
 //! off (SIGTERM, or the agent's `__vm-poweroff`). When a mount fails, the agent answers
 //! every command with why (see [`super::agent::BROKEN`]).
 
+use super::shares;
 use crate::{Error, Result};
 use rustix::mount::{MountFlags, mount};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Where podbag keeps its data in the VM: the data disk.
 pub const DATA_DIR: &str = "/var/lib/podbag";
@@ -264,14 +265,75 @@ fn setup() -> Vec<Error> {
                 })
             }),
     );
-    need(mount_at(
-        "users",
-        "/Users",
-        "virtiofs",
-        MountFlags::NODEV,
-        None,
-    ));
+    need(share_folders(&cmdline));
+    if problems.is_empty()
+        && let Err(error) = grow_data_disk()
+    {
+        // The mounted filesystem can still serve its existing data. Leave the
+        // extra capacity pending, report the error, and retry on the next boot.
+        eprintln!("podbag: cannot grow the VM data filesystem: {error}");
+    }
     problems
+}
+
+fn grow_data_disk() -> std::io::Result<()> {
+    use std::fs::File;
+    let sectors: u64 = std::fs::read_to_string("/sys/class/block/vda/size")?
+        .trim()
+        .parse()
+        .map_err(std::io::Error::other)?;
+    let device_bytes = sectors
+        .checked_mul(512)
+        .ok_or(std::io::ErrorKind::InvalidData)?;
+    let device = File::open("/dev/vda")?;
+    let mounted = File::open(DATA_DIR)?;
+    if let Some((before, after)) = super::ext4::grow_mounted(&device, &mounted, device_bytes)? {
+        eprintln!("podbag: VM data filesystem grew from {before} to {after} bytes");
+    }
+    Ok(())
+}
+
+fn share_folders(cmdline: &str) -> Result<()> {
+    let paths = if cmdline
+        .split_whitespace()
+        .any(|word| word == "podbag.shares=1")
+    {
+        let staging = "/run/podbag-shares";
+        mount_at(shares::TAG, staging, "virtiofs", MountFlags::NODEV, None)?;
+        let staging = Path::new(staging);
+        let config = staging.join(shares::CONFIG).join(shares::MANIFEST);
+        let paths: Vec<PathBuf> = serde_json::from_reader(
+            std::fs::File::open(&config).map_err(|e| fail("read shared folders", e))?,
+        )
+        .map_err(|e| fail("read shared folders", std::io::Error::other(e)))?;
+        for (index, target) in paths.iter().enumerate() {
+            if !shares::valid_target(target) {
+                return Err(fail(
+                    "shared folder path",
+                    std::io::Error::other(target.display().to_string()),
+                ));
+            }
+            let source = staging.join(shares::entry(index));
+            std::fs::create_dir_all(target)
+                .and_then(|()| rustix::mount::mount_bind(&source, target).map_err(Into::into))
+                .map_err(|e| fail(&format!("mount shared folder {}", target.display()), e))?;
+        }
+        rustix::mount::unmount(staging, rustix::mount::UnmountFlags::empty())
+            .map_err(|e| fail("close the share configuration", e))?;
+        paths
+    } else {
+        mount_at(
+            "users",
+            shares::DEFAULT,
+            "virtiofs",
+            MountFlags::NODEV,
+            None,
+        )?;
+        shares::defaults()
+    };
+    let json = serde_json::to_vec(&paths)
+        .map_err(|e| fail("record shared folders", std::io::Error::other(e)))?;
+    std::fs::write(shares::ACTIVE, json).map_err(|e| fail("record shared folders", e))
 }
 
 fn loopback_up() {

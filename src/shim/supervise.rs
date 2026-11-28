@@ -12,7 +12,7 @@ use crate::helper::{StatusChannel, StatusMessage};
 use crate::paths::Dirs;
 use crate::spec::ContainerSpec;
 use crate::state::{self, State, Status};
-use crate::{Error, Result, cgroup, linux};
+use crate::{Error, ErrorKind, Result, cgroup, linux};
 use rustix::pipe::{PipeFlags, pipe_with};
 use std::collections::VecDeque;
 use std::fs::File;
@@ -39,6 +39,25 @@ pub(crate) const DRAIN: Duration = Duration::from_secs(2);
 /// While this much output waits for a slow caller, the shim stops reading the container's
 /// output, so the container waits too (as it would writing to a slow terminal).
 const ECHO_LIMIT: usize = 1 << 20;
+
+/// How long the container's last processes may take to exit before its volume driver
+/// mounts are released; after that they stay mounted.
+const DRIVER_RELEASE_LIMIT: Duration = Duration::from_secs(10);
+
+/// Driver volumes are released only after the container's processes are gone: a cgroup or
+/// a PID namespace of its own is needed to know that.
+fn check_driver_mounts(spec: &ContainerSpec, cgroup: bool) -> Result<()> {
+    let own_pid = spec.namespaces.pid == crate::spec::Namespace::Own;
+    if cgroup || own_pid || !crate::volume::plugin::has_mounts(spec) {
+        return Ok(());
+    }
+    Err(Error::new(
+        ErrorKind::InvalidInput,
+        "cannot use volume driver mounts",
+        "the container has neither a cgroup nor a PID namespace of its own",
+        "run it with cgroup v2 available, or without --pid",
+    ))
+}
 
 pub(super) struct Outcome {
     pub code: i32,
@@ -322,13 +341,12 @@ fn socket_pair() -> Result<(OwnedFd, OwnedFd)> {
 }
 
 /// The memory budget in bytes (`None`: no limit), from the settings and the host's memory.
-fn memory_budget(dirs: &Dirs) -> Result<Option<u64>> {
-    let setting = crate::config::load(dirs)?.memory_budget;
+fn memory_budget(setting: cgroup::Budget) -> Option<u64> {
     let total = std::fs::read_to_string("/proc/meminfo")
         .ok()
         .and_then(|m| cgroup::mem_total(&m))
         .unwrap_or(0);
-    Ok(setting.bytes(total).filter(|&b| b > 0))
+    setting.bytes(total).filter(|&b| b > 0)
 }
 
 pub(super) fn run(
@@ -361,10 +379,6 @@ pub(super) fn run(
         Err(e) => return failed(status, e),
     };
     let id = spec.id.as_str();
-    // A detached container of the keeper needs no process of its own: the keeper becomes
-    // its parent and takes over the watching once it runs. Published ports
-    // are relayed by a shim, so such a container keeps this process.
-    let hand_over = spec.detach && crate::keeper::under_keeper() && spec.publish.is_empty();
     let mut io = match Io::prepare(spec) {
         Ok(io) => io,
         Err(e) => return failed(status, e),
@@ -396,13 +410,14 @@ pub(super) fn run(
         remove_control(dirs, id);
         return failed(status, e);
     }
-    let budget = match memory_budget(dirs) {
-        Ok(b) => b,
+    let config = match crate::config::load(dirs) {
+        Ok(config) => config,
         Err(e) => {
             remove_control(dirs, id);
             return failed(status, e);
         }
     };
+    let budget = memory_budget(config.memory_budget);
     let group = match crate::keeper::cgroups::create(&spec.cgroup, id, &spec.limits, budget) {
         Ok(g) => g,
         Err(e) => {
@@ -479,18 +494,51 @@ pub(super) fn run(
         }
     };
     let mut run_spec = spec.clone();
-    match super::net::files(spec, dirs, rootless, own) {
-        Ok(mut files) => {
+    let mut dns_upstream = match super::net::files(spec, dirs, rootless, own, config.embedded_dns) {
+        Ok((mut files, upstream)) => {
             files.append(&mut run_spec.mounts);
             run_spec.mounts = files;
             run_spec.mounts.extend(device_mounts(&devices));
+            upstream
         }
         Err(e) => {
             undo(group);
             return failed(status, e);
         }
+    };
+    if let Err(e) = check_driver_mounts(spec, group.is_some()) {
+        undo(group);
+        return failed(status, e);
     }
-    let mut attach = |pid: u32| super::net::attach(spec, &addresses, session, pid);
+    let own_pid = spec.namespaces.pid == crate::spec::Namespace::Own;
+    let driver_mounts = match crate::volume::plugin::Mounts::prepare(dirs, spec, &mut run_spec) {
+        Ok(mounts) => mounts,
+        Err(e) => {
+            undo(group);
+            return failed(status, e);
+        }
+    };
+    // The keeper can watch detached containers. Containers with published ports,
+    // embedded DNS or driver volumes keep this shim to serve or release them.
+    let hand_over = spec.detach
+        && crate::keeper::under_keeper()
+        && spec.publish.is_empty()
+        && dns_upstream.is_none()
+        && !crate::volume::plugin::has_mounts(spec);
+    let mut resolver = None;
+    let mut attach = |pid: u32| {
+        super::net::attach(spec, &addresses, session, pid)?;
+        if let Some(upstream) = dns_upstream.take() {
+            resolver = Some(super::dns::Resolver::start(
+                dirs,
+                id,
+                pid,
+                upstream,
+                config.dns_filter,
+            )?);
+        }
+        Ok(())
+    };
     let child = match linux::spawn(
         &run_spec,
         io.stdio,
@@ -505,7 +553,9 @@ pub(super) fn run(
     ) {
         Ok(c) => c,
         Err(e) => {
+            drop(resolver);
             undo(group);
+            driver_mounts.release();
             return failed(status, e);
         }
     };
@@ -514,7 +564,9 @@ pub(super) fn run(
         // SAFETY: killing our own child, which runs but has no terminal to talk on.
         unsafe { libc::kill(child.pid as libc::pid_t, libc::SIGKILL) };
         let _ = linux::wait(child.pid);
+        drop(resolver);
         undo(group);
+        driver_mounts.release();
         return failed(status, e);
     }
     // Published ports: bound now, so a taken port fails the start.
@@ -524,7 +576,9 @@ pub(super) fn run(
             // SAFETY: killing our own child; nothing is published for it.
             unsafe { libc::kill(child.pid as libc::pid_t, libc::SIGKILL) };
             let _ = linux::wait(child.pid);
+            drop(resolver);
             undo(group);
+            driver_mounts.release();
             return failed(status, e);
         }
     };
@@ -556,7 +610,16 @@ pub(super) fn run(
             .as_ref()
             .map(|g| g.path().to_string_lossy().into_owned()),
         oom: None,
-        ip: addresses.first().map(|(_, ip)| ip.to_string()),
+        ip: addresses.first().map(|(_, ip)| ip.ipv4.to_string()),
+        network_inode: if addresses.is_empty() {
+            None
+        } else {
+            use std::os::unix::fs::MetadataExt;
+            linux::net::namespace(child.pid)
+                .and_then(|ns| ns.metadata())
+                .ok()
+                .map(|metadata| metadata.ino())
+        },
         ports: published.iter().map(|(m, _)| *m).collect(),
         paused: false,
     };
@@ -592,7 +655,7 @@ pub(super) fn run(
     }
     let relays = addresses
         .first()
-        .map(|(_, ip)| super::proxy::serve(published, *ip, session));
+        .map(|(_, ip)| super::proxy::serve(published, ip.ipv4, session));
 
     let echo = io
         .outputs
@@ -613,15 +676,31 @@ pub(super) fn run(
         &sig_r,
         spec.health.as_ref(),
     );
-    // Published ports close first: the address goes back to the network below.
+    // Stop DNS and published ports before returning the container's addresses.
+    drop(resolver);
     if let Some(relays) = relays {
         relays.close();
     }
     let _ = log.flush_partial();
     let oom = group.as_ref().and_then(|g| g.oom_reason());
     // Without a PID namespace of its own, its other processes outlive it: they go too.
-    if let (Some(g), false) = (&group, spec.namespaces.pid == crate::spec::Namespace::Own) {
+    if let (Some(g), false) = (&group, own_pid) {
         cgroup::kill_all(g.path());
+    }
+    // A process still exiting may write to a driver volume. Without a cgroup, the kernel
+    // ended the PID namespace's processes before its init could be waited for.
+    let settled = !crate::volume::plugin::has_mounts(spec)
+        || group
+            .as_ref()
+            .is_none_or(|g| cgroup::wait_empty(g.path(), DRIVER_RELEASE_LIMIT));
+    if settled {
+        driver_mounts.release();
+    } else {
+        eprintln!(
+            "podbag: container {id} still has processes after {} seconds; its volume driver mounts stay until it starts again or the volume is removed",
+            DRIVER_RELEASE_LIMIT.as_secs()
+        );
+        driver_mounts.keep();
     }
     finish(
         dirs,
@@ -716,6 +795,7 @@ pub(crate) fn finish(
     waiters: &[UnixStream],
 ) {
     st.status = Status::Exited;
+    st.network_inode = None;
     st.paused = false;
     st.exit_code = Some(code);
     st.oom = oom;
@@ -1033,6 +1113,33 @@ mod tests {
         assert!(
             matches!(&early, Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
             "answered early: {early:?}"
+        );
+    }
+
+    #[test]
+    fn driver_mounts_need_a_way_to_see_the_processes_end() {
+        let mut spec = crate::spec::spec_fixture();
+        spec.namespaces.pid = crate::spec::Namespace::Host;
+        assert!(
+            check_driver_mounts(&spec, false).is_ok(),
+            "no driver mounts"
+        );
+        spec.mounts.push(crate::volume::Mount {
+            source: crate::volume::MountSource::Driver {
+                name: "data".into(),
+                driver: "store".into(),
+            },
+            target: "/data".into(),
+            read_only: false,
+            copy_up: false,
+        });
+        let e = check_driver_mounts(&spec, false).unwrap_err();
+        assert_eq!(e.kind, ErrorKind::InvalidInput);
+        assert!(check_driver_mounts(&spec, true).is_ok(), "a cgroup");
+        spec.namespaces.pid = crate::spec::Namespace::Own;
+        assert!(
+            check_driver_mounts(&spec, false).is_ok(),
+            "its own PID namespace"
         );
     }
 }

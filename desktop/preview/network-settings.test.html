@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Network settings test</title>
+<iframe src="preview.html?view=settings&amp;lang=en&amp;network-settings-error" width="1100" height="750" title="Desktop preview"></iframe>
+<pre id="result">Running</pre>
+<script>
+"use strict";
+const frame = document.querySelector("iframe");
+const result = document.querySelector("#result");
+
+async function until(read, description) {
+  const deadline = performance.now() + 3500;
+  do {
+    const value = read();
+    if (value) return value;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  } while (performance.now() < deadline);
+  throw Error("Timed out waiting for " + description);
+}
+
+function check(condition, message) {
+  if (!condition) throw Error(message);
+}
+
+async function test() {
+  const doc = frame.contentDocument;
+  const win = frame.contentWindow;
+  const search = await until(() => doc.querySelector("#settings-search"), "Settings search");
+  const section = doc.querySelector("#network-settings");
+  check(!section.open, "The network settings start closed");
+  search.value = "DNS query filtering";
+  search.dispatchEvent(new win.Event("input"));
+  const match = await until(() => doc.querySelector('[data-setting-result="networkSettings.dnsFilter"]'), "DNS search result");
+  match.click();
+  check(section.open, "The search result opens the network settings");
+
+  const apply = section.querySelector('button[type="submit"]');
+  const status = section.querySelector('[role="status"]');
+  await until(() => status.textContent.includes("Cannot read the network configuration."), "the read error");
+  check(apply.disabled, "Save stays disabled after a failed read");
+  status.querySelector("button").click();
+  await until(() => !apply.disabled, "a successful read after Retry");
+
+  const ipv4 = doc.querySelector("#default-ipv4-subnet");
+  const mode = doc.querySelector("#default-ip-mode");
+  const ipv6 = doc.querySelector("#default-ipv6-subnet");
+  const active = doc.querySelector("#active-bridge-subnets");
+  const dns = doc.querySelector("#embedded-dns");
+  const filter = doc.querySelector("#dns-filter");
+  check(ipv4.value === "10.77.0.0/16" && mode.value === "dual", "Read the saved subnets");
+  check(ipv6.value === "fd77:706f:6462::/64", "Read the saved IPv6 subnet");
+  check(dns.checked && filter.value === "none", "Read the saved DNS preferences");
+  check(active.textContent.includes("10.77.0.0/16") && !active.textContent.includes("fd77"), "Show the initialized bridge separately");
+
+  dns.click();
+  check(filter.disabled, "DNS filtering requires embedded DNS");
+  dns.click();
+  check(!filter.disabled, "Embedded DNS enables filtering");
+  filter.value = "ipv6";
+  mode.value = "ipv4";
+  mode.dispatchEvent(new win.Event("change", { bubbles: true }));
+  check(!ipv6.getClientRects().length && ipv6.disabled, "IPv4-only hides the IPv6 input");
+
+  ipv4.value = "10.79.4.1/24";
+  apply.click();
+  await until(() => status.textContent.includes("The IPv4 subnet has host bits set."), "the save error");
+  check(ipv4.value === "10.79.4.1/24" && filter.value === "ipv6", "Keep the edits after a failed save");
+  ipv4.value = "10.79.4.0/24";
+  apply.click();
+  await until(() => status.textContent === "Network settings saved.", "successful saving");
+  check(active.textContent.includes("10.77.0.0/16"), "Leave the initialized bridge unchanged");
+  await win.podbag.go("containers");
+  await win.podbag.openSettingsSection("network-settings");
+  await until(() => doc.querySelector("#default-ipv4-subnet")?.value === "10.79.4.0/24", "the persisted settings");
+  check(doc.querySelector("#default-ip-mode").value === "ipv4", "Persist the IPv4-only default");
+  check(doc.querySelector("#embedded-dns").checked && doc.querySelector("#dns-filter").value === "ipv6",
+    "Persist the DNS filter");
+
+  const invoke = win.__TAURI__.core.invoke;
+  const [token] = await invoke("connection");
+  const previous = await invoke("network_settings", { token });
+  const competing = await invoke("network_settings", {
+    token, expectedRevision: previous.revision, values: { ...previous.preferences, dnsFilter: "ipv4" },
+  });
+  const currentInput = doc.querySelector("#default-ipv4-subnet");
+  const currentSection = doc.querySelector("#network-settings");
+  const currentStatus = currentSection.querySelector('[role="status"]');
+  currentInput.value = "10.79.5.0/24";
+  currentSection.querySelector('button[type="submit"]').click();
+  await until(() => currentStatus.textContent.includes("Network settings changed after they were opened."),
+    "a conflict with the competing save");
+  check(currentInput.value === "10.79.5.0/24", "Keep the draft after a revision conflict");
+  check(doc.querySelector("#dns-filter").value === "ipv6", "Keep the other draft fields");
+  check((await invoke("network_settings", { token })).revision === competing.revision,
+    "Leave the competing save in place");
+
+  currentStatus.querySelector("button").click();
+  await until(() => doc.querySelector("#dns-filter").value === "ipv4", "reloading the saved settings");
+  check(currentInput.value === "10.79.4.0/24", "Reload only when explicitly requested");
+}
+
+frame.addEventListener("load", () => test().then(
+  () => { result.textContent = "PASS: Search, read, save, and keep the draft on conflict"; },
+  error => { result.textContent = "FAIL: " + error.message; },
+), { once: true });
+</script>

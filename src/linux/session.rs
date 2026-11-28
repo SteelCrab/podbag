@@ -97,6 +97,22 @@ pub fn acquire(dirs: &Dirs, id: &str) -> Result<u32> {
     Ok(pid)
 }
 
+/// Find the existing session for a running container without starting a replacement.
+pub(crate) fn existing(dirs: &Dirs, id: &str) -> Result<u32> {
+    let _lock = lock(dirs)?;
+    if read_refs(dirs).iter().any(|r| r == id)
+        && let Some(pid) = holder(dirs)
+    {
+        return Ok(pid);
+    }
+    Err(Error::new(
+        ErrorKind::Conflict,
+        "cannot use the rootless network session",
+        "the container's session is no longer running",
+        "stop and start the container again",
+    ))
+}
+
 /// Container `id` no longer needs the session. Entries of containers whose shims are gone
 /// are dropped too; with no user left, the session stops.
 pub fn release(dirs: &Dirs, id: &str) {

@@ -9,7 +9,6 @@ use crate::network::{Labels, Network, docker_id_of};
 use crate::volume::Volume;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use std::net::Ipv4Addr;
 
 type Filters = BTreeMap<String, Vec<String>>;
 
@@ -55,12 +54,15 @@ fn labels_of(body: &Value) -> Result<Labels, Reply> {
 pub fn volume_json(v: &Volume) -> Value {
     json!({
         "Name": v.name,
-        "Driver": "local",
+        "Driver": v.driver(),
         "Mountpoint": v.mountpoint,
         "CreatedAt": rfc3339(Some(v.created)),
         "Labels": v.labels,
         "Scope": "local",
-        "Options": {},
+        "Options": match &v.plugin {
+            Some(plugin) => json!(plugin.options),
+            None => v.nfs.as_ref().map_or_else(|| json!({}), |opts| json!(opts)),
+        },
         "UsageData": null,
     })
 }
@@ -73,19 +75,32 @@ fn prefix_len(subnet: &str) -> u32 {
 }
 
 /// A bridge network as Docker shows it, with its containers: (ID, name, address).
-pub fn network_json(n: &Network, endpoints: &[(String, String, Ipv4Addr)]) -> Value {
+pub fn network_json(
+    n: &Network,
+    endpoints: &[(String, String, crate::network::Addresses)],
+) -> Value {
     let prefix = prefix_len(&n.subnet);
+    let mut ipam = vec![json!({"Subnet": n.subnet, "Gateway": n.gateway})];
+    if let Some(subnet) = n.ipv6 {
+        ipam.push(json!({"Subnet": subnet.to_string(), "Gateway": subnet.gateway().to_string()}));
+    }
     let containers: serde_json::Map<String, Value> = endpoints
         .iter()
-        .map(|(id, name, ip)| {
+        .map(|(id, name, addresses)| {
+            let ipv6 = addresses
+                .ipv6
+                .zip(n.ipv6)
+                .map_or_else(String::new, |(address, subnet)| {
+                    format!("{address}/{}", subnet.prefix)
+                });
             (
                 id.clone(),
                 json!({
                     "Name": name,
                     "EndpointID": "",
                     "MacAddress": "",
-                    "IPv4Address": format!("{ip}/{prefix}"),
-                    "IPv6Address": "",
+                    "IPv4Address": format!("{}/{prefix}", addresses.ipv4),
+                    "IPv6Address": ipv6,
                 }),
             )
         })
@@ -97,11 +112,11 @@ pub fn network_json(n: &Network, endpoints: &[(String, String, Ipv4Addr)]) -> Va
         "Scope": "local",
         "Driver": "bridge",
         "EnableIPv4": true,
-        "EnableIPv6": false,
+        "EnableIPv6": n.ipv6.is_some(),
         "IPAM": {
             "Driver": "default",
             "Options": null,
-            "Config": [{"Subnet": n.subnet, "Gateway": n.gateway}],
+            "Config": ipam,
         },
         "Internal": false,
         "Attachable": false,
@@ -140,27 +155,34 @@ pub fn special_network_json(name: &str) -> Value {
 pub fn volumes(req: &Request, ctx: &Ctx, rest: &[&str]) -> Option<Reply> {
     Some(match (req.method.as_str(), rest) {
         ("GET", []) => list_volumes(req, ctx),
-        ("POST", ["create"]) => create_volume(req),
+        ("POST", ["create"]) => create_volume(req, ctx),
         ("POST", ["prune"]) => prune_volumes(req),
         ("GET", [name]) => match Volume::get(name) {
             Ok(v) => Reply::Json(200, volume_json(&v)),
             Err(e) => no_such_volume(name, &e),
         },
-        ("DELETE", [name]) => match Volume::remove(name, req.query.bool_param("force")) {
-            Ok(()) => {
+        ("DELETE", [name]) => remove_volume(name, req.query.bool_param("force")),
+        ("PUT", [_]) => not_supported("cluster volumes", "use local volumes"),
+        _ => return None,
+    })
+}
+
+fn remove_volume(name: &str, force: bool) -> Reply {
+    let volume = Volume::get(name).ok();
+    match Volume::remove(name, force) {
+        Ok(()) => {
+            if let Some(volume) = volume {
                 publish(
                     "volume",
                     "destroy",
                     name,
-                    &[("driver", "local".to_string())],
+                    &[("driver", volume.driver().to_string())],
                 );
-                Reply::Empty(204)
             }
-            Err(e) => no_such_volume(name, &e),
-        },
-        ("PUT", [_]) => not_supported("cluster volumes", "use local volumes"),
-        _ => return None,
-    })
+            Reply::Empty(204)
+        }
+        Err(e) => no_such_volume(name, &e),
+    }
 }
 
 fn no_such_volume(name: &str, e: &crate::Error) -> Reply {
@@ -192,7 +214,7 @@ fn list_volumes(req: &Request, ctx: &Ctx) -> Reply {
         .iter()
         .filter(|v| labels_match(&v.labels, &filters))
         .filter(|v| any("name", &|want| v.name.contains(want)))
-        .filter(|_| any("driver", &|want| want == "local"))
+        .filter(|v| any("driver", &|want| want == v.driver()))
         .filter(|v| {
             any("dangling", &|want| {
                 let unused = crate::volume::users_of(&ctx.dirs, &v.name)
@@ -207,44 +229,47 @@ fn list_volumes(req: &Request, ctx: &Ctx) -> Reply {
 }
 
 /// `POST /volumes/create`.
-fn create_volume(req: &Request) -> Reply {
+fn create_volume(req: &Request, ctx: &Ctx) -> Reply {
     let body = match req.json() {
         Ok(b) => b,
         Err(e) => return message(400, format!("{e:?}")),
     };
     let driver = body["Driver"].as_str().unwrap_or("");
-    if !matches!(driver, "" | "local") {
-        return message(
-            400,
-            format!("volume driver {driver} is not supported (use local)"),
-        );
-    }
-    if body["DriverOpts"]
-        .as_object()
-        .is_some_and(|o| !o.is_empty())
-    {
-        return message(
-            400,
-            "volume options are not supported (podbag volumes are plain directories)",
-        );
-    }
+    let opts = match driver_options(&body["DriverOpts"]) {
+        Ok(opts) => opts,
+        Err(e) => return reply_error(&e),
+    };
     let name = body["Name"].as_str().filter(|n| !n.is_empty());
     let labels = match labels_of(&body) {
         Ok(l) => l,
         Err(reply) => return reply,
     };
-    match Volume::create_with(name, labels) {
+    match Volume::create_with_driver(&ctx.dirs, name, labels, driver, opts) {
         Ok(v) => {
             publish(
                 "volume",
                 "create",
                 &v.name,
-                &[("driver", "local".to_string())],
+                &[("driver", v.driver().to_string())],
             );
             Reply::Json(201, volume_json(&v))
         }
         Err(e) => reply_error(&e),
     }
+}
+
+pub(super) fn driver_options(options: &Value) -> crate::Result<Labels> {
+    if options.is_null() {
+        return Ok(Labels::new());
+    }
+    serde_json::from_value(options.clone()).map_err(|_| {
+        crate::Error::new(
+            ErrorKind::InvalidInput,
+            "invalid volume driver options",
+            "options must be an object of strings",
+            "set each driver option as a string",
+        )
+    })
 }
 
 /// `POST /volumes/prune?filters`: unused anonymous volumes, all unused ones with
@@ -400,8 +425,7 @@ fn inspect_network(ctx: &Ctx, id: &str) -> Reply {
     }
 }
 
-/// `POST /networks/{id}/connect` and `disconnect`: a container that does not run joins or
-/// leaves the network at its next start.
+/// `POST /networks/{id}/connect` and `disconnect`: join or leave a secondary bridge.
 fn connect_network(req: &Request, id: &str, join: bool) -> Reply {
     let body = match req.json() {
         Ok(b) => b,
@@ -426,12 +450,10 @@ fn connect_network(req: &Request, id: &str, join: bool) -> Reply {
     };
     let done = if join {
         let endpoint = &body["EndpointConfig"];
-        if endpoint["IPAMConfig"]["IPv4Address"]
-            .as_str()
-            .is_some_and(|a| !a.is_empty())
-        {
-            return message(400, "fixed addresses are not supported by podbag");
-        }
+        let addresses = match super::create::fixed_addresses(endpoint) {
+            Ok(addresses) => addresses,
+            Err(e) => return reply_error(&e),
+        };
         let aliases: Vec<String> = match &endpoint["Aliases"] {
             Value::Null => Vec::new(),
             Value::Array(list) => match list
@@ -444,7 +466,7 @@ fn connect_network(req: &Request, id: &str, join: bool) -> Reply {
             },
             _ => return message(400, "Aliases must be a list of strings"),
         };
-        handle.connect(&name, &aliases)
+        handle.connect_with_addresses(&name, &aliases, addresses)
     } else {
         handle.disconnect(&name)
     };
@@ -482,8 +504,14 @@ fn create_network(req: &Request) -> Reply {
             format!("network driver {driver} is not supported (podbag makes bridge networks)"),
         );
     }
-    if body["EnableIPv6"].as_bool().unwrap_or(false) || body["Ingress"].as_bool().unwrap_or(false) {
-        return message(400, "IPv6 and ingress networks are not supported");
+    if body["Ingress"].as_bool().unwrap_or(false) {
+        return message(400, "ingress networks are not supported");
+    }
+    if body["EnableIPv4"].as_bool() == Some(false) {
+        return message(
+            400,
+            "only IPv4 and dual-stack bridge networks are supported",
+        );
     }
     let ipam_driver = body["IPAM"]["Driver"].as_str().unwrap_or("");
     if !matches!(ipam_driver, "" | "default") {
@@ -493,13 +521,27 @@ fn create_network(req: &Request) -> Reply {
         .as_array()
         .cloned()
         .unwrap_or_default();
-    let subnet = configs
-        .first()
-        .and_then(|c| c["Subnet"].as_str())
-        .filter(|s| !s.is_empty());
     let mut warnings = Vec::new();
-    if configs.len() > 1 {
-        warnings.push("only the first IPAM config is used".to_string());
+    let mut ipv4 = None;
+    let mut ipv6 = None;
+    for config in &configs {
+        let Some(subnet) = config["Subnet"].as_str().filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        if subnet.contains(':') {
+            if ipv6.is_some() {
+                return message(400, "only one IPv6 subnet is supported");
+            }
+            let parsed = match subnet.parse() {
+                Ok(subnet) => subnet,
+                Err(e) => return reply_error(&e),
+            };
+            ipv6 = Some((parsed, config));
+        } else if ipv4.is_some() {
+            warnings.push("only the first IPv4 IPAM config is used".to_string());
+        } else {
+            ipv4 = Some((subnet, config));
+        }
     }
     if body["Internal"].as_bool().unwrap_or(false) {
         warnings.push("internal networks are not supported: this one reaches outside".to_string());
@@ -511,23 +553,35 @@ fn create_network(req: &Request) -> Reply {
         Ok(l) => l,
         Err(reply) => return reply,
     };
-    let network = match Network::create_with(name, subnet, labels) {
+    let subnet = ipv4.map(|(subnet, _)| subnet);
+    let dual_stack = ipv6.is_some() || body["EnableIPv6"].as_bool().unwrap_or(false);
+    let created = if dual_stack {
+        Network::create_dual_stack(name, subnet, ipv6.map(|(subnet, _)| subnet), labels)
+    } else {
+        Network::create_with(name, subnet, labels)
+    };
+    let network = match created {
         Ok(n) => n,
         Err(e) => return reply_error(&e),
     };
-    if let Some(gw) = configs.first().and_then(|c| c["Gateway"].as_str()) {
-        if !gw.is_empty() && gw != network.gateway {
-            warnings.push(format!(
-                "gateway {gw} is ignored: the gateway is {}",
-                network.gateway
-            ));
+    let configured = ipv4
+        .map(|(_, config)| (config, network.gateway.clone()))
+        .into_iter()
+        .chain(
+            ipv6.zip(network.ipv6)
+                .map(|((_, config), subnet)| (config, subnet.gateway().to_string())),
+        );
+    for (config, gateway) in configured {
+        if let Some(gw) = config["Gateway"]
+            .as_str()
+            .filter(|gw| !gw.is_empty() && *gw != gateway)
+        {
+            warnings.push(format!("gateway {gw} is ignored: the gateway is {gateway}",));
         }
-    }
-    if configs
-        .first()
-        .is_some_and(|c| c["IPRange"].as_str().is_some_and(|r| !r.is_empty()))
-    {
-        warnings.push("IP ranges are ignored: addresses come from the whole subnet".to_string());
+        if config["IPRange"].as_str().is_some_and(|r| !r.is_empty()) {
+            warnings
+                .push("IP ranges are ignored: addresses come from the whole subnet".to_string());
+        }
     }
     let id = network.docker_id();
     publish(
@@ -630,6 +684,8 @@ mod tests {
             created: 1_700_000_000,
             anonymous: false,
             labels: Labels::new(),
+            nfs: None,
+            plugin: None,
         };
         let j = volume_json(&v);
         assert_eq!(j["Name"], "v1");
@@ -641,12 +697,29 @@ mod tests {
     }
 
     #[test]
+    fn nfs_volume_inspect_returns_docker_options() {
+        let options = json!({"type":"nfs", "device":":/data", "o":"addr=192.0.2.1,vers=4"});
+        let v = Volume {
+            name: "share".into(),
+            mountpoint: "/d/volumes/share/data".into(),
+            created: 1_700_000_000,
+            anonymous: false,
+            labels: Labels::new(),
+            nfs: crate::volume::parse_options(driver_options(&options).unwrap()).unwrap(),
+            plugin: None,
+        };
+        assert_eq!(volume_json(&v)["Options"], options);
+        assert!(driver_options(&json!({"type":false})).is_err());
+    }
+
+    #[test]
     fn network_shapes() {
         let n = Network {
             name: "app".into(),
             id: "abcdef123456".into(),
             subnet: "10.78.1.0/24".into(),
             gateway: "10.78.1.1".into(),
+            ipv6: Some("fd7f:1::/64".parse().unwrap()),
             bridge: "pbg-1".into(),
             created: 1_700_000_000,
             labels: [("a".to_string(), "b".to_string())].into_iter().collect(),
@@ -654,7 +727,14 @@ mod tests {
         let c = "c".repeat(64);
         let j = network_json(
             &n,
-            &[(c.clone(), "web".into(), "10.78.1.2".parse().unwrap())],
+            &[(
+                c.clone(),
+                "web".into(),
+                crate::network::Addresses {
+                    ipv4: "10.78.1.2".parse().unwrap(),
+                    ipv6: Some("fd7f:1::2".parse().unwrap()),
+                },
+            )],
         );
         assert_eq!(j["Name"], "app");
         assert_eq!(j["Id"], n.docker_id());
@@ -662,10 +742,12 @@ mod tests {
         assert_eq!(j["Scope"], "local");
         assert_eq!(
             j["IPAM"]["Config"],
-            json!([{"Subnet": "10.78.1.0/24", "Gateway": "10.78.1.1"}])
+            json!([{"Subnet": "10.78.1.0/24", "Gateway": "10.78.1.1"}, {"Subnet": "fd7f:1::/64", "Gateway": "fd7f:1::1"}])
         );
         assert_eq!(j["Containers"][&c]["Name"], "web");
         assert_eq!(j["Containers"][&c]["IPv4Address"], "10.78.1.2/24");
+        assert_eq!(j["EnableIPv6"], true);
+        assert_eq!(j["Containers"][&c]["IPv6Address"], "fd7f:1::2/64");
         assert_eq!(j["Labels"], json!({"a": "b"}));
         let host = special_network_json("host");
         assert_eq!(host["Driver"], "host");
