@@ -30,7 +30,8 @@ pub fn paint(d: &mut Desktop, ui: &mut Ui, r: Rect) {
     let Some((kind, id, tab)) = d.detail.as_ref().map(|x| (x.kind, x.id.clone(), x.tab)) else {
         return;
     };
-    let Some(i) = d.lists.find(kind, &id) else {
+    let row = d.lists.find(kind, &id);
+    if row.is_none() && tab != Tab::Analysis {
         // Not (yet) in the lists: the page waits for them.
         let text = d.t("engine.checking");
         ui.p.label(
@@ -40,7 +41,7 @@ pub fn paint(d: &mut Desktop, ui: &mut Ui, r: Rect) {
             t.ink2,
         );
         return;
-    };
+    }
     let mut r = r;
     let bar = r.cut_top(TOOLBAR_H);
     ui.p.border_bottom(bar, t.line);
@@ -60,7 +61,10 @@ pub fn paint(d: &mut Desktop, ui: &mut Ui, r: Rect) {
         return;
     }
     // The title takes what the actions leave.
-    let name = d.lists.name(kind, i);
+    let name = row.map_or_else(
+        || crate::lists::short_id(&id).to_string(),
+        |i| d.lists.name(kind, i),
+    );
     let style = ui.style().with_size(18.).weight(700);
     let actions_w = 6. * 32.;
     let max_title = (inner.w - actions_w - 42. - 150.).max(60.);
@@ -72,7 +76,7 @@ pub fn paint(d: &mut Desktop, ui: &mut Ui, r: Rect) {
         Rect::new(tx, inner.y, title.width, inner.h),
         &name,
     );
-    if kind == Kind::Containers {
+    if let Some(i) = row.filter(|_| kind == Kind::Containers) {
         let state = d.lists.containers[i].state.clone();
         chip(
             d,
@@ -84,13 +88,17 @@ pub fn paint(d: &mut Desktop, ui: &mut Ui, r: Rect) {
         );
     }
     let actions = Rect::new(inner.right() - actions_w, inner.y, actions_w, inner.h);
-    row_actions(d, ui, kind, i, actions, ACTIONS, true);
+    if let Some(i) = row {
+        row_actions(d, ui, kind, i, actions, ACTIONS, true);
+    }
     if d.detail.as_ref().is_none_or(|x| x.id != id || x.tab != tab) {
         return; // an action left or changed the page
     }
     // The tabs.
     let list: Vec<Tab> = if kind == Kind::Containers {
         vec![Tab::Info, Tab::Logs, Tab::Inspect]
+    } else if kind == Kind::Images {
+        vec![Tab::Info, Tab::Inspect, Tab::Analysis]
     } else {
         vec![Tab::Info, Tab::Inspect]
     };
@@ -104,8 +112,13 @@ pub fn paint(d: &mut Desktop, ui: &mut Ui, r: Rect) {
     }
     let panel = r.inset(20., 18., 20., 20.);
     match tab {
-        Tab::Info => info(d, ui, panel, kind, i),
+        Tab::Info => {
+            if let Some(i) = row {
+                info(d, ui, panel, kind, i);
+            }
+        }
         Tab::Logs => logs(d, ui, panel),
+        Tab::Analysis => super::image_analysis::paint(d, ui, panel),
         Tab::Inspect => {
             let Some(det) = &mut d.detail else { return };
             log_view(ui, Id::of("inspect"), panel, &mut det.inspect, "");

@@ -25,6 +25,15 @@ struct Shot {
 /// The pages and dialogs of Training, Migrate, updates, login, import, the notices, the
 /// run form and OpenShift Routes (`views-<name>-<lang>-<theme>.png`).
 const VIEW_SHOTS: &[(&str, &[&str], f32)] = &[
+    (
+        "image-security",
+        &[
+            "nav images",
+            "detail images 0 analysis",
+            "image-analysis scan",
+        ],
+        1200.,
+    ),
     ("migrate", &["nav migrate"], 1200.),
     (
         "migrate-images",

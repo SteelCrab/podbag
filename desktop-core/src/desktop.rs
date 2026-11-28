@@ -3,6 +3,7 @@
 
 use crate::dockercmd::{self, DockerCommand};
 use crate::events::{Event, Events};
+use crate::image_analysis;
 use crate::images::{self, ImportImage};
 use crate::lock;
 use crate::migration;
@@ -47,6 +48,7 @@ pub struct Desktop {
     /// The window and the tray share the same Docker CLI configuration.
     docker_switch: Mutex<()>,
     migration: Mutex<()>,
+    image_scan: Mutex<()>,
     star_prompt: AtomicBool,
     settings: Mutex<Settings>,
     settings_file: Mutex<Option<PathBuf>>,
@@ -103,6 +105,7 @@ impl Desktop {
             docker: Mutex::new(None),
             docker_switch: Mutex::new(()),
             migration: Mutex::new(()),
+            image_scan: Mutex::new(()),
             star_prompt: AtomicBool::new(false),
             settings: Mutex::new(Settings::default()),
             settings_file: Mutex::new(None),
@@ -145,6 +148,20 @@ impl Desktop {
                 )
             })?;
         crate::extensions::apply(&dir, action)
+    }
+
+    pub(crate) fn analyze_image(
+        &self,
+        token: u64,
+        id: &str,
+    ) -> Result<image_analysis::Report, image_analysis::Failure> {
+        use image_analysis::Failure;
+        let session = self.session(token).map_err(|_| Failure::EngineChanged)?;
+        let _scan = self.image_scan.try_lock().map_err(|_| Failure::Busy)?;
+        let cache = image_analysis::cache_dir().ok_or(Failure::Workspace)?;
+        let result = image_analysis::analyze(&session.client, id, &cache);
+        self.session(token).map_err(|_| Failure::EngineChanged)?;
+        result
     }
 
     pub fn events(&self) -> &Events {

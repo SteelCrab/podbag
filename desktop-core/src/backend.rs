@@ -68,6 +68,11 @@ pub trait Api: Send + Sync {
         })
     }
     fn inspect(&self, kind: Kind, id: &str) -> Result<Value, String>;
+    fn analyze_image(
+        &self,
+        session: u64,
+        id: &str,
+    ) -> Result<crate::image_analysis::Report, crate::image_analysis::Failure>;
     fn features(&self, sample: Option<&str>) -> Features;
     /// `stats` or `top` of a container.
     fn container_json(&self, id: &str, what: &str) -> Result<Value, String>;
@@ -320,6 +325,14 @@ impl Api for Desktop {
 
     fn inspect(&self, kind: Kind, id: &str) -> Result<Value, String> {
         self.current().inspect(kind, id)
+    }
+
+    fn analyze_image(
+        &self,
+        session: u64,
+        id: &str,
+    ) -> Result<crate::image_analysis::Report, crate::image_analysis::Failure> {
+        Desktop::analyze_image(self, session, id)
     }
 
     fn features(&self, sample: Option<&str>) -> Features {

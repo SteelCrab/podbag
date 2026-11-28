@@ -15,6 +15,7 @@ pub mod dockercmd;
 pub mod engine;
 pub mod events;
 pub mod extensions;
+pub mod image_analysis;
 pub mod images;
 pub mod kubernetes;
 pub mod migration;

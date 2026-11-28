@@ -169,6 +169,7 @@ pub enum Tab {
     Info,
     Logs,
     Inspect,
+    Analysis,
 }
 
 impl Tab {
@@ -177,6 +178,7 @@ impl Tab {
             Tab::Info => "detail.info",
             Tab::Logs => "detail.logs",
             Tab::Inspect => "detail.inspect",
+            Tab::Analysis => "detail.analysis",
         }
     }
 }
@@ -192,6 +194,7 @@ pub struct Detail {
     /// `top` and `stats` of a running container: None while asked.
     pub top: Option<String>,
     pub stats: Option<String>,
+    pub analysis: views::image_analysis::State,
 }
 
 impl Detail {
@@ -204,6 +207,7 @@ impl Detail {
             inspect_loaded: false,
             top: None,
             stats: None,
+            analysis: views::image_analysis::State::default(),
         }
     }
 }
@@ -1846,6 +1850,7 @@ impl Desktop {
                     let tab = match c {
                         Some("logs") => Tab::Logs,
                         Some("inspect") => Tab::Inspect,
+                        Some("analysis") if kind == Kind::Images => Tab::Analysis,
                         _ => Tab::Info,
                     };
                     let id = self.lists.id(kind, index(b));

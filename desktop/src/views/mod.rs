@@ -7,6 +7,7 @@ pub mod compression;
 pub mod detail;
 pub mod engine_config;
 pub mod extensions;
+pub mod image_analysis;
 pub mod import;
 pub mod kubernetes;
 pub mod login;
@@ -101,6 +102,7 @@ pub fn next_due(d: &Desktop) -> Option<std::time::Instant> {
 pub fn command(d: &mut Desktop, line: &str) {
     let words: Vec<&str> = line.split_whitespace().collect();
     match words.as_slice() {
+        ["image-analysis", "scan"] => image_analysis::scan(d),
         ["training"] => training::show(d, None),
         ["training", "install", id] => {
             if let Some(text) = podbag_desktop_core::mock::sample_module(id) {

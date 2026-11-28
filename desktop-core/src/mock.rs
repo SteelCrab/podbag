@@ -126,6 +126,7 @@ pub struct Options {
     pub compression_prompt: bool,
     pub compression: CompressionOptions,
     pub models: ModelOptions,
+    pub analysis: ImageAnalysisOptions,
     /// The platform instead of macOS: `linux` (no VM) or `windows` (a WSL VM whose
     /// resources the app does not set).
     pub platform: Option<&'static str>,
@@ -133,6 +134,13 @@ pub struct Options {
     pub sync_share: bool,
     /// Where the mock notes the calls a test checks.
     pub calls: Calls,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ImageAnalysisOptions {
+    pub failure: Option<crate::image_analysis::Failure>,
+    pub empty: bool,
+    pub gate: Gate,
 }
 
 /// The local model runner's cases.
@@ -298,6 +306,7 @@ struct State {
 pub struct Mock {
     state: Arc<Mutex<State>>,
     training: Mutex<crate::mock_training::Training>,
+    image_scan: Mutex<()>,
     /// Launch at login.
     login: AtomicBool,
     events: Events,
@@ -916,6 +925,7 @@ impl Mock {
             training: Mutex::new(crate::mock_training::Training::new(
                 scenario == Scenario::Offline,
             )),
+            image_scan: Mutex::new(()),
             login: AtomicBool::new(false),
             events,
             now,
@@ -1099,6 +1109,50 @@ impl Api for Mock {
             "NetworkSettings": { "IPAddress": "10.77.0.2" },
             "Kind": kind.segment(),
         }))
+    }
+
+    fn analyze_image(
+        &self,
+        session: u64,
+        id: &str,
+    ) -> Result<crate::image_analysis::Report, crate::image_analysis::Failure> {
+        use crate::image_analysis::{Failure, Finding, Package, Report, Severity};
+        if self.token() != session {
+            return Err(Failure::EngineChanged);
+        }
+        let _scan = self.image_scan.try_lock().map_err(|_| Failure::Busy)?;
+        self.opts.calls.push(format!("analyze_image {id}"));
+        self.opts.analysis.gate.pass();
+        if self.token() != session {
+            return Err(Failure::EngineChanged);
+        }
+        if !self.st().images.iter().any(|image| image.id == id) {
+            return Err(Failure::ImageUnavailable);
+        }
+        if let Some(error) = self.opts.analysis.failure {
+            return Err(error);
+        }
+        let mut report = Report {
+            image_id: id.into(),
+            packages: Vec::new(),
+            findings: Vec::new(),
+        };
+        if !self.opts.analysis.empty {
+            report.packages.push(Package {
+                name: "musl".into(),
+                version: "1.2.5-r10".into(),
+                target: "alpine".into(),
+            });
+            report.findings.push(Finding {
+                severity: Severity::High,
+                advisory: "DEMO-2026-0001".into(),
+                package: "musl".into(),
+                installed: "1.2.5-r10".into(),
+                fixed: "1.2.5-r11".into(),
+                target: "alpine".into(),
+            });
+        }
+        Ok(report)
     }
 
     fn features(&self, _sample: Option<&str>) -> Features {
