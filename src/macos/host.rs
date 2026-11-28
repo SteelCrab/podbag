@@ -10,11 +10,11 @@
 //! connection starts a VM again. When asked (`podbag vm stop`: SIGTERM, or `STOP`), and
 //! on SIGTERM, SIGINT or SIGHUP (a logout), it powers the VM off and ends.
 
-use super::settings;
 use super::vm::{Vm, VmSpec};
+use super::{disk, settings};
 use crate::network::Proto;
 use crate::vm::proto::{API_PORT, CLI_PORT, CliRequest, FORWARD_PORT, Frame};
-use crate::vm::udp;
+use crate::vm::{shares, udp};
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -31,6 +31,7 @@ pub struct Paths {
     pub run: PathBuf,
     /// The guest: `Image`, `initramfs.gz`, `disk.zst`.
     pub guest: PathBuf,
+    /// The default data image when no other location is configured.
     pub disk: PathBuf,
     pub console: PathBuf,
     pub vm_sock: PathBuf,
@@ -58,9 +59,12 @@ pub(super) fn home() -> Result<PathBuf, String> {
 }
 
 pub fn paths() -> Result<Paths, String> {
-    let home = home()?;
+    home().map(paths_in)
+}
+
+pub(super) fn paths_in(home: PathBuf) -> Paths {
     let run = home.join("run");
-    Ok(Paths {
+    Paths {
         guest: guest_dir(&home),
         disk: home.join("disk.img"),
         console: home.join("console.log"),
@@ -73,7 +77,7 @@ pub fn paths() -> Result<Paths, String> {
         running: run.join("vm.json"),
         run,
         home,
-    })
+    }
 }
 
 /// Where the guest files are: `PODBAG_VM_GUEST`, then the guest this binary carries
@@ -300,8 +304,7 @@ fn run() -> Result<(), String> {
         // SAFETY: the standby handed over these descriptors, which nothing else owns.
         Some(fds) => unsafe { std::fs::File::from_raw_fd(fds.lock) },
         None => {
-            let lock =
-                std::fs::File::create(&p.lock).map_err(|e| format!("{}: {e}", p.lock.display()))?;
+            let lock = disk::open_host_lock(&p)?;
             if !take_lock(&lock) {
                 // Another host runs (or starts, or stops): the CLI waits for it.
                 return Ok(());
@@ -391,10 +394,30 @@ fn serve_vm(p: &Paths, lock: &std::fs::File, inherited: Option<&Inherited>) -> R
         }
     }
     super::cpu::check_guest(&p.guest.join("Image"))?;
-    make_disk(p)?;
+    let disk = disk::for_boot(p)?;
     let env = |k: &str| std::env::var(k).ok();
-    let (resources, _) =
-        settings::effective(&settings::read(&p.home)?, &env, &settings::Mac::this());
+    let saved = settings::read(&p.home)?;
+    let (resources, _) = settings::effective(&saved, &env, &settings::Mac::this());
+    let shared_paths = saved.shared_paths();
+    let config = if shared_paths == shares::defaults() {
+        None
+    } else {
+        // A replaced directory must not redirect a previously approved share.
+        if settings::normalize_shares(&shared_paths)? != shared_paths {
+            return Err("a shared folder moved; review the file sharing settings".into());
+        }
+        let config =
+            tempfile::tempdir_in(&p.run).map_err(|e| format!("share configuration: {e}"))?;
+        let paths = serde_json::to_vec(&shared_paths).map_err(|e| e.to_string())?;
+        std::fs::write(config.path().join(shares::MANIFEST), paths)
+            .map_err(|e| format!("share configuration: {e}"))?;
+        Some(config)
+    };
+    let share_boot = if config.is_some() {
+        " podbag.shares=1"
+    } else {
+        ""
+    };
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
@@ -405,7 +428,7 @@ fn serve_vm(p: &Paths, lock: &std::fs::File, inherited: Option<&Inherited>) -> R
     let spec = VmSpec {
         kernel: p.guest.join("Image"),
         initrd: p.guest.join("initramfs.gz"),
-        disk: p.disk.clone(),
+        disk,
         console: p.console.clone(),
         cpus: resources.cpus as usize,
         memory,
@@ -414,12 +437,13 @@ fn serve_vm(p: &Paths, lock: &std::fs::File, inherited: Option<&Inherited>) -> R
         // boot, so the Mac holds them), and nothing uses them: virtio here does not go
         // through the DMA API.
         cmdline: format!(
-            "console=hvc0 ip=dhcp loglevel=4 panic=-1 swiotlb=2048 podbag.time={}.{:09} -- {}",
+            "console=hvc0 ip=dhcp loglevel=4 panic=-1 swiotlb=2048 podbag.time={}.{:09}{share_boot} -- {}",
             now.as_secs(),
             now.subsec_nanos(),
             crate::vm::proto::INIT_ARG
         ),
-        share: PathBuf::from("/Users"),
+        share_config: config.as_ref().map(|dir| dir.path().to_owned()),
+        shared_paths: shared_paths.clone(),
         mac: mac_address(&p.home),
     };
     let vm = Arc::new(Vm::start(&spec).map_err(start_error)?);
@@ -438,6 +462,7 @@ fn serve_vm(p: &Paths, lock: &std::fs::File, inherited: Option<&Inherited>) -> R
         seen: Mutex::new(settings::Running {
             started: now.as_secs(),
             resources: Some(resources),
+            shared_paths: Some(shared_paths),
             ..Default::default()
         }),
     });
@@ -601,24 +626,6 @@ fn wait_for(signals: &[i32]) -> i32 {
     }
 }
 
-/// The data disk, from the template when there is none: written beside it, flushed,
-/// then renamed, so a host that dies meanwhile leaves no half disk behind.
-fn make_disk(p: &Paths) -> Result<(), String> {
-    if p.disk.exists() {
-        return Ok(());
-    }
-    let template = p.guest.join("disk.zst");
-    let part = p.disk.with_extension("img.part");
-    let _ = std::fs::remove_file(&part);
-    let err = |path: &Path, e: std::io::Error| format!("{}: {e}", path.display());
-    let mut t = std::fs::File::open(&template).map_err(|e| err(&template, e))?;
-    crate::vm::template::expand(&mut t, &part).map_err(|e| e.to_string())?;
-    std::fs::File::open(&part)
-        .and_then(|f| f.sync_all())
-        .map_err(|e| err(&part, e))?;
-    std::fs::rename(&part, &p.disk).map_err(|e| err(&p.disk, e))
-}
-
 /// What the running VM started with and what it does, in `run/vm.json` for
 /// `podbag vm status` (which must not connect: a connection keeps the VM up).
 struct Monitor {
@@ -734,6 +741,7 @@ fn guest_command(vm: &Vm, what: &str) -> std::io::Result<(i32, String)> {
         argv: vec![what.into()],
         env: Vec::new(),
         cwd: "/".into(),
+        paths: Vec::new(),
         tty: false,
         rows: 0,
         cols: 0,

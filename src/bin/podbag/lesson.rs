@@ -6,6 +6,10 @@ mod containers;
 use std::path::Path;
 use std::{fs, io};
 
+/// The module's title, for the TUI panel. Practice sessions are unix only.
+#[cfg(unix)]
+pub const TITLE: &str = "PODBAG_TRAINING_TITLE";
+
 pub fn command(cmd: LabCmd) -> i32 {
     let result = (|| {
         match cmd {
@@ -85,6 +89,7 @@ pub fn command(cmd: LabCmd) -> i32 {
                 module,
                 lang,
                 library,
+                tui,
             } => {
                 let dir = match library {
                     Some(dir) => dir,
@@ -97,6 +102,7 @@ pub fn command(cmd: LabCmd) -> i32 {
                     refresh(&dir);
                 }
                 let module = volume_lesson::selected(&dir, module.as_deref())?;
+                let tui = tui_track(&module, tui)?;
                 let lang = lang
                     .or_else(|| std::env::var("LANG").ok())
                     .unwrap_or_else(|| "en".into());
@@ -104,18 +110,19 @@ pub fn command(cmd: LabCmd) -> i32 {
                 {
                     let path =
                         podbag::wsl::wsl_path(&dir.to_string_lossy()).map_err(io::Error::other)?;
-                    let code = podbag::windows::forward(
-                        &[
-                            "lab".into(),
-                            "start".into(),
-                            module.id().into(),
-                            "--lang".into(),
-                            lang,
-                            "--library".into(),
-                            path,
-                        ],
-                        &[],
-                    );
+                    let mut args: Vec<String> = vec![
+                        "lab".into(),
+                        "start".into(),
+                        module.id().into(),
+                        "--lang".into(),
+                        lang,
+                        "--library".into(),
+                        path,
+                    ];
+                    if tui {
+                        args.push("--tui".into());
+                    }
+                    let code = podbag::windows::forward(&args, &[]);
                     if code != 0 {
                         return Err(io::Error::other("The lab did not finish in WSL."));
                     }
@@ -131,7 +138,7 @@ pub fn command(cmd: LabCmd) -> i32 {
                     };
                     let words = installed.words(&lang);
                     let guide = installed.guide_url(&lang);
-                    if session(words, guide, &dir, &module, course)? {
+                    if session(words, guide, &dir, &module, course, tui)? {
                         installed.finish(&dir)?;
                     }
                 }
@@ -144,6 +151,27 @@ pub fn command(cmd: LabCmd) -> i32 {
         return 1;
     }
     0
+}
+
+/// Whether `--tui` can start MODULE: course modules only.
+fn tui_track(module: &Module, tui: bool) -> io::Result<bool> {
+    if tui && !matches!(module, Module::Course(_)) {
+        return Err(io::Error::other("The TUI track is for course modules."));
+    }
+    Ok(tui)
+}
+
+/// The TUI in a course session: (once, mouse) for `podbag tui` without --engine.
+#[cfg(unix)]
+fn course_tui(cmd: &crate::args::Cmd) -> Option<(bool, bool)> {
+    match *cmd {
+        crate::args::Cmd::Tui {
+            once,
+            no_mouse,
+            engine: None,
+        } => Some((once, !no_mouse)),
+        _ => None,
+    }
 }
 
 #[cfg(unix)]
@@ -243,6 +271,7 @@ fn session(
     library: &Path,
     module: &Module,
     course: Option<volume_lesson::course::Course>,
+    tui: bool,
 ) -> io::Result<bool> {
     use std::io::{BufRead, BufReader, IsTerminal};
     use std::os::unix::process::CommandExt;
@@ -297,15 +326,14 @@ fn session(
         } else {
             println!("\n{}\n", words.guide);
         }
-        if Path::new("/bin/sh").is_file() {
-            practice_command(Path::new("/bin/sh"), dir)?
-                .arg("-i")
-                .env("ENV", "/dev/null")
-                .env("HISTFILE", "/dev/null")
-                .env("PS1", prompt)
+        // Quitting the TUI ends the session the same way `exit` ends the shell.
+        if tui {
+            practice_command(&std::env::current_exe()?, dir)?
+                .arg("tui")
+                .env(TITLE, &words.title)
                 .status()?;
         } else {
-            terminal_without_shell(dir, prompt)?;
+            shell(dir, prompt, Some(&words.title))?;
         }
         if course.is_some() {
             return Ok(volume_lesson::course::Attempt::read(dir)?
@@ -333,10 +361,37 @@ fn session(
     Ok(complete)
 }
 
+/// The practice shell in DIR with PROMPT: /bin/sh -i, or the line reader without it.
+/// PROMPT is the one `session` picks (`training $ `, `container-lab $ `,
+/// `volume-lab $ `), so the legacy labs keep their prompts. Unix only, like `session`.
+/// Its commands get this process's `TITLE`, as in the TUI that `session` started.
+#[cfg(unix)]
+pub(crate) fn training_shell(dir: &Path, prompt: &str) -> io::Result<()> {
+    shell(dir, prompt, None)
+}
+
+/// `training_shell` with TITLE set for its commands, when given.
+#[cfg(unix)]
+fn shell(dir: &Path, prompt: &str, title: Option<&str>) -> io::Result<()> {
+    if Path::new("/bin/sh").is_file() {
+        let mut sh = practice_command(Path::new("/bin/sh"), dir)?;
+        if let Some(title) = title {
+            sh.env(TITLE, title);
+        }
+        sh.arg("-i")
+            .env("ENV", "/dev/null")
+            .env("HISTFILE", "/dev/null")
+            .env("PS1", prompt)
+            .status()?;
+        return Ok(());
+    }
+    terminal_without_shell(dir, prompt, title)
+}
+
 /// The Podbag WSL distribution contains just the engine. Run each command as a real
 /// child on the attached console so the normal TUI can take over the terminal.
 #[cfg(unix)]
-fn terminal_without_shell(dir: &Path, prompt: &str) -> io::Result<()> {
+fn terminal_without_shell(dir: &Path, prompt: &str, title: Option<&str>) -> io::Result<()> {
     use std::io::Write;
     let exe = std::env::current_exe()?;
     loop {
@@ -352,7 +407,11 @@ fn terminal_without_shell(dir: &Path, prompt: &str) -> io::Result<()> {
         };
         match args.split_first() {
             Some((name, args)) if name == "podbag" => {
-                practice_command(&exe, dir)?.args(args).status()?;
+                let mut cmd = practice_command(&exe, dir)?;
+                if let Some(title) = title {
+                    cmd.env(TITLE, title);
+                }
+                cmd.args(args).status()?;
             }
             Some(_) => {
                 eprintln!("Run the podbag commands shown in the practice guide, or type exit.")
@@ -395,7 +454,15 @@ pub fn scoped(root: &Path, cmd: crate::args::Cmd) -> i32 {
         return 1;
     }
     if root.join("run/container-lab").is_file() {
-        let result = if volume_lesson::course::Attempt::active(root) {
+        let course = volume_lesson::course::Attempt::active(root);
+        if course && let Some((once, mouse)) = course_tui(&cmd) {
+            return crate::tui::run(
+                once,
+                Some(Choice::Socket(volume_lesson::containers::socket(root))),
+                mouse,
+            );
+        }
+        let result = if course {
             containers::course_command(root)
         } else {
             containers::scoped(root, cmd)
@@ -466,5 +533,39 @@ pub fn scoped(root: &Path, cmd: crate::args::Cmd) -> i32 {
             );
             1
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_course_modules_have_a_tui_track() {
+        assert!(tui_track(&Module::Course("web-basics".into()), true).unwrap());
+        assert!(!tui_track(&Module::Containers, false).unwrap());
+        assert_eq!(
+            tui_track(&Module::Containers, true)
+                .unwrap_err()
+                .to_string(),
+            "The TUI track is for course modules."
+        );
+    }
+
+    #[test]
+    fn a_course_shell_opens_only_the_practice_tui() {
+        let parsed = |a: &[&str]| {
+            crate::parse(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+                .unwrap()
+                .cmd
+        };
+        assert_eq!(course_tui(&parsed(&["tui"])), Some((false, true)));
+        assert_eq!(
+            course_tui(&parsed(&["tui", "--no-mouse"])),
+            Some((false, false))
+        );
+        // Never another engine.
+        assert_eq!(course_tui(&parsed(&["tui", "--engine", "docker"])), None);
+        assert_eq!(course_tui(&parsed(&["ps"])), None);
     }
 }

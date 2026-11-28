@@ -130,6 +130,26 @@ pub fn pull(
         .map_err(|e| e.message)
 }
 
+/// User-configured hosts that can identify a specific registry provider.
+pub(crate) fn configured_locations(hosts: &[(String, String)]) -> Vec<Location> {
+    hosts
+        .iter()
+        .filter(|(id, host)| id != "custom" && !host.trim().is_empty())
+        .filter_map(|(id, host)| location(id, host).ok())
+        .filter(|location| location.needs_host())
+        .collect()
+}
+
+/// Match the registry in an image name to a configured or recognized provider.
+pub(crate) fn registry_location(reference: &str, configured: &[Location]) -> Location {
+    let host = registry_host(reference);
+    configured
+        .iter()
+        .find(|location| location.host() == host)
+        .cloned()
+        .unwrap_or_else(|| Location::of(&host))
+}
+
 /// A tagged image as shown in the Docker import list.
 #[derive(Serialize)]
 pub struct ImportImage {
@@ -144,13 +164,7 @@ impl ImportImage {
             .repo_tags
             .into_iter()
             .find(|tag| tag != "<none>:<none>")?;
-        let host = registry_host(&name);
-        let detected = Location::of(&host);
-        let location = configured
-            .iter()
-            .find(|l| l.host() == host)
-            .unwrap_or(&detected);
-        let registry = location.id();
+        let registry = registry_location(&name, configured).id();
         Some(Self {
             name,
             size: image.size,

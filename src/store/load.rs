@@ -1,4 +1,4 @@
-//! `docker load`: an image archive into the store.
+//! Image archives: `docker load` and root filesystem import.
 //!
 //! The archive may hold `docker save`'s `manifest.json`, an OCI image layout (`index.json`
 //! and `blobs/`), or both, as BuildKit and newer Docker write them. It is untrusted input:
@@ -6,16 +6,20 @@
 //! disk), every digest it names is checked, and its layers pass the same checks as a
 //! pull's (blob digest, diff ID, safe paths).
 
+#[cfg(unix)]
+use super::HashingReader;
 use super::{Source, Store, io_error, now, remove_tree};
 use crate::config::ImageCompression;
 use crate::image::manifest::{self, Compression, Descriptor, Fetched, Platform};
 use crate::image::reference::{Reference, is_digest};
 use crate::image::registry::sha256_hex;
+#[cfg(unix)]
+use crate::image::{ImageConfig, ImportOptions, manifest::HistoryEntry};
 use crate::{Error, ErrorKind, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 
 /// What a load stored.
@@ -85,6 +89,104 @@ impl Store {
             }
             Err(e) => {
                 // What this load left behind goes, as after a failed pull.
+                if let Ok(_exclusive) = self.lock(true) {
+                    let _ = self.collect_garbage();
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Store a root filesystem as one image layer, keeping its original tar digest.
+    #[cfg(unix)]
+    pub fn import(
+        &self,
+        input: &mut dyn Read,
+        options: ImportOptions,
+        limit: u64,
+        in_use: &dyn Fn() -> HashMap<String, String>,
+    ) -> Result<String> {
+        let bad_import = |why: String| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                "cannot import the root filesystem",
+                why,
+                "provide a complete tar archive",
+            )
+        };
+        let name = options.name.as_deref().map(Reference::parse).transpose()?;
+        if name.as_ref().is_some_and(|name| name.digest.is_some()) {
+            return Err(bad_import("the image name must use a tag".to_string()));
+        }
+        let mut config = ImageConfig::default();
+        crate::build::commit::apply_changes(&mut config, &options.changes)?;
+        let created = now();
+        let stored = {
+            let _shared = self.lock(false)?;
+            (|| {
+                let (magic, filled) = read_magic(input).map_err(|e| bad_import(e.to_string()))?;
+                let magic = &magic[..filled];
+                let input = BufReader::new(magic.chain(input));
+                let decoded: Box<dyn Read> = if magic.starts_with(&[0x1f, 0x8b]) {
+                    Box::new(flate2::bufread::MultiGzDecoder::new(input))
+                } else if magic.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
+                    Box::new(super::zstd::ZstdFrames::new(input))
+                } else {
+                    Box::new(input)
+                };
+                let capacity = free_space(&self.root)
+                    .map_or(limit, |free| free.saturating_sub(DISK_RESERVE).min(limit));
+                let mut tar = HashingReader::new(decoded.take(capacity.saturating_add(1)));
+                let entries = super::layer::read_layer(&mut tar, &self.objects);
+                // The tar parser stops at a zero block. Drain the rest to include padding in
+                // the diff ID and check the gzip or zstd trailer.
+                if entries.is_ok() {
+                    std::io::copy(&mut tar, &mut std::io::sink())
+                        .map_err(|e| bad_import(e.to_string()))?;
+                }
+                if tar.count > capacity {
+                    return Err(bad_import(format!(
+                        "the archive exceeds the available store space ({capacity} bytes)"
+                    )));
+                }
+                let entries = entries.map_err(|e| bad_import(e.to_string()))?;
+                if tar.count < 512 {
+                    return Err(bad_import(
+                        "the archive has no complete tar header".to_string(),
+                    ));
+                }
+                let diff_id = tar.digest();
+                self.write_layer_index(&diff_id, entries)?;
+                let history = vec![HistoryEntry {
+                    created: Some(crate::shim::logbook::rfc3339(created, 0)),
+                    comment: options.message,
+                    ..HistoryEntry::default()
+                }];
+                let digest = self.record_image(config, vec![diff_id], created, true, history)?;
+                let mut replaced = Vec::new();
+                if let Some(name) = name {
+                    let name = name.name();
+                    self.update_refs(|refs| {
+                        let next = super::RefEntry {
+                            digest: digest.clone(),
+                            last_used: created,
+                        };
+                        if let Some(old) =
+                            refs.insert(name, next).filter(|old| old.digest != digest)
+                        {
+                            replaced.push(old.digest);
+                        }
+                    })?;
+                }
+                Ok((digest, replaced))
+            })()
+        };
+        match stored {
+            Ok((digest, replaced)) => {
+                self.after_naming(&replaced, std::slice::from_ref(&digest), limit, in_use)?;
+                Ok(digest)
+            }
+            Err(e) => {
                 if let Ok(_exclusive) = self.lock(true) {
                     let _ = self.collect_garbage();
                 }
@@ -210,14 +312,20 @@ impl Store {
                 .clone()
                 .unwrap_or_else(|| config_digest.clone());
             if self.image_dir(&digest).join("image.json").exists() {
+                self.remember_history(&digest, config.history)?;
                 self.ensure_artifact(&digest)?;
             } else {
                 self.assemble(
-                    &digest,
-                    config.config,
-                    config.diff_ids,
-                    Some(config_digest.clone()),
-                    false,
+                    super::ImageRecord {
+                        digest: digest.clone(),
+                        config_digest: Some(config_digest),
+                        config: config.config,
+                        diff_ids: config.diff_ids,
+                        history: config.history,
+                        created: now(),
+                        size: 0,
+                        oci: false,
+                    },
                     true,
                 )?;
             }
@@ -400,6 +508,23 @@ fn json<T: serde::de::DeserializeOwned>(data: &[u8], name: &str) -> Result<T> {
     serde_json::from_slice(data).map_err(|e| bad(format!("{name} is not valid: {e}")))
 }
 
+/// The first 4 bytes of `input`, to tell its compression, and how many there are: fewer
+/// only when the input is shorter. One read may return fewer, so this reads until it has
+/// them. Give them again before the rest of `input`.
+fn read_magic(input: &mut dyn Read) -> std::io::Result<([u8; 4], usize)> {
+    let mut magic = [0; 4];
+    let mut filled = 0;
+    while filled < magic.len() {
+        match input.read(&mut magic[filled..]) {
+            Ok(0) => break,
+            Ok(count) => filled += count,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok((magic, filled))
+}
+
 /// How a layer file is compressed, from its first bytes.
 fn sniff(path: &Path) -> Result<Compression> {
     let mut magic = [0u8; 4];
@@ -455,8 +580,9 @@ impl Files {
     /// limit: an archive larger than it could not be kept), and stop before the disk is
     /// nearly full (a small gzip stream can unpack to a great deal).
     fn unpack(input: &mut dyn Read, scratch: &Path, limit: u64) -> Result<Files> {
-        let mut input = BufReader::new(input);
-        let start = input.fill_buf().map_err(|e| bad(e.to_string()))?;
+        let (start, filled) = read_magic(input).map_err(|e| bad(e.to_string()))?;
+        let start = &start[..filled];
+        let input = BufReader::new(start.chain(input));
         let reader: Box<dyn Read + '_> = if start.starts_with(&[0x1f, 0x8b]) {
             Box::new(flate2::read::MultiGzDecoder::new(input))
         } else {
@@ -632,6 +758,121 @@ mod tests {
             }
         }
         b.into_inner().unwrap()
+    }
+
+    /// A transfer that sent a whole tar and then failed must not name an image: the
+    /// helper gets its input through the framing that `Image::import` uses.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_import_transfer_keeps_the_old_tag() {
+        struct Failing(Vec<u8>);
+        impl Read for Failing {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.0.is_empty() {
+                    return Err(std::io::Error::other("the download broke"));
+                }
+                let count = self.0.len().min(buf.len());
+                buf[..count].copy_from_slice(&self.0[..count]);
+                self.0.drain(..count);
+                Ok(count)
+            }
+        }
+        let options = || ImportOptions {
+            name: Some("demo:latest".to_string()),
+            ..ImportOptions::default()
+        };
+        let tmp = tempfile::tempdir().unwrap();
+        let store = open(&tmp);
+        let mut first = Vec::new();
+        crate::helper::send_framed(&mut &tar_of(&[("old", b"1")])[..], &mut first).unwrap();
+        let old = store
+            .import(
+                &mut crate::helper::FramedInput::new(&first[..]),
+                options(),
+                u64::MAX,
+                &none,
+            )
+            .unwrap();
+
+        let mut cut = Vec::new();
+        let sent = crate::helper::send_framed(&mut Failing(tar_of(&[("new", b"2")])), &mut cut);
+        assert!(sent.is_err());
+        let result = store.import(
+            &mut crate::helper::FramedInput::new(&cut[..]),
+            options(),
+            u64::MAX,
+            &none,
+        );
+        assert!(result.is_err(), "{result:?}");
+        assert_eq!(store.find("demo:latest").unwrap().1.digest, old);
+    }
+
+    /// Gives at most one byte per read, as a slow pipe may.
+    struct OneByte<'a>(&'a [u8]);
+
+    impl Read for OneByte<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let Some((first, rest)) = self.0.split_first() else {
+                return Ok(0);
+            };
+            if buf.is_empty() {
+                return Ok(0);
+            }
+            buf[0] = *first;
+            self.0 = rest;
+            Ok(1)
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compression_is_found_when_the_input_comes_a_byte_at_a_time() {
+        let tar = tar_of(&[("file", b"data")]);
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        gz.write_all(&tar).unwrap();
+        let gz = gz.finish().unwrap();
+        let zst = ruzstd::encoding::compress_to_vec(
+            &tar[..],
+            ruzstd::encoding::CompressionLevel::Fastest,
+        );
+        let tmp = tempfile::tempdir().unwrap();
+        let store = open(&tmp);
+        let plain = store
+            .import(
+                &mut OneByte(&tar),
+                ImportOptions::default(),
+                u64::MAX,
+                &none,
+            )
+            .unwrap();
+        for compressed in [&gz, &zst] {
+            let digest = store
+                .import(
+                    &mut OneByte(compressed),
+                    ImportOptions::default(),
+                    u64::MAX,
+                    &none,
+                )
+                .unwrap();
+            // The same tar, so the same layer.
+            assert_eq!(
+                store.find(&digest).unwrap().1.diff_ids,
+                store.find(&plain).unwrap().1.diff_ids
+            );
+        }
+    }
+
+    #[test]
+    fn load_finds_gzip_when_the_input_comes_a_byte_at_a_time() {
+        let layer = tar_of(&[("file", b"data")]);
+        let archive = docker_archive(&layer, "/slow", serde_json::json!(["slow:latest"]));
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        gz.write_all(&archive).unwrap();
+        let gz = gz.finish().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let store = open(&tmp);
+        store.load(&mut OneByte(&gz), u64::MAX, &none).unwrap();
+        assert!(store.find("slow:latest").is_ok());
     }
 
     fn digest(data: &[u8]) -> String {

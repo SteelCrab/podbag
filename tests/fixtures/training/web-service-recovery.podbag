@@ -61,6 +61,7 @@
         "vi": "Đọc lỗi khởi động trong CLI"
       },
       "command": "podbag logs lab-web",
+      "ui": { "action": "logs", "name": "lab-web" },
       "check": {
         "kind": "output-has-line",
         "text": "SITE_TITLE is required"
@@ -78,6 +79,7 @@
         "vi": "Xóa container gặp lỗi trong CLI"
       },
       "command": "podbag rm lab-web",
+      "ui": { "action": "remove", "name": "lab-web" },
       "check": {
         "kind": "container-absent",
         "name": "lab-web"
@@ -161,6 +163,7 @@
         "vi": "Xóa container trong CLI"
       },
       "command": "podbag rm lab-web",
+      "ui": { "action": "remove", "name": "lab-web" },
       "check": {
         "kind": "container-absent",
         "name": "lab-web"

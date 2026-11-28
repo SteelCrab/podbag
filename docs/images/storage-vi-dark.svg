@@ -8,39 +8,39 @@
 <text x="400.0" y="34.0" font-size="17" fill="#f0efec" font-weight="700" text-anchor="middle" class="m k4"><tspan x="400.0" dy="0.0">Đo với 8 dịch vụ Spring trong 2 bản phát hành</tspan></text>
 <text x="228.2" y="72.0" font-size="13" fill="#f0efec" font-weight="700" text-anchor="middle">image A</text>
 <rect x="71.4" y="82" width="313.6" height="34" rx="7" fill="#34342f" stroke="#4a4a44"/>
-<rect x="79.4" y="88.0" width="88.0" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<rect x="79.4" y="88.0" width="88.0" height="22" rx="5" fill="#8853b4" stroke="#8853b4"/>
 <text x="123.4" y="103.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">spring.jar</text>
-<rect x="173.4" y="88.0" width="95.2" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<rect x="173.4" y="88.0" width="95.2" height="22" rx="5" fill="#8853b4" stroke="#8853b4"/>
 <text x="221.0" y="103.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">jackson.jar</text>
 <rect x="274.6" y="88.0" width="88.0" height="22" rx="5" fill="#1c1c1a" stroke="#5a5a53"/>
 <text x="318.6" y="103.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#f0efec" text-anchor="middle">orders.jar</text>
 <rect x="71.4" y="122" width="313.6" height="34" rx="7" fill="#34342f" stroke="#4a4a44"/>
-<rect x="79.4" y="128.0" width="52.0" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<rect x="79.4" y="128.0" width="52.0" height="22" rx="5" fill="#8853b4" stroke="#8853b4"/>
 <text x="105.4" y="143.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">linux</text>
-<rect x="137.4" y="128.0" width="44.8" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<rect x="137.4" y="128.0" width="44.8" height="22" rx="5" fill="#8853b4" stroke="#8853b4"/>
 <text x="159.8" y="143.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">java</text>
 <text x="571.8" y="72.0" font-size="13" fill="#f0efec" font-weight="700" text-anchor="middle">image B</text>
 <rect x="415.0" y="82" width="313.6" height="34" rx="7" fill="#34342f" stroke="#4a4a44"/>
-<rect x="423.0" y="88.0" width="88.0" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<rect x="423.0" y="88.0" width="88.0" height="22" rx="5" fill="#8853b4" stroke="#8853b4"/>
 <text x="467.0" y="103.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">spring.jar</text>
-<rect x="517.0" y="88.0" width="95.2" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<rect x="517.0" y="88.0" width="95.2" height="22" rx="5" fill="#8853b4" stroke="#8853b4"/>
 <text x="564.6" y="103.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">jackson.jar</text>
 <rect x="618.2" y="88.0" width="102.4" height="22" rx="5" fill="#1c1c1a" stroke="#5a5a53"/>
 <text x="669.4" y="103.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#f0efec" text-anchor="middle">payments.jar</text>
 <rect x="415.0" y="122" width="313.6" height="34" rx="7" fill="#34342f" stroke="#4a4a44"/>
-<rect x="423.0" y="128.0" width="52.0" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<rect x="423.0" y="128.0" width="52.0" height="22" rx="5" fill="#8853b4" stroke="#8853b4"/>
 <text x="449.0" y="143.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">linux</text>
-<rect x="481.0" y="128.0" width="44.8" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<rect x="481.0" y="128.0" width="44.8" height="22" rx="5" fill="#8853b4" stroke="#8853b4"/>
 <text x="503.4" y="143.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">java</text>
-<rect class="m k5" opacity="0" x="76.4" y="85.0" width="94.0" height="28.0" rx="8" fill="none" stroke="#2a78d6" stroke-width="2.5"/>
-<rect class="m k5" opacity="0" x="170.4" y="85.0" width="101.2" height="28.0" rx="8" fill="none" stroke="#2a78d6" stroke-width="2.5"/>
-<rect class="m k5" opacity="0" x="76.4" y="125.0" width="58.0" height="28.0" rx="8" fill="none" stroke="#2a78d6" stroke-width="2.5"/>
-<rect class="m k5" opacity="0" x="134.4" y="125.0" width="50.8" height="28.0" rx="8" fill="none" stroke="#2a78d6" stroke-width="2.5"/>
-<rect class="m k5" opacity="0" x="420.0" y="85.0" width="94.0" height="28.0" rx="8" fill="none" stroke="#2a78d6" stroke-width="2.5"/>
-<rect class="m k5" opacity="0" x="514.0" y="85.0" width="101.2" height="28.0" rx="8" fill="none" stroke="#2a78d6" stroke-width="2.5"/>
-<rect class="m k5" opacity="0" x="420.0" y="125.0" width="58.0" height="28.0" rx="8" fill="none" stroke="#2a78d6" stroke-width="2.5"/>
-<rect class="m k5" opacity="0" x="478.0" y="125.0" width="50.8" height="28.0" rx="8" fill="none" stroke="#2a78d6" stroke-width="2.5"/>
-<rect x="326.4" y="173" width="13" height="13" rx="3" fill="#2a78d6"/>
+<rect class="m k5" opacity="0" x="76.4" y="85.0" width="94.0" height="28.0" rx="8" fill="none" stroke="#8853b4" stroke-width="2.5"/>
+<rect class="m k5" opacity="0" x="170.4" y="85.0" width="101.2" height="28.0" rx="8" fill="none" stroke="#8853b4" stroke-width="2.5"/>
+<rect class="m k5" opacity="0" x="76.4" y="125.0" width="58.0" height="28.0" rx="8" fill="none" stroke="#8853b4" stroke-width="2.5"/>
+<rect class="m k5" opacity="0" x="134.4" y="125.0" width="50.8" height="28.0" rx="8" fill="none" stroke="#8853b4" stroke-width="2.5"/>
+<rect class="m k5" opacity="0" x="420.0" y="85.0" width="94.0" height="28.0" rx="8" fill="none" stroke="#8853b4" stroke-width="2.5"/>
+<rect class="m k5" opacity="0" x="514.0" y="85.0" width="101.2" height="28.0" rx="8" fill="none" stroke="#8853b4" stroke-width="2.5"/>
+<rect class="m k5" opacity="0" x="420.0" y="125.0" width="58.0" height="28.0" rx="8" fill="none" stroke="#8853b4" stroke-width="2.5"/>
+<rect class="m k5" opacity="0" x="478.0" y="125.0" width="50.8" height="28.0" rx="8" fill="none" stroke="#8853b4" stroke-width="2.5"/>
+<rect x="326.4" y="173" width="13" height="13" rx="3" fill="#8853b4"/>
 <text x="346.4" y="184.0" font-size="12.5" fill="#c3c2b7" text-anchor="start">có trong cả hai image</text>
 <text x="22" y="212" font-size="16" font-weight="700" fill="#f0efec">Lớp<tspan dx="8" font-size="12.5" font-weight="400" fill="#c3c2b7">Docker, Podman, Kiri</tspan></text>
 <rect x="14" y="224" width="380" height="190" rx="10" fill="#232321" stroke="#4a4a44"/>
@@ -49,26 +49,26 @@
 <g class="m k6"><rect x="22" y="245" width="44" height="20" rx="10" fill="#1a1a19" stroke="#4a4a44"/><text x="44" y="259" font-size="11" font-weight="700" fill="#c3c2b7" text-anchor="middle">A</text></g>
 <g class="m k7">
 <rect x="70.0" y="238" width="313.6" height="34" rx="7" fill="#34342f" stroke="#4a4a44"/>
-<rect x="78.0" y="244.0" width="88.0" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<rect x="78.0" y="244.0" width="88.0" height="22" rx="5" fill="#8853b4" stroke="#8853b4"/>
 <text x="122.0" y="259.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">spring.jar</text>
-<rect x="172.0" y="244.0" width="95.2" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<rect x="172.0" y="244.0" width="95.2" height="22" rx="5" fill="#8853b4" stroke="#8853b4"/>
 <text x="219.6" y="259.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">jackson.jar</text>
 <rect x="273.2" y="244.0" width="88.0" height="22" rx="5" fill="#1c1c1a" stroke="#5a5a53"/>
 <text x="317.2" y="259.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#f0efec" text-anchor="middle">orders.jar</text>
 </g>
 <g class="m k8">
 <rect x="70.0" y="322" width="313.6" height="34" rx="7" fill="#34342f" stroke="#4a4a44"/>
-<rect x="78.0" y="328.0" width="52.0" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<rect x="78.0" y="328.0" width="52.0" height="22" rx="5" fill="#8853b4" stroke="#8853b4"/>
 <text x="104.0" y="343.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">linux</text>
-<rect x="136.0" y="328.0" width="44.8" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<rect x="136.0" y="328.0" width="44.8" height="22" rx="5" fill="#8853b4" stroke="#8853b4"/>
 <text x="158.4" y="343.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">java</text>
 </g>
 <g class="m k9" opacity="0"><rect x="22" y="329" width="44" height="20" rx="10" fill="#1a1a19" stroke="#4a4a44"/><text x="44" y="343" font-size="11" font-weight="700" fill="#c3c2b7" text-anchor="middle">A</text></g>
 <g class="m k10" opacity="0">
 <rect x="70.0" y="322" width="313.6" height="34" rx="7" fill="#34342f" stroke="#4a4a44"/>
-<rect x="78.0" y="328.0" width="52.0" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<rect x="78.0" y="328.0" width="52.0" height="22" rx="5" fill="#8853b4" stroke="#8853b4"/>
 <text x="104.0" y="343.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">linux</text>
-<rect x="136.0" y="328.0" width="44.8" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<rect x="136.0" y="328.0" width="44.8" height="22" rx="5" fill="#8853b4" stroke="#8853b4"/>
 <text x="158.4" y="343.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">java</text>
 </g>
 <rect class="m k11" opacity="0" x="67.0" y="319.0" width="319.6" height="40.0" rx="8" fill="none" stroke="#4ade80" stroke-width="2.5"/>
@@ -76,9 +76,9 @@
 <text x="192.8" y="344.0" font-size="12" fill="#4ade80" font-weight="700" text-anchor="start" class="m k13">✓ cùng lớp: chỉ lưu một lần</text>
 <g class="m k14">
 <rect x="70.0" y="280" width="313.6" height="34" rx="7" fill="#34342f" stroke="#4a4a44"/>
-<rect x="78.0" y="286.0" width="88.0" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<rect x="78.0" y="286.0" width="88.0" height="22" rx="5" fill="#8853b4" stroke="#8853b4"/>
 <text x="122.0" y="301.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">spring.jar</text>
-<rect x="172.0" y="286.0" width="95.2" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<rect x="172.0" y="286.0" width="95.2" height="22" rx="5" fill="#8853b4" stroke="#8853b4"/>
 <text x="219.6" y="301.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">jackson.jar</text>
 <rect x="273.2" y="286.0" width="102.4" height="22" rx="5" fill="#1c1c1a" stroke="#5a5a53"/>
 <text x="324.4" y="301.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#f0efec" text-anchor="middle">payments.jar</text>
@@ -92,19 +92,19 @@
 </g>
 <text class="m k17" x="22" y="398" font-size="13"><tspan font-weight="700" fill="#f0efec">Lưu 8 tệp</tspan><tspan fill="#fb923c" font-weight="600"> · 2 tệp lưu hai lần</tspan></text>
 <g class="m k18">
-<rect x="493.6" y="262.0" width="52.0" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<rect x="493.6" y="262.0" width="52.0" height="22" rx="5" fill="#8853b4" stroke="#8853b4"/>
 <text x="519.6" y="277.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">linux</text>
 </g>
 <g class="m k19">
-<rect x="555.6" y="262.0" width="44.8" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<rect x="555.6" y="262.0" width="44.8" height="22" rx="5" fill="#8853b4" stroke="#8853b4"/>
 <text x="578.0" y="277.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">java</text>
 </g>
 <g class="m k20">
-<rect x="610.4" y="262.0" width="88.0" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<rect x="610.4" y="262.0" width="88.0" height="22" rx="5" fill="#8853b4" stroke="#8853b4"/>
 <text x="654.4" y="277.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">spring.jar</text>
 </g>
 <g class="m k21">
-<rect x="443.2" y="306.0" width="95.2" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<rect x="443.2" y="306.0" width="95.2" height="22" rx="5" fill="#8853b4" stroke="#8853b4"/>
 <text x="490.8" y="321.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">jackson.jar</text>
 </g>
 <g class="m k22">
@@ -112,22 +112,22 @@
 <text x="592.4" y="321.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#f0efec" text-anchor="middle">orders.jar</text>
 </g>
 <g class="m k23" opacity="0">
-<rect x="493.6" y="262.0" width="52.0" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<rect x="493.6" y="262.0" width="52.0" height="22" rx="5" fill="#8853b4" stroke="#8853b4"/>
 <text x="519.6" y="277.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">linux</text>
 </g>
 <rect class="m k24" opacity="0" x="490.6" y="259.0" width="58.0" height="28.0" rx="8" fill="none" stroke="#4ade80" stroke-width="2.5"/>
 <g class="m k25" opacity="0">
-<rect x="555.6" y="262.0" width="44.8" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<rect x="555.6" y="262.0" width="44.8" height="22" rx="5" fill="#8853b4" stroke="#8853b4"/>
 <text x="578.0" y="277.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">java</text>
 </g>
 <rect class="m k26" opacity="0" x="552.6" y="259.0" width="50.8" height="28.0" rx="8" fill="none" stroke="#4ade80" stroke-width="2.5"/>
 <g class="m k27" opacity="0">
-<rect x="610.4" y="262.0" width="88.0" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<rect x="610.4" y="262.0" width="88.0" height="22" rx="5" fill="#8853b4" stroke="#8853b4"/>
 <text x="654.4" y="277.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">spring.jar</text>
 </g>
 <rect class="m k28" opacity="0" x="607.4" y="259.0" width="94.0" height="28.0" rx="8" fill="none" stroke="#4ade80" stroke-width="2.5"/>
 <g class="m k29" opacity="0">
-<rect x="443.2" y="306.0" width="95.2" height="22" rx="5" fill="#2a78d6" stroke="#2a78d6"/>
+<rect x="443.2" y="306.0" width="95.2" height="22" rx="5" fill="#8853b4" stroke="#8853b4"/>
 <text x="490.8" y="321.0" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12" fill="#ffffff" text-anchor="middle">jackson.jar</text>
 </g>
 <rect class="m k30" opacity="0" x="440.2" y="303.0" width="101.2" height="28.0" rx="8" fill="none" stroke="#4ade80" stroke-width="2.5"/>
@@ -137,7 +137,7 @@
 </g>
 <text class="m k32" x="414" y="398" font-size="13"><tspan font-weight="700" fill="#f0efec">Lưu 6 tệp</tspan><tspan fill="#4ade80" font-weight="600"> · mỗi tệp một lần</tspan></text>
 <text x="22.0" y="444.0" font-size="14" fill="#f0efec" font-weight="700" text-anchor="start" class="m k34">Đĩa 2.970 MiB</text>
-<rect class="m k33" x="22" y="452" width="360.0" height="14" rx="4" fill="#2a78d6" style="transform-box:fill-box;transform-origin:0 50%"/>
+<rect class="m k33" x="22" y="452" width="360.0" height="14" rx="4" fill="#8853b4" style="transform-box:fill-box;transform-origin:0 50%"/>
 <text x="414.0" y="444.0" font-size="14" fill="#f0efec" font-weight="700" text-anchor="start" class="m k35">Đĩa 902 MiB</text>
-<rect class="m k33" x="414" y="452" width="109.3" height="14" rx="4" fill="#2a78d6" style="transform-box:fill-box;transform-origin:0 50%"/>
+<rect class="m k33" x="414" y="452" width="109.3" height="14" rx="4" fill="#8853b4" style="transform-box:fill-box;transform-origin:0 50%"/>
 </svg>

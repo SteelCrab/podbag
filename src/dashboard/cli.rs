@@ -41,16 +41,36 @@ impl Ran {
 
 /// Run the program with `args`; stdin is empty, so it never waits for an answer.
 pub fn run(podbag: &Path, args: &[&str]) -> Result<Ran, String> {
-    let mut cmd = std::process::Command::new(podbag);
-    cmd.args(args).stdin(std::process::Stdio::null());
+    run_with_input(podbag, args, None)
+}
+
+fn run_with_input(podbag: &Path, args: &[&str], input: Option<&[u8]>) -> Result<Ran, String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut cmd = Command::new(podbag);
+    cmd.args(args);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000);
     }
-    let out = cmd
-        .output()
-        .map_err(|e| format!("{}: {e}", podbag.display()))?;
+    let error = |e| format!("{}: {e}", podbag.display());
+    let out = if let Some(input) = input {
+        let mut child = cmd
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(error)?;
+        let written = child.stdin.take().unwrap().write_all(input);
+        let out = child.wait_with_output().map_err(error)?;
+        if out.status.success() {
+            written.map_err(error)?;
+        }
+        out
+    } else {
+        cmd.stdin(Stdio::null()).output().map_err(error)?
+    };
     Ok(Ran {
         code: out.status.code().unwrap_or(-1),
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -81,6 +101,8 @@ pub struct VmSettings {
     pub memory_mib: Option<u64>,
     /// 0: never power off.
     pub idle_seconds: Option<u64>,
+    /// The full list of macOS folders shared with the guest.
+    pub shared_paths: Option<Vec<String>>,
     /// Restart the VM now (running containers stop: the window asked first).
     pub restart: bool,
 }
@@ -98,6 +120,14 @@ pub fn vm_set_args(s: &VmSettings) -> Result<Vec<String>, String> {
         let idle = if i == 0 { "0".into() } else { format!("{i}s") };
         args.extend(["--idle".into(), idle]);
     }
+    if let Some(paths) = &s.shared_paths {
+        if paths.is_empty() {
+            args.push("--no-shares".into());
+        }
+        for path in paths {
+            args.extend(["--share".into(), path.to_string()]);
+        }
+    }
     if args.len() == 2 {
         return Err("nothing to set".into());
     }
@@ -112,6 +142,23 @@ pub fn vm_set(podbag: &Path, s: &VmSettings) -> Result<String, String> {
     let args = vm_set_args(s)?;
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     run_ok(podbag, &args).map(|out| out.trim().to_string())
+}
+
+/// `podbag vm sync`: list or change a running VM's synchronized shares.
+pub fn vm_sync(
+    podbag: &Path,
+    action: &str,
+    name: Option<&str>,
+    path: Option<&str>,
+) -> Result<Value, String> {
+    let mut args = vec!["vm", "sync", action];
+    match (action, name, path) {
+        ("list", None, None) => {}
+        ("now" | "remove", Some(name), None) => args.push(name),
+        ("add", Some(name), Some(path)) => args.extend([name, path]),
+        _ => return Err("invalid synchronized share command".into()),
+    }
+    serde_json::from_str(&run_ok(podbag, &args)?).map_err(|e| e.to_string())
 }
 
 /// `podbag vm start`, `stop` or `restart` (with `--yes`: the window asked first).
@@ -139,11 +186,103 @@ pub fn compression(podbag: &Path, mode: Option<&str>) -> Result<Value, String> {
     serde_json::from_str(out.trim()).map_err(|e| format!("podbag system compression --json: {e}"))
 }
 
+/// An offline change to the local macOS VM data disk.
+#[derive(serde::Deserialize)]
+#[serde(tag = "action", rename_all = "lowercase")]
+pub enum VmStorageEdit {
+    Grow { gib: u64 },
+    Move { path: String },
+}
+
+/// Read or edit the storage of the macOS VM without connecting to the guest.
+pub fn vm_storage(podbag: &Path, edit: Option<VmStorageEdit>) -> Result<Value, String> {
+    let base = ["vm", "storage"];
+    let output = match edit {
+        None => run_ok(podbag, &base)?,
+        Some(VmStorageEdit::Grow { gib }) => {
+            run_ok(podbag, &[base[0], base[1], "grow", &gib.to_string()])?
+        }
+        Some(VmStorageEdit::Move { path }) => run_ok(podbag, &[base[0], base[1], "move", &path])?,
+    };
+    serde_json::from_str(output.trim()).map_err(|e| format!("podbag vm storage: {e}"))
+}
+
+/// Read or save network preferences using the companion CLI on the engine's host.
+pub fn network_settings(
+    podbag: &Path,
+    values: Option<crate::network::NetworkPreferences>,
+    expected_revision: Option<&str>,
+) -> Result<Value, String> {
+    let mut args = vec!["system", "network-settings"];
+    let json;
+    if let Some(values) = values {
+        json = serde_json::to_string(&values).map_err(|e| e.to_string())?;
+        let revision = expected_revision
+            .filter(|revision| !revision.is_empty())
+            .ok_or("Reload Network settings before saving changes")?;
+        args.extend(["--set", &json, "--expect-revision", revision]);
+    }
+    let out = run_ok(podbag, &args)?;
+    serde_json::from_str(out.trim()).map_err(|e| format!("podbag system network-settings: {e}"))
+}
+
+/// Query the local engine's settings through the companion CLI, including the macOS VM.
+pub fn registry_proxy(
+    podbag: &Path,
+    settings: Option<crate::image::proxy::Settings>,
+) -> Result<crate::image::proxy::Settings, String> {
+    use crate::image::proxy;
+    let args = ["system", "registry-proxy", "--set"];
+    let result = if let Some(settings) = settings {
+        let settings = settings.normalized().map_err(|error| error.why)?;
+        let bytes = serde_json::to_vec(&settings).map_err(|_| "Cannot encode proxy settings")?;
+        run_with_input(podbag, &args, Some(&bytes))?
+    } else {
+        run(podbag, &args[..2])?
+    };
+    if result.code != 0 {
+        return Err(result.error());
+    }
+    proxy::read_json(result.stdout.as_bytes()).map_err(|error| error.why)
+}
+
 /// `podbag --version`: `0.1.0` from `podbag 0.1.0`.
 pub fn engine_version(podbag: &Path) -> Option<String> {
     let out = run_ok(podbag, &["--version"]).ok()?;
     let v = out.split_whitespace().nth(1)?.trim_start_matches('v');
     crate::upgrade::Version::parse(v).map(|v| v.to_string())
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "snake_case", tag = "action")]
+pub enum EngineConfigRequest {
+    Read,
+    Check { text: String },
+    Save { edit: crate::config::Edit },
+}
+
+pub fn engine_config(
+    podbag: &Path,
+    request: EngineConfigRequest,
+) -> Result<Option<crate::config::Document>, String> {
+    let (action, input) = match request {
+        EngineConfigRequest::Read => ("show", None),
+        EngineConfigRequest::Check { text } => ("check", Some(text.into_bytes())),
+        EngineConfigRequest::Save { edit } => (
+            "apply",
+            Some(serde_json::to_vec(&edit).map_err(|e| e.to_string())?),
+        ),
+    };
+    let call = run_with_input(podbag, &["system", "config", action], input.as_deref())?;
+    if call.code != 0 {
+        return Err(call.error());
+    }
+    if action == "check" {
+        return Ok(None);
+    }
+    serde_json::from_str(&call.stdout)
+        .map(Some)
+        .map_err(|e| format!("podbag system config {action}: {e}"))
 }
 
 /// `latest` is newer than `current`.
@@ -408,7 +547,7 @@ mod tests {
             cpus: Some(6),
             memory_mib: Some(8192),
             idle_seconds: Some(0),
-            restart: false,
+            ..VmSettings::default()
         };
         assert_eq!(
             vm_set(&fake.bin, &s).unwrap(),
@@ -429,6 +568,33 @@ mod tests {
         );
         assert!(vm_set(&fake.bin, &VmSettings::default()).is_err());
         assert_eq!(fake.calls().len(), 2, "nothing to set runs nothing");
+    }
+
+    #[test]
+    fn vm_set_distinguishes_missing_shares_from_an_empty_list() {
+        let settings = |paths| VmSettings {
+            shared_paths: Some(paths),
+            ..VmSettings::default()
+        };
+        assert_eq!(
+            vm_set_args(&settings(vec![])).unwrap(),
+            ["vm", "set", "--no-shares"]
+        );
+        assert_eq!(
+            vm_set_args(&settings(vec![
+                "/Users".into(),
+                "/Volumes/my projects".into()
+            ]))
+            .unwrap(),
+            [
+                "vm",
+                "set",
+                "--share",
+                "/Users",
+                "--share",
+                "/Volumes/my projects"
+            ]
+        );
     }
 
     #[test]

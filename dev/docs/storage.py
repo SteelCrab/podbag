@@ -26,11 +26,11 @@ MONO = "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
 THEMES = {
     "light": {"surface": "#fcfcfb", "disk": "#f2f1ed", "box": "#e6e4dc", "line": "#c3c2b7",
               "ink": "#0b0b0b", "ink2": "#52514e", "chip": "#ffffff", "chipline": "#c3c2b7",
-              "accent": "#2a78d6", "on": "#ffffff", "again": "#c2410c", "on_again": "#ffffff",
+              "accent": "#8853b4", "on": "#ffffff", "again": "#c2410c", "on_again": "#ffffff",
               "once": "#15803d"},
     "dark": {"surface": "#1a1a19", "disk": "#232321", "box": "#34342f", "line": "#4a4a44",
              "ink": "#f0efec", "ink2": "#c3c2b7", "chip": "#1c1c1a", "chipline": "#5a5a53",
-             "accent": "#2a78d6", "on": "#ffffff", "again": "#fb923c", "on_again": "#1a1a19",
+             "accent": "#8853b4", "on": "#ffffff", "again": "#fb923c", "on_again": "#1a1a19",
              "once": "#4ade80"},
 }
 
