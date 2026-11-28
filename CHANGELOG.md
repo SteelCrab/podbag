@@ -48,8 +48,8 @@
 
 ### Images
 
-- View image history with `podbag history` and import a root filesystem archive with
-  `podbag import`. Both operations are available through the Docker API.
+- View image history with `podbag image history` and import a root filesystem archive
+  with `podbag image import`. Both operations are available through the Docker API.
 - podbag can compress images that no container uses, file by file with zstd. It is off
   by default. Files that two images share stay shared. In our test the store went from
   725 MB to 337 MB.
