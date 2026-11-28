@@ -1,7 +1,9 @@
 use crate::build::managed_worker::{Process, Workspace};
 use crate::paths::Dirs;
 use crate::{Error, Result};
+use std::io;
 use std::os::unix::net::UnixStream;
+use std::path::Path;
 use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -139,7 +141,7 @@ impl Running {
     }
 
     fn connect(&mut self) -> std::io::Result<Connection> {
-        let stream = UnixStream::connect(self.work.socket())?;
+        let stream = connect_socket(self.work.socket())?;
         self.last_used = Instant::now();
         Ok(Connection {
             stream,
@@ -149,10 +151,53 @@ impl Running {
     }
 }
 
+fn connect_socket(path: &Path) -> io::Result<UnixStream> {
+    use rustix::net::{
+        AddressFamily, SocketAddrUnix, SocketFlags, SocketType, connect, socket_with,
+    };
+    // A worker that hasn't accepted its queued connections must never block shutdown.
+    let socket = socket_with(
+        AddressFamily::UNIX,
+        SocketType::STREAM,
+        SocketFlags::NONBLOCK | SocketFlags::CLOEXEC,
+        None,
+    )?;
+    connect(&socket, &SocketAddrUnix::new(path)?)?;
+    Ok(UnixStream::from(socket))
+}
+
 fn worker_error(error: &std::io::Error) -> Error {
     Error::io(
         "cannot use the private BuildKit worker",
         error,
         "check buildkitd and its Linux prerequisites",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustix::net::{AddressFamily, SocketAddrUnix, SocketType, bind, listen, socket};
+
+    #[test]
+    fn a_full_unix_listener_rejects_another_connection_without_waiting() {
+        let tmp = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
+        let path = tmp.path().join("buildkit.sock");
+        let listener = socket(AddressFamily::UNIX, SocketType::STREAM, None).unwrap();
+        bind(&listener, &SocketAddrUnix::new(&path).unwrap()).unwrap();
+        listen(&listener, 0).unwrap();
+        let _first = connect_socket(&path).unwrap();
+
+        let (send, recv) = mpsc::channel();
+        let client = thread::spawn(move || {
+            let _ = send.send(connect_socket(&path));
+        });
+        let result = recv.recv_timeout(Duration::from_secs(1));
+        drop(listener);
+        client.join().unwrap();
+        assert_eq!(
+            result.unwrap().unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+    }
 }

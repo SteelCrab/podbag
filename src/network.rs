@@ -499,6 +499,12 @@ fn host_routes() -> Vec<(Ipv4Addr, u8)> {
         .unwrap_or_default()
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) fn buildkit_route_ready(bridge: &str, subnet: Ipv4Addr) -> std::io::Result<bool> {
+    let routes = std::fs::read_to_string("/proc/net/route")?;
+    Ok(parse_routes_with(&routes, |iface| iface == bridge).contains(&(subnet, 24)))
+}
+
 /// Read `/proc/net/route`.
 fn parse_routes(text: &str) -> Vec<(Ipv4Addr, u8)> {
     parse_routes_with(text, |iface| {

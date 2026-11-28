@@ -55,8 +55,8 @@ impl Workspace {
 
     pub fn start(&self) -> Result<Process> {
         let log = self.work.path().join("buildkitd.log");
-        // The host guard lives through socket readiness, when the rootful worker
-        // has installed the bridge's connected route.
+        // BuildKit opens its listener before installing the connected route.
+        // Keep the guard through route readiness so no other store can reserve it.
         let host_lock = crate::network::lock_host_bridges()?;
         let bridge = host_lock
             .as_ref()
@@ -67,9 +67,9 @@ impl Workspace {
             &self.address(),
             self.socket_dir.path(),
             &log,
-            bridge,
+            bridge.as_ref(),
         )?;
-        wait_for_socket(&mut daemon, &self.socket, &log)?;
+        wait_for_startup(&mut daemon, &self.socket, &log, bridge.as_ref())?;
         Ok(daemon)
     }
 }
@@ -106,7 +106,7 @@ fn start_daemon(
     addr: &str,
     socket_dir: &Path,
     log: &Path,
-    bridge: Option<(String, Ipv4Addr)>,
+    bridge: Option<&(String, Ipv4Addr)>,
 ) -> Result<Process> {
     let config = work.join("buildkitd.toml");
     let rootless = bridge.is_none();
@@ -176,27 +176,58 @@ fn start_daemon(
         Error::io(
             "cannot start the private BuildKit backend",
             &e,
-            "install buildkitd, buildctl and runc; rootless builds also need RootlessKit and pasta",
+            startup_help(rootless),
         )
     })
 }
 
-fn wait_for_socket(daemon: &mut Process, socket: &Path, log: &Path) -> Result<()> {
+fn startup_help(rootless: bool) -> &'static str {
+    if rootless {
+        "install buildkitd, buildctl, runc, RootlessKit and pasta"
+    } else {
+        "install buildkitd, buildctl, runc and the BuildKit CNI plugins (bridge, firewall, host-local and loopback)"
+    }
+}
+
+fn wait_for_startup(
+    daemon: &mut Process,
+    socket: &Path,
+    log: &Path,
+    bridge: Option<&(String, Ipv4Addr)>,
+) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
-        if socket.metadata().is_ok_and(|m| m.file_type().is_socket()) {
+        let running = daemon
+            .running()
+            .map_err(|e| io_error("check the BuildKit worker", e))?;
+        let socket_ready = socket.metadata().is_ok_and(|m| m.file_type().is_socket());
+        let route_ready = match bridge {
+            Some((name, subnet)) if socket_ready => {
+                crate::network::buildkit_route_ready(name, *subnet).map_err(|e| {
+                    Error::io(
+                        "cannot check the private BuildKit bridge route",
+                        &e,
+                        "check that /proc/net/route is readable",
+                    )
+                })?
+            }
+            _ => true,
+        };
+        if running && socket_ready && route_ready {
             return Ok(());
         }
-        let exited = daemon
-            .child
-            .try_wait()
-            .map_err(|e| io_error("check the BuildKit worker", e))?;
-        if exited.is_some() || Instant::now() >= deadline {
+        if !running || Instant::now() >= deadline {
+            let mut detail = read_tail(log);
+            if !route_ready && let Some((name, subnet)) = bridge {
+                detail.push_str(&format!(
+                    "\nthe connected route {subnet}/24 did not appear on {name}"
+                ));
+            }
             return Err(Error::new(
                 ErrorKind::Runtime,
                 "the private BuildKit backend did not start",
-                read_tail(log),
-                "check the BuildKit worker and its Linux prerequisites",
+                detail,
+                startup_help(bridge.is_none()),
             ));
         }
         std::thread::sleep(Duration::from_millis(40));
@@ -300,5 +331,22 @@ mod tests {
         for dir in [workspace.path(), workspace.socket_dir.path()] {
             assert_eq!(dir.metadata().unwrap().permissions().mode() & 0o777, 0o700);
         }
+    }
+
+    #[test]
+    fn a_rootful_worker_needs_its_route_even_when_the_socket_exists() {
+        let tmp = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
+        let socket = tmp.path().join("buildkit.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let log = tmp.path().join("log");
+        fs::write(&log, "worker startup failed").unwrap();
+        let mut daemon =
+            Process::new(spawn(Command::new("sh").args(["-c", "sleep 0.1; exit 1"])).unwrap());
+        let bridge = ("podbag-bk-test".into(), Ipv4Addr::new(192, 0, 2, 0));
+
+        let error = wait_for_startup(&mut daemon, &socket, &log, Some(&bridge)).unwrap_err();
+        assert!(error.why.contains("worker startup failed"), "{error}");
+        assert!(error.why.contains("192.0.2.0/24 did not appear"), "{error}");
+        assert!(error.next.contains("CNI plugins"), "{error}");
     }
 }

@@ -516,6 +516,9 @@ podbag build -t myapp - < Dockerfile               # only a Dockerfile, no conte
 ### Managed BuildKit
 
 On native Linux, install `buildkitd`, `buildctl`, and `runc` on your `PATH`.
+For rootful builds, also install `buildkit-cni-bridge`, `buildkit-cni-firewall`,
+`buildkit-cni-host-local`, and `buildkit-cni-loopback` from the same BuildKit release
+on your `PATH`. The worker initializes its bridge even for `--network none`.
 For rootless builds, also install RootlessKit and pasta. Set up subordinate user
 and group IDs for RootlessKit.
 
@@ -1054,9 +1057,9 @@ docker compose build --builder podbag
 - Its cache stays in its volume until `docker buildx rm`.
 ### Buildx Engine driver
 
-On Linux, start the Unix socket service with `--buildkit`. Install `buildkitd` and
-`runc` on the service's `PATH`. For a rootless service, also install RootlessKit
-and pasta. Use another terminal for the Docker commands.
+On Linux, start the Unix socket service with `--buildkit`. Install the
+[Managed BuildKit prerequisites](#managed-buildkit) on the service's `PATH`.
+Use another terminal for the Docker commands.
 
 ```sh
 podbag system service --buildkit --socket "$XDG_RUNTIME_DIR/podbag-buildkit.sock"
