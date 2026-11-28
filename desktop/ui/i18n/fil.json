@@ -1,6 +1,6 @@
 {
   "kube.localTitle": "Lokal na cluster",
-  "kube.localPrerequisites": "Kailangan ang kind, kubectl, at hiwalay na lokal na Docker engine para sa mga Linux container.",
+  "kube.localPrerequisites": "Kailangan ang kind at kubectl. Gumamit ng hiwalay na lokal na Docker engine. Sa nakahandang Linux host, puwedeng gamitin ang Podbag engine bilang root at buksan ang Desktop gamit ang PODBAG_KUBERNETES_NATIVE=1.",
   "kube.localVersion": "Bersyon ng Kubernetes",
   "kube.localNodes": "Bilang ng mga node",
   "kube.localDefault": "Default ng kind",

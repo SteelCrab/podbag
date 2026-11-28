@@ -1,6 +1,6 @@
 {
   "kube.localTitle": "로컬 클러스터",
-  "kube.localPrerequisites": "kind, kubectl과 Linux 컨테이너를 실행하는 별도의 로컬 Docker 엔진이 필요합니다.",
+  "kube.localPrerequisites": "kind와 kubectl이 필요합니다. 별도의 로컬 Docker 엔진을 사용합니다. 준비된 Linux에서는 root 권한의 Podbag 엔진을 사용하고, PODBAG_KUBERNETES_NATIVE=1을 설정해 Desktop을 시작할 수 있습니다.",
   "kube.localVersion": "Kubernetes 버전",
   "kube.localNodes": "노드 수",
   "kube.localDefault": "kind 기본값",

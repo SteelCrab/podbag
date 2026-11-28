@@ -1,6 +1,6 @@
 {
   "kube.localTitle": "本地集群",
-  "kube.localPrerequisites": "需要 kind、kubectl 和一个用于运行 Linux 容器的独立本地 Docker 引擎。",
+  "kube.localPrerequisites": "需要 kind 和 kubectl。请使用独立的本地 Docker 引擎。在配置好的 Linux 主机上，可使用以 root 身份运行的 Podbag 引擎，并设置 PODBAG_KUBERNETES_NATIVE=1 后启动 Desktop。",
   "kube.localVersion": "Kubernetes 版本",
   "kube.localNodes": "节点数",
   "kube.localDefault": "kind 默认值",

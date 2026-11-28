@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Local Kubernetes lifecycle test</title>
+<iframe src="preview.html?view=pods&amp;lang=en" width="950" height="720" title="Desktop preview"></iframe>
+<pre id="result">Running</pre>
+<script>
+"use strict";
+
+const check = (condition, message) => { if (!condition) throw Error(message); };
+async function until(read, message) {
+  const deadline = performance.now() + 5000;
+  for (;;) {
+    const value = read();
+    if (value) return value;
+    check(performance.now() < deadline, message);
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+}
+
+async function test() {
+  const frame = document.querySelector("iframe");
+  await until(() => frame.contentDocument?.documentElement?.dataset.ready === "1" &&
+    frame.contentDocument.getElementById("local-kube-open"), "Kubernetes did not load");
+  const doc = frame.contentDocument;
+  const win = frame.contentWindow;
+  const byId = id => doc.getElementById(id);
+  const select = byId("kube-context");
+  const localContext = "kind-podbag-demo123456";
+  const dialog = () => doc.querySelector("dialog.local-kube[open]");
+  const inDialog = text => [...dialog().querySelectorAll("button")].find(button => button.textContent === text);
+  const contexts = () => [...select.options].map(option => option.value);
+  const calls = [];
+  const invoke = win.__TAURI__.core.invoke;
+  win.__TAURI__.core.invoke = (cmd, args) => {
+    if (["local_kube_create", "local_kube_reset", "local_kube_remove"].includes(cmd)) calls.push([cmd, args]);
+    return invoke(cmd, args);
+  };
+
+  await until(() => contexts().includes("staging"), "External contexts did not load");
+  select.value = "staging";
+  select.dispatchEvent(new win.Event("change"));
+  byId("local-kube-open").click();
+  const version = await until(() => byId("local-kube-version"), "Local cluster form did not open");
+  check(!inDialog("Reset cluster") && !inDialog("Remove"), "An external selection offers no reset or removal");
+  check(dialog().textContent.includes("PODBAG_KUBERNETES_NATIVE=1"), "The dialog shows the Linux opt-in");
+  version.value = "v1.35.8";
+  byId("local-kube-nodes").value = "3";
+  inDialog("Create cluster").click();
+  await until(() => select.value === localContext && inDialog("Reset cluster"), "Create did not select the local context");
+  check(calls[0][0] === "local_kube_create" && calls[0][1].version === "v1.35.8" &&
+    calls[0][1].nodes === 3, "Create sends the chosen version and node count");
+
+  async function confirm(button, accept) {
+    const confirmation = byId("confirm");
+    button.click();
+    check(confirmation.open && byId("confirm-text").textContent.includes("stored data will be deleted"),
+      "Destructive actions require confirmation and explain the data loss");
+    const closed = new Promise(resolve => confirmation.addEventListener("close", resolve, { once: true }));
+    byId(accept ? "confirm-yes" : "confirm-cancel").click();
+    await closed;
+  }
+
+  await confirm(inDialog("Reset cluster"), false);
+  check(calls.length === 1, "Cancel keeps the local cluster");
+  await confirm(inDialog("Reset cluster"), true);
+  await until(() => calls.length === 2 && !inDialog("Back").disabled, "Reset did not finish");
+  check(calls[1][0] === "local_kube_reset" && !calls[1][1] && select.value === localContext,
+    "Reset uses only the managed cluster");
+  inDialog("Back").click();
+  await until(() => !dialog(), "Local cluster dialog did not close");
+
+  select.value = "staging";
+  select.dispatchEvent(new win.Event("change"));
+  byId("local-kube-open").click();
+  await confirm(await until(() => inDialog("Remove"), "The managed cluster did not reopen"), true);
+  await until(() => byId("local-kube-version") && !contexts().includes(localContext), "Remove did not clear the local cluster");
+  check(calls.length === 3 && calls[2][0] === "local_kube_remove" && !calls[2][1],
+    "Remove uses only the managed cluster");
+  check(select.value === "staging" && ["dev", "staging", "ocp"].every(name => contexts().includes(name)),
+    "Remove preserves all external contexts and the selected external context");
+}
+
+const result = document.getElementById("result");
+test().then(() => { result.textContent = "PASS: Create, confirm reset, and remove while preserving external contexts"; },
+  error => { result.textContent = "FAIL: " + error.message; });
+</script>
+</html>

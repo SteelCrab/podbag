@@ -1,6 +1,6 @@
 {
   "kube.localTitle": "Clúster local",
-  "kube.localPrerequisites": "Requiere kind, kubectl y un motor Docker local separado para contenedores Linux.",
+  "kube.localPrerequisites": "Requiere kind y kubectl. Usa un motor Docker local separado. En Linux, también puedes usar un motor Podbag preparado que se ejecute como root. Inicia Desktop con PODBAG_KUBERNETES_NATIVE=1.",
   "kube.localVersion": "Versión de Kubernetes",
   "kube.localNodes": "Número de nodos",
   "kube.localDefault": "Valor predeterminado de kind",
