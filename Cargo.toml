@@ -11,10 +11,11 @@ keywords = ["container", "docker", "oci", "rootless", "wsl"]
 categories = ["command-line-utilities", "virtualization"]
 include = ["/src/**", "/build.rs", "/README.md", "/LICENSE"]
 
-# The desktop app (desktop/, Tauri) is a member, but plain `cargo build`, `cargo test` and
-# the static Linux build leave it out: build it with `cargo build -p podbag-desktop`.
+# The desktop app (desktop/, on its own UI layer in ui/ and the backend in desktop-core/)
+# is a member, but plain `cargo build`, `cargo test` and the static Linux build leave it
+# out: build it with `cargo build -p podbag-desktop`.
 [workspace]
-members = [".", "desktop"]
+members = [".", "desktop", "ui", "desktop-core"]
 default-members = ["."]
 
 [lib]

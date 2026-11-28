@@ -14,7 +14,8 @@ target=$(printf '%s\n' "$metadata" | jq -er '.target_directory')
 BIN_DIR=$target/release
 export ARCH VERSION BIN_DIR
 
-cargo build --locked --release -p podbag -p podbag-desktop --features tauri/custom-protocol
+# The tray item builds on GTK 3 (libgtk-3-dev).
+cargo build --locked --release -p podbag -p podbag-desktop --features podbag-desktop/linux-tray
 mkdir -p "$target/packages"
 for format in deb rpm; do
     nfpm package --config desktop/linux/nfpm.yaml --packager "$format" --target "$target/packages/"

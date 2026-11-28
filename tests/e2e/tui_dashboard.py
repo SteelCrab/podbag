@@ -18,7 +18,7 @@ def check_translations():
     repo = Path(__file__).resolve().parents[2]
     labels = json.loads((repo / "src/bin/podbag/tui/labels.json").read_text())
     for index, language in enumerate(("en", "ko", "ja", "zh-CN", "fil", "es", "vi")):
-        desktop = json.loads((repo / "desktop/ui/i18n" / (language + ".json")).read_text())
+        desktop = json.loads((repo / "desktop-core/i18n" / (language + ".json")).read_text())
         for key, translations in labels.items():
             assert len(translations) == 7 and translations[index], (language, key)
             if key in desktop:

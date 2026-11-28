@@ -15,3 +15,20 @@ pub(crate) mod shares;
 pub(crate) mod sync;
 pub mod template;
 pub mod udp;
+
+/// The macOS VM disk as reported by `podbag vm storage`.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiskStorage {
+    pub path: std::path::PathBuf,
+    pub exists: bool,
+    pub configured: bool,
+    pub editable: bool,
+    pub size_bytes: u64,
+    pub allocated_bytes: u64,
+    pub filesystem_bytes: Option<u64>,
+    pub growth_pending: bool,
+    pub max_size_gib: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backup_path: Option<std::path::PathBuf>,
+}
