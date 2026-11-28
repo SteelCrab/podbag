@@ -632,15 +632,24 @@ volumes using an external driver are outside this support.
 | `--read-only` | make the root filesystem read-only; volumes and tmpfs keep their own access |
 | `--device HOST[:TARGET][:rwm]` | map a host block or character device when the Linux engine runs as root |
 | `--gpus all\|COUNT\|device=ID` | map Linux DRM render devices when the engine runs as root |
+| `--gpus 'driver=nvidia,SELECTION'` | map selected NVIDIA devices and driver files |
 | `--privileged` | every capability, no seccomp filter, kernel files shown, writable `/sys` and cgroup, any device; host devices are not added to `/dev` |
 
 The target of `--device` defaults to the host path. The access defaults to `rwm`: read,
 write, and make device nodes. Without `--privileged`, device access is enforced by the
 cgroup. In a VM, the source path names a device in the Linux guest.
 
-`--gpus` selects `/dev/dri/renderD*` nodes by count, zero-based index, or node name.
-The image must supply compatible userspace graphics libraries. Podbag does not inject
-NVIDIA CUDA libraries or run vendor GPU hooks.
+With no driver specified, `--gpus` selects Linux `/dev/dri/renderD*` nodes by count,
+zero-based index, or node name. The image supplies its userspace graphics libraries.
+
+On a native Linux host with an NVIDIA GPU, install the NVIDIA driver and
+[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
+1.19.1 or later. Use a current release to get current driver support and security fixes.
+Use `--gpus 'driver=nvidia,all'`, `--gpus 'driver=nvidia,2'`, or
+`--gpus 'driver=nvidia,device=GPU-UUID'` with the Podbag CLI or the Docker CLI
+connected to Podbag. Podbag maps the selected devices and mounts the host driver files
+read-only. The toolkit sets up CUDA library links before the container starts. The
+image still supplies the application and CUDA runtime it needs.
 
 ### Memory budget
 
@@ -910,7 +919,7 @@ podbag system docker restore    # back to the context you had (Docker Desktop, â
 
 ### What does not work
 
-- Refused: GPU drivers other than Linux DRM, custom device cgroup rules, `--pid host`,
+- Refused: GPU drivers other than Linux DRM or NVIDIA, custom device cgroup rules, `--pid host`,
   `--volumes-from`, `--link`, port ranges, and other network or volume drivers.
 - Accepted with a warning, because ignoring them is safe: ulimits, unsupported log drivers, fixed
   addresses.

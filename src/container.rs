@@ -1047,7 +1047,7 @@ mod linux_launch {
                 "run podbag as root, or omit the device mapping",
             ));
         }
-        crate::gpu::devices(&c.gpu_requests)?;
+        crate::gpu::setup(&c.gpu_requests)?;
         crate::cgroup::device_rules(&c.devices)?;
         let (placement, warning) = crate::cgroup::choose_placement(rootless, &limits)?;
         if uses_devices

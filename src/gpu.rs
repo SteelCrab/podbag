@@ -2,7 +2,10 @@ use crate::{Error, ErrorKind, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// The Docker DeviceRequest fields used to select Linux DRM render devices.
+#[cfg(target_os = "linux")]
+pub(crate) mod nvidia;
+
+/// The Docker DeviceRequest fields used to select Linux GPUs.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default, rename_all = "PascalCase")]
 pub struct Request {
@@ -26,7 +29,7 @@ where
 
 impl Request {
     pub fn validate(&self) -> Result<()> {
-        if !matches!(self.driver.as_str(), "" | "dri")
+        if !matches!(self.driver.as_str(), "" | "dri" | "nvidia")
             || !self.options.is_empty()
             || !(self.capabilities.is_empty()
                 || self.capabilities.len() == 1 && self.capabilities[0] == ["gpu"])
@@ -34,8 +37,8 @@ impl Request {
             return Err(Error::new(
                 ErrorKind::Unsupported,
                 "cannot request GPUs",
-                "Podbag supports only Linux DRM render devices and the gpu capability",
-                "omit the driver or select dri, without driver-specific options",
+                "select the dri or nvidia driver and use only the gpu capability",
+                "omit the driver or select a supported driver without driver-specific options",
             ));
         }
         if self.device_ids.is_empty() && (self.count == 0 || self.count < -1)
@@ -56,7 +59,14 @@ impl std::str::FromStr for Request {
             .strip_prefix('"')
             .and_then(|s| s.strip_suffix('"'))
             .unwrap_or(text);
+        let (driver, text) = match text.strip_prefix("driver=") {
+            Some(selection) => selection
+                .split_once(',')
+                .ok_or_else(|| invalid("a driver requires a count or a device list"))?,
+            None => ("", text),
+        };
         let mut request = Self {
+            driver: driver.into(),
             capabilities: vec![vec!["gpu".into()]],
             ..Self::default()
         };
@@ -82,19 +92,36 @@ fn invalid(why: &str) -> Error {
         ErrorKind::InvalidInput,
         "cannot request GPUs",
         why,
-        "use --gpus all, --gpus COUNT, or --gpus device=renderD128",
+        "use --gpus all, --gpus COUNT, or --gpus device=ID; add driver=nvidia, to select NVIDIA",
     )
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn devices(requests: &[Request]) -> Result<Vec<crate::spec::Device>> {
+pub(crate) struct Setup {
+    pub drm: Vec<crate::spec::Device>,
+    pub nvidia: Option<nvidia::Setup>,
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn setup(requests: &[Request]) -> Result<Setup> {
+    for request in requests {
+        request.validate()?;
+    }
+    let (nvidia, drm): (Vec<_>, Vec<_>) = requests
+        .iter()
+        .partition(|request| request.driver == "nvidia");
+    Ok(Setup {
+        drm: drm_devices(&drm)?,
+        nvidia: nvidia::setup(&nvidia)?,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn drm_devices(requests: &[&Request]) -> Result<Vec<crate::spec::Device>> {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
 
     if requests.is_empty() {
         return Ok(Vec::new());
-    }
-    for request in requests {
-        request.validate()?;
     }
     let directory = "/dev/dri";
     let unavailable = || {
@@ -145,10 +172,9 @@ pub(crate) fn devices(requests: &[Request]) -> Result<Vec<crate::spec::Device>> 
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn select<'a>(requests: &[Request], nodes: &'a [String]) -> Result<Vec<&'a str>> {
+fn select<'a>(requests: &[&Request], nodes: &'a [String]) -> Result<Vec<&'a str>> {
     let mut selected = Vec::new();
     for request in requests {
-        request.validate()?;
         if request.device_ids.is_empty() {
             let count = if request.count == -1 {
                 nodes.len()
@@ -197,23 +223,31 @@ mod tests {
             ("device=/dev/dri/renderD128", vec![nodes[0].as_str()]),
         ] {
             assert_eq!(
-                select(&[selection.parse().unwrap()], &nodes).unwrap(),
+                select(&[&selection.parse().unwrap()], &nodes).unwrap(),
                 expected
             );
         }
-        assert!(select(&["3".parse().unwrap()], &nodes).is_err());
-        assert!(select(&["device=2".parse().unwrap()], &nodes).is_err());
+        assert!(select(&[&"3".parse().unwrap()], &nodes).is_err());
+        assert!(select(&[&"device=2".parse().unwrap()], &nodes).is_err());
         assert!("device=".parse::<Request>().is_err());
     }
 
     #[test]
     fn unsupported_gpu_drivers_report_an_error() {
         let request = Request {
-            driver: "nvidia".into(),
+            driver: "unknown".into(),
             count: -1,
             ..Request::default()
         };
         assert_eq!(request.validate().unwrap_err().kind, ErrorKind::Unsupported);
+    }
+
+    #[test]
+    fn parses_explicit_nvidia_device_selection() {
+        let request: Request = "driver=nvidia,device=0,GPU-01234567".parse().unwrap();
+        assert_eq!(request.driver, "nvidia");
+        assert_eq!(request.device_ids, ["0", "GPU-01234567"]);
+        assert_eq!(request.count, 0);
     }
 
     #[test]

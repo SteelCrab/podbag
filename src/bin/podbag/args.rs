@@ -728,7 +728,7 @@ pub struct RunArgs {
     /// Map a device as root on Linux (HOST[:CONTAINER][:rwm])
     #[arg(long = "device", value_name = "DEVICE")]
     pub devices: Vec<podbag::spec::Device>,
-    /// Select Linux DRM render devices as root (all, COUNT, or device=ID)
+    /// Select Linux GPUs as root (all, COUNT, device=ID, or driver=nvidia,SELECTION)
     #[arg(long, value_name = "GPUS")]
     pub gpus: Vec<podbag::gpu::Request>,
     /// Logging driver (json-file, syslog, journald)
