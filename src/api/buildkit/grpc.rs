@@ -31,7 +31,7 @@ pub(super) async fn forward(
         .map_err(io::Error::other)?;
     let download = async {
         let response = response.await.map_err(io::Error::other)?;
-        forward_response(reply, response).await
+        forward_response(reply, response).await.map(|_| ())
     };
     if end {
         return download.await;
@@ -46,32 +46,39 @@ pub(super) async fn forward(
     }
 }
 
+/// Forward the response and report whether it reached an OK gRPC status.
 pub(super) async fn forward_response(
     mut reply: SendResponse<Bytes>,
     response: Response<RecvStream>,
-) -> io::Result<()> {
+) -> io::Result<bool> {
     let (headers, body) = response.into_parts();
     let end = body.is_end_stream();
+    let accepted = headers.status.is_success() && grpc_ok(&headers.headers);
+    let completed = ended_successfully(&headers.headers);
     let send = reply
         .send_response(Response::from_parts(headers, ()), end)
         .map_err(io::Error::other)?;
     if end {
-        return Ok(());
+        return Ok(accepted && completed);
     }
-    copy(body, send).await
+    let completed = copy(body, send).await?;
+    Ok(accepted && completed)
 }
 
-async fn copy(mut body: RecvStream, mut send: SendStream<Bytes>) -> io::Result<()> {
+async fn copy(mut body: RecvStream, mut send: SendStream<Bytes>) -> io::Result<bool> {
     loop {
         let chunk = tokio::select! {
             reset = std::future::poll_fn(|context| send.poll_reset(context)) => {
                 reset.map_err(io::Error::other)?;
-                return Ok(());
+                return Ok(false);
             }
             chunk = data(&mut body) => chunk?,
         };
         let Some(chunk) = chunk else {
-            return finish(&mut send, body.trailers().await.map_err(io::Error::other)?);
+            let trailers = body.trailers().await.map_err(io::Error::other)?;
+            let completed = trailers.as_ref().is_some_and(ended_successfully);
+            finish(&mut send, trailers)?;
+            return Ok(completed);
         };
         send_data(&mut send, chunk).await?;
     }
@@ -179,9 +186,13 @@ pub(super) fn status(
 pub(super) fn success(response: &Response<RecvStream>, trailers: Option<&HeaderMap>) -> bool {
     response.status().is_success()
         && grpc_ok(response.headers())
-        && trailers
-            .and_then(|headers| headers.get("grpc-status"))
-            .is_some_and(|status| status == "0")
+        && trailers.is_some_and(ended_successfully)
+}
+
+fn ended_successfully(headers: &HeaderMap) -> bool {
+    headers
+        .get("grpc-status")
+        .is_some_and(|status| status == "0")
 }
 
 #[cfg(test)]

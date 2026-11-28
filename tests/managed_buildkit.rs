@@ -896,6 +896,10 @@ fn engine_docker_driver_loads_implicit_and_explicit_images() {
             "engine-kit:load",
             &["--load", "--tag", "engine-kit:alias"][..],
         ),
+        (
+            "engine-kit:default-tar",
+            &["--output", "type=image,tar="][..],
+        ),
     ] {
         std::fs::write(context.join("message"), format!("{tag}\n")).unwrap();
         let mut args = vec![

@@ -18,6 +18,7 @@ use std::sync::{Arc, LazyLock, Mutex, Weak};
 pub(super) const SOLVE: &str = "/moby.buildkit.v1.Control/Solve";
 pub(super) const FILE_SEND: &str = "/moby.filesync.v1.FileSend/DiffCopy";
 const EXPORTER_ID: &str = "buildkit-attachable-exporter-id";
+const NEW_SESSION: &str = "start a new BuildKit session after an incomplete export";
 
 #[derive(Clone, Default)]
 pub(super) struct Exports(Arc<Mutex<HashMap<String, Session>>>);
@@ -25,8 +26,17 @@ pub(super) struct Exports(Arc<Mutex<HashMap<String, Session>>>);
 enum Session {
     // An explicit file exporter can use the same ID that an unrelated Solve
     // would assign to a local load. Do not allow those Solves to overlap.
-    Forward(usize),
+    Forward { active: usize, incomplete: bool },
     Load { index: usize, archive: Archive },
+    // BuildKit can resolve a session ID again after reconnecting. Keep this
+    // entry for the worker generation, rather than reopening it on disconnect.
+    Blocked,
+}
+
+enum FileSend {
+    Forward,
+    Archive(Archive),
+    Reject(&'static str),
 }
 
 #[derive(Clone, Default)]
@@ -38,17 +48,24 @@ enum ArchiveState {
     Waiting,
     Receiving,
     Complete(StagedArchive),
+    Closed,
 }
 
 struct Lease {
     exports: Exports,
     id: String,
     archive: Option<Archive>,
+    complete: bool,
 }
 
 impl Exports {
     fn reserve(&self, id: String, index: Option<usize>) -> io::Result<Lease> {
         use std::collections::hash_map::Entry;
+        // BuildKit's SessionManager.Get strips a nonempty session prefix.
+        let id = match id.split_once(':') {
+            Some((_, suffix)) if !suffix.is_empty() => suffix.to_owned(),
+            _ => id,
+        };
         let mut sessions = self.0.lock().unwrap();
         let mut archive = None;
         match sessions.entry(id.clone()) {
@@ -61,11 +78,20 @@ impl Exports {
                         archive: load,
                     });
                 } else {
-                    entry.insert(Session::Forward(1));
+                    entry.insert(Session::Forward {
+                        active: 1,
+                        incomplete: false,
+                    });
                 }
             }
             Entry::Occupied(mut entry) => match entry.get_mut() {
-                Session::Forward(count) if index.is_none() => *count += 1,
+                Session::Forward { active, .. } if index.is_none() => *active += 1,
+                Session::Blocked
+                | Session::Forward {
+                    incomplete: true, ..
+                } => {
+                    return Err(io::Error::other(NEW_SESSION));
+                }
                 _ => {
                     return Err(io::Error::other(
                         "BuildKit cannot share a session with a concurrent Engine image load",
@@ -77,29 +103,48 @@ impl Exports {
             exports: self.clone(),
             id,
             archive,
+            complete: false,
         })
     }
 
-    fn archive(&self, id: &str, index: usize) -> Option<Archive> {
-        match self.0.lock().unwrap().get(id)? {
-            Session::Load {
+    fn file_send(&self, id: &str, index: Option<usize>) -> FileSend {
+        match self.0.lock().unwrap().get(id) {
+            Some(Session::Load {
                 index: expected,
                 archive,
-            } if *expected == index => Some(archive.clone()),
-            _ => None,
+            }) => match index {
+                Some(index) if index == *expected => FileSend::Archive(archive.clone()),
+                Some(_) => FileSend::Forward,
+                None => FileSend::Reject("BuildKit FileSend must provide one exporter ID"),
+            },
+            Some(Session::Blocked) => FileSend::Reject(NEW_SESSION),
+            _ => FileSend::Forward,
         }
     }
 }
 
 impl Drop for Lease {
     fn drop(&mut self) {
+        if let Some(archive) = &self.archive {
+            archive.close();
+        }
         let mut sessions = self.exports.0.lock().unwrap();
-        if let Some(Session::Forward(count)) = sessions.get_mut(&self.id)
-            && *count > 1
-        {
-            *count -= 1;
-        } else {
-            sessions.remove(&self.id);
+        match sessions.get_mut(&self.id) {
+            Some(Session::Forward { active, incomplete }) => {
+                *active -= 1;
+                // Late explicit FileSend requests still go to their client. They
+                // must never be mistaken for an Engine archive on this session.
+                *incomplete |= !self.complete;
+                if *active == 0 && !*incomplete {
+                    sessions.remove(&self.id);
+                }
+            }
+            Some(Session::Load { .. }) if !self.complete => {
+                sessions.insert(self.id.clone(), Session::Blocked);
+            }
+            _ => {
+                sessions.remove(&self.id);
+            }
         }
     }
 }
@@ -159,10 +204,9 @@ impl SolveFields {
                 "Buildx Engine output cannot push directly; build the image, then use podbag push",
             ));
         }
-        if attrs
-            .get("tar")
-            .is_some_and(|value| !matches!(value.to_ascii_lowercase().as_str(), "true" | "1" | "t"))
-        {
+        if attrs.get("tar").is_some_and(|value| {
+            !matches!(value.to_ascii_lowercase().as_str(), "" | "true" | "1" | "t")
+        }) {
             return Err(io::Error::other(
                 "Engine image loads require a Docker archive",
             ));
@@ -282,7 +326,7 @@ pub(super) async fn solve(
     } else {
         original
     };
-    let lease = if !fields.session.is_empty()
+    let mut lease = if !fields.session.is_empty()
         && (!fields.exporters.is_empty() || !fields.deprecated_kind.is_empty())
     {
         match exports.reserve(fields.session, index) {
@@ -312,10 +356,15 @@ pub(super) async fn solve(
         }
     };
     let Some(archive) = lease.as_ref().and_then(|lease| lease.archive.as_ref()) else {
-        return grpc::forward_response(reply, response).await;
+        let complete = grpc::forward_response(reply, response).await?;
+        if let Some(lease) = &mut lease {
+            lease.complete = complete;
+        }
+        return Ok(());
     };
     if response.body().is_end_stream() {
-        return grpc::forward_response(reply, response).await;
+        grpc::forward_response(reply, response).await?;
+        return Ok(());
     }
     let completed = async {
         let data = grpc::unary(response.body_mut()).await?;
@@ -334,10 +383,18 @@ pub(super) async fn solve(
         }
         result = completed => result?,
     };
-    if grpc::success(&response, trailers.as_ref())
-        && let Err(error) = archive.load().await
-    {
-        return grpc::status(reply, "13", &error.to_string());
+    if grpc::success(&response, trailers.as_ref()) {
+        let staged = match archive.take_complete() {
+            Ok(staged) => staged,
+            Err(error) => return grpc::status(reply, "13", &error.to_string()),
+        };
+        // BuildKit finishes FileSend and observes its success before sending
+        // a successful Solve response. There are no outstanding archive
+        // sends once both results have been received.
+        lease.as_mut().unwrap().complete = true;
+        if let Err(error) = staged.load().await {
+            return grpc::status(reply, "13", &error.to_string());
+        }
     }
     let (headers, _) = response.into_parts();
     let mut send = reply
@@ -348,37 +405,39 @@ pub(super) async fn solve(
 }
 
 impl Archive {
-    async fn load(&self) -> io::Result<()> {
-        let archive = std::mem::take(&mut *self.0.lock().unwrap());
-        let ArchiveState::Complete(archive) = archive else {
-            return Err(io::Error::other(
+    fn begin_receive(&self) -> io::Result<()> {
+        let mut state = self.0.lock().unwrap();
+        if !matches!(*state, ArchiveState::Waiting) {
+            return Err(io::Error::other("duplicate BuildKit image archive"));
+        }
+        *state = ArchiveState::Receiving;
+        Ok(())
+    }
+
+    fn finish_receive(&self, archive: StagedArchive) -> io::Result<()> {
+        let mut state = self.0.lock().unwrap();
+        if !matches!(*state, ArchiveState::Receiving) {
+            return Err(io::Error::other("the BuildKit image archive session ended"));
+        }
+        *state = ArchiveState::Complete(archive);
+        Ok(())
+    }
+
+    fn take_complete(&self) -> io::Result<StagedArchive> {
+        match std::mem::replace(&mut *self.0.lock().unwrap(), ArchiveState::Closed) {
+            ArchiveState::Complete(archive) => Ok(archive),
+            _ => Err(io::Error::other(
                 "BuildKit did not send the Engine image archive",
-            ));
-        };
-        tokio::task::spawn_blocking(move || {
-            let cleanup =
-                crate::helper::load_staged_archive(archive.file.try_clone()?).map_err(|error| {
-                    io::Error::other(format!("cannot load the BuildKit image: {error}"))
-                })?;
-            if let Some(error) = cleanup {
-                eprintln!("podbag: BuildKit image loaded. Image store maintenance failed: {error}");
-            }
-            // Keep the file and its reservation until the helper exits.
-            drop(archive);
-            Ok(())
-        })
-        .await
-        .map_err(io::Error::other)?
+            )),
+        }
+    }
+
+    fn close(&self) {
+        *self.0.lock().unwrap() = ArchiveState::Closed;
     }
 
     async fn receive(&self, mut body: RecvStream) -> io::Result<()> {
-        {
-            let mut state = self.0.lock().unwrap();
-            if !matches!(*state, ArchiveState::Waiting) {
-                return Err(io::Error::other("duplicate BuildKit image archive"));
-            }
-            *state = ArchiveState::Receiving;
-        }
+        self.begin_receive()?;
         let dirs = crate::paths::dirs().map_err(io::Error::other)?;
         let limit = crate::config::load(&dirs)
             .map_err(io::Error::other)?
@@ -402,8 +461,7 @@ impl Archive {
         if !buffer.is_empty() || archive.written == 0 {
             return Err(io::Error::other("incomplete BuildKit image archive"));
         }
-        *self.0.lock().unwrap() = ArchiveState::Complete(archive);
-        Ok(())
+        self.finish_receive(archive)
     }
 }
 
@@ -449,6 +507,23 @@ static ARCHIVE_BUDGETS: LazyLock<Mutex<HashMap<u64, Weak<Mutex<SpaceBudget>>>>> 
     LazyLock::new(Mutex::default);
 
 impl StagedArchive {
+    async fn load(self) -> io::Result<()> {
+        tokio::task::spawn_blocking(move || {
+            let cleanup =
+                crate::helper::load_staged_archive(self.file.try_clone()?).map_err(|error| {
+                    io::Error::other(format!("cannot load the BuildKit image: {error}"))
+                })?;
+            if let Some(error) = cleanup {
+                eprintln!("podbag: BuildKit image loaded. Image store maintenance failed: {error}");
+            }
+            // Keep the file and its reservation until the helper exits.
+            drop(self);
+            Ok(())
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
+
     fn new(dir: &Path, limit: u64) -> io::Result<Self> {
         let file = Arc::new(tempfile::tempfile_in(dir)?);
         let device = file.metadata()?.dev();
@@ -582,17 +657,22 @@ pub(super) async fn session(
     exports: Exports,
     session: String,
 ) -> io::Result<()> {
-    if request.uri().path() == FILE_SEND
-        && let Some(index) = request
-            .headers()
-            .get(EXPORTER_ID)
-            .and_then(|value| value.to_str().ok()?.parse().ok())
-        && let Some(archive) = exports.archive(&session, index)
-    {
-        return match archive.receive(request.into_body()).await {
-            Ok(()) => grpc::status(reply, "0", ""),
-            Err(error) => grpc::status(reply, "13", &error.to_string()),
-        };
+    if request.uri().path() == FILE_SEND {
+        let mut headers = request.headers().get_all(EXPORTER_ID).iter();
+        let index = headers
+            .next()
+            .and_then(|value| value.to_str().ok()?.parse().ok());
+        let index = index.filter(|_| headers.next().is_none());
+        match exports.file_send(&session, index) {
+            FileSend::Forward => {}
+            FileSend::Archive(archive) => {
+                return match archive.receive(request.into_body()).await {
+                    Ok(()) => grpc::status(reply, "0", ""),
+                    Err(error) => grpc::status(reply, "13", &error.to_string()),
+                };
+            }
+            FileSend::Reject(message) => return grpc::status(reply, "9", message),
+        }
     }
     grpc::forward(upstream, request, reply).await
 }
@@ -775,22 +855,117 @@ mod tests {
     }
 
     #[test]
-    fn reserves_one_archive_for_the_exact_session_and_exporter() {
+    fn an_empty_tar_value_selects_the_docker_archive() {
+        let mut fields = SolveFields {
+            session: "client".into(),
+            exporters: vec![Exporter {
+                kind: "moby".into(),
+                attrs: HashMap::from([("tar".into(), String::new())]),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(fields.load_index().unwrap(), Some(0));
+        fields.exporters[0]
+            .attrs
+            .insert("tar".into(), "false".into());
+        assert!(fields.load_index().is_err());
+        fields.deprecated_kind = "moby".into();
+        fields.deprecated_attrs.insert("tar".into(), String::new());
+        fields.exporters.clear();
+        assert_eq!(fields.load_index().unwrap(), Some(0));
+    }
+
+    #[test]
+    fn a_taken_archive_stays_closed_to_new_receives() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = Archive::default();
+        archive.begin_receive().unwrap();
+        archive
+            .finish_receive(StagedArchive::new(tmp.path(), u64::MAX).unwrap())
+            .unwrap();
+        let staged = archive.take_complete().unwrap();
+        assert!(archive.begin_receive().is_err());
+        assert!(archive.take_complete().is_err());
+        drop(staged);
+        assert!(archive.begin_receive().is_err());
+    }
+
+    #[test]
+    fn a_clean_solve_can_reuse_the_same_session() {
         let exports = Exports::default();
-        let forward1 = exports.reserve("client".into(), None).unwrap();
-        let forward2 = exports.reserve("client".into(), None).unwrap();
+        let mut forward1 = exports.reserve("context:client".into(), None).unwrap();
+        let mut forward2 = exports.reserve("client".into(), None).unwrap();
         assert!(exports.reserve("client".into(), Some(0)).is_err());
+        forward1.complete = true;
         drop(forward1);
         assert!(exports.reserve("client".into(), Some(0)).is_err());
+        forward2.complete = true;
         drop(forward2);
-        let load = exports.reserve("client".into(), Some(1)).unwrap();
+
+        let mut load = exports.reserve("context:client".into(), Some(1)).unwrap();
         assert!(exports.reserve("client".into(), None).is_err());
         assert!(exports.reserve("client".into(), Some(2)).is_err());
-        assert!(exports.archive("client", 0).is_none());
-        assert!(exports.archive("other", 1).is_none());
-        assert!(exports.archive("client", 1).is_some());
+        assert!(matches!(
+            exports.file_send("client", Some(0)),
+            FileSend::Forward
+        ));
+        assert!(matches!(
+            exports.file_send("other", Some(1)),
+            FileSend::Forward
+        ));
+        assert!(matches!(
+            exports.file_send("client", Some(1)),
+            FileSend::Archive(_)
+        ));
+        assert!(matches!(
+            exports.file_send("client", None),
+            FileSend::Reject(_)
+        ));
+        load.complete = true;
         drop(load);
-        assert!(exports.archive("client", 1).is_none());
+        assert!(exports.reserve("client".into(), Some(1)).is_ok());
+    }
+
+    #[test]
+    fn a_cancelled_load_keeps_old_uploads_out_of_future_solves() {
+        let exports = Exports::default();
+        let load = exports.reserve("client".into(), Some(0)).unwrap();
+        let FileSend::Archive(archive) = exports.file_send("client", Some(0)) else {
+            panic!("expected the load's archive");
+        };
+        archive.begin_receive().unwrap();
+        drop(load);
+
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(
+            archive
+                .finish_receive(StagedArchive::new(tmp.path(), u64::MAX).unwrap())
+                .is_err()
+        );
+        assert!(archive.begin_receive().is_err());
+        assert!(matches!(
+            exports.file_send("client", Some(0)),
+            FileSend::Reject(_)
+        ));
+        assert!(exports.reserve("client".into(), Some(0)).is_err());
+        assert!(exports.reserve("context:client".into(), None).is_err());
+        assert!(exports.reserve("replacement".into(), Some(0)).is_ok());
+    }
+
+    #[test]
+    fn an_incomplete_forward_never_becomes_an_engine_archive() {
+        let exports = Exports::default();
+        let forward = exports.reserve("client".into(), None).unwrap();
+        let mut other = exports.reserve("client".into(), None).unwrap();
+        drop(forward);
+        other.complete = true;
+        drop(other);
+
+        assert!(matches!(
+            exports.file_send("client", Some(0)),
+            FileSend::Forward
+        ));
+        assert!(exports.reserve("client".into(), Some(0)).is_err());
         assert!(exports.reserve("client".into(), None).is_ok());
     }
 }
