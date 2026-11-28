@@ -6,9 +6,12 @@ use podbag::Volume;
 
 pub fn run(cmd: VolumeCmd) -> i32 {
     match cmd {
-        VolumeCmd::Create { labels, name } => match podbag::network::parse_labels(&labels)
-            .and_then(|labels| Volume::create_with(name.as_deref(), labels))
-        {
+        VolumeCmd::Create {
+            labels,
+            options,
+            driver,
+            name,
+        } => match create(name.as_deref(), &labels, &driver, &options) {
             Ok(v) => {
                 println!("{}", v.name);
                 0
@@ -24,7 +27,7 @@ pub fn run(cmd: VolumeCmd) -> i32 {
                     if quiet {
                         println!("{}", v.name);
                     } else {
-                        println!("{:<10}{}", "local", v.name);
+                        println!("{:<10}{}", v.driver(), v.name);
                     }
                 }
                 0
@@ -49,4 +52,15 @@ pub fn run(cmd: VolumeCmd) -> i32 {
             Err(e) => report(&e),
         },
     }
+}
+
+fn create(
+    name: Option<&str>,
+    labels: &[String],
+    driver: &str,
+    options: &[String],
+) -> podbag::Result<Volume> {
+    let labels = podbag::network::parse_labels(labels)?;
+    let opts = podbag::network::parse_labels(options)?;
+    Volume::create_with_driver(&podbag::paths::dirs()?, name, labels, driver, opts)
 }

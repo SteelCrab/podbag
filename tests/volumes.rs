@@ -230,6 +230,50 @@ fn volume_commands() {
 }
 
 #[test]
+fn nfs_volume_creation_checks_the_engine_and_keeps_its_options() {
+    let sb = Sandbox::new();
+    let options = [
+        "volume",
+        "create",
+        "--opt",
+        "type=nfs",
+        "--opt",
+        "device=:/data",
+        "--opt",
+        "o=addr=127.0.0.1,vers=4",
+        "remote",
+    ];
+    if !root_mode() {
+        let out = podbag(&sb, &options);
+        assert_ne!(out.status.code(), Some(0));
+        assert!(stderr(&out).contains("require a rootful Linux engine"));
+        assert!(volume_names(&sb).is_empty());
+        return;
+    }
+    assert_eq!(ok(&podbag(&sb, &options)), "remote");
+    let output = ok(&podbag(&sb, &["volume", "inspect", "remote"]));
+    let info: serde_json::Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(info["nfs"]["type"], "nfs");
+    assert_eq!(info["nfs"]["device"], ":/data");
+    assert_eq!(info["nfs"]["o"], "addr=127.0.0.1,vers=4");
+    let changed = podbag(
+        &sb,
+        &[
+            "volume",
+            "create",
+            "--opt",
+            "type=nfs",
+            "--opt",
+            "device=127.0.0.1:/other",
+            "remote",
+        ],
+    );
+    assert_ne!(changed.status.code(), Some(0));
+    assert!(stderr(&changed).contains("different options"));
+    assert_eq!(ok(&podbag(&sb, &["volume", "rm", "remote"])), "remote");
+}
+
+#[test]
 fn volume_in_use_cannot_be_removed() {
     let sb = Sandbox::new();
     let rootfs = rootfs();

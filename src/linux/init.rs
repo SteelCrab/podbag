@@ -18,6 +18,7 @@ pub(super) fn child_main(
     status_write: OwnedFd,
     stdio: super::spawn::ContainerStdio,
     joins: &super::spawn::Joins,
+    nfs: &super::mounts::NfsMounts,
 ) -> ! {
     let mut sync = File::from(sync_read);
     let mut byte = [0u8; 1];
@@ -35,7 +36,7 @@ pub(super) fn child_main(
         Ok(())
     };
     let error = match early
-        .and_then(|()| setup_and_exec(spec, rootless, status_fd, stdio.tty_socket, joins))
+        .and_then(|()| setup_and_exec(spec, rootless, status_fd, stdio.tty_socket, joins, nfs))
     {
         Err(e) => e,
         Ok(never) => match never {},
@@ -81,6 +82,7 @@ fn setup_and_exec(
     status_fd: i32,
     tty_socket: Option<i32>,
     joins: &super::spawn::Joins,
+    nfs: &super::mounts::NfsMounts,
 ) -> Result<Infallible> {
     // First, while the host's files are in view: the pod's namespaces.
     joins.enter()?;
@@ -118,6 +120,7 @@ fn setup_and_exec(
         spec.network != crate::network::NetworkMode::Host,
         rootless,
         &spec.security,
+        nfs,
     )?;
     if let Some(sock) = tty_socket {
         // Open the terminal in the container's own /dev/pts, so the command can find it.
