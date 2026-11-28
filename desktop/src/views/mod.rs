@@ -140,6 +140,8 @@ pub fn command(d: &mut Desktop, line: &str) {
             training::poll(d);
             practice::poll(d);
         }
+        // The current step's window part, as the page does it after any question.
+        ["lab", "step"] => practice::debug_step(d),
         ["labs", action, rest @ ..] => {
             let action: &'static str = match *action {
                 "start" => "start",

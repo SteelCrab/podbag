@@ -187,6 +187,48 @@ const VIEW_SHOTS: &[(&str, &[&str], f32)] = &[
         1200.,
     ),
     (
+        "training-ui-step",
+        &[
+            "training install volume-persistence",
+            "lab start volume-persistence",
+            "training volume-persistence",
+        ],
+        1200.,
+    ),
+    (
+        "lab-ui-toolbar",
+        &[
+            "training install volume-persistence",
+            "lab start volume-persistence",
+            "nav lab-volumes",
+        ],
+        1200.,
+    ),
+    (
+        "lab-ui-row",
+        &[
+            "training install volume-persistence",
+            "lab start volume-persistence",
+            "nav lab-volumes",
+            "lab step",
+            "lab advance",
+            "nav lab-containers",
+        ],
+        1200.,
+    ),
+    (
+        "lab-ui-logs",
+        &[
+            "training install web-service-recovery",
+            "lab start web-service-recovery",
+            "lab advance",
+            "nav lab-containers",
+            "lab step",
+            "lab step",
+        ],
+        1200.,
+    ),
+    (
         "lab-empty",
         &[
             "training install container-basics",

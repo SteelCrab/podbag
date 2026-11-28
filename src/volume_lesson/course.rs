@@ -25,6 +25,17 @@ const FILES_LIMIT: usize = 16 * 1024;
 pub fn is_course(format: &str) -> bool {
     format == FORMAT || format == FORMAT_V2
 }
+
+/// Explicit inspect commands select a resource even when another kind uses the same name.
+pub fn inspect_command_kind(command: &str) -> Option<Kind> {
+    let mut words = command.split_whitespace();
+    match (words.next(), words.next(), words.next()) {
+        (Some("podbag" | "docker"), Some("container"), Some("inspect")) => Some(Kind::Containers),
+        (Some("podbag" | "docker"), Some("volume"), Some("inspect")) => Some(Kind::Volumes),
+        (Some("podbag" | "docker"), Some("network"), Some("inspect")) => Some(Kind::Networks),
+        _ => None,
+    }
+}
 /// The check kinds each UI action may complete. podbag-page's dev/docs/training.py
 /// mirrors this table; its tests read it from this file, so keep one entry per line.
 #[rustfmt::skip]
@@ -1096,7 +1107,7 @@ pub fn view(
             shown
         }
         // Any listed volume may be inspected; only the step's own advances.
-        ("inspect", _) if volumes.iter().any(|v| v.name == target) => Shown {
+        ("inspect" | "inspect-volume", _) if volumes.iter().any(|v| v.name == target) => Shown {
             detail: Some(
                 client
                     .inspect(Kind::Volumes, target)
@@ -1342,7 +1353,10 @@ fn ui_step(
             // The details the UI showed (the TUI's), or a fresh inspect (Desktop's).
             let detail = match seen {
                 Some(detail) => detail,
-                None => inspect_named(&client, name)?,
+                None => match step.command.as_deref().and_then(inspect_command_kind) {
+                    Some(kind) => client.inspect(kind, name).map_err(io::Error::other)?,
+                    None => inspect_named(&client, name)?,
+                },
             };
             let text = serde_json::to_string_pretty(&detail)?;
             step.verify_cli(root, port, text.as_bytes())?;
@@ -2778,5 +2792,44 @@ mod tests {
         assert!(other["detail"].is_object(), "{other}");
         // The step's own name does the step.
         assert_eq!(shown(&d, "inspect", "app").unwrap()["stage"], "ports");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn desktop_inspects_the_network_when_a_volume_has_the_same_name() {
+        let course = first_step(
+            fixture("web-basics"),
+            "inspectNetwork",
+            "podbag network inspect training-data",
+            Check::OutputContains {
+                text: "10.89.0.0/24".into(),
+            },
+            UiAction::Inspect,
+            "training-data",
+        );
+        let rest = lists(json!([]), &["training-data"]);
+        let d = desktop(
+            &course,
+            "inspectNetwork",
+            move |method: &str, path: &str| {
+                if (method, path) == ("GET", "/networks/training-data") {
+                    reply(
+                        200,
+                        json!({"Name":"training-data","IPAM":{"Config":[{"Subnet":"10.89.0.0/24"}]}}),
+                    )
+                } else {
+                    rest(method, path)
+                }
+            },
+        );
+        let volume = shown(&d, "inspect-volume", "training-data").unwrap();
+        assert_eq!(volume["stage"], "inspectNetwork");
+        assert!(volume["detail"].is_object());
+        let network = shown(&d, "inspect", "training-data").unwrap();
+        assert_eq!(network["stage"], "ports");
+        assert_eq!(
+            network["detail"]["IPAM"]["Config"][0]["Subnet"],
+            "10.89.0.0/24"
+        );
     }
 }

@@ -94,12 +94,13 @@ pub struct Record {
 }
 
 /// A step of a practice: its key, its names by language (a course's module file names
-/// its steps; the app names the built-in labs' steps), and its command.
+/// its steps; the app names the built-in labs' steps), its command, and its module `ui`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Step {
     pub key: String,
     pub names: BTreeMap<String, String>,
     pub command: Option<String>,
+    pub ui: Option<StepUi>,
 }
 
 impl Step {
@@ -108,7 +109,35 @@ impl Step {
             key: key.into(),
             names: BTreeMap::new(),
             command: command.map(str::to_string),
+            ui: None,
         }
+    }
+}
+
+/// A step's module `ui`: what the learner does in the window instead of the command.
+/// `name` is the object: a container, image, volume or network name, or for `prune` the
+/// kind of resource.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StepUi {
+    pub action: String,
+    pub name: String,
+}
+
+impl StepUi {
+    /// The `ui` of a session's state or of a step, when it has one.
+    pub fn of(v: &Value) -> Option<StepUi> {
+        Some(StepUi {
+            action: v["action"].as_str()?.to_string(),
+            name: v["name"].as_str()?.to_string(),
+        })
+    }
+
+    /// Where to click in Podbag Desktop.
+    pub fn place(&self, d: &Desktop) -> String {
+        d.tv(
+            &format!("training.ui.{}", self.action),
+            &[("name", &self.name)],
+        )
     }
 }
 
@@ -121,6 +150,10 @@ impl Record {
                 key: s.key.clone(),
                 names: s.names.clone(),
                 command: s.command.clone(),
+                ui: s.ui.as_ref().map(|ui| StepUi {
+                    action: ui.action.as_str().to_string(),
+                    name: ui.name.clone(),
+                }),
             })
             .collect();
         Record {
@@ -336,11 +369,12 @@ pub fn practice_state(api: &dyn Api, flavor: Flavor, module: &str) -> Result<Val
 }
 
 /// Where a module's session is: its stage (`complete` once finished), and the command
-/// it shows.
+/// and the module `ui` it shows (with the session's port).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Stage {
     pub stage: String,
     pub command: Option<String>,
+    pub ui: Option<StepUi>,
 }
 
 /// The JSON lesson's lab, as the core reports it.
@@ -613,6 +647,7 @@ pub fn poll(d: &mut Desktop) {
                             return Ok(Stage {
                                 stage: stage.to_string(),
                                 command: state["command"].as_str().map(str::to_string),
+                                ui: StepUi::of(&state["ui"]),
                             });
                         }
                         // The shell saves completion after it ends the session.
@@ -624,6 +659,7 @@ pub fn poll(d: &mut Desktop) {
                         Ok(Stage {
                             stage: stage.into(),
                             command: None,
+                            ui: None,
                         })
                     };
                     (p.id.clone(), read())
@@ -989,9 +1025,12 @@ fn library(d: &mut Desktop, ui: &mut Ui, x: f32, y0: f32, w: f32) -> f32 {
                 });
                 match (&practice, detail) {
                     (Some(p), true) => {
+                        let (command, step_ui) =
+                            stage.map(|s| (s.command, s.ui)).unwrap_or_default();
                         let now = Stage {
                             stage: current_stage.clone(),
-                            command: stage.and_then(|s| s.command),
+                            command,
+                            ui: step_ui,
                         };
                         y += progress(d, ui, (x, y, w), p, &now);
                     }
@@ -1101,8 +1140,8 @@ fn library(d: &mut Desktop, ui: &mut Ui, x: f32, y0: f32, w: f32) -> f32 {
     y - y0
 }
 
-/// Each step, done, current or pending, with the
-/// command of the current one. Returns the height.
+/// Each step, done, current or pending, with where to do it in the window (a module
+/// `ui`) and the command of the current one. Returns the height.
 fn progress(
     d: &mut Desktop,
     ui: &mut Ui,
@@ -1110,7 +1149,7 @@ fn progress(
     p: &Practice,
     now: &Stage,
 ) -> f32 {
-    let (stage, live) = (now.stage.as_str(), now.command.as_deref());
+    let (stage, live, live_ui) = (now.stage.as_str(), now.command.as_deref(), &now.ui);
     let t = ui.theme;
     let complete = stage == "complete";
     let wanted = if stage == "restart" { "stop" } else { stage };
@@ -1119,7 +1158,16 @@ fn progress(
     if complete {
         y += text(ui, x, y, w, &d.t("tutorial.complete"), t.ink2) + 10.;
     }
-    for (i, Step { key, command, .. }) in p.steps.iter().enumerate() {
+    for (
+        i,
+        Step {
+            key,
+            command,
+            ui: step_ui,
+            ..
+        },
+    ) in p.steps.iter().enumerate()
+    {
         let done = complete || current.is_some_and(|c| i < c);
         let active = current == Some(i);
         ui.p.fill(Rect::new(x, y, w, 1.), t.line);
@@ -1171,29 +1219,46 @@ fn progress(
             name_color,
         );
         y = row_y + nh.max(20.) + 10.;
-        if active {
-            let line = if stage == "restart" {
-                Some("exit".to_string())
-            } else if key == "start" {
-                Some(start_command(&p.id))
-            } else {
-                live.map(str::to_string).or_else(|| command.clone())
-            };
-            if let Some(line) = line {
-                let note = if stage == "restart" {
-                    Some(d.t("training.restart"))
+        // The current step reads the session's own `ui` (its port names the resource);
+        // the other steps read the module's.
+        let place = if active { live_ui } else { step_ui }
+            .as_ref()
+            .map(|u| u.place(d));
+        let line = active
+            .then(|| {
+                if stage == "restart" {
+                    Some("exit".to_string())
                 } else if key == "start" {
-                    Some(d.t("training.terminalStart"))
+                    Some(start_command(&p.id))
                 } else {
-                    None
-                };
-                let (cx, cw) = (x + 27., w - 27.);
-                y -= 4.;
-                if let Some(note) = note {
-                    y += text(ui, cx, y, cw, &note, t.ink2) + 6.;
+                    live.map(str::to_string).or_else(|| command.clone())
                 }
-                y += code_box(d, ui, Id::of(("training-step", &p.id)), cx, y, cw, &line) + 10.;
+            })
+            .flatten();
+        let (cx, cw) = (x + 27., w - 27.);
+        if place.is_some() || line.is_some() {
+            y -= 4.;
+        }
+        if let Some(place) = &place {
+            y += text(ui, cx, y, cw, place, t.ink2) + 6.;
+            if line.is_some() {
+                y += text(ui, cx, y, cw, &d.t("training.ui.or"), t.ink2) + 6.;
             }
+        }
+        if let Some(line) = line {
+            let note = if stage == "restart" {
+                Some(d.t("training.restart"))
+            } else if key == "start" {
+                Some(d.t("training.terminalStart"))
+            } else {
+                None
+            };
+            if let Some(note) = note {
+                y += text(ui, cx, y, cw, &note, t.ink2) + 6.;
+            }
+            y += code_box(d, ui, Id::of(("training-step", &p.id)), cx, y, cw, &line) + 10.;
+        } else if place.is_some() {
+            y += 4.;
         }
     }
     if complete {
