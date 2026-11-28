@@ -1,385 +1,168 @@
-//! The pull panel and the import from Docker: where images come from and who is logged
-//! in there, Docker Hub search, pulls with a login, and copies from one engine to
-//! another. No Tauri here, so it is tested against fake engines.
+//! The app's bitmaps: the logo, the registry icons of the pull panel and the Docker
+//! import (desktop/assets/registry-icons.svg, rendered to PNG by
+//! `assets/make-registry-icons.sh`), and the window and tray icons.
 
-use podbag::client::registries::{config_dir, registry_host};
-use podbag::client::{Client, ImageSummary, Location, Target, logins};
-use serde::Serialize;
+use std::collections::HashMap;
+use std::sync::OnceLock;
 
-/// A pull location, as the panel shows it. No secrets: only the account name.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LocationInfo {
-    /// The stable preference key and icon ID.
-    pub id: &'static str,
-    pub label: String,
-    pub host: String,
-    pub host_example: &'static str,
-    /// The user gives the host (ECR, GAR, ACR, another registry).
-    pub needs_host: bool,
-    /// Who is logged in there.
-    pub account: Option<String>,
-    /// The command to log in with, where a password is not enough (ECR, GAR, ACR).
-    pub hint: Option<String>,
+use podbag_ui::ui::Ui;
+use podbag_ui::{Color, Image, ImageData, Rect};
+
+/// The logo of the empty and offline pages (192 x 192).
+const LOGO: &[u8] = include_bytes!("../assets/logo.png");
+/// The window icon.
+const WINDOW_ICON: &[u8] = include_bytes!("../assets/icon-128.png");
+/// The tray icon: a template image (black and alpha) for the macOS menu bar, the app
+/// icon elsewhere.
+pub const TRAY_TEMPLATE: &[u8] = include_bytes!("../assets/tray-template.png");
+pub const TRAY_ICON: &[u8] = include_bytes!("../assets/icon-64.png");
+
+macro_rules! registry {
+    ($($id:literal),* $(,)?) => {
+        &[$(($id, include_bytes!(concat!("../assets/registry/", $id, ".png")))),*]
+    };
 }
 
-/// The location `id`, at `host` where it needs one.
-pub fn location(id: &str, host: &str) -> Result<Location, String> {
-    Location::all()
-        .into_iter()
-        .find(|l| l.id() == id)
-        .map(|l| l.with_host(host))
-        .ok_or_else(|| format!("unknown location {id}"))
+/// The registry icons, by location id.
+const REGISTRY: &[(&str, &[u8])] = registry![
+    "acr",
+    "alibaba",
+    "chainguard",
+    "cloudsmith",
+    "custom",
+    "digitalocean",
+    "dockerhub",
+    "ecr",
+    "gar",
+    "github",
+    "gitlab",
+    "harbor",
+    "huawei",
+    "ibm",
+    "jfrog",
+    "kubernetes",
+    "mcr",
+    "nexus",
+    "ngc",
+    "ocir",
+    "ovh",
+    "quay",
+    "redhat",
+    "scaleway",
+    "suse",
+    "tencent",
+];
+
+/// Locations that show another one's mark (`<use>` in the sprite).
+const SAME_AS: &[(&str, &str)] = &[
+    ("ecr-public", "ecr"),
+    ("dhi", "dockerhub"),
+    ("gcr", "gar"),
+    ("oracle", "ocir"),
+    ("gitlab-self", "gitlab"),
+];
+
+/// Marks in the text color (`currentColor` in the sprite): drawn as a tinted mask.
+const MONOCHROME: &[&str] = &["chainguard", "cloudsmith", "custom", "github", "nexus"];
+
+struct Images {
+    logo: Image,
+    registry: HashMap<&'static str, Image>,
 }
 
-fn info(l: &Location, logins: &[(String, String)]) -> LocationInfo {
-    LocationInfo {
-        id: l.id(),
-        label: l.label(),
-        host: l.host(),
-        host_example: l.host_example(),
-        needs_host: l.needs_host(),
-        account: l.account(logins).map(str::to_string),
-        hint: l.login_hint(),
-    }
+fn decode(bytes: &[u8]) -> Image {
+    Image::png(bytes).expect("bundled PNG")
 }
 
-/// Every location with its login state. `hosts`: the hosts the user gave (ECR, GAR, ACR,
-/// another registry), by id.
-pub fn locations(logins: &[(String, String)], hosts: &[(String, String)]) -> Vec<LocationInfo> {
-    Location::all()
-        .iter()
-        .map(|l| {
-            let host = hosts
-                .iter()
-                .find(|(id, _)| id == l.id())
-                .map(|(_, h)| h.as_str())
-                .unwrap_or("");
-            info(&l.with_host(host), logins)
-        })
-        .collect()
-}
-
-/// The logins of this user, as the docker CLI keeps them (account names only).
-pub fn current_logins() -> Vec<(String, String)> {
-    config_dir().map(|d| logins(&d)).unwrap_or_default()
-}
-
-/// What a search found; `supported` is false when the engine has no search.
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Search {
-    pub supported: bool,
-    pub results: Vec<podbag::client::SearchResult>,
-    pub error: Option<String>,
-}
-
-/// Search Docker Hub through the engine.
-pub fn search(client: &Client, term: &str) -> Search {
-    let term = term.trim();
-    if term.is_empty() {
-        return Search {
-            supported: true,
-            ..Search::default()
-        };
-    }
-    match client.search(term, 25) {
-        Ok(results) => Search {
-            supported: true,
-            results,
-            error: None,
-        },
-        Err(e) if e.unsupported() => Search::default(),
-        Err(e) => Search {
-            supported: true,
-            results: Vec::new(),
-            error: Some(e.message),
-        },
-    }
-}
-
-/// The reference to pull: `image` at `location` (a short name at GitHub is
-/// `ghcr.io/<name>`). Empty names and spaces are refused.
-pub fn reference(image: &str, location: Option<&Location>) -> Result<String, String> {
-    let image = image.trim();
-    if image.is_empty() || image.chars().any(char::is_whitespace) {
-        return Err(format!("{image:?} is not an image name"));
-    }
-    Ok(match location {
-        Some(l) => l.qualify(image),
-        None => image.to_string(),
+fn images() -> &'static Images {
+    static IMAGES: OnceLock<Images> = OnceLock::new();
+    IMAGES.get_or_init(|| Images {
+        logo: decode(LOGO),
+        registry: REGISTRY
+            .iter()
+            .map(|(id, png)| (*id, decode(png)))
+            .collect(),
     })
 }
 
-/// Pull `reference`, with the login for its registry when there is one and the engine is
-/// local (`auth` gives it; it is a secret and goes nowhere else).
-pub fn pull(
-    client: &Client,
-    target: &Target,
-    reference: &str,
-    auth: impl Fn(&str) -> Option<String>,
-    progress: impl FnMut(&str),
-) -> Result<(), String> {
-    let login = if target.allows_registry_auth() {
-        auth(reference)
-    } else {
-        None
-    };
-    client
-        .pull_auth(reference, login.as_deref(), progress)
-        .map_err(|e| e.message)
+/// Decode the bitmaps now rather than on first use.
+pub fn install() {
+    images();
 }
 
-/// User-configured hosts that can identify a specific registry provider.
-pub(crate) fn configured_locations(hosts: &[(String, String)]) -> Vec<Location> {
-    hosts
+pub fn logo() -> Image {
+    images().logo
+}
+
+/// The window's icon.
+pub fn window_icon() -> ImageData {
+    ImageData::from_png(WINDOW_ICON).expect("bundled PNG")
+}
+
+/// A location's mark, and whether it takes the text color.
+pub fn registry_icon(id: &str) -> Option<(Image, bool)> {
+    let id = SAME_AS
         .iter()
-        .filter(|(id, host)| id != "custom" && !host.trim().is_empty())
-        .filter_map(|(id, host)| location(id, host).ok())
-        .filter(|location| location.needs_host())
-        .collect()
+        .find(|(alias, _)| *alias == id)
+        .map_or(id, |(_, real)| real);
+    let image = *images().registry.get(id)?;
+    Some((image, MONOCHROME.contains(&id)))
 }
 
-/// Match the registry in an image name to a configured or recognized provider.
-pub(crate) fn registry_location(reference: &str, configured: &[Location]) -> Location {
-    let host = registry_host(reference);
-    configured
-        .iter()
-        .find(|location| location.host() == host)
-        .cloned()
-        .unwrap_or_else(|| Location::of(&host))
-}
-
-/// A tagged image as shown in the Docker import list.
-#[derive(Serialize)]
-pub struct ImportImage {
-    name: String,
-    size: i64,
-    registry: &'static str,
-}
-
-impl ImportImage {
-    pub fn from_image(image: ImageSummary, configured: &[Location]) -> Option<Self> {
-        let name = image
-            .repo_tags
-            .into_iter()
-            .find(|tag| tag != "<none>:<none>")?;
-        let registry = registry_location(&name, configured).id();
-        Some(Self {
-            name,
-            size: image.size,
-            registry,
-        })
+/// Draw a location's mark into `rect` (square); `ink` colors the monochrome ones.
+/// Unknown ids draw nothing.
+pub fn draw_registry_icon(ui: &mut Ui, id: &str, rect: Rect, ink: Color) {
+    match registry_icon(id) {
+        Some((image, true)) => ui.p.image_tinted(image, rect, ink),
+        Some((image, false)) => ui.p.image(image, rect),
+        None => {}
     }
 }
 
-/// Copy images from one engine to another (`GET /images/get` into `POST
-/// /images/load`). Only read from `from`.
-pub fn import(from: &Client, to: &Client, names: &[String]) -> Result<(), String> {
-    to.import_images(from, names)
+/// Draw the logo into `rect`.
+pub fn draw_logo(ui: &mut Ui, rect: Rect) {
+    ui.p.image(logo(), rect);
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
-    use podbag::client::fake::{FakeEngine, json, small_engine};
-    use podbag::client::{Choice, Endpoint};
-    use std::cell::Cell;
-
-    fn target_of(choice: Choice, endpoint: Endpoint) -> Target {
-        Target { choice, endpoint }
-    }
+    use podbag_desktop_core::images;
 
     #[test]
-    fn locations_show_who_is_logged_in() {
-        let logins = vec![
-            ("ghcr.io".to_string(), "octo".to_string()),
-            (
-                "123456789012.dkr.ecr.eu-west-1.amazonaws.com".to_string(),
-                "AWS".to_string(),
-            ),
-        ];
-        let all = locations(&logins, &[]);
-        let ids: Vec<&str> = all.iter().map(|l| l.id).collect();
-        assert_eq!(
-            &ids[..7],
-            ["dockerhub", "github", "ecr", "quay", "gar", "gitlab", "acr"]
-        );
-        assert_eq!(ids.last(), Some(&"custom"));
-        assert_eq!(
-            ids.len(),
-            ids.iter().collect::<std::collections::HashSet<_>>().len()
-        );
-        let sprite = include_str!("../ui/registry-icons.svg");
-        for id in ids {
+    fn every_pull_location_has_an_icon() {
+        for location in images::locations(&[], &[]) {
             assert!(
-                sprite.contains(&format!("<symbol id=\"{id}\"")),
-                "missing icon for {id}"
+                registry_icon(location.id).is_some(),
+                "missing icon for {}",
+                location.id
             );
         }
-        assert_eq!(all[0].account, None);
-        assert_eq!(all[1].account.as_deref(), Some("octo"));
-        // ECR with no host yet: any ECR login.
-        assert_eq!(all[2].account.as_deref(), Some("AWS"));
-        assert!(all[2].needs_host && all[2].hint.as_deref().unwrap().contains("aws ecr"));
-        assert!(all[4].hint.as_deref().unwrap().contains("gcloud"));
-        let acr_host = "contoso-hash.azurecr.io";
-        let logins = [(acr_host.into(), "azure-user".into())];
-        let given = locations(
-            &logins,
-            &[
-                ("acr".into(), acr_host.into()),
-                ("custom".into(), "registry.example.com".into()),
-            ],
-        );
-        let acr = given.iter().find(|l| l.id == "acr").unwrap();
-        assert_eq!(acr.host, acr_host);
-        assert_eq!(acr.account.as_deref(), Some("azure-user"));
-        assert_eq!(acr.hint.as_deref(), Some("az acr login --name contoso"));
-        let custom = given.iter().find(|l| l.id == "custom").unwrap();
-        assert_eq!(custom.host, "registry.example.com");
-        assert_eq!(custom.account, None);
-        assert!(location("nowhere", "").is_err());
     }
 
     #[test]
-    fn references_are_qualified_by_location() {
-        let gh = location("github", "").unwrap();
-        assert_eq!(
-            reference("me/app:1", Some(&gh)).unwrap(),
-            "ghcr.io/me/app:1"
-        );
-        let hub = location("dockerhub", "").unwrap();
-        assert_eq!(reference(" nginx ", Some(&hub)).unwrap(), "nginx");
-        assert_eq!(
-            reference("quay.io/x/y", Some(&gh)).unwrap(),
-            "quay.io/x/y",
-            "a full reference stays"
-        );
-        assert!(reference("", None).is_err());
-        assert!(reference("a b", None).is_err());
-    }
-
-    #[test]
-    fn search_hides_itself_when_the_engine_has_none() {
-        let podbag = FakeEngine::start(small_engine);
-        let s = search(&podbag.client, "nginx");
-        assert!(!s.supported, "{s:?}");
-        let docker = FakeEngine::start(|method, path| {
-            if path.starts_with("/images/search") {
-                json(
-                    200,
-                    serde_json::json!([{"name": "nginx", "description": "Official build of Nginx.",
-                        "star_count": 20000, "is_official": true}]),
-                )
-            } else {
-                small_engine(method, path)
-            }
-        });
-        let s = search(&docker.client, "ngi nx");
-        assert!(s.supported);
-        assert_eq!(s.results[0].name, "nginx");
-        assert!(s.results[0].is_official);
-        assert_eq!(
-            docker.requests(),
-            ["GET /images/search?term=ngi%20nx&limit=25"]
-        );
-        assert!(search(&docker.client, "  ").results.is_empty());
-    }
-
-    #[test]
-    fn a_login_goes_only_to_a_local_engine() {
-        let engine = FakeEngine::start(small_engine);
-        let asked = Cell::new(0);
-        let auth = |r: &str| {
-            asked.set(asked.get() + 1);
-            assert_eq!(r, "ghcr.io/me/app:1");
-            Some(String::from("e30"))
-        };
-        let local = target_of(Choice::Docker, engine.client.endpoint.clone());
-        pull(&engine.client, &local, "ghcr.io/me/app:1", auth, |_| {}).unwrap();
-        assert_eq!(asked.get(), 1);
-        // Docker reached through `docker system dial-stdio` (tcp, ssh): no login.
-        let remote = target_of(
-            Choice::Docker,
-            Endpoint::Command(vec!["docker".into(), "system".into(), "dial-stdio".into()]),
-        );
-        assert!(!remote.allows_registry_auth());
-        assert!(
-            target_of(Choice::Podbag, Endpoint::Command(vec!["podbag.exe".into()]))
-                .allows_registry_auth()
-        );
-        pull(&engine.client, &remote, "ghcr.io/me/app:1", auth, |_| {}).unwrap();
-        assert_eq!(asked.get(), 1, "not asked for a remote engine");
-        assert_eq!(
-            engine.requests(),
-            [
-                "POST /images/create?fromImage=ghcr.io%2Fme%2Fapp&tag=1",
-                "POST /images/create?fromImage=ghcr.io%2Fme%2Fapp&tag=1"
-            ]
-        );
-    }
-
-    #[test]
-    fn import_icons_follow_the_first_named_tag() {
-        for (name, registry) in [
-            ("redis:7", "dockerhub"),
-            ("ghcr.io/team/api:1", "github"),
-            ("contoso.azurecr.io/team/api:1", "acr"),
-            ("example.org/worker:1", "custom"),
-            ("harbor.example.org:8443/tools/app:1", "harbor"),
-        ] {
-            let configured = [location("harbor", "harbor.example.org:8443").unwrap()];
-            let row = ImportImage::from_image(
-                ImageSummary {
-                    repo_tags: vec!["<none>:<none>".into(), name.into(), "other:2".into()],
-                    ..Default::default()
-                },
-                &configured,
-            )
-            .unwrap();
-            assert_eq!(row.name, name);
-            assert_eq!(row.registry, registry);
+    fn bundled_images_decode() {
+        assert_eq!(logo().size(), (192, 192));
+        assert_eq!(window_icon().width, 128);
+        for (id, _) in REGISTRY {
+            assert_eq!(registry_icon(id).unwrap().0.size(), (64, 64), "{id}");
         }
-        assert!(ImportImage::from_image(ImageSummary::default(), &[]).is_none());
+        assert!(ImageData::from_png(TRAY_TEMPLATE).is_ok());
+        assert!(ImageData::from_png(TRAY_ICON).is_ok());
     }
 
     #[test]
-    fn images_are_copied_from_one_engine_to_another() {
-        let docker = FakeEngine::start(|method, path| {
-            if path.starts_with("/images/get") {
-                (200, "application/x-tar", b"a tar archive".to_vec())
-            } else {
-                small_engine(method, path)
-            }
-        });
-        let podbag = FakeEngine::start(|method, path| {
-            if path == "/images/load" {
-                json(
-                    200,
-                    serde_json::json!({"stream": "Loaded image: nginx:alpine\n"}),
-                )
-            } else {
-                small_engine(method, path)
-            }
-        });
-        import(
-            &docker.client,
-            &podbag.client,
-            &["nginx:alpine".to_string(), "redis:7".to_string()],
-        )
-        .unwrap();
-        assert_eq!(
-            docker.requests(),
-            ["GET /images/get?names=nginx%3Aalpine&names=redis%3A7"]
-        );
-        let seen = podbag.seen.lock().unwrap().clone();
-        assert_eq!(seen.len(), 1);
-        assert_eq!(
-            (seen[0].0.as_str(), seen[0].1.as_str()),
-            ("POST", "/images/load")
-        );
-        assert_eq!(seen[0].2, "a tar archive");
-        assert!(import(&docker.client, &podbag.client, &[]).is_err());
+    fn the_sprite_and_the_pngs_name_the_same_marks() {
+        let sprite = include_str!("../assets/registry-icons.svg");
+        let mut ids: Vec<&str> = REGISTRY.iter().map(|(id, _)| *id).collect();
+        ids.extend(SAME_AS.iter().map(|(alias, _)| *alias));
+        ids.sort_unstable();
+        let mut in_sprite: Vec<&str> = sprite
+            .split("<symbol id=\"")
+            .skip(1)
+            .filter_map(|s| s.split('"').next())
+            .collect();
+        in_sprite.sort_unstable();
+        assert_eq!(ids, in_sprite);
     }
 }

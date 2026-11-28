@@ -1,7 +1,8 @@
-# Inspect the installed app through the same accessibility tree as a Windows user.
-param([int]$AppPid, [string]$OutputFile)
+# Wait for the Podbag Desktop window of a process, check that it draws (not one plain
+# color), save a screenshot, and close the window.
+param([Parameter(Mandatory)][int]$AppPid, [Parameter(Mandatory)][string]$OutputFile)
 $ErrorActionPreference = 'Stop'
-Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Drawing
+Add-Type -AssemblyName System.Drawing
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -16,87 +17,87 @@ public static class WindowCapture {
     public static extern bool SetProcessDPIAware();
     [DllImport("user32.dll")]
     public static extern bool SetForegroundWindow(IntPtr hwnd);
-    [DllImport("user32.dll")]
-    public static extern bool SetCursorPos(int x, int y);
-    [DllImport("user32.dll")]
-    public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
 }
 '@
 [void][WindowCapture]::SetProcessDPIAware()
+$title = 'Podbag Desktop'
 
 $deadline = [DateTime]::UtcNow.AddSeconds(90)
 $process = Get-Process -Id $AppPid
 do {
     $process.Refresh()
-    if ($process.HasExited) { throw "App exited with code $($process.ExitCode)" }
+    if ($process.HasExited) { throw "The app exited with code $($process.ExitCode)" }
     $window = $process.MainWindowHandle
-    if ($window -ne [IntPtr]::Zero -and $process.MainWindowTitle -eq 'podbag') { break }
+    if ($window -ne [IntPtr]::Zero -and $process.MainWindowTitle -eq $title) { break }
     Start-Sleep -Milliseconds 400
 } until ([DateTime]::UtcNow -gt $deadline)
-if ($process.MainWindowTitle -ne 'podbag') { throw 'The main Podbag window did not appear' }
-Write-Output "Opened window '$($process.MainWindowTitle)' in session $($process.SessionId)."
-$root = [Windows.Automation.AutomationElement]::FromHandle($window)
-$scope = [Windows.Automation.TreeScope]::Descendants
+if ($process.MainWindowTitle -ne $title) { throw "The '$title' window did not appear" }
+Write-Output "Opened window '$title' in session $($process.SessionId)."
 
-function Find-Text([string]$Name) {
-    $condition = [Windows.Automation.PropertyCondition]::new(
-        [Windows.Automation.AutomationElement]::NameProperty, $Name)
-    $root.FindFirst($scope, $condition)
-}
-
-function Activate-Button([string]$Name) {
-    $named = [Windows.Automation.PropertyCondition]::new(
-        [Windows.Automation.AutomationElement]::NameProperty, $Name)
-    $button = [Windows.Automation.PropertyCondition]::new(
-        [Windows.Automation.AutomationElement]::ControlTypeProperty, [Windows.Automation.ControlType]::Button)
-    $item = $root.FindFirst($scope, [Windows.Automation.AndCondition]::new($named, $button))
-    if ($item) {
-        $invoke = $null
-        if ($item.TryGetCurrentPattern([Windows.Automation.InvokePattern]::Pattern, [ref]$invoke)) {
-            $invoke.Invoke()
-            return
+# The window as the app drew it: through DWM (PrintWindow with PW_RENDERFULLCONTENT,
+# which includes Direct3D content), else from the screen.
+function Get-WindowImage([bool]$FromScreen) {
+    $r = New-Object WindowCapture+Rect
+    if (![WindowCapture]::GetWindowRect($window, [ref]$r)) { throw 'Cannot read the window bounds' }
+    $w = $r.Right - $r.Left
+    $h = $r.Bottom - $r.Top
+    if ($w -le 0 -or $h -le 0) { return $null }
+    $image = [Drawing.Bitmap]::new($w, $h)
+    $graphics = [Drawing.Graphics]::FromImage($image)
+    try {
+        if ($FromScreen) {
+            [void][WindowCapture]::SetForegroundWindow($window)
+            Start-Sleep -Milliseconds 300
+            $graphics.CopyFromScreen($r.Left, $r.Top, 0, 0, $image.Size)
+        } else {
+            $dc = $graphics.GetHdc()
+            try { [void][WindowCapture]::PrintWindow($window, $dc, 2) }
+            finally { $graphics.ReleaseHdc($dc) }
         }
-    } else {
-        # Some WebView2 versions expose the button's label as a separate text node.
-        $item = $root.FindFirst($scope, $named)
+    } finally {
+        $graphics.Dispose()
     }
-    if (!$item -or $item.Current.IsOffscreen) { return }
-    $rect = $item.Current.BoundingRectangle
-    if ($rect.IsEmpty -or $rect.Width -le 0 -or $rect.Height -le 0) { return }
-    [void][WindowCapture]::SetForegroundWindow($window)
-    if ([WindowCapture]::SetCursorPos(($rect.Left + $rect.Width / 2), ($rect.Top + $rect.Height / 2))) {
-        [WindowCapture]::mouse_event(2, 0, 0, 0, [UIntPtr]::Zero)
-        [WindowCapture]::mouse_event(4, 0, 0, 0, [UIntPtr]::Zero)
-    }
+    $image
 }
 
-# The first-launch prompts (star, then image compression) may appear after navigation
-# becomes visible.
-$deadline = [DateTime]::UtcNow.AddSeconds(90)
+# How many colors a grid of points in the image has, and the share of the most common one.
+function Measure-Image([Drawing.Bitmap]$Image) {
+    $counts = @{}
+    $n = 0
+    for ($y = 4; $y -lt $Image.Height; $y += [Math]::Max(1, [int]($Image.Height / 48))) {
+        for ($x = 4; $x -lt $Image.Width; $x += [Math]::Max(1, [int]($Image.Width / 48))) {
+            $c = $Image.GetPixel($x, $y).ToArgb()
+            $counts[$c] = 1 + [int]$counts[$c]
+            $n++
+        }
+    }
+    $top = ($counts.Values | Measure-Object -Maximum).Maximum
+    [pscustomobject]@{ Colors = $counts.Count; Top = $top / [Math]::Max(1, $n) }
+}
+
+# The first frames can come before the fonts and the views: wait until it has content.
+$deadline = [DateTime]::UtcNow.AddSeconds(60)
+$image = $null
+$drawn = $false
 do {
-    Activate-Button 'Skip'
-    Activate-Button 'Not now'
-    Activate-Button 'Training'
-    Start-Sleep -Milliseconds 500
-    $heading = Find-Text 'No modules installed.'
-    if ($heading) { break }
-} until ([DateTime]::UtcNow -gt $deadline)
-if (!$heading) { throw 'The installed WebView did not open the English Training view' }
-
-$bounds = New-Object WindowCapture+Rect
-if (![WindowCapture]::GetWindowRect($window, [ref]$bounds)) { throw 'Cannot read window bounds' }
-$image = [Drawing.Bitmap]::new(($bounds.Right - $bounds.Left), ($bounds.Bottom - $bounds.Top))
-$graphics = [Drawing.Graphics]::FromImage($image)
-$dc = $graphics.GetHdc()
-try {
-    if (![WindowCapture]::PrintWindow($window, $dc, 2)) { throw 'Cannot capture the app window' }
-} finally {
-    $graphics.ReleaseHdc($dc)
-    $graphics.Dispose()
-}
-try {
+    foreach ($fromScreen in $false, $true) {
+        if ($image) { $image.Dispose() }
+        $image = Get-WindowImage $fromScreen
+        if (!$image) { continue }
+        $m = Measure-Image $image
+        if ($m.Colors -ge 8 -and $m.Top -lt 0.95) {
+            $drawn = $true
+            $how = if ($fromScreen) { 'the screen' } else { 'PrintWindow' }
+            Write-Output "The window draws: $($m.Colors) colors in a sample, from $how."
+            break
+        }
+    }
+    if (!$drawn) { Start-Sleep -Seconds 1 }
+} until ($drawn -or [DateTime]::UtcNow -gt $deadline)
+if ($image) {
     $image.Save([IO.Path]::GetFullPath($OutputFile), [Drawing.Imaging.ImageFormat]::Png)
-} finally {
     $image.Dispose()
 }
-Write-Output 'Opened Training in the installed English desktop app.'
+if (!$drawn) { throw "The window stayed blank ($($m.Colors) colors, see $OutputFile)" }
+[void]$process.CloseMainWindow()
+Write-Output 'Closed the window.'
