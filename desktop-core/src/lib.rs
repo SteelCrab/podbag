@@ -8,6 +8,7 @@
 
 pub mod autostart;
 pub mod backend;
+pub mod builders;
 pub mod compression;
 pub mod desktop;
 pub mod dockercmd;

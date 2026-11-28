@@ -334,6 +334,7 @@ pub struct Desktop {
     pub update: views::updates::UpdateState,
     pub notices: views::notices::Notices,
     pub compression: views::compression::CompressionState,
+    pub builders: views::builders::Form,
     pub vm_storage: views::vm_storage::Form,
     pub engine_config: views::engine_config::Form,
     pub network_settings: views::network_settings::Form,
@@ -450,6 +451,7 @@ impl Desktop {
             update: views::updates::UpdateState::default(),
             notices: views::notices::Notices::default(),
             compression: views::compression::CompressionState::default(),
+            builders: views::builders::Form::default(),
             vm_storage: views::vm_storage::Form::default(),
             engine_config: views::engine_config::Form::default(),
             network_settings: views::network_settings::Form::default(),
@@ -549,6 +551,7 @@ impl Desktop {
         self.loaded = false;
         self.lists = Lists::default();
         views::compression::reset(self);
+        self.builders = views::builders::Form::default();
         self.vm_storage = views::vm_storage::Form::default();
         self.engine_config = views::engine_config::Form::default();
         self.network_settings = views::network_settings::Form::default();
@@ -1859,6 +1862,7 @@ impl Desktop {
                     "network",
                     "registryProxy",
                     "vmStorage",
+                    "builders",
                     "vm",
                     "syncShares",
                     "updates",

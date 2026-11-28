@@ -13,6 +13,7 @@
 //! run answers "Blue.". The VM shares `/Users`; synchronized shares are kept in memory.
 
 use crate::backend::Api;
+use crate::builders;
 use crate::compression::{Compression, Mode};
 use crate::desktop::Connection;
 use crate::dockercmd::DockerCommand;
@@ -42,6 +43,39 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::Duration;
+
+#[derive(Default)]
+struct PreviewBuilders {
+    selected: bool,
+    running: bool,
+    removed: bool,
+}
+
+impl PreviewBuilders {
+    fn catalog(&self, context: &str) -> builders::Catalog {
+        let mut entries = vec![builders::Builder {
+            name: context.into(),
+            driver: "docker".into(),
+            current: !self.selected,
+            managed: false,
+        }];
+        if !self.removed {
+            entries.push(builders::Builder {
+                name: "local-builder".into(),
+                driver: "docker-container".into(),
+                current: self.selected,
+                managed: true,
+            });
+        }
+        builders::Catalog {
+            availability: builders::Availability::Ready,
+            scope: Some(context.into()),
+            context: Some(context.into()),
+            outside_scope: false,
+            builders: entries,
+        }
+    }
+}
 
 /// Which preview view to start from.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -248,6 +282,7 @@ struct State {
     logs_following: bool,
     update_found: bool,
     compression: Compression,
+    builders: BTreeMap<String, PreviewBuilders>,
     disk: crate::DiskStorage,
     config_text: Option<String>,
     network_settings: NetworkSettings,
@@ -831,6 +866,7 @@ impl Mock {
                 }),
                 after: Some(opts.compression.after),
             },
+            builders: BTreeMap::new(),
             disk: crate::DiskStorage {
                 path: "/Users/me/.podbag/vm/disk.img".into(),
                 exists: true,
@@ -1574,6 +1610,79 @@ impl Api for Mock {
             _ if o.broken => Ok(Compression::default()),
             _ => Ok(state),
         }
+    }
+
+    fn builder_list(&self, session: u64) -> Result<builders::Catalog, String> {
+        let mut state = self.st();
+        if state.token != session {
+            return Err("The engine has changed".into());
+        }
+        let context = state.selected.clone();
+        if !matches!(context.as_str(), "docker" | "podbag") {
+            return Ok(builders::unavailable(builders::Availability::NonLocal));
+        }
+        let builders = state.builders.entry(context.clone()).or_default();
+        Ok(builders.catalog(&context))
+    }
+
+    fn builder_inspect(
+        &self,
+        session: u64,
+        scope: &str,
+        name: &str,
+    ) -> Result<builders::Inspection, String> {
+        let catalog = self.builder_list(session)?;
+        let builder = catalog
+            .builders
+            .iter()
+            .find(|item| item.name == name && catalog.scope.as_deref() == Some(scope))
+            .ok_or("Unknown builder in this context")?;
+        let state = self.st();
+        let set = state.builders.get(scope).ok_or("The engine has changed")?;
+        let running = !builder.managed || set.running;
+        Ok(builders::Inspection {
+            error: String::new(),
+            nodes: vec![builders::Node {
+                name: format!("{name}0"),
+                endpoint: scope.into(),
+                status: if running { "running" } else { "inactive" }.into(),
+                buildkit: "v0.33.1".into(),
+                platforms: "linux/arm64".into(),
+                ..Default::default()
+            }],
+        })
+    }
+
+    fn builder_action(
+        &self,
+        session: u64,
+        scope: &str,
+        name: &str,
+        action: builders::Action,
+    ) -> Result<(), String> {
+        let mut state = self.st();
+        if state.token != session || state.selected != scope {
+            return Err("The engine has changed".into());
+        }
+        let set = state
+            .builders
+            .get_mut(scope)
+            .ok_or("Unknown builder context")?;
+        let managed = !set.removed && name == "local-builder";
+        if name != scope && !managed {
+            return Err("Unknown builder".into());
+        }
+        match action {
+            builders::Action::Select => set.selected = managed,
+            builders::Action::Start if managed => set.running = true,
+            builders::Action::Stop if managed => set.running = false,
+            builders::Action::Remove if managed => {
+                set.removed = true;
+                set.selected = false;
+            }
+            _ => return Err("Only a managed builder can be changed".into()),
+        }
+        Ok(())
     }
 
     fn vm_storage(

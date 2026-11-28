@@ -8,6 +8,7 @@
 //! with `try_recv`, after the waker asked for a redraw.
 
 use crate::autostart::LoginItem;
+use crate::builders;
 use crate::compression::{self, Compression};
 use crate::desktop::{Connection, Desktop};
 use crate::dockercmd::DockerCommand;
@@ -133,6 +134,20 @@ pub trait Api: Send + Sync {
     /// it runs in the VM, which it starts when it is stopped. Slow.
     fn compression(&self, mode: Option<compression::Mode>) -> Result<Compression, String>;
 
+    fn builder_list(&self, session: u64) -> Result<builders::Catalog, String>;
+    fn builder_inspect(
+        &self,
+        session: u64,
+        scope: &str,
+        name: &str,
+    ) -> Result<builders::Inspection, String>;
+    fn builder_action(
+        &self,
+        session: u64,
+        scope: &str,
+        name: &str,
+        action: builders::Action,
+    ) -> Result<(), String>;
     /// Read or change the local macOS VM's data disk using the host CLI.
     fn vm_storage(
         &self,
@@ -418,6 +433,29 @@ impl Api for Desktop {
             .current()
             .compression(mode.map(compression::Mode::as_str))?;
         Ok(Compression::from_json(&reply))
+    }
+
+    fn builder_list(&self, session: u64) -> Result<builders::Catalog, String> {
+        builders::list(&self.session(session)?.target)
+    }
+
+    fn builder_inspect(
+        &self,
+        session: u64,
+        scope: &str,
+        name: &str,
+    ) -> Result<builders::Inspection, String> {
+        builders::inspect(&self.session(session)?.target, scope, name)
+    }
+
+    fn builder_action(
+        &self,
+        session: u64,
+        scope: &str,
+        name: &str,
+        action: builders::Action,
+    ) -> Result<(), String> {
+        builders::act(&self.session(session)?.target, scope, name, action)
     }
 
     fn vm_storage(

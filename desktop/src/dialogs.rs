@@ -46,6 +46,11 @@ pub enum Then {
     },
     /// Stop synchronizing a share of the macOS VM.
     SyncRemove(String),
+    RemoveBuilder {
+        session: u64,
+        scope: String,
+        name: String,
+    },
 }
 
 /// What an ask dialog's text is for.
@@ -439,6 +444,20 @@ fn finish(d: &mut Desktop, ui: &mut Ui, dlg: Dialog, yes: bool) {
             Then::EndLab => crate::views::training::lab(d, "end", None),
             Then::PracticeRemove { name, session } => {
                 crate::views::practice::act(d, "remove", name, session)
+            }
+            Then::RemoveBuilder {
+                session,
+                scope,
+                name,
+            } => {
+                if d.session == session {
+                    crate::views::builders::act(
+                        d,
+                        scope,
+                        name,
+                        podbag_desktop_core::builders::Action::Remove,
+                    );
+                }
             }
             Then::SyncRemove(name) => {
                 crate::views::sync_shares::act(d, podbag_desktop_core::vm::SyncAction::Remove(name))

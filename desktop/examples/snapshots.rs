@@ -63,6 +63,7 @@ const VIEW_SHOTS: &[(&str, &[&str], f32)] = &[
         &["nav settings", "section engine"],
         1200.,
     ),
+    ("settings-builders", &["section builders"], 1200.),
     ("settings-storage", &["section vmStorage"], 1200.),
     ("settings-search", &["search Virtual machine"], 1200.),
     // The same in Korean.
@@ -439,6 +440,10 @@ fn views(out: &Path, filter: &str, scale: f32) {
             for c in *commands {
                 h.view_mut().app.command(c);
                 h.repaint();
+            }
+            if *shot == "settings-builders" {
+                h.click_id(podbag_desktop::views::builders::row("local-builder"));
+                h.message(podbag_desktop::Msg::Wake);
             }
             if *shot == "settings-engine-config" {
                 h.click_id(podbag_desktop::views::engine_config::OPEN);

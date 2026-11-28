@@ -298,6 +298,12 @@ fn second_card(d: &mut Desktop, ui: &mut Ui, x: f32, y0: f32, w: f32) -> f32 {
             crate::views::registry_proxy::closed(d);
         }
     }
+    separator(ui, x, y, w);
+    let (h, open) = section(d, ui, x, y, w, "builders", Icon::Engine, "");
+    y += h;
+    if open {
+        y += super::builders::body(d, ui, bx, y, bw) + 18.;
+    }
     // The VM, for podbag on macOS and Windows.
     if let Some(vm) = d.vm.clone().filter(|_| d.has_vm()) {
         separator(ui, x, y, w);

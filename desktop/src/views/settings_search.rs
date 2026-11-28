@@ -118,6 +118,7 @@ fn entries(d: &Desktop) -> Vec<Entry> {
             Some(settings::THEME),
         ),
         section("engine", &["settings.search.terms.engine"]),
+        section("builders", &["settings.search.terms.builders"]),
     ];
     if d.connection.local {
         out.push(entry(
@@ -224,6 +225,7 @@ fn section_key(key: &'static str) -> &'static str {
         "engine" => "settings.engine",
         "network" => "settings.network",
         "registryProxy" => "settings.registryProxy",
+        "builders" => "settings.builders",
         "vmStorage" => "settings.vmStorage",
         "vm" => "settings.vm",
         "syncShares" => "settings.syncShares",

@@ -2,6 +2,7 @@
 //! commands to copy and the label/value grids.
 
 pub mod blocks;
+pub mod builders;
 pub mod compression;
 pub mod detail;
 pub mod engine_config;
