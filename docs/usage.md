@@ -72,6 +72,8 @@ The [README](../README.md) shows how to install podbag. This page shows what it 
   - [Build the desktop app](#build-the-desktop-app)
   - [What is hidden](#what-is-hidden)
 - [Swarm mode](#swarm-mode)
+  - [Enroll a worker](#enroll-a-worker)
+  - [Distribute replicas across workers](#distribute-replicas-across-workers)
   - [What it is](#what-it-is)
   - [How it runs without a daemon](#how-it-runs-without-a-daemon)
   - [Networks and ports](#networks-and-ports)
@@ -925,7 +927,7 @@ podbag system docker restore    # back to the context you had (Docker Desktop, â
   addresses.
 - Answered with 501 and what to do instead: BuildKit's build API (use buildx with the
   `docker-container` driver) and plugins.
-- Swarm mode works on one node. See [Swarm mode](#swarm-mode).
+- Swarm mode supports one manager and enrolled SSH workers. See [Swarm mode](#swarm-mode).
 
 ### cp, save and load
 
@@ -1815,9 +1817,9 @@ open target/release/podbag.app
 
 - `docker swarm init`, `docker service`, `docker stack deploy`, `docker secret`,
   `docker config` and `docker node ls` work through `podbag system service`.
-- **One node only.** The swarm is this machine. Docker's swarm nodes (SwarmKit) cannot
-  join it, and it cannot join theirs: `docker swarm join` is refused.
-- Several podbag nodes may come later. They will be podbag nodes only, never Docker's.
+- The manager runs services locally by default. A service can select one enrolled
+  Podbag worker or distribute replicas across enrolled workers. Each worker runs its
+  own Linux Podbag engine.
 
 ```sh
 docker swarm init
@@ -1827,6 +1829,75 @@ docker service rollback web
 docker stack deploy -c compose.yml app
 docker swarm leave --force                       # removes services, secrets, configs
 ```
+
+### Enroll a worker
+
+- Install this Podbag version on both Linux hosts. Set up OpenSSH key access from the
+  manager to the worker's Podbag account. Verify and save the worker's host key on the
+  manager. Make sure `podbag system dial-stdio` is available in the SSH user's path.
+- Run the manager's API service and the commands below under the same account. The
+  worker uses its private Docker API socket over SSH. Enrollment uses the OpenSSH
+  host and user keys. Docker's `swarm join` and join tokens are for SwarmKit peers.
+
+```sh
+worker_id=$(podbag swarm worker-add worker1 podbag@worker1)
+docker node ls
+docker service create --name web --replicas 2 --constraint "node.id==$worker_id" nginx
+docker service ps web
+docker service scale web=3
+docker service rm web
+docker node rm "$worker_id"
+```
+
+- An SSH config alias supports custom ports and key locations. Set `--ssh-config` on
+  enrollment to use a specific OpenSSH config file. The manager uses that same
+  configuration for task requests.
+- A worker service uses one `node.id==ID` constraint with the worker's full ID. The
+  worker pulls the image and runs the tasks. If a task is removed, reading or changing
+  the service asks the worker to reconcile it again. Unreachable workers stay assigned
+  to their services.
+- A replicated service pinned to one worker supports rolling updates and manual
+  rollback. Keep the worker constraint and replica count the same during the rollout.
+  The worker stops each old task before starting its replacement. It honors
+  parallelism, delay and monitor settings, and pauses at the first failed task.
+- The worker retains the current rollout revision if SSH disconnects. Inspect the
+  service after reconnecting to resume coordination with the same worker. A paused
+  rollout can be retried or rolled back.
+- Remove the services assigned to a worker before removing it. Remove the workers before
+  leaving the manager's swarm.
+
+### Distribute replicas across workers
+
+Enroll workers, then set the worker-role constraint on a replicated service. Use the new
+Podbag version on the manager and each worker in the pool.
+
+```sh
+docker service create --name jobs --replicas 4 --constraint 'node.role==worker' alpine sleep 3600
+docker service ps jobs
+docker service scale jobs=6
+```
+
+- New replica slots go to reachable workers. The manager prefers the worker that owns
+  the fewest slots of that service. Worker name and ID break ties.
+- Each slot keeps its assigned worker through manager restarts and changes to the
+  replica count. Enrolling a worker gives new slots another destination.
+- Use `docker node update --availability drain WORKER` to move that worker's replicas.
+  The worker must confirm removal of its old tasks before another worker can start them.
+  If every worker is drained, activate a worker to make the released slots available again.
+- A disconnected worker may still be running its tasks. The manager reserves its slots
+  until it reconnects and confirms removal. Use `docker service ps` or `docker service ls`
+  to resume a pending drain. A manager restart preserves the pending drain and its slots.
+  The task list shows tasks from reachable nodes.
+- Use `docker node update --availability active WORKER` to accept new assignments after
+  a drain completes. Existing replicas keep their current placement. Remove pinned
+  services before draining their worker.
+- Drain a worker or remove its services before removing it. All
+  assigned workers must be reachable to complete service removal. If a worker is
+  disconnected, retry the removal when it reconnects. The manager stops starting tasks
+  for the service while removal is pending.
+- Rolling updates for services spread across workers remain unsupported. Worker
+  rollouts also require stop-first order and pause on failure. Automatic rollback
+  remains available for local services.
 
 ### How it runs without a daemon
 
@@ -1869,8 +1940,11 @@ docker swarm leave --force                       # removes services, secrets, co
 
 ### What does not work
 
-- Jobs (`replicated-job`, `global-job`), placement across nodes, `--autolock`, secret
-  drivers and templating.
+- Jobs (`replicated-job`, `global-job`), worker failover, multiple
+  managers, `--autolock`, secret drivers and templating.
+- Worker services use node-local networking. Cross-host overlay networking, ingress
+  publishing, custom networks, mounts, secrets, configs, streaming logs and rolling
+  updates are unavailable for those services.
 - Restart delays and windows: podbag's own restart timing applies.
 - Registry logins sent with `--with-registry-auth`: tasks pull with podbag's own
   credentials.

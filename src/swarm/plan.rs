@@ -117,8 +117,13 @@ pub fn reconcile(mode: Mode, active: bool, live: &[Live]) -> Plan {
         (true, Mode::Replicated(n)) => (1..=n).map(Slot::Replica).collect(),
         (true, Mode::Global) => vec![Slot::Node],
     };
+    reconcile_slots(&wanted, live)
+}
+
+/// Compare a node's assigned slots with the tasks it already owns.
+pub fn reconcile_slots(wanted: &[Slot], live: &[Live]) -> Plan {
     let mut plan = Plan::default();
-    for slot in &wanted {
+    for slot in wanted {
         let mut here: Vec<&Live> = live.iter().filter(|t| t.slot == *slot).collect();
         if here.is_empty() {
             plan.start.push(*slot);

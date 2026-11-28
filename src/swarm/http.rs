@@ -2,6 +2,7 @@
 //! `/tasks`, `/secrets` and `/configs`.
 
 use super::ops::{Engine, host};
+use super::remote;
 use super::shapes::{self, Counts};
 use super::store::Kind;
 use crate::api::http::{Request, client_gone};
@@ -92,8 +93,17 @@ fn engine(ctx: &Ctx) -> Result<(Engine, super::store::Cluster), Reply> {
 
 /// The Swarm part of `/info`.
 pub fn info(ctx: &Ctx) -> Value {
-    let cluster = Engine::new(&ctx.dirs).cluster().ok().flatten();
-    shapes::info_swarm(cluster.as_ref())
+    let engine = Engine::new(&ctx.dirs);
+    let cluster = engine.cluster().ok().flatten();
+    let mut output = shapes::info_swarm(cluster.as_ref());
+    if cluster.is_some() {
+        let workers = engine.store.workers().unwrap_or_default();
+        output["Nodes"] = json!(1 + workers.iter().filter(|w| w.host.is_some()).count());
+    } else if let Ok(Some(worker)) = engine.store.membership() {
+        output["NodeID"] = json!(worker.node_id);
+        output["LocalNodeState"] = json!("active");
+    }
+    output
 }
 
 /// Routes under the swarm's paths; `segments` is the whole path, split at `/`.
@@ -103,8 +113,9 @@ pub fn route(req: &Request, ctx: &Ctx, segments: &[&str]) -> Option<Reply> {
         ("POST", ["swarm", "init"]) => init(req, ctx),
         ("POST", ["swarm", "join"]) => not_supported(
             "joining another swarm",
-            "podbag runs a swarm of one node; Docker's nodes cannot join it either",
+            "register a Podbag worker over SSH with podbag swarm worker-add",
         ),
+        ("POST", ["swarm", "podbag", "worker"]) => worker_request(req, ctx),
         ("GET", ["swarm"]) => match engine(ctx) {
             Ok((_, c)) => Reply::Json(200, shapes::swarm_json(&c)),
             Err(r) => r,
@@ -119,10 +130,7 @@ pub fn route(req: &Request, ctx: &Ctx, segments: &[&str]) -> Option<Reply> {
         ("GET", ["nodes"]) => nodes(req, ctx),
         ("GET", ["nodes", id]) => node(ctx, id),
         ("POST", ["nodes", id, "update"]) => update_node(req, ctx, id),
-        ("DELETE", ["nodes", _]) => message(
-            400,
-            "cannot remove the only node of the swarm: leave the swarm with `docker swarm leave --force`",
-        ),
+        ("DELETE", ["nodes", id]) => remove_node(ctx, id),
         ("GET", ["services"]) => services(req, ctx),
         ("POST", ["services", "create"]) => create_service(req, ctx),
         ("GET", ["services", id]) => service(ctx, id),
@@ -144,6 +152,18 @@ pub fn route(req: &Request, ctx: &Ctx, segments: &[&str]) -> Option<Reply> {
         ("DELETE", ["configs", id]) => remove_object(ctx, Kind::Config, id),
         _ => return None,
     })
+}
+
+fn worker_request(req: &Request, ctx: &Ctx) -> Reply {
+    let body = found!(body(req));
+    let request = match serde_json::from_value(body) {
+        Ok(request) => request,
+        Err(err) => return message(400, format!("invalid Podbag worker request: {err}")),
+    };
+    match remote::handle(&Engine::new(&ctx.dirs), request) {
+        Ok(value) => Reply::Json(200, value),
+        Err(e) => reply(&e),
+    }
 }
 
 // ---- the swarm ----
@@ -194,7 +214,7 @@ fn update_swarm(req: &Request, ctx: &Ctx) -> Reply {
 // ---- nodes ----
 
 fn nodes(req: &Request, ctx: &Ctx) -> Reply {
-    let (_, c) = found!(engine(ctx));
+    let (engine, c) = found!(engine(ctx));
     let f = found!(filters(
         req,
         &["id", "name", "role", "membership", "label", "node.label"]
@@ -222,11 +242,25 @@ fn nodes(req: &Request, ctx: &Ctx) -> Reply {
             // Engine labels: podbag has none.
             false
         });
-    Reply::Json(200, if keep { json!([node]) } else { json!([]) })
+    let mut out = if keep { vec![node] } else { Vec::new() };
+    if any(&f, "role", |v| v == "worker")
+        && any(&f, "membership", |v| v == "accepted")
+        && !f.contains_key("node.label")
+        && !f.contains_key("label")
+    {
+        for worker in ok_or_reply!(engine.store.workers()) {
+            if any(&f, "id", |v| worker.id.starts_with(v))
+                && any(&f, "name", |v| worker.name.contains(v))
+            {
+                out.push(shapes::worker_json(&worker, worker.ready(&c)));
+            }
+        }
+    }
+    Reply::Json(200, Value::Array(out))
 }
 
 fn node(ctx: &Ctx, id: &str) -> Reply {
-    let (_, c) = found!(engine(ctx));
+    let (engine, c) = found!(engine(ctx));
     let host = host();
     if id == c.node_id
         || id == "self"
@@ -234,6 +268,8 @@ fn node(ctx: &Ctx, id: &str) -> Reply {
         || (id.len() >= 3 && c.node_id.starts_with(id))
     {
         Reply::Json(200, shapes::node_json(&c, &host))
+    } else if let Some(worker) = ok_or_reply!(remote::find(&engine, id)) {
+        Reply::Json(200, shapes::worker_json(&worker, worker.ready(&c)))
     } else {
         message(404, format!("node {id} not found"))
     }
@@ -242,10 +278,36 @@ fn node(ctx: &Ctx, id: &str) -> Reply {
 fn update_node(req: &Request, ctx: &Ctx, id: &str) -> Reply {
     let (engine, c) = found!(engine(ctx));
     if !(id == c.node_id || id == host().hostname || (id.len() >= 3 && c.node_id.starts_with(id))) {
+        if let Some(worker) = ok_or_reply!(remote::find(&engine, id)) {
+            let body = found!(body(req));
+            ok_or_reply!(remote::update_availability(
+                &engine,
+                &worker.id,
+                version(req),
+                &body
+            ));
+            return Reply::Empty(200);
+        }
         return message(404, format!("node {id} not found"));
     }
     let body = found!(body(req));
     ok_or_reply!(engine.update_node(version(req), &body));
+    Reply::Empty(200)
+}
+
+fn remove_node(ctx: &Ctx, id: &str) -> Reply {
+    let (engine, cluster) = found!(engine(ctx));
+    if id == cluster.node_id
+        || id == "self"
+        || id == host().hostname
+        || (id.len() >= 3 && cluster.node_id.starts_with(id))
+    {
+        return message(
+            400,
+            "cannot remove the only manager: leave the swarm with docker swarm leave --force",
+        );
+    }
+    ok_or_reply!(remote::remove(&engine, id));
     Reply::Empty(200)
 }
 
@@ -288,22 +350,21 @@ fn services(req: &Request, ctx: &Ctx) -> Reply {
     let _ = engine.reconcile();
     let all = ok_or_reply!(engine.store.services());
     let counts: Option<BTreeMap<String, Counts>> = req.query.bool_param("status").then(|| {
-        let tasks = super::tasks::list(&ctx.dirs, &c.node_id);
+        let tasks = engine.task_list().unwrap_or_default();
         all.iter()
             .map(|s| {
-                let mine = tasks.iter().filter(|t| t.service_id == s.id);
+                let mine = tasks
+                    .iter()
+                    .map(|(t, ..)| t)
+                    .filter(|t| t.service_id == s.id);
+                let local = remote::placement(s, &c).ok() == Some(remote::Placement::Local);
                 let desired = match super::plan::mode_of(&s.spec) {
-                    _ if !c.active() => 0,
+                    _ if local && !c.active() => 0,
                     Some(super::plan::Mode::Replicated(n)) => n,
                     _ => 1,
                 };
-                let running = mine.clone().filter(|t| t.running()).count() as u64;
-                let completed = mine
-                    .filter(|t| {
-                        t.state.status == crate::state::Status::Exited
-                            && t.state.exit_code == Some(0)
-                    })
-                    .count() as u64;
+                let running = mine.clone().filter(|t| t.state == "running").count() as u64;
+                let completed = mine.filter(|t| t.state == "complete").count() as u64;
                 (
                     s.id.clone(),
                     Counts {
@@ -332,6 +393,9 @@ fn services(req: &Request, ctx: &Ctx) -> Reply {
 fn service(ctx: &Ctx, id: &str) -> Reply {
     let (engine, _) = found!(engine(ctx));
     let s = ok_or_reply!(engine.find_service(id));
+    if super::update::active(&s).is_some() && !super::update::running(&s.id) {
+        let _ = engine.resume_pinned_update(&s.id);
+    }
     Reply::Json(
         200,
         shapes::service_json(&s, &super::net::vips_json(&s), None),
@@ -380,6 +444,7 @@ fn task_list(req: &Request, ctx: &Ctx) -> Reply {
     let _ = engine.reconcile();
     let services = ok_or_reply!(engine.store.services());
     let all = ok_or_reply!(engine.task_list());
+    let workers = ok_or_reply!(engine.store.workers());
     let hostname = host().hostname;
     let out: Vec<Value> = all
         .iter()
@@ -398,9 +463,13 @@ fn task_list(req: &Request, ctx: &Ctx) -> Reply {
                         .any(|s| s.id == t.service_id && s.name() == v)
             })
         })
-        .filter(|_| {
+        .filter(|(t, ..)| {
             any(&f, "node", |v| {
-                c.node_id.starts_with(v) || v == hostname || v == "self"
+                t.node_id.starts_with(v)
+                    || (t.node_id == c.node_id && (v == hostname || v == "self"))
+                    || workers
+                        .iter()
+                        .any(|worker| worker.id == t.node_id && worker.name == v)
             })
         })
         .filter(|(t, ..)| any(&f, "desired-state", |v| v == t.desired_state))
@@ -443,6 +512,12 @@ fn logs(req: &Request, ctx: &Ctx, of: Of) -> Reply {
     let (service_id, only_task, tty) = match &of {
         Of::Service(key) => {
             let s = ok_or_reply!(engine.find_service(key));
+            if ok_or_reply!(remote::placement(&s, &c)) != remote::Placement::Local {
+                return not_supported(
+                    "streaming logs from SSH workers",
+                    "read logs on that worker",
+                );
+            }
             let tty = s.spec["TaskTemplate"]["ContainerSpec"]["TTY"]
                 .as_bool()
                 .unwrap_or(false);
@@ -453,6 +528,15 @@ fn logs(req: &Request, ctx: &Ctx, of: Of) -> Reply {
             let Some(t) = all.iter().find(|t| {
                 t.task_id == *key || (!key.is_empty() && t.task_id.starts_with(key.as_str()))
             }) else {
+                if ok_or_reply!(engine.task_list())
+                    .iter()
+                    .any(|(t, ..)| t.id.starts_with(key))
+                {
+                    return not_supported(
+                        "streaming logs from SSH workers",
+                        "read logs on that worker",
+                    );
+                }
                 return message(404, format!("task {key} not found"));
             };
             let tty = crate::state::read_config(&ctx.dirs, &t.container_id).is_ok_and(|s| s.tty);

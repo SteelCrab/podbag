@@ -561,6 +561,7 @@ fn dispatch(cmd: Cmd) -> i32 {
         } => tui::run(once, engine, !no_mouse),
         Cmd::System { cmd } => image::system(cmd),
         Cmd::Cri { cmd } => cri(cmd),
+        Cmd::Swarm { cmd } => swarm(cmd),
         Cmd::Ps { all, quiet } => container::ps(all, quiet),
         Cmd::Inspect { container: c } => container::inspect(&c),
         Cmd::Logs {
@@ -704,6 +705,7 @@ fn dispatch(cmd: Cmd) -> i32 {
         Cmd::Save { output, images } => image::save(output.as_deref(), &images),
         Cmd::System { cmd } => image::system(cmd),
         Cmd::Cri { cmd } => cri(cmd),
+        Cmd::Swarm { cmd } => swarm(cmd),
         Cmd::Volume { cmd } => volume::run(cmd),
         Cmd::Network { cmd } => network::run(cmd),
         Cmd::Upgrade {
@@ -910,6 +912,44 @@ mod tests {
     fn network_paths_are_refused() {
         assert!(via_wsl(&["run", "-v", r"\\server\share:/data", "alpine"]).is_err());
     }
+}
+
+#[cfg(target_os = "linux")]
+fn swarm(cmd: args::SwarmCmd) -> i32 {
+    let args::SwarmCmd::WorkerAdd {
+        name,
+        destination,
+        ssh_config,
+    } = cmd;
+    let result = (|| -> podbag::Result<String> {
+        let config = ssh_config
+            .map(|path| {
+                std::fs::canonicalize(&path)
+                    .map(|path| path.to_string_lossy().to_string())
+                    .map_err(|e| {
+                        podbag::Error::io(
+                            "cannot open SSH configuration",
+                            &e,
+                            "give an existing OpenSSH configuration file",
+                        )
+                    })
+            })
+            .transpose()?;
+        let engine = podbag::swarm::Engine::new(&podbag::paths::dirs()?);
+        podbag::swarm::remote::add(&engine, &name, &destination, config)
+    })();
+    match result {
+        Ok(id) => {
+            println!("{id}");
+            0
+        }
+        Err(e) => image::report(&e),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn swarm(_cmd: args::SwarmCmd) -> i32 {
+    unsupported()
 }
 
 /// `podbag cri serve`.
