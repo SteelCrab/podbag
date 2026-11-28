@@ -23,7 +23,9 @@ use crate::training;
 use crate::tray::TrayModel;
 use crate::updates::{self, Check, Updates, Upgraded};
 use crate::vm::{SyncAction, SyncShare, VmSettings, VmStatus};
-use crate::{NetworkPreferences, NetworkSettings, RegistryProxySettings};
+use crate::{
+    ConfigDocument, EngineConfigRequest, NetworkPreferences, NetworkSettings, RegistryProxySettings,
+};
 use podbag::client::{
     ContainerSummary, Features, ImageSummary, Kind, NetworkSummary, Pruned, RunSpec, VolumeSummary,
 };
@@ -131,6 +133,12 @@ pub trait Api: Send + Sync {
     /// it runs in the VM, which it starts when it is stopped. Slow.
     fn compression(&self, mode: Option<compression::Mode>) -> Result<Compression, String>;
 
+    /// Read, validate or save the configuration file on the selected local engine.
+    fn engine_config(
+        &self,
+        session: u64,
+        request: EngineConfigRequest,
+    ) -> Result<Option<ConfigDocument>, String>;
     /// Read or save the settings of this local Podbag connection.
     fn network_settings(
         &self,
@@ -404,6 +412,17 @@ impl Api for Desktop {
             .current()
             .compression(mode.map(compression::Mode::as_str))?;
         Ok(Compression::from_json(&reply))
+    }
+
+    fn engine_config(
+        &self,
+        session: u64,
+        request: EngineConfigRequest,
+    ) -> Result<Option<ConfigDocument>, String> {
+        if self.session(session)?.target.choice != podbag::client::Choice::Podbag {
+            return Err("Engine configuration requires the local Podbag engine".into());
+        }
+        podbag::dashboard::cli::engine_config(self.podbag(), request)
     }
 
     fn network_settings(

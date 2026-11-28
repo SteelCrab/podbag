@@ -120,6 +120,12 @@ fn entries(d: &Desktop) -> Vec<Entry> {
         section("engine", &["settings.search.terms.engine"]),
     ];
     if d.connection.local {
+        out.push(entry(
+            "engineConfig.title",
+            &["settings.search.terms.engineConfig"],
+            Some("engine"),
+            Some(crate::views::engine_config::OPEN),
+        ));
         let id = d.compression.enabled().then_some(compression::SWITCH);
         out.push(entry(
             "compression.label",

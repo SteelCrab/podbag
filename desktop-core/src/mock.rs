@@ -248,6 +248,7 @@ struct State {
     logs_following: bool,
     update_found: bool,
     compression: Compression,
+    config_text: Option<String>,
     network_settings: NetworkSettings,
     registry_proxy: RegistryProxySettings,
     /// The local model runner runs, and the models it has.
@@ -829,6 +830,7 @@ impl Mock {
                 }),
                 after: Some(opts.compression.after),
             },
+            config_text: Some("# Local engine settings\nstore_limit = \"4 GiB\"\n".into()),
             network_settings: NetworkSettings {
                 preferences: NetworkPreferences {
                     default_subnet: "10.77.0.0/16".into(),
@@ -1559,6 +1561,36 @@ impl Api for Mock {
             _ if o.broken => Ok(Compression::default()),
             _ => Ok(state),
         }
+    }
+
+    fn engine_config(
+        &self,
+        session: u64,
+        request: crate::EngineConfigRequest,
+    ) -> Result<Option<crate::ConfigDocument>, String> {
+        use crate::EngineConfigRequest::*;
+        let mut state = self.st();
+        if state.token != session || state.selected != "podbag" {
+            return Err("Engine configuration requires the local Podbag engine".into());
+        }
+        match request {
+            Read => {}
+            Check { text } => {
+                podbag::config::parse(&text).map_err(|e| e.to_string())?;
+                return Ok(None);
+            }
+            Save { edit } => {
+                podbag::config::parse(&edit.text).map_err(|e| e.to_string())?;
+                if state.config_text != edit.original {
+                    return Err("config.toml changed after it was opened".into());
+                }
+                state.config_text = Some(edit.text);
+            }
+        }
+        Ok(Some(crate::ConfigDocument {
+            path: "/home/podbag/.config/podbag/config.toml".into(),
+            text: state.config_text.clone(),
+        }))
     }
 
     fn network_settings(

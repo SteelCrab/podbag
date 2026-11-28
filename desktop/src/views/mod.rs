@@ -4,6 +4,7 @@
 pub mod blocks;
 pub mod compression;
 pub mod detail;
+pub mod engine_config;
 pub mod import;
 pub mod kubernetes;
 pub mod login;

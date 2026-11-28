@@ -58,6 +58,11 @@ const VIEW_SHOTS: &[(&str, &[&str], f32)] = &[
         ],
         1200.,
     ),
+    (
+        "settings-engine-config",
+        &["nav settings", "section engine"],
+        1200.,
+    ),
     ("settings-search", &["search Virtual machine"], 1200.),
     // The same in Korean.
     ("settings-search-vm", &["search 가상 머신"], 1200.),
@@ -431,6 +436,10 @@ fn views(out: &Path, filter: &str, scale: f32) {
             for c in *commands {
                 h.view_mut().app.command(c);
                 h.repaint();
+            }
+            if *shot == "settings-engine-config" {
+                h.click_id(podbag_desktop::views::engine_config::OPEN);
+                h.message(podbag_desktop::Msg::Wake);
             }
             for _ in 0..3 {
                 h.repaint();

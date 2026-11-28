@@ -1,4 +1,4 @@
-//! The editing model of a single-line text field, without layout or painting:
+//! The editing model of a text field, without layout or painting:
 //! content, selection, IME composition, keys and the clipboard.
 //! The editing logic follows GPUI's `examples/input.rs` (Apache-2.0).
 
@@ -13,6 +13,7 @@ use crate::input::{Clipboard, KeyPress, shortcut_modifier};
 #[derive(Clone, Debug, Default)]
 pub struct EditBuffer {
     pub content: String,
+    pub multiline: bool,
     /// The selection; empty for a plain caret.
     pub selected: Range<usize>,
     /// The caret is at the start of the selection.
@@ -106,8 +107,18 @@ impl EditBuffer {
             key.mods.control_key()
         };
         let to_edge = mac && key.mods.super_key();
+        let line = |b: &Self| {
+            let at = b.cursor();
+            let start = b.content[..at].rfind('\n').map_or(0, |i| i + 1);
+            let end = b.content[at..]
+                .find('\n')
+                .map_or(b.content.len(), |i| at + i);
+            start..end
+        };
         let left = |b: &Self| {
-            if to_edge {
+            if to_edge && b.multiline {
+                line(b).start
+            } else if to_edge {
                 0
             } else if by_word {
                 previous_word(&b.content, b.cursor())
@@ -116,7 +127,9 @@ impl EditBuffer {
             }
         };
         let right = |b: &Self| {
-            if to_edge {
+            if to_edge && b.multiline {
+                line(b).end
+            } else if to_edge {
                 b.content.len()
             } else if by_word {
                 next_word(&b.content, b.cursor())
@@ -150,19 +163,24 @@ impl EditBuffer {
             } else {
                 self.move_to(self.selected.end);
             }
-        } else if key.is(NamedKey::Home) {
-            if shift {
-                self.select_to(0)
+        } else if key.is(NamedKey::Home) || key.is(NamedKey::End) {
+            let bounds = if self.multiline && key.plain() {
+                line(self)
             } else {
-                self.move_to(0)
-            }
-        } else if key.is(NamedKey::End) {
-            let end = self.content.len();
-            if shift {
-                self.select_to(end)
+                0..self.content.len()
+            };
+            let at = if key.is(NamedKey::Home) {
+                bounds.start
             } else {
-                self.move_to(end)
+                bounds.end
+            };
+            if shift {
+                self.select_to(at)
+            } else {
+                self.move_to(at)
             }
+        } else if self.multiline && key.plain() && key.is(NamedKey::Enter) {
+            self.replace("\n");
         } else if shortcut_modifier(key.mods) {
             match key.letter {
                 Some('a') => self.select_all(),
@@ -179,7 +197,11 @@ impl EditBuffer {
                 }
                 Some('v') => {
                     if let Some(text) = clip.read() {
-                        self.replace(&single_line(&text));
+                        if self.multiline {
+                            self.replace(&text.replace("\r\n", "\n").replace('\r', "\n"));
+                        } else {
+                            self.replace(&single_line(&text));
+                        }
                     }
                 }
                 _ => return None,

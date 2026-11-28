@@ -417,6 +417,9 @@ fn engine_body(d: &mut Desktop, ui: &mut Ui, x: f32, y0: f32, w: f32) -> f32 {
         ui.style().with_size(12.5),
         t.muted,
     ) + 12.;
+    if d.connection.local {
+        y += crate::views::engine_config::body(d, ui, x, y, w) + 12.;
+    }
     let e = d.engine.clone();
     let rows = vec![
         field(

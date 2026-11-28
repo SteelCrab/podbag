@@ -1,4 +1,4 @@
-//! A bordered single-line text field around `TextInput`.
+//! A bordered text field around `TextInput`.
 
 use crate::focus::FocusKind;
 use crate::geom::Rect;
@@ -61,7 +61,16 @@ fn field(
     input.placeholder_color = t.muted;
     input.caret_color = t.accent;
     input.selection_color = t.selection();
-    let line = inner.center_v(input.style.line_height);
+    let line = if input.edit.multiline {
+        if enabled {
+            ui.p.scroll_region(rect, id);
+            let (dx, dy) = ui.take_scroll_xy(id, input.style.line_height);
+            input.scroll(dx, dy);
+        }
+        inner.pad(0., 8.)
+    } else {
+        inner.center_v(input.style.line_height)
+    };
     let mut changed = false;
     if enabled {
         ui.focusable(id, FocusKind::Input, rect, 7.);

@@ -334,6 +334,7 @@ pub struct Desktop {
     pub update: views::updates::UpdateState,
     pub notices: views::notices::Notices,
     pub compression: views::compression::CompressionState,
+    pub engine_config: views::engine_config::Form,
     pub network_settings: views::network_settings::Form,
     pub registry_proxy: views::registry_proxy::Form,
     pub run: views::run::RunState,
@@ -448,6 +449,7 @@ impl Desktop {
             update: views::updates::UpdateState::default(),
             notices: views::notices::Notices::default(),
             compression: views::compression::CompressionState::default(),
+            engine_config: views::engine_config::Form::default(),
             network_settings: views::network_settings::Form::default(),
             registry_proxy: views::registry_proxy::Form::default(),
             run: views::run::RunState::default(),
@@ -545,6 +547,7 @@ impl Desktop {
         self.loaded = false;
         self.lists = Lists::default();
         views::compression::reset(self);
+        self.engine_config = views::engine_config::Form::default();
         self.network_settings = views::network_settings::Form::default();
         self.registry_proxy = views::registry_proxy::Form::default();
         self.close_detail_quiet();

@@ -49,7 +49,8 @@ pub use podbag::client::{
     CompressionSizes, ContainerSummary, Features, ImageSummary, Kind, NetworkSummary, Port, Pruned,
     PublishedPort, RESTART_POLICIES, RunSpec, SearchResult, VolumeMount, VolumeSummary,
 };
-pub use podbag::config::DnsFilter;
+pub use podbag::config::{DnsFilter, Document as ConfigDocument, Edit as ConfigEdit};
+pub use podbag::dashboard::cli::EngineConfigRequest;
 pub use podbag::dashboard::lab;
 pub use podbag::image::proxy::{Mode as RegistryProxyMode, Settings as RegistryProxySettings};
 pub use podbag::network::NetworkPreferences;
