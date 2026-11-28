@@ -5,7 +5,9 @@
 $PodbagUpgradeCode = '{43294F5F-5CA2-5C9B-AD98-D421422A0586}'
 
 function Invoke-Com($Object, [string]$Name, [string]$Kind, [object[]]$Arguments = @()) {
-    $Object.GetType().InvokeMember($Name, [Reflection.BindingFlags]$Kind, $null, $Object, $Arguments)
+    # The comma keeps a collection (such as the StringList of RelatedProducts) whole; without
+    # it, PowerShell unrolls the result, and an empty list comes back as $null.
+    return , ($Object.GetType().InvokeMember($Name, [Reflection.BindingFlags]$Kind, $null, $Object, $Arguments))
 }
 
 function New-Installer {
