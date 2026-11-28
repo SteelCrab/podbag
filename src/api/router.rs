@@ -10,6 +10,8 @@ pub const API_VERSION: &str = "1.47";
 /// The oldest version a client may ask for.
 pub const MIN_API_VERSION: &str = "1.24";
 
+type ReadBody = Box<dyn FnOnce(&mut dyn std::io::Read) -> Reply + Send>;
+
 /// What a handler answers.
 pub enum Reply {
     Json(u16, serde_json::Value),
@@ -42,7 +44,10 @@ pub enum Reply {
     Headed(Vec<(&'static str, String)>, Box<Reply>),
     /// The handler reads the request body as it arrives ([`streams_body`] left it unread)
     /// and then gives the reply. The connection closes afterwards.
-    WithBody(Box<dyn FnOnce(&mut dyn std::io::Read) -> Reply + Send>),
+    WithBody(ReadBody),
+    /// A managed BuildKit request body tracked through shutdown.
+    #[cfg(target_os = "linux")]
+    WithManagedBuild(ReadBody),
 }
 
 /// The response head of a hijacked connection.
@@ -54,10 +59,18 @@ pub struct Upgrade {
 
 impl Upgrade {
     pub fn send(&self, w: &mut impl std::io::Write) -> std::io::Result<()> {
+        self.send_protocol(w, "tcp")
+    }
+
+    pub(super) fn send_protocol(
+        &self,
+        w: &mut impl std::io::Write,
+        protocol: &str,
+    ) -> std::io::Result<()> {
         let mut extra = vec![("Content-Type", self.content_type.to_string())];
         if self.upgrade {
             extra.push(("Connection", "Upgrade".to_string()));
-            extra.push(("Upgrade", "tcp".to_string()));
+            extra.push(("Upgrade", protocol.to_owned()));
         }
         super::http::write_head(w, if self.upgrade { 101 } else { 200 }, &extra)
     }
@@ -67,6 +80,10 @@ impl Upgrade {
 pub struct Ctx {
     pub dirs: Dirs,
     volume_lesson: bool,
+    #[cfg(target_os = "linux")]
+    pub(super) buildkit: Option<super::buildkit::Client>,
+    #[cfg(target_os = "linux")]
+    pub(super) http_builds: std::sync::Arc<super::HttpBuilds>,
     /// Clients attached to containers that wait for a start, and how starts ended.
     pub attachments: std::sync::Arc<super::stream::Attachments>,
     /// Commands made by `POST /containers/{id}/exec`.
@@ -83,6 +100,10 @@ impl Ctx {
         Ctx {
             dirs,
             volume_lesson: std::env::var_os(crate::volume_lesson::SCOPE).is_some(),
+            #[cfg(target_os = "linux")]
+            buildkit: None,
+            #[cfg(target_os = "linux")]
+            http_builds: Default::default(),
             attachments: Default::default(),
             execs: Default::default(),
             binds_under: None,
@@ -175,7 +196,12 @@ pub fn route(req: &Request, ctx: &Ctx) -> Reply {
     }
     let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
     match (req.method.as_str(), segments.as_slice()) {
-        // Builder-Version 1: the classic builder (`POST /build`), not BuildKit.
+        #[cfg(target_os = "linux")]
+        ("POST", [endpoint @ ("grpc" | "session")]) => match &ctx.buildkit {
+            Some(worker) => super::buildkit::upgrade(req, worker, *endpoint == "session"),
+            None => message(404, "page not found"),
+        },
+        // Keep the classic builder as the default recommendation. BuildKit is opt-in.
         ("GET" | "HEAD", ["_ping"]) => Reply::Headed(
             vec![("Builder-Version", "1".to_string())],
             Box::new(Reply::Text(200, "OK".to_string())),
@@ -200,7 +226,7 @@ pub fn route(req: &Request, ctx: &Ctx) -> Reply {
             super::exec::route(req, ctx, rest).unwrap_or_else(|| message(404, "page not found"))
         }
         ("POST", ["commit"]) => super::build::commit(req),
-        ("POST", ["build"]) => super::build::build(req),
+        ("POST", ["build"]) => super::build::build(req, ctx),
         ("POST", ["build", "prune"]) => super::build::prune_cache(ctx),
         (_, ["build", ..]) => not_supported(
             "BuildKit's build API",

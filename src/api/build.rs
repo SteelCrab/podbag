@@ -1,4 +1,4 @@
-//! The classic builder (`POST /build`), `POST /commit`, and a container's changes and
+//! Image builds (`POST /build`), `POST /commit`, and a container's changes and
 //! files (`/containers/{id}/changes`, `/containers/{id}/export`).
 
 use super::http::Request;
@@ -42,30 +42,50 @@ fn send(out: &mut dyn Write, value: &Value) {
 
 /// `POST /build`: the context tar in the body; progress as Docker's JSON messages.
 #[cfg(target_os = "linux")]
-pub fn build(req: &Request) -> Reply {
+pub fn build(req: &Request, ctx: &Ctx) -> Reply {
     use crate::build::engine::{self, BuildOptions};
     let q = &req.query;
+    let buildkit = q.get("version") == Some("2");
     if q.get("remote").is_some_and(|r| !r.is_empty()) {
         return super::router::not_supported(
             "a remote build context",
             "send the context in the request body",
         );
     }
-    if q.get("version") == Some("2") || q.get("outputs").is_some_and(|o| !o.is_empty()) {
+    if buildkit && ctx.buildkit.is_none() {
         return super::router::not_supported(
             "BuildKit builds",
-            "use the classic builder (DOCKER_BUILDKIT=0), or buildx with the docker-container driver",
+            "start podbag system service --buildkit, or use DOCKER_BUILDKIT=0",
         );
     }
-    let other_platform = q
-        .get("platform")
-        .filter(|p| !p.is_empty() && !crate::build::steps::is_this_platform(p));
-    if let Some(p) = other_platform {
+    if q.get("outputs").is_some_and(|o| !o.is_empty()) {
+        return super::router::not_supported(
+            "custom build outputs",
+            "use docker buildx with an enabled BuildKit driver",
+        );
+    }
+    if buildkit {
+        for (parameter, feature) in [
+            ("session", "an HTTP build client session"),
+            ("buildid", "an externally cancellable build"),
+            ("cachefrom", "HTTP build cache imports"),
+        ] {
+            if q.get(parameter).is_some_and(|value| !value.is_empty()) {
+                return super::router::not_supported(
+                    feature,
+                    "use docker buildx with an enabled BuildKit driver",
+                );
+            }
+        }
+    }
+    let platform = q.get("platform").filter(|p| !p.is_empty());
+    if !buildkit && let Some(p) = platform.filter(|p| !crate::build::steps::is_this_platform(p)) {
         return super::router::not_supported(
             &format!("building for {p}"),
             "build for this machine's platform, or use buildx",
         );
     }
+    let platform = platform.map(str::to_owned);
     let (build_args, labels) = match (json_map(req, "buildargs"), json_map(req, "labels")) {
         (Ok(a), Ok(l)) => (a, l),
         (Err(r), _) | (_, Err(r)) => return r,
@@ -98,12 +118,13 @@ pub fn build(req: &Request) -> Reply {
         registry_logins,
         ..BuildOptions::default()
     };
-    Reply::WithBody(Box::new(move |body| {
+    let http_builds = buildkit.then(|| ctx.http_builds.clone());
+    let run = Box::new(move |body: &mut dyn std::io::Read| {
         let context = match engine::unpack_context(body) {
             Ok(c) => c,
             Err(e) => return reply_error(&e),
         };
-        let (text, ignore) = match engine::read_dockerfile(&context.dir, &dockerfile) {
+        let (text, ignore) = match engine::read_archive_dockerfile(&context.dir, &dockerfile) {
             Ok(found) => found,
             Err(e) => return reply_error(&e),
         };
@@ -117,7 +138,13 @@ pub fn build(req: &Request) -> Reply {
         Reply::Stream {
             content_type: "application/json",
             body: Box::new(move |w| {
-                let result = engine::build(&options, &mut |text| send(w, &json!({"stream": text})));
+                let mut progress = |text: &str| send(w, &json!({"stream": text}));
+                let result = match &http_builds {
+                    Some(builds) => {
+                        managed_build(&options, platform.as_deref(), builds, &mut progress)
+                    }
+                    None => engine::build(&options, &mut progress),
+                };
                 match result {
                     Ok(built) => {
                         send(w, &json!({"aux": {"ID": built.id}}));
@@ -135,11 +162,97 @@ pub fn build(req: &Request) -> Reply {
                 Ok(())
             }),
         }
-    }))
+    });
+    if buildkit {
+        Reply::WithManagedBuild(run)
+    } else {
+        Reply::WithBody(run)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn managed_build(
+    build: &crate::build::BuildOptions,
+    platform: Option<&str>,
+    builds: &super::HttpBuilds,
+    progress: &mut dyn FnMut(&str),
+) -> crate::Result<crate::build::Built> {
+    use crate::build::managed::{Options, RegistryConfig, ResultOutput, run};
+    use crate::build::managed_worker::{Process, spawn};
+    use rustix::fs::{OFlags, fcntl_setfl};
+    use std::io::{BufRead, BufReader, ErrorKind};
+    use std::os::fd::AsRawFd;
+    use std::process::Stdio;
+    use std::time::Duration;
+
+    let stopped = || std::io::Error::other("the BuildKit service is stopping");
+
+    let options = Options {
+        platform,
+        registry: RegistryConfig::Request,
+        ..Default::default()
+    };
+    let output = run(build, options, |command| {
+        let error =
+            |e| crate::Error::io("cannot run buildctl", &e, "install buildctl and check PATH");
+        command.stdout(Stdio::null());
+        if !build.quiet {
+            command.stderr(Stdio::piped());
+        }
+        if builds.stopping() {
+            return Err(error(stopped()));
+        }
+        let mut process = Process::new(spawn(command).map_err(error)?);
+        let child = process.child();
+        let mut log = child.stderr.take().map(BufReader::new);
+        if let Some(log) = &log {
+            fcntl_setfl(log.get_ref(), OFlags::NONBLOCK).map_err(|e| error(e.into()))?;
+        }
+        let mut line = Vec::new();
+        let mut exit_status = None;
+        loop {
+            if builds.stopping() {
+                return Err(error(stopped()));
+            }
+            if let Some(reader) = &mut log {
+                match reader.read_until(b'\n', &mut line) {
+                    Ok(0) => log = None,
+                    Ok(_) => {
+                        progress(&String::from_utf8_lossy(&line));
+                        line.clear();
+                        continue;
+                    }
+                    Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                    Err(e) if e.kind() == ErrorKind::WouldBlock => {}
+                    Err(e) => return Err(error(e)),
+                }
+            }
+            if let Some(status) = exit_status {
+                if !line.is_empty() {
+                    progress(&String::from_utf8_lossy(&line));
+                }
+                return Ok(status);
+            }
+            exit_status = child.try_wait().map_err(error)?;
+            if exit_status.is_some() {
+                // buildctl may have written its final error just before exit.
+                continue;
+            }
+            if let Some(log) = &log {
+                super::wait_readable(log.get_ref().as_raw_fd(), 100);
+            } else {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+    })?;
+    match output {
+        ResultOutput::Image(image) => Ok(image),
+        ResultOutput::Path(_) => unreachable!("the Engine build always loads its result"),
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn build(_req: &Request) -> Reply {
+pub fn build(_req: &Request, _ctx: &Ctx) -> Reply {
     reply_error(&crate::Error::unsupported_os())
 }
 

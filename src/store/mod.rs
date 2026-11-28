@@ -28,6 +28,8 @@ use crate::image::{DiskUsage, HistoryItem, ImageConfig, PruneReport, VerifyRepor
 use crate::paths::Dirs;
 use crate::{Error, ErrorKind, Result};
 use layer::{EntryKind, LayerIndex};
+#[cfg(target_os = "linux")]
+pub(crate) use load::DISK_RESERVE;
 pub use load::LoadReport;
 pub use method::MountMethod;
 use object::{ObjectStore, io_error};

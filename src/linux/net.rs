@@ -5,7 +5,7 @@
 //! that joins the container's network namespace (`setns` works per thread).
 
 use crate::netlink::{Socket, nft, route};
-use crate::network::{Addresses, Network};
+use crate::network::{Addresses, HostBridgeLock, Network};
 use crate::{Error, ErrorKind, Result};
 use std::fs::File;
 use std::net::Ipv4Addr;
@@ -32,6 +32,16 @@ fn tolerate_exists(r: std::io::Result<()>) -> std::io::Result<()> {
 /// forwarding is on, and that its masquerade rule is in place. Safe to repeat, and cheap
 /// when everything is there already (every container's start comes through here).
 pub fn prepare_bridge(net: &Network) -> Result<u32> {
+    prepare_bridge_with_lock(net, None)
+}
+
+pub(crate) fn prepare_bridge_with_lock(
+    net: &Network,
+    host_bridge: Option<HostBridgeLock>,
+) -> Result<u32> {
+    if let Some(lock) = &host_bridge {
+        lock.check_activation(net)?;
+    }
     let fail = |what: &str, e: std::io::Error| net_error(&net.name, what, e);
     let (subnet, prefix) = net.cidr();
     let gateway: Ipv4Addr = net.gateway.parse().unwrap_or(subnet);
@@ -57,6 +67,7 @@ pub fn prepare_bridge(net: &Network) -> Result<u32> {
     }
     s.request(route::set_up(index))
         .map_err(|e| fail("bring the bridge up", e))?;
+    drop(host_bridge);
     let forward = "/proc/sys/net/ipv4/ip_forward";
     if std::fs::read_to_string(forward)
         .map(|v| v.trim() != "1")

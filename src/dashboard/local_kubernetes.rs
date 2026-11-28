@@ -330,7 +330,7 @@ fn provision(
     let created = run(&mut command);
     #[cfg(all(test, target_os = "macos"))]
     if capture && created.is_err() {
-        tests::report_failed_control_plane(&host.socket, &record.name);
+        tests::report_failed_kind_cluster(&host.socket, &record.name, record.nodes);
     }
     created?;
     if !dir.join("kubeconfig").is_file() {
@@ -782,37 +782,162 @@ mod tests {
     }
 
     #[cfg(target_os = "macos")]
-    pub(super) fn report_failed_control_plane(host: &str, name: &str) {
-        let node = format!("{name}-control-plane");
-        let exec = |args: &[&str]| {
-            run(docker_command("docker", host)?
-                .args(["exec", "--privileged", &node])
-                .args(args))
+    #[test]
+    fn kind_failure_diagnostics_keep_stderr_and_omit_credentials() {
+        let output = Command::new("/bin/sh")
+            .args(["-c", "printf '%s\n' 'stdout' 'abcdef.0123456789abcdef' '-----BEGIN PRIVATE KEY-----' 'private data' '-----END PRIVATE KEY-----'; printf '%s\n' 'stderr' 'Authorization: Bearer supplied' >&2"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            kind_diagnostic_output(&output),
+            "stdout\n[credential omitted]\n[credential omitted]\nstderr\n[credential omitted]\n"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    fn kind_diagnostic_text(bytes: &[u8]) -> String {
+        let mut text = String::new();
+        let mut pem = false;
+        for line in String::from_utf8_lossy(bytes).lines() {
+            if line.contains("-----BEGIN ") {
+                pem = true;
+                text.push_str("[credential omitted]\n");
+            }
+            if pem {
+                pem = !line.contains("-----END ");
+                continue;
+            }
+            let lower = line.to_ascii_lowercase().replace('"', "");
+            let bootstrap_token = line
+                .split(|c: char| !c.is_ascii_alphanumeric() && c != '.')
+                .any(|word| {
+                    word.trim_matches('.')
+                        .split_once('.')
+                        .is_some_and(|(id, secret)| {
+                            id.len() == 6
+                                && secret.len() == 16
+                                && id
+                                    .bytes()
+                                    .chain(secret.bytes())
+                                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+                        })
+                });
+            if bootstrap_token
+                || [
+                    "authorization:",
+                    "authorization=",
+                    "bearer ",
+                    "client-key-data:",
+                    "client-key-data=",
+                    "token:",
+                    "token=",
+                ]
+                .iter()
+                .any(|field| lower.contains(field))
+            {
+                text.push_str("[credential omitted]\n");
+            } else {
+                text.push_str(line);
+                text.push('\n');
+            }
+        }
+        text
+    }
+
+    #[cfg(target_os = "macos")]
+    fn kind_diagnostic_output(output: &std::process::Output) -> String {
+        [
+            kind_diagnostic_text(&output.stdout),
+            kind_diagnostic_text(&output.stderr),
+        ]
+        .concat()
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn report_failed_kind_cluster(host: &str, name: &str, nodes: u8) {
+        let control = format!("{name}-control-plane");
+        let command = |node: &str, args: &[&str]| -> Result<Command, String> {
+            let mut cmd = docker_command("docker", host)?;
+            cmd.args(["exec", "--privileged", node]).args(args);
+            Ok(cmd)
         };
-        let report = |args: &[&str]| {
+        let report = |node: &str, args: &[&str]| {
             eprintln!("== {} on {node}", args.join(" "));
-            match exec(args) {
-                Ok(output) => eprintln!("{}", output.trim_end()),
-                Err(error) => eprintln!("{error}"),
+            match command(node, args).and_then(|mut cmd| cmd.output().map_err(|e| e.to_string())) {
+                Ok(output) => {
+                    eprintln!("{}", kind_diagnostic_output(&output).trim_end());
+                    if !output.status.success() {
+                        eprintln!("diagnostic command failed ({})", output.status);
+                    }
+                }
+                Err(error) => eprintln!("{}", kind_diagnostic_text(error.as_bytes()).trim_end()),
             }
         };
 
-        report(&[
-            "journalctl",
-            "--no-pager",
-            "--lines=100",
-            "--unit=kubelet",
-            "--unit=containerd",
-        ]);
-        report(&["crictl", "ps", "--all"]);
-        for component in ["etcd", "kube-apiserver"] {
-            match exec(&["crictl", "ps", "--all", "--name", component, "--quiet"]) {
+        report(
+            &control,
+            &[
+                "journalctl",
+                "--no-pager",
+                "--lines=100",
+                "--unit=kubelet",
+                "--unit=containerd",
+            ],
+        );
+        if nodes > 1 {
+            report(
+                &format!("{name}-worker"),
+                &["journalctl", "--no-pager", "--lines=80", "--unit=kubelet"],
+            );
+        }
+        report(&control, &["crictl", "ps", "--all"]);
+        report(
+            &control,
+            &[
+                "kubectl",
+                "--kubeconfig=/etc/kubernetes/admin.conf",
+                "--request-timeout=3s",
+                "get",
+                "csr",
+                "--no-headers",
+                "--output=custom-columns=APPROVAL:.status.conditions[*].type,REASON:.status.conditions[*].reason",
+            ],
+        );
+        report(
+            &control,
+            &[
+                "cat",
+                "/proc/pressure/cpu",
+                "/proc/pressure/memory",
+                "/proc/pressure/io",
+            ],
+        );
+        report(
+            &control,
+            &["df", "-h", "/var/lib/containerd", "/var/lib/kubelet"],
+        );
+        for component in [
+            "kube-controller-manager",
+            "kube-scheduler",
+            "etcd",
+            "kube-apiserver",
+        ] {
+            let ids = command(
+                &control,
+                &["crictl", "ps", "--all", "--name", component, "--quiet"],
+            )
+            .and_then(|mut cmd| run(&mut cmd));
+            match ids {
                 Ok(ids) => {
                     for id in ids.lines().take(2) {
-                        report(&["crictl", "logs", "--tail=60", id]);
+                        eprintln!("== {component}");
+                        report(&control, &["crictl", "logs", "--tail=60", id]);
                     }
                 }
-                Err(error) => eprintln!("{component} logs: {error}"),
+                Err(error) => eprintln!(
+                    "{component} logs: {}",
+                    kind_diagnostic_text(error.as_bytes()).trim_end()
+                ),
             }
         }
     }
@@ -825,22 +950,25 @@ mod tests {
         use std::time::{Duration, Instant};
 
         let deadline = Instant::now() + timeout;
-        let get = |path: &str| {
+        let get = |path: &str, window: Duration, clipped: &mut bool| {
             let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
+            let request_timeout = remaining.min(window).as_millis();
+            if request_timeout == 0 {
                 return Ok(None);
             }
-            let request_timeout = remaining.min(Duration::from_secs(3)).as_millis().max(1);
             kubectl(&[
                 "get",
                 &format!("--raw={path}"),
                 &format!("--request-timeout={request_timeout}ms"),
             ])
             .map(Some)
-            .map_err(|error| format!("{path}: {error}"))
+            .map_err(|error| {
+                *clipped = remaining < window;
+                format!("{path}: {error}")
+            })
         };
-        let check = || {
-            let Some(response) = get("/api/v1/nodes")? else {
+        let check = |window, clipped: &mut bool| {
+            let Some(response) = get("/api/v1/nodes", window, clipped)? else {
                 return Ok(None);
             };
             let value: serde_json::Value = serde_json::from_str(&response)
@@ -871,7 +999,7 @@ mod tests {
                 }
                 ready.push(name);
             }
-            let Some(response) = get("/readyz")? else {
+            let Some(response) = get("/readyz", window, clipped)? else {
                 return Ok(None);
             };
             if response.trim() != "ok" {
@@ -880,22 +1008,37 @@ mod tests {
             Ok(Some(ready.join(", ")))
         };
 
-        let mut last = "no probe completed before the deadline".into();
+        let mut last = None;
+        let mut last_short = None;
+        let mut window = Duration::from_secs(3);
+        let mut interval = Duration::from_millis(250);
         while Instant::now() < deadline {
-            match check() {
+            let mut clipped = false;
+            match check(window, &mut clipped) {
                 Ok(Some(nodes)) if Instant::now() < deadline => {
                     println!("Kubernetes API and all {count} nodes Ready: {nodes}");
                     return Ok(());
                 }
                 Ok(_) => break,
-                Err(error) => last = error,
+                // A shortened final retry can time out even when earlier probes responded.
+                Err(error) if clipped && last.is_some() => last_short = Some(error),
+                Err(error) => {
+                    last = Some(error);
+                    last_short = None;
+                }
             }
-            std::thread::sleep(
-                Duration::from_millis(250).min(deadline.saturating_duration_since(Instant::now())),
-            );
+            std::thread::sleep(interval.min(deadline.saturating_duration_since(Instant::now())));
+            window = (window * 2).min(Duration::from_secs(10));
+            interval = (interval * 2).min(Duration::from_secs(1));
         }
+        let last = last
+            .as_deref()
+            .unwrap_or("no probe completed before the deadline");
+        let shortened = last_short
+            .filter(|error| error != last)
+            .map_or_else(String::new, |error| format!("; shortened request: {error}"));
         Err(format!(
-            "Kubernetes readiness timed out after {timeout:?}: {last}"
+            "Kubernetes readiness timed out after {timeout:?}: {last}{shortened}"
         ))
     }
 
@@ -928,7 +1071,7 @@ mod tests {
                 .unwrap()
                 .parse()
                 .unwrap();
-            assert!((1..=3000).contains(&request_timeout));
+            assert!((1..=10_000).contains(&request_timeout));
             match args[1] {
                 "--raw=/api/v1/nodes" => {
                     let attempt = nodes.replace(nodes.get() + 1);
@@ -947,6 +1090,27 @@ mod tests {
         })
         .unwrap();
         assert_eq!((nodes.get(), api.get()), (4, 2));
+    }
+
+    #[test]
+    fn kind_readiness_retries_a_slow_api_with_a_larger_request_window() {
+        let next = Cell::new(0);
+        wait_for_kind_ready(2, std::time::Duration::from_secs(20), |args| {
+            let call = next.replace(next.get() + 1);
+            match (call, args[1], args[2]) {
+                (0, "--raw=/api/v1/nodes", "--request-timeout=3000ms")
+                | (1, "--raw=/api/v1/nodes", "--request-timeout=6000ms") => {
+                    Err("waiting for response headers".into())
+                }
+                (2, "--raw=/api/v1/nodes", "--request-timeout=10000ms") => {
+                    Ok(kind_nodes(&[true, true]))
+                }
+                (3, "--raw=/readyz", "--request-timeout=10000ms") => Ok("ok\n".into()),
+                _ => panic!("unexpected kubectl request: {args:?}"),
+            }
+        })
+        .unwrap();
+        assert_eq!(next.get(), 4);
     }
 
     #[test]
@@ -983,7 +1147,7 @@ mod tests {
         );
         let original = fs::read(&external).unwrap();
         assert!(status().unwrap().is_none());
-        let verify = |context: &str| -> Result<(), String> {
+        let check = |context: &str| -> Result<(), String> {
             let config = kubeconfig().ok_or("the cluster did not create a private kubeconfig")?;
             let kubectl = |args: &[&str]| {
                 run(host_command("kubectl")?
@@ -991,7 +1155,14 @@ mod tests {
                     .arg(&config)
                     .args(args))
             };
-            wait_for_kind_ready(2, std::time::Duration::from_secs(60), kubectl)?;
+            // The hosted Intel runner runs this guest under nested virtualization.
+            // Its control plane can still be catching up when Kind returns.
+            let seconds = if cfg!(target_arch = "x86_64") {
+                120
+            } else {
+                60
+            };
+            wait_for_kind_ready(2, std::time::Duration::from_secs(seconds), kubectl)?;
             if !super::super::kubernetes::kube_contexts()?
                 .iter()
                 .any(|name| name == context)
@@ -999,6 +1170,24 @@ mod tests {
                 return Err("Desktop could not discover the managed context".into());
             }
             Ok(())
+        };
+        let verify = |context: &str| {
+            let result = check(context);
+            if result.is_err() && std::env::var_os("PODBAG_TEST_KIND_DIAGNOSTICS").is_some() {
+                let report = || -> Result<(), String> {
+                    let record = owned(&directory()?, Some(context))?;
+                    let socket = KindHost::open(&record.host, record.provider)?;
+                    report_failed_kind_cluster(&socket.socket, &record.name, record.nodes);
+                    Ok(())
+                };
+                if let Err(error) = report() {
+                    eprintln!(
+                        "Kind diagnostics unavailable: {}",
+                        kind_diagnostic_text(error.as_bytes()).trim_end()
+                    );
+                }
+            }
+            result
         };
         let result = (|| -> Result<(), String> {
             let created = create_on_vm(Some("v1.36.4".into()), 2)?;
@@ -1027,11 +1216,16 @@ mod tests {
             println!("Desktop reset the same cluster.");
             Ok(())
         })();
-        let cleanup = status().unwrap().map(|_| remove());
-        if let Some(cleanup) = cleanup {
-            cleanup.unwrap();
+        let cleanup =
+            status().and_then(|cluster| if cluster.is_some() { remove() } else { Ok(()) });
+        if let Err(error) = &cleanup {
+            eprintln!(
+                "Could not remove the private Kind cluster: {}",
+                kind_diagnostic_text(error.as_bytes()).trim_end()
+            );
         }
         result.unwrap();
+        cleanup.unwrap();
         assert!(status().unwrap().is_none());
         assert!(!directory().unwrap().join("kubeconfig").exists());
         assert_eq!(fs::read(external).unwrap(), original);

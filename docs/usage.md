@@ -30,7 +30,8 @@ The [README](../README.md) shows how to install podbag. This page shows what it 
   - [Dockerfiles](#dockerfiles)
   - [The cache](#the-cache)
   - [commit, export and diff](#commit-export-and-diff)
-  - [Not supported in builds](#not-supported-in-builds)
+  - [Managed BuildKit](#managed-buildkit)
+  - [Classic builder limits](#classic-builder-limits)
 - [Checks](#checks)
   - [podbag check](#podbag-check)
   - [podbag check-image](#podbag-check-image)
@@ -512,12 +513,48 @@ podbag build -t myapp - < Dockerfile               # only a Dockerfile, no conte
 - `podbag export [-o FILE] CONTAINER`: all its files as a tar, without its volumes.
 - `podbag diff CONTAINER`: the paths it changed: `A` added, `C` changed, `D` deleted.
 
-### Not supported in builds
+### Managed BuildKit
+
+On native Linux, install `buildkitd`, `buildctl`, and `runc` on your `PATH`.
+For rootful builds, also install `buildkit-cni-bridge`, `buildkit-cni-firewall`,
+`buildkit-cni-host-local`, and `buildkit-cni-loopback` from the same BuildKit release
+on your `PATH`. The worker initializes its bridge even for `--network none`.
+For rootless builds, also install RootlessKit and pasta. Set up subordinate user
+and group IDs for RootlessKit.
+
+```sh
+podbag build --buildkit -t app .
+podbag build --buildkit --secret id=config,src=/path/to/config --ssh default -t app .
+podbag build --buildkit --platform linux/amd64,linux/arm64 \
+  --output type=oci,dest=app.tar .
+podbag build --buildkit --output type=local,dest=build-result \
+  --cache-from type=local,src=/path/to/cache \
+  --cache-to type=local,dest=/path/to/cache,mode=max .
+```
+
+- Each build runs its own BuildKit worker and uses a private Unix socket. Podbag
+  stops the worker before importing or publishing the result. The classic builder
+  is the default.
+- By default Podbag imports the image for the local platform. Use an OCI archive
+  or local output for other platforms. Running foreign binaries during the build
+  still requires a suitable emulator. Local output uses a new destination directory.
+- `RUN --mount=type=cache` keeps data during the build. Import and export layer
+  cache with `--cache-from` and `--cache-to` using a local directory or registry.
+- Use file or environment secret mounts and an existing Unix SSH agent socket.
+  BuildKit sends the secret and SSH requests through its build session. Keep secret
+  files outside the context or exclude them with `.dockerignore`.
+- The Docker-compatible `POST /build` endpoint uses the classic builder. To use
+  BuildKit from Docker Buildx, enable the [Buildx Engine driver](#buildx-engine-driver)
+  on the Linux API service.
+
+<a id="not-supported-in-builds"></a>
+
+### Classic builder limits
 
 - BuildKit features: `RUN --mount`, secrets, SSH, `--output`, cache export and import,
   builds for other platforms, `COPY --parents` and `--exclude`, `ADD --checksum`, `ADD` of a
   Git repository, heredocs in `COPY` and `ADD`. podbag stops with a message; build such
-  Dockerfiles with buildx (see [buildx](#buildx)).
+  Dockerfiles with `podbag build --buildkit` or [buildx](#buildx).
 - `ADD` of bzip2 or xz archives.
 - Changes that a `RUN` makes in a `VOLUME` path stay in the image (Docker drops them).
 
@@ -925,8 +962,8 @@ podbag system docker restore    # back to the context you had (Docker Desktop, â
   `--volumes-from`, `--link`, port ranges, and other network or volume drivers.
 - Accepted with a warning, because ignoring them is safe: ulimits, unsupported log drivers, fixed
   addresses.
-- Answered with 501 and what to do instead: BuildKit's build API (use buildx with the
-  `docker-container` driver) and plugins.
+- Unsupported build options and plugins return 501. To use BuildKit, start the
+  service with `--buildkit` or use a `docker-container` builder.
 - Swarm mode supports one manager and enrolled SSH workers. See [Swarm mode](#swarm-mode).
 
 ### cp, save and load
@@ -982,9 +1019,28 @@ docker compose build
   `Builder-Version: 1`.
 - A docker CLI with the buildx plugin still sends `docker build` to buildx, whatever the
   server says. `DOCKER_BUILDKIT=0` makes it use the classic builder.
-- Without `DOCKER_BUILDKIT=0`, buildx starts its own BuildKit in a podbag container, and
-  keeps the result in its cache (add `--load` to get the image).
+- Use the [Buildx Engine driver](#buildx-engine-driver) or select the `docker-container`
+  driver for `docker buildx build`.
 - The build works as `podbag build` does: see [Builds](#builds).
+
+### BuildKit over the build API
+
+On Linux, start `podbag system service --buildkit` to accept `POST /build?version=2`.
+Send a local context as a tar archive, optionally compressed with gzip or zstd.
+The service loads the image for the host's platform and returns its image ID in
+the JSON response. The classic builder remains the default.
+
+```sh
+tar -czf context.tar.gz Dockerfile src
+curl --unix-socket "$XDG_RUNTIME_DIR/podbag/docker.sock" \
+  --header 'Content-Type: application/x-tar' --data-binary @context.tar.gz \
+  'http://localhost/build?version=2&t=myapp'
+```
+
+The endpoint supports tags, build arguments, labels, a target stage, the
+`X-Registry-Config` header and the `pull`, `nocache` and `q` options. It has
+no remote context, client session, external cancellation, cache import, or custom exporter.
+Use [Buildx](#buildx) for those build workflows.
 
 ### buildx
 
@@ -999,7 +1055,37 @@ docker compose build --builder podbag
 
 - The builder keeps running after the service stops: it is an ordinary container.
 - Its cache stays in its volume until `docker buildx rm`.
-- The default `docker` driver (the daemon's own BuildKit) is not available.
+### Buildx Engine driver
+
+On Linux, start the Unix socket service with `--buildkit`. Install the
+[Managed BuildKit prerequisites](#managed-buildkit) on the service's `PATH`.
+Use another terminal for the Docker commands.
+
+```sh
+podbag system service --buildkit --socket "$XDG_RUNTIME_DIR/podbag-buildkit.sock"
+```
+
+```sh
+export DOCKER_HOST=unix://$XDG_RUNTIME_DIR/podbag-buildkit.sock
+docker buildx inspect default
+docker buildx build --builder default --secret id=config,src=/path/to/config \
+  --output type=local,dest=build-result .
+docker buildx build --builder default -t myapp .
+docker image inspect myapp
+docker buildx build --builder default --load -t myapp:loaded .
+docker buildx build --builder default -t myapp --output type=docker,dest=myapp.tar .
+```
+
+- Buildx sends its build context, secret mounts and SSH mounts through the session.
+  The worker starts on the first Buildx request and uses a private Unix socket.
+  Podbag removes it after 15 seconds without a Buildx connection or when the service
+  stops. Use an explicit cache exporter to retain cache between workers.
+- The default output and `--load` install one platform's image in Podbag. All supplied
+  tags become available to `docker image inspect` and `podbag run` after a successful build.
+  Use `--output type=docker,dest=...` to save an archive. Run `podbag push IMAGE` after
+  building to publish a loaded image. Use a `docker-container` builder for multi-platform
+  output.
+- Use `DOCKER_BUILDKIT=0` to select the classic `POST /build` path.
 
 ## TUI and GUI
 

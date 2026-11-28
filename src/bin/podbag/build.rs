@@ -29,23 +29,28 @@ fn run_build(a: BuildArgs) -> podbag::Result<()> {
     let mut unpacked = None;
     let mut stdin_dockerfile = None;
     let context: PathBuf = if a.context == "-" {
-        let mut bytes = Vec::new();
-        std::io::stdin().read_to_end(&mut bytes).map_err(|e| {
+        let fail = |e: std::io::Error| {
             Error::io(
                 "cannot read the build context from stdin",
                 &e,
                 "send a tar archive",
             )
-        })?;
-        let packing = podbag::build::plan::packing(&bytes[..bytes.len().min(512)]);
-        let tar = if packing == podbag::build::plan::Packing::None {
-            // Not an archive: a Dockerfile, with an empty context.
-            stdin_dockerfile = Some(String::from_utf8_lossy(&bytes).into_owned());
-            vec![0u8; 1024]
-        } else {
-            bytes
         };
-        let ctx = engine::unpack_context(&mut &tar[..])?;
+        let mut stdin = std::io::stdin().lock();
+        let mut head = Vec::new();
+        (&mut stdin)
+            .take(512)
+            .read_to_end(&mut head)
+            .map_err(fail)?;
+        let packing = podbag::build::plan::packing(&head);
+        let ctx = if packing == podbag::build::plan::Packing::None {
+            // Not an archive: a Dockerfile, with an empty context.
+            stdin.read_to_end(&mut head).map_err(fail)?;
+            stdin_dockerfile = Some(String::from_utf8_lossy(&head).into_owned());
+            engine::unpack_context(&mut &[0u8; 1024][..])?
+        } else {
+            engine::unpack_context(&mut head.as_slice().chain(stdin))?
+        };
         let dir = ctx.dir.clone();
         unpacked = Some(ctx);
         dir
@@ -64,12 +69,13 @@ fn run_build(a: BuildArgs) -> podbag::Result<()> {
     };
     let (dockerfile, name, ignore) = match (&stdin_dockerfile, &a.file) {
         (Some(text), _) => (text.clone(), "Dockerfile".to_string(), String::new()),
+        (None, file) if unpacked.is_some() => {
+            let name = file.as_deref().unwrap_or("Dockerfile");
+            let (text, ignore) = engine::read_archive_dockerfile(&context, name)?;
+            (text, name.to_owned(), ignore)
+        }
         (None, Some(f)) => {
-            let path = if unpacked.is_some() {
-                context.join(f)
-            } else {
-                PathBuf::from(f)
-            };
+            let path = PathBuf::from(f);
             let text = std::fs::read_to_string(&path).map_err(|e| {
                 Error::io(
                     format!("cannot read the Dockerfile {f}"),
@@ -100,6 +106,20 @@ fn run_build(a: BuildArgs) -> podbag::Result<()> {
         // Logins come from the front end or Docker's config, as for `pull`.
         registry_logins: Vec::new(),
     };
+    if a.buildkit {
+        return crate::buildkit::run(
+            &opts,
+            podbag::build::managed::Options {
+                platform: a.platform.as_deref(),
+                output: a.output.as_deref(),
+                secrets: &a.secret,
+                ssh: &a.ssh,
+                cache_from: &a.cache_from,
+                cache_to: &a.cache_to,
+                ..Default::default()
+            },
+        );
+    }
     let mut stdout = std::io::stdout();
     let result = engine::build(&opts, &mut |text| {
         let _ = stdout.write_all(text.as_bytes());

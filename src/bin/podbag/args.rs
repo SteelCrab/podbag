@@ -595,6 +595,9 @@ pub enum SystemCmd {
         /// Print systemd units that start the service on the first connection
         #[arg(long)]
         print_units: bool,
+        /// Enable managed BuildKit for Docker Buildx and HTTP v2 builds on Linux
+        #[arg(long, conflicts_with = "print_units")]
+        buildkit: bool,
     },
     /// Connect stdin and stdout to the Docker API socket
     ///
@@ -704,6 +707,27 @@ pub struct BuildArgs {
     /// Name the image (REPOSITORY[:TAG]); may be given more than once
     #[arg(short, long = "tag")]
     pub tag: Vec<String>,
+    /// Start a private BuildKit backend for this build (Linux)
+    #[arg(long)]
+    pub buildkit: bool,
+    /// Build platform or comma-separated platform list (requires --buildkit)
+    #[arg(long, requires = "buildkit")]
+    pub platform: Option<String>,
+    /// Export the result as type=oci,dest=FILE or type=local,dest=DIR
+    #[arg(long, requires = "buildkit")]
+    pub output: Option<String>,
+    /// Secret mount input, id=NAME,src=FILE or id=NAME,env=VARIABLE
+    #[arg(long, requires = "buildkit")]
+    pub secret: Vec<String>,
+    /// Forward an SSH agent, ID or ID=SOCKET
+    #[arg(long, requires = "buildkit")]
+    pub ssh: Vec<String>,
+    /// Import BuildKit cache with type=local or type=registry
+    #[arg(long, requires = "buildkit")]
+    pub cache_from: Vec<String>,
+    /// Export BuildKit cache with type=local or type=registry
+    #[arg(long, requires = "buildkit")]
+    pub cache_to: Vec<String>,
     /// The Dockerfile (default: CONTEXT/Dockerfile)
     #[arg(short, long)]
     pub file: Option<String>,

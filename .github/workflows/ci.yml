@@ -121,6 +121,23 @@ jobs:
         if: matrix.mode == 'root'
         timeout-minutes: 5
         run: dev/ci/nvidia-gpu.sh target/debug/podbag "$PODBAG_TEST_ROOTFS"
+      - name: Managed BuildKit HTTP v2 and Buildx
+        timeout-minutes: 15
+        env:
+          PODBAG_TEST_BUILDKIT: '1'
+        run: |
+          sudo apt-get install -y busybox-static iptables openssh-client
+          fixtures="$RUNNER_TEMP/podbag-buildkit"
+          dev/ci/setup-buildkit.sh "$fixtures"
+          # sudo uses its own PATH for the rootful matrix entry.
+          sudo install -m 0755 "$fixtures/"{buildctl,buildkitd,rootlesskit,runc} \
+            "$fixtures"/buildkit-cni-* /usr/local/bin/
+          # Rootless BuildKit needs a private location for its trace socket.
+          XDG_RUNTIME_DIR="$(mktemp -d "$RUNNER_TEMP/podbag-buildkit-runtime.XXXXXX")"
+          export XDG_RUNTIME_DIR
+          trap 'rm -rf "$XDG_RUNTIME_DIR"' EXIT
+          export PODBAG_TEST_BUILDX="$fixtures/buildx"
+          cargo test --locked --test managed_buildkit --test managed_buildkit_cli -- --nocapture --test-threads=1
       - name: Library tests as root
         if: matrix.mode == 'root'
         timeout-minutes: 15

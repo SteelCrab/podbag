@@ -1,11 +1,13 @@
 //! The Docker Engine API service: `podbag system service`.
 //!
-//! One thread per connection, no async runtime. The service keeps nothing of its own:
-//! every request is a library call on state files and locks, so the CLI and the API can be
-//! used together. It ends after a quiet spell without connections, and can be started by
-//! systemd socket activation, so nothing runs at rest.
+//! Each API connection runs on a thread. Requests use the same state files and locks as
+//! the CLI. The optional BuildKit upgrades relay streams to a private worker using an
+//! async runtime for each tunnel. The service can exit when idle and start on demand
+//! through systemd socket activation.
 
 pub mod build;
+#[cfg(target_os = "linux")]
+mod buildkit;
 pub mod containers;
 pub mod create;
 pub mod docker;
@@ -40,6 +42,8 @@ pub struct ServeOptions {
     pub timeout: Option<Duration>,
     /// The listening socket from systemd socket activation.
     pub activated: Option<OwnedFd>,
+    /// Enable managed BuildKit for Docker Buildx and HTTP v2 builds.
+    pub managed_buildkit: bool,
 }
 
 /// `<runtime>/docker.sock`: `$XDG_RUNTIME_DIR/podbag/docker.sock` rootless,
@@ -133,6 +137,20 @@ const REPLACED_GRACE: Duration = Duration::from_secs(2);
 /// the new program.
 pub fn serve(opts: ServeOptions) -> Result<()> {
     let dirs = crate::paths::dirs()?;
+    #[cfg(not(target_os = "linux"))]
+    if opts.managed_buildkit {
+        return Err(Error::unsupported_os());
+    }
+    #[cfg(target_os = "linux")]
+    let shutdown = opts
+        .managed_buildkit
+        .then(BuildkitShutdown::install)
+        .transpose()?;
+    #[cfg(target_os = "linux")]
+    let worker = opts
+        .managed_buildkit
+        .then(|| buildkit::Owner::start(dirs.clone()))
+        .transpose()?;
     let on_demand = opts.timeout.is_some() || opts.activated.is_some();
     let program = on_demand.then(crate::upgrade::ProgramWatch::new).flatten();
     let (listener, owned_path) = match opts.activated {
@@ -142,12 +160,26 @@ pub fn serve(opts: ServeOptions) -> Result<()> {
     listener
         .set_nonblocking(true)
         .map_err(|e| Error::io("cannot set up the API socket", &e, "report this bug"))?;
-    let ctx = Arc::new(Ctx::new(dirs));
+    let ctx = Ctx::new(dirs);
+    #[cfg(target_os = "linux")]
+    let ctx = {
+        let mut ctx = ctx;
+        ctx.buildkit = worker.as_ref().map(buildkit::Owner::client);
+        ctx
+    };
+    let ctx = Arc::new(ctx);
     let activity = Arc::new(Activity(Mutex::new((0, Instant::now()))));
     // Containers this service starts must not get a Ctrl+C or hangup meant for it.
     crate::helper::helpers_in_own_group();
     crate::helper::raise_descriptor_limit();
-    loop {
+    let result = loop {
+        #[cfg(target_os = "linux")]
+        if shutdown
+            .as_ref()
+            .is_some_and(|shutdown| wait_readable(shutdown.read.as_raw_fd(), 0))
+        {
+            break Ok(());
+        }
         if wait_readable(listener.as_raw_fd(), 250) {
             match listener.accept() {
                 Ok((stream, _)) => {
@@ -185,7 +217,7 @@ pub fn serve(opts: ServeOptions) -> Result<()> {
                     std::thread::sleep(std::time::Duration::from_millis(100));
                 }
                 Err(e) => {
-                    return Err(Error::io(
+                    break Err(Error::io(
                         "cannot accept API connections",
                         &e,
                         "restart the service",
@@ -197,13 +229,120 @@ pub fn serve(opts: ServeOptions) -> Result<()> {
         let timed_out = opts.timeout.is_some_and(|t| idle >= t);
         let replaced = idle >= REPLACED_GRACE && program.as_ref().is_some_and(|p| p.replaced());
         if (timed_out || replaced) && !crate::swarm::busy() {
-            break;
+            break Ok(());
         }
-    }
+    };
+    drop(listener);
     if let Some(path) = owned_path {
         let _ = std::fs::remove_file(path);
     }
-    Ok(())
+    #[cfg(target_os = "linux")]
+    if opts.managed_buildkit {
+        ctx.http_builds.stop();
+    }
+    result
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct HttpBuilds {
+    active: Mutex<HttpBuildState>,
+    finished: std::sync::Condvar,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct HttpBuildState {
+    stopping: bool,
+    clients: std::collections::HashMap<i32, UnixStream>,
+}
+
+#[cfg(target_os = "linux")]
+struct HttpBuild<'a> {
+    builds: &'a HttpBuilds,
+    socket: i32,
+}
+
+#[cfg(target_os = "linux")]
+impl HttpBuilds {
+    fn enter(&self, client: &UnixStream) -> std::io::Result<HttpBuild<'_>> {
+        let mut active = self.active.lock().unwrap_or_else(|p| p.into_inner());
+        if active.stopping {
+            return Err(std::io::Error::other("the BuildKit service is stopping"));
+        }
+        let client = client.try_clone()?;
+        let socket = client.as_raw_fd();
+        active.clients.insert(socket, client);
+        Ok(HttpBuild {
+            builds: self,
+            socket,
+        })
+    }
+
+    fn stop(&self) {
+        let mut active = self.active.lock().unwrap_or_else(|p| p.into_inner());
+        active.stopping = true;
+        // Unblock both context uploads and writes to clients who stopped reading progress.
+        for client in active.clients.values() {
+            let _ = client.shutdown(std::net::Shutdown::Both);
+        }
+        drop(
+            self.finished
+                .wait_while(active, |active| !active.clients.is_empty())
+                .unwrap_or_else(|p| p.into_inner()),
+        );
+    }
+
+    fn stopping(&self) -> bool {
+        self.active
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .stopping
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for HttpBuild<'_> {
+    fn drop(&mut self) {
+        let mut active = self.builds.active.lock().unwrap_or_else(|p| p.into_inner());
+        active.clients.remove(&self.socket);
+        self.builds.finished.notify_all();
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct BuildkitShutdown {
+    read: OwnedFd,
+    _write: OwnedFd,
+}
+
+#[cfg(target_os = "linux")]
+impl BuildkitShutdown {
+    const SIGNALS: [i32; 3] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP];
+
+    fn install() -> Result<Self> {
+        use rustix::pipe::{PipeFlags, pipe_with};
+        let (read, write) =
+            pipe_with(PipeFlags::CLOEXEC | PipeFlags::NONBLOCK).map_err(|error| {
+                Error::io(
+                    "cannot monitor BuildKit service shutdown",
+                    &error.into(),
+                    "check the process descriptor limit",
+                )
+            })?;
+        crate::signals::notify_pipe(write.as_raw_fd(), &Self::SIGNALS);
+        Ok(Self {
+            read,
+            _write: write,
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for BuildkitShutdown {
+    fn drop(&mut self) {
+        crate::signals::restore_default(&Self::SIGNALS);
+    }
 }
 
 fn wait_readable(fd: i32, millis: i32) -> bool {
@@ -282,7 +421,28 @@ pub(crate) fn handle_connection(stream: UnixStream, ctx: &Ctx) {
             }
         };
         let head_only = req.method == "HEAD";
+        // Drop any extracted context in the reply before allowing shutdown to finish.
+        #[cfg(target_os = "linux")]
+        let _build;
         let mut reply = router::route(&req, ctx);
+        #[cfg(target_os = "linux")]
+        if let Reply::WithManagedBuild(run) = reply {
+            _build = match ctx.http_builds.enter(&writer) {
+                Ok(build) => build,
+                Err(error) => {
+                    let reply =
+                        router::message(503, format!("cannot start a BuildKit build: {error}"));
+                    let _ = write_fixed(
+                        &mut writer,
+                        head_only,
+                        reply,
+                        &[("Connection", "close".into())],
+                    );
+                    return;
+                }
+            };
+            reply = Reply::WithBody(run);
+        }
         // A body left unread for its handler: the handler reads it (an empty one when the
         // request gives no length), or it is skipped. What follows it cannot be told from a
         // new request, so the connection then closes.
@@ -387,6 +547,8 @@ fn write_fixed(
         | Reply::Hijack { .. }
         | Reply::Headed(..)
         | Reply::WithBody(_) => unreachable!("handled by the caller"),
+        #[cfg(target_os = "linux")]
+        Reply::WithManagedBuild(_) => unreachable!("handled by the caller"),
     };
     let mut extra: Vec<(&str, String)> = headers.to_vec();
     if let Some(ct) = content_type {

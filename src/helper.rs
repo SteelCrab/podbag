@@ -669,6 +669,29 @@ pub fn run_store_op_with_input(
     }
 }
 
+/// Give the store helper the staged file descriptor so it can read image
+/// entries in place. The result reports any maintenance error after commit.
+#[cfg(target_os = "linux")]
+pub(crate) fn load_staged_archive(file: File) -> Result<Option<Error>> {
+    let json = encode_store_op(&crate::store::ops::StoreOp::LoadStaged)?;
+    let output = spawn_with_args(
+        &["__store", &json],
+        Stdio::from(file),
+        Stdio::null(),
+        Stdio::null(),
+        None,
+    )?
+    .wait_done()?;
+    serde_json::from_value(output).map_err(|e| {
+        Error::new(
+            ErrorKind::Internal,
+            "the store helper sent an unreadable archive result",
+            e.to_string(),
+            "report this bug",
+        )
+    })
+}
+
 /// Copy `input` to `out` in frames: a 4-byte big-endian length, then that many bytes. An
 /// empty frame ends the input. It is sent only after `input` ended normally, so a reader
 /// that fails (or a sender that dies) leaves the input without its end.
