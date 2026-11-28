@@ -1029,7 +1029,7 @@ mod tests {
             }
             std::thread::sleep(interval.min(deadline.saturating_duration_since(Instant::now())));
             window = (window * 2).min(Duration::from_secs(10));
-            interval = (interval * 2).min(Duration::from_secs(1));
+            interval = (interval * 2).min(Duration::from_secs(3));
         }
         let last = last
             .as_deref()
@@ -1156,9 +1156,9 @@ mod tests {
                     .args(args))
             };
             // The hosted Intel runner runs this guest under nested virtualization.
-            // Its control plane can still be catching up when Kind returns.
+            // Its worker can still be initializing the network after creation or reset.
             let seconds = if cfg!(target_arch = "x86_64") {
-                120
+                180
             } else {
                 60
             };

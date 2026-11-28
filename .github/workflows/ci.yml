@@ -415,7 +415,7 @@ jobs:
     name: macOS Intel Kubernetes VM
     needs: macos-guest
     runs-on: macos-15-intel
-    timeout-minutes: 40
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -426,7 +426,7 @@ jobs:
       - name: Build podbag with its guest
         run: *build-macos-intel-cli
       - name: Run the Desktop Kubernetes lifecycle in a private VM
-        timeout-minutes: 25
+        timeout-minutes: 35
         env:
           PODBAG_VM_CPUS: 3
         run: dev/ci/macos-local-kubernetes.sh target/release/podbag
