@@ -1155,7 +1155,10 @@ mod tests {
                     .arg(&config)
                     .args(args))
             };
-            wait_for_kind_ready(2, std::time::Duration::from_secs(60), kubectl)?;
+            // The hosted Intel runner runs this guest under nested virtualization.
+            // Its control plane can still be catching up when Kind returns.
+            let seconds = if cfg!(target_arch = "x86_64") { 120 } else { 60 };
+            wait_for_kind_ready(2, std::time::Duration::from_secs(seconds), kubectl)?;
             if !super::super::kubernetes::kube_contexts()?
                 .iter()
                 .any(|name| name == context)
