@@ -5,7 +5,7 @@ use super::store::{Cluster, FileObject, Kind, ServiceRecord};
 use serde_json::{Value, json};
 
 /// Facts about this host for the node.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Host {
     pub hostname: String,
     /// Docker's name for the CPU: `x86_64`, `aarch64`.
@@ -100,6 +100,29 @@ pub fn node_json(c: &Cluster, host: &Host) -> Value {
     })
 }
 
+pub fn worker_json(worker: &super::remote::Worker, ready: bool) -> Value {
+    let host = worker.host.as_ref();
+    json!({
+        "ID": worker.id,
+        "Version": {"Index": worker.version},
+        "CreatedAt": worker.created,
+        "UpdatedAt": worker.updated.as_ref().unwrap_or(&worker.created),
+        "Spec": {
+            "Name": worker.name,
+            "Role": "worker",
+            "Availability": if worker.drained { "drain" } else { "active" },
+            "Labels": {}
+        },
+        "Description": {
+            "Hostname": worker.name,
+            "Platform": {"Architecture": host.map(|h| h.architecture.as_str()).unwrap_or_default(), "OS": "linux"},
+            "Resources": {"NanoCPUs": host.map_or(0, |h| h.ncpu * 1_000_000_000), "MemoryBytes": host.map_or(0, |h| h.memory)},
+            "Engine": {"EngineVersion": host.map(|h| h.engine_version.as_str()).unwrap_or_default()}
+        },
+        "Status": {"State": if ready { "ready" } else { "down" }, "Addr": worker.destination}
+    })
+}
+
 /// Task counts for `GET /services?status=true`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Counts {
@@ -155,7 +178,7 @@ pub fn service_json(s: &ServiceRecord, vips: &[(String, String)], counts: Option
 }
 
 /// What a task is, for its JSON.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TaskFacts {
     pub id: String,
     pub version: u64,
@@ -166,8 +189,8 @@ pub struct TaskFacts {
     pub slot: u64,
     pub node_id: String,
     pub spec: Value,
-    pub desired_state: &'static str,
-    pub state: &'static str,
+    pub desired_state: String,
+    pub state: String,
     pub message: String,
     pub err: String,
     pub container_id: String,
@@ -410,6 +433,9 @@ mod tests {
                 mode: "ingress".into(),
             }],
             vips: BTreeMap::new(),
+            worker_slots: Default::default(),
+            worker_releases: Default::default(),
+            removing: false,
         }
     }
 
@@ -473,8 +499,8 @@ mod tests {
             slot: 2,
             node_id: "n".repeat(25),
             spec: json!({"ContainerSpec": {"Image": "nginx:1.27"}}),
-            desired_state: "running",
-            state: "failed",
+            desired_state: "running".into(),
+            state: "failed".into(),
             message: "started".into(),
             err: "task: non-zero exit (1)".into(),
             container_id: "c".repeat(64),

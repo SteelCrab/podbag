@@ -355,6 +355,18 @@ fn host_config(f: &Facts) -> Value {
     if !f.spec.security.seccomp {
         security_opt.push("seccomp=unconfined".to_string());
     }
+    let devices: Vec<_> = f
+        .spec
+        .devices
+        .iter()
+        .map(|d| {
+            json!({
+                "PathOnHost": d.host,
+                "PathInContainer": d.container,
+                "CgroupPermissions": d.access,
+            })
+        })
+        .collect();
     json!({
         "Binds": binds,
         "NetworkMode": network_mode(f),
@@ -380,7 +392,9 @@ fn host_config(f: &Facts) -> Value {
         "Privileged": f.spec.security.privileged,
         "CapDrop": f.spec.security.cap_drop,
         "SecurityOpt": security_opt,
-        "ReadonlyRootfs": false,
+        "ReadonlyRootfs": f.spec.security.read_only_rootfs,
+        "Devices": devices,
+        "DeviceRequests": f.spec.gpu_requests,
         "PublishAllPorts": false,
         "Init": null,
         "ExtraHosts": f.spec.extra_hosts.iter().map(|e| e.docker()).collect::<Vec<_>>(),

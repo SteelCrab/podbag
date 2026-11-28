@@ -4,6 +4,7 @@ pub mod cli;
 pub mod cluster_migration;
 pub mod kubernetes;
 pub mod lab;
+pub mod local_kubernetes;
 pub mod tutorial;
 
 use crate::client::{Choice, Target};

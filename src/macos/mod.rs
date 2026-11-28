@@ -5,6 +5,7 @@ pub mod cpu;
 mod disk;
 pub mod embedded;
 pub mod host;
+pub(crate) mod kind;
 mod resources;
 pub mod settings;
 pub mod standby;

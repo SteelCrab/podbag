@@ -16,7 +16,7 @@ use crate::engine::{EngineStatus, List};
 use crate::events::{Event, Events};
 use crate::extensions;
 use crate::images::{self, ImportImage, LocationInfo, Search};
-use crate::kubernetes::{self, Resource, Snapshot};
+use crate::kubernetes::{self, LocalAction, LocalCluster, Resource, Snapshot};
 use crate::migration::{self, Listing, Request};
 use crate::model_runner;
 use crate::settings::Settings;
@@ -187,6 +187,8 @@ pub trait Api: Send + Sync {
     fn refresh(&self, asked: bool);
 
     // Kubernetes.
+    fn local_kube_status(&self) -> Result<Option<LocalCluster>, String>;
+    fn local_kube_change(&self, action: LocalAction) -> Result<Option<LocalCluster>, String>;
     fn kube_contexts(&self) -> Result<Vec<String>, String>;
     fn kube_counts(
         &self,
@@ -538,6 +540,14 @@ impl Api for Desktop {
 
     fn refresh(&self, asked: bool) {
         Desktop::refresh(self, asked)
+    }
+
+    fn local_kube_status(&self) -> Result<Option<LocalCluster>, String> {
+        kubernetes::local_status()
+    }
+
+    fn local_kube_change(&self, action: LocalAction) -> Result<Option<LocalCluster>, String> {
+        kubernetes::local_change(action)
     }
 
     fn kube_contexts(&self) -> Result<Vec<String>, String> {

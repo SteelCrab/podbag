@@ -47,6 +47,7 @@ pub enum Then {
     /// Stop synchronizing a share of the macOS VM.
     SyncRemove(String),
     RemoveExtension(String),
+    LocalCluster(podbag_desktop_core::kubernetes::LocalAction),
     RemoveBuilder {
         session: u64,
         scope: String,
@@ -466,6 +467,7 @@ fn finish(d: &mut Desktop, ui: &mut Ui, dlg: Dialog, yes: bool) {
                 }
             }
             Then::RemoveExtension(id) => crate::views::extensions::remove(d, id),
+            Then::LocalCluster(action) => crate::views::local_kubernetes::change(d, action),
             Then::SyncRemove(name) => {
                 crate::views::sync_shares::act(d, podbag_desktop_core::vm::SyncAction::Remove(name))
             }

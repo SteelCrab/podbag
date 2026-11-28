@@ -74,6 +74,61 @@ impl Setup {
 }
 
 #[test]
+fn docker_read_only_root_persists_and_leaves_mounts_writable() {
+    let s = setup();
+    let id = s.ok(&[
+        "create",
+        "--read-only",
+        "--tmpfs",
+        "/writable",
+        &s.image,
+        "sh",
+        "-ec",
+        "if touch /readonly-probe 2>/dev/null; then exit 1; fi; touch /writable/probe",
+    ]);
+    let id = id.trim();
+    assert_eq!(
+        s.ok(&["inspect", "--format", "{{.HostConfig.ReadonlyRootfs}}", id]),
+        "true",
+    );
+    s.ok(&["start", "-a", id]);
+}
+
+#[test]
+fn docker_device_mapping_persists_and_exposes_the_requested_node() {
+    let s = setup();
+    let args = [
+        "create",
+        "--device",
+        "/dev/zero:/dev/podbag-zero:r",
+        &s.image,
+        "sh",
+        "-ec",
+        "test -c /dev/podbag-zero; head -c 3 /dev/podbag-zero",
+    ];
+    if !root_mode() {
+        let out = s.docker(&args);
+        assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+        assert!(stderr(&out).contains("require root"), "{}", stderr(&out));
+        return;
+    }
+    let id = s.ok(&args);
+    let id = id.trim();
+    let devices = s.ok(&["inspect", "--format", "{{json .HostConfig.Devices}}", id]);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&devices).unwrap(),
+        serde_json::json!([{
+            "PathOnHost": "/dev/zero",
+            "PathInContainer": "/dev/podbag-zero",
+            "CgroupPermissions": "r",
+        }]),
+    );
+    let out = s.docker(&["start", "-a", id]);
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(out.stdout, [0; 3]);
+}
+
+#[test]
 fn docker_run_rm_prints_output_and_exit_code() {
     let s = unpulled();
     let out = s.docker(&[
@@ -910,6 +965,31 @@ fn privileged_through_the_api() {
         serde_json::from_str::<serde_json::Value>(&s.ok(&["inspect", "p"])).unwrap()[0].clone();
     assert_eq!(inspect["HostConfig"]["Privileged"], true);
     s.ok(&["rm", "p"]);
+
+    s.ok(&[
+        "run",
+        "-d",
+        "--name",
+        "p",
+        "--privileged",
+        &s.image,
+        "sleep",
+        "60",
+    ]);
+    let inherited = s.ok(&[
+        "exec",
+        "--privileged",
+        "p",
+        "grep",
+        "CapEff",
+        "/proc/self/status",
+    ]);
+    assert!(inherited.contains(&all), "{inherited}");
+    s.ok(&["run", "-d", "--name", "ordinary", &s.image, "sleep", "60"]);
+    let denied = s.docker(&["exec", "--privileged", "ordinary", "true"]);
+    assert!(!denied.status.success());
+    assert!(stderr(&denied).contains("was not started with --privileged"));
+    s.ok(&["rm", "-f", "p", "ordinary"]);
 }
 
 #[test]

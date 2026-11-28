@@ -66,6 +66,7 @@ struct Kept {
     tty: bool,
     /// stdout and stderr (or the terminal), until each ends.
     outputs: [Option<OwnedFd>; 2],
+    terminal_slave: Option<OwnedFd>,
     listener: UnixListener,
     /// The container's shim lock: held while it is watched.
     lock: OwnedFd,
@@ -791,8 +792,8 @@ impl Keeper {
             return false;
         };
         let (first, second) = (fds.next(), fds.next());
-        // A terminal is one descriptor; otherwise stdout and stderr.
-        if crate::id::check(&h.id).is_err() || first.is_none() || h.tty != second.is_none() {
+        // The terminal master and slave, or the stdout and stderr pipes.
+        if crate::id::check(&h.id).is_err() || first.is_none() || second.is_none() {
             return false;
         }
         let dirs = Dirs {
@@ -809,6 +810,11 @@ impl Keeper {
             .iter()
             .position(|(pid, _, _)| *pid == h.pid)
             .map(|at| self.early.swap_remove(at).1);
+        let (second, terminal_slave) = if h.tty {
+            (None, if exit.is_none() { second } else { None })
+        } else {
+            (second, None)
+        };
         let spec = crate::state::read_config(&dirs, &h.id).ok();
         let log = match &spec {
             Some(spec) => LogWriter::for_container(&dirs, spec).ok(),
@@ -830,6 +836,7 @@ impl Keeper {
             dirs,
             tty: h.tty,
             outputs: [first, second],
+            terminal_slave,
             listener: UnixListener::from(listener),
             lock,
             log,
@@ -1116,6 +1123,7 @@ impl Keeper {
                 .find(|c| c.pid == pid && c.exit.is_none())
             {
                 c.exit = Some(code);
+                drop(c.terminal_slave.take());
                 c.drain_until = Some(now + crate::shim::DRAIN);
                 // The container ended: its check goes with it.
                 if let Some(probe) = c.health.take().and_then(|h| h.probe()) {
@@ -1346,6 +1354,7 @@ mod tests {
             },
             tty: false,
             outputs: [Some(out_r.into()), Some(err_r.into())],
+            terminal_slave: None,
             listener: UnixListener::bind(dir.join(name)).unwrap(),
             lock: File::create(dir.join(format!("{name}.lock")))
                 .unwrap()

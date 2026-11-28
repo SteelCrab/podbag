@@ -159,5 +159,6 @@ base, with the same jars:
   profiles or seccomp profile files yet: see [usage.md](usage.md#kubernetes).
 - **Builds.** podbag builds Dockerfiles itself, with the classic builder's features. For
   BuildKit's (`RUN --mount`, secrets, other platforms), use buildx.
-- **Docker API.** Swarm mode runs on one node only. Engine plugins are unsupported.
+- **Docker API.** Swarm mode has one manager and can assign services to enrolled SSH
+  workers. Engine plugins are unsupported.
 - **Windows.** Not yet tried on a Windows machine.

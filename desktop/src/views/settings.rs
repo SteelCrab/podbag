@@ -238,7 +238,7 @@ fn section(
         ui.p.rounded(r.inset(0., 2., 0., 2.), 6., t.hover);
     }
     let cy = y + ROW_H / 2.;
-    let label = d.t(&format!("settings.{key}"));
+    let label = d.t(super::settings_search::section_key(key));
     let title_w = setting_title(ui, x, cy, key, icon, &label);
     let open = d.open_sections.contains(key);
     let chevron = if open {
@@ -303,6 +303,22 @@ fn second_card(d: &mut Desktop, ui: &mut Ui, x: f32, y0: f32, w: f32) -> f32 {
     y += h;
     if open {
         y += super::builders::body(d, ui, bx, y, bw) + 18.;
+    }
+    separator(ui, x, y, w);
+    let value = super::local_kubernetes::summary(d);
+    let (h, open) = section(
+        d,
+        ui,
+        x,
+        y,
+        w,
+        super::local_kubernetes::SECTION,
+        Icon::Kubernetes,
+        &value,
+    );
+    y += h;
+    if open {
+        y += super::local_kubernetes::body(d, ui, bx, y, bw) + 18.;
     }
     // The VM, for podbag on macOS and Windows.
     if let Some(vm) = d.vm.clone().filter(|_| d.has_vm()) {

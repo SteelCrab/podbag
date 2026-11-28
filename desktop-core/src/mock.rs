@@ -20,7 +20,7 @@ use crate::dockercmd::DockerCommand;
 use crate::engine::{EngineStatus, engine_kind};
 use crate::events::{Event, Events};
 use crate::images::{self, ImportImage, LocationInfo, Search};
-use crate::kubernetes::{Resource, Snapshot, route_url};
+use crate::kubernetes::{LocalAction, LocalCluster, Provider, Resource, Snapshot, route_url};
 use crate::lock;
 use crate::migration::{self, Listing, Request};
 use crate::model_runner::{self, Failure, Generation, Model, Reply};
@@ -132,6 +132,8 @@ pub struct Options {
     pub platform: Option<&'static str>,
     /// The VM has a synchronized share at start.
     pub sync_share: bool,
+    /// Creation leaves an owned but incomplete local Kubernetes cluster.
+    pub local_kube_incomplete: bool,
     /// Where the mock notes the calls a test checks.
     pub calls: Calls,
 }
@@ -278,6 +280,7 @@ struct State {
     volumes: Vec<VolumeSummary>,
     networks: Vec<NetworkSummary>,
     kube: Value,
+    local_cluster: Option<LocalCluster>,
     engine: EngineStatus,
     vm: VmStatus,
     token: u64,
@@ -841,6 +844,7 @@ impl Mock {
             volumes,
             networks: sample_networks(),
             kube: sample_kube(),
+            local_cluster: None,
             selected: engine.engine.to_string(),
             engine,
             vm: if opts.platform == Some("windows") {
@@ -1964,8 +1968,72 @@ impl Api for Mock {
 
     fn refresh(&self, _asked: bool) {}
 
+    fn local_kube_status(&self) -> Result<Option<LocalCluster>, String> {
+        Ok(self.st().local_cluster.clone())
+    }
+
+    fn local_kube_change(&self, action: LocalAction) -> Result<Option<LocalCluster>, String> {
+        let mut state = self.st();
+        match action {
+            LocalAction::Create {
+                version,
+                nodes,
+                managed_vm,
+            } => {
+                self.opts.calls.push(format!(
+                    "local_kube_create {managed_vm} {nodes} {}",
+                    version.as_deref().unwrap_or("-")
+                ));
+                if state.local_cluster.is_some() {
+                    return Err("Podbag already has a local cluster".into());
+                }
+                let provider = if managed_vm && state.engine.platform == "macos" {
+                    Provider::PodbagVm
+                } else if managed_vm {
+                    return Err("Local Kubernetes in the Podbag VM requires macOS".into());
+                } else {
+                    Provider::Docker
+                };
+                let ready = !self.opts.local_kube_incomplete;
+                state.local_cluster = Some(LocalCluster {
+                    context: "kind-podbag-test".into(),
+                    version,
+                    nodes,
+                    provider,
+                    ready,
+                });
+                if !ready {
+                    return Err("The local cluster did not reach readiness".into());
+                }
+            }
+            LocalAction::Reset(ref context) | LocalAction::Remove(ref context) => {
+                let Some(cluster) = state
+                    .local_cluster
+                    .as_mut()
+                    .filter(|c| c.context == *context)
+                else {
+                    return Err("The local cluster changed since it was shown".into());
+                };
+                if matches!(action, LocalAction::Reset(_)) {
+                    self.opts.calls.push(format!("local_kube_reset {context}"));
+                    cluster.ready = true;
+                } else {
+                    self.opts.calls.push(format!("local_kube_remove {context}"));
+                    state.local_cluster = None;
+                }
+            }
+        }
+        Ok(state.local_cluster.clone())
+    }
+
     fn kube_contexts(&self) -> Result<Vec<String>, String> {
-        Ok(vec!["dev".into(), "staging".into(), "ocp".into()])
+        let mut names = vec!["dev".into(), "staging".into(), "ocp".into()];
+        if let Some(cluster) = &self.st().local_cluster
+            && cluster.ready
+        {
+            names.push(cluster.context.clone());
+        }
+        Ok(names)
     }
 
     /// Routes count only on OpenShift (`ocp`).

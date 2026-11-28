@@ -163,12 +163,10 @@ fn create(req: &Request, ctx: &Ctx) -> Reply {
         Ok(b) => b,
         Err(e) => return message(400, format!("{e:?}")),
     };
-    if let Some(roots) = &ctx.binds_under {
-        for source in ok_or_reply!(super::create::bind_sources(&body)) {
-            if let Err(error) = super::create::check_shared_bind(&source, roots) {
-                return error;
-            }
-        }
+    if let Some(roots) = &ctx.binds_under
+        && let Err(error) = super::create::check_container_binds(&body, roots, ctx.kind_node_binds)
+    {
+        return error;
     }
     let (c, warnings) = ok_or_reply!(container_from_create(&body, name));
     let handle = ok_or_reply!(c.create());
@@ -227,9 +225,8 @@ pub(super) fn shape(
     })
 }
 
-/// Docker's `name` filter is a regular expression on `/name`; the anchors `^` and `$`
-/// and plain text cover how clients use it.
-fn name_matches(pattern: &str, name: &str) -> bool {
+/// The name filter forms used by clients such as Compose and kind.
+pub(super) fn name_matches(pattern: &str, name: &str) -> bool {
     let (start, p) = match pattern.strip_prefix('^') {
         Some(p) => (true, p),
         None => (false, pattern),
@@ -239,6 +236,8 @@ fn name_matches(pattern: &str, name: &str) -> bool {
         None => (false, p),
     };
     let p = p.trim_start_matches('/');
+    let literal = p.contains(r"\.").then(|| p.replace(r"\.", "."));
+    let p = literal.as_deref().unwrap_or(p);
     match (start, end) {
         (true, true) => name == p,
         (true, false) => name.starts_with(p),
@@ -846,6 +845,8 @@ mod tests {
         assert!(!name_matches("^/web$", "web2"));
         assert!(name_matches("^web", "web2"));
         assert!(name_matches("1$", "web1"));
+        assert!(name_matches(r"^kind\.local$", "kind.local"));
+        assert!(!name_matches(r"^kind\.local$", "kind-local"));
     }
 
     fn keys(keys: &[&str]) -> BTreeMap<String, Vec<String>> {

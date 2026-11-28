@@ -8,6 +8,8 @@ use std::io::{Read, Write};
 pub const CLI_PORT: u32 = 2;
 /// The Docker Engine API (`podbag system service`).
 pub const API_PORT: u32 = 2375;
+/// The private Docker API used by Desktop to provision Kind in the macOS VM.
+pub const KIND_API_PORT: u32 = 2376;
 /// The forwarder of published ports: a first line `TCP <port>` or `UDP <port>`, answered
 /// `OK` once the VM's `127.0.0.1:<port>` is connected (or `ERR …`), then bytes both ways
 /// (TCP) or datagrams both ways (UDP, see [`super::udp`]).

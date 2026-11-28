@@ -2,8 +2,9 @@
 
 use crate::image::Image;
 use crate::network::{NetworkMode, PortMapping, Proto};
-use crate::spec::SecurityOpt;
+use crate::spec::{Device, SecurityOpt};
 use crate::{Access, Container, Error, ErrorKind, MountRequest, Result};
+use serde::Deserialize;
 use serde_json::Value;
 
 /// The container a create body describes, and warnings about settings podbag ignores.
@@ -267,6 +268,46 @@ fn map_create_with(
         };
     }
     c = c.privileged(host["Privileged"].as_bool().unwrap_or(false));
+    c = c.read_only(host["ReadonlyRootfs"].as_bool().unwrap_or(false));
+    if !host["Devices"].is_null() {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "PascalCase")]
+        struct DeviceMapping {
+            path_on_host: String,
+            #[serde(default)]
+            path_in_container: String,
+            #[serde(default)]
+            cgroup_permissions: String,
+        }
+        let mappings = Vec::<DeviceMapping>::deserialize(&host["Devices"]).map_err(|e| {
+            invalid(
+                "invalid Devices",
+                &e.to_string(),
+                "pass a list of device mappings with PathOnHost",
+            )
+        })?;
+        for d in mappings {
+            c = c.device(Device::new(
+                &d.path_on_host,
+                &d.path_in_container,
+                &d.cgroup_permissions,
+            )?);
+        }
+    }
+    if !host["DeviceRequests"].is_null() {
+        let requests =
+            Vec::<crate::gpu::Request>::deserialize(&host["DeviceRequests"]).map_err(|e| {
+                invalid(
+                    "invalid DeviceRequests",
+                    &e.to_string(),
+                    "pass a list of GPU requests",
+                )
+            })?;
+        for request in requests {
+            request.validate()?;
+            c = c.gpus(request);
+        }
+    }
     let auto_remove = host["AutoRemove"].as_bool().unwrap_or(false);
     if auto_remove {
         c = c.remove_on_exit(true);
@@ -356,11 +397,11 @@ fn refuse_unsupported(host: &Value) -> Result<()> {
         ))
     };
     let listed = |key: &str| host[key].as_array().is_some_and(|a| !a.is_empty());
-    if listed("Devices") || listed("DeviceRequests") || listed("DeviceCgroupRules") {
-        return refuse("devices", "drop --device and --gpus");
-    }
-    if host["ReadonlyRootfs"].as_bool().unwrap_or(false) {
-        return refuse("a read-only root filesystem", "drop --read-only");
+    if listed("DeviceCgroupRules") {
+        return refuse(
+            "custom device cgroup rules",
+            "use --device with a host device path",
+        );
     }
     for key in ["PidMode", "IpcMode", "UTSMode", "UsernsMode"] {
         let mode = host[key].as_str().unwrap_or("");
@@ -469,21 +510,66 @@ fn check_host_path(path: &str, spec: &str) -> Result<()> {
     }
 }
 
-/// The host paths a create body binds (`HostConfig.Binds` and `Mounts` of type bind).
-pub fn bind_sources(body: &Value) -> Result<Vec<String>> {
+/// Docker's two representations for a host mount.
+fn mount_requests(body: &Value) -> impl Iterator<Item = Result<MountRequest>> + '_ {
     let host = &body["HostConfig"];
+    let binds = strings(&host["Binds"])
+        .into_iter()
+        .map(|spec| parse_bind(&spec));
+    let mounts = host["Mounts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(parse_mount);
+    binds
+        .chain(mounts)
+        .map(|parsed| parsed.map(|(request, _)| request))
+}
+
+/// The host paths a create body binds.
+pub fn bind_sources(body: &Value) -> Result<Vec<String>> {
     let mut sources = Vec::new();
-    for bind in strings(&host["Binds"]) {
-        if let (MountRequest::Bind { source, .. }, _) = parse_bind(&bind)? {
-            sources.push(source);
-        }
-    }
-    for m in host["Mounts"].as_array().into_iter().flatten() {
-        if let (MountRequest::Bind { source, .. }, _) = parse_mount(m)? {
+    for request in mount_requests(body) {
+        if let MountRequest::Bind { source, .. } = request? {
             sources.push(source);
         }
     }
     Ok(sources)
+}
+
+/// A VM's Kind nodes need its own kernel mounts. They remain separate from Mac
+/// folder sharing, with fixed source and target paths and read-only access.
+pub(super) fn check_container_binds(
+    body: &Value,
+    roots: &[std::path::PathBuf],
+    kind_node_binds: bool,
+) -> std::result::Result<(), super::router::Reply> {
+    let labels = &body["Labels"];
+    let kind_node = kind_node_binds
+        && body["HostConfig"]["Privileged"] == true
+        && non_empty(&labels["io.x-k8s.kind.cluster"]).is_some()
+        && matches!(
+            labels["io.x-k8s.kind.role"].as_str(),
+            Some("control-plane" | "worker")
+        );
+    for request in mount_requests(body) {
+        let MountRequest::Bind {
+            source,
+            target,
+            access,
+        } = request.map_err(|error| super::router::reply_error(&error))?
+        else {
+            continue;
+        };
+        let guest_kernel = kind_node
+            && access == Access::ReadOnly
+            && source == target
+            && matches!(source.as_str(), "/lib/modules" | "/dev/kmsg");
+        if !guest_kernel {
+            check_shared_bind(&source, roots)?;
+        }
+    }
+    Ok(())
 }
 
 /// Refuse bind sources outside the Mac folders mounted by the VM.
@@ -887,6 +973,40 @@ mod tests {
     }
 
     #[test]
+    fn only_the_kind_vm_service_allows_exact_read_only_guest_mounts() {
+        let mut body = json!({
+            "Labels": {
+                "io.x-k8s.kind.role": "control-plane",
+                "io.x-k8s.kind.cluster": "podbag-test"
+            },
+            "HostConfig": {
+                "Privileged": true,
+                "Binds": ["/lib/modules:/lib/modules:ro"],
+                "Mounts": [{"Type": "bind", "Source": "/dev/kmsg", "Target": "/dev/kmsg", "ReadOnly": true}]
+            }
+        });
+        assert!(check_container_binds(&body, &[], false).is_err());
+        assert!(check_container_binds(&body, &[], true).is_ok());
+        body["HostConfig"]["Mounts"][0]["ReadOnly"] = false.into();
+        assert!(check_container_binds(&body, &[], true).is_err());
+        body["HostConfig"]["Mounts"][0]["ReadOnly"] = true.into();
+        for bind in [
+            "/lib/modules:/lib/modules:rw",
+            "/lib/modules:/other:ro",
+            "/etc:/etc:ro",
+        ] {
+            body["HostConfig"]["Binds"][0] = bind.into();
+            assert!(check_container_binds(&body, &[], true).is_err(), "{bind}");
+        }
+        body["HostConfig"]["Binds"][0] = "/lib/modules:/lib/modules:ro".into();
+        body["HostConfig"]["Privileged"] = false.into();
+        assert!(check_container_binds(&body, &[], true).is_err());
+        body["HostConfig"]["Privileged"] = true.into();
+        body["Labels"]["io.x-k8s.kind.cluster"] = "".into();
+        assert!(check_container_binds(&body, &[], true).is_err());
+    }
+
+    #[test]
     fn create_maps_docker_fields() {
         let body = json!({
             "Image": "alpine",
@@ -919,6 +1039,8 @@ mod tests {
                 "PidsLimit": 100,
                 "CapAdd": ["CAP_NET_ADMIN"],
                 "CapDrop": ["MKNOD"],
+                "ReadonlyRootfs": true,
+                "Devices": [{"PathOnHost": "/dev/zero", "PathInContainer": "/dev/podbag-zero", "CgroupPermissions": "r"}],
                 "SecurityOpt": ["no-new-privileges:true", "seccomp=unconfined"],
                 "AutoRemove": true,
                 "RestartPolicy": {"Name": "no", "MaximumRetryCount": 0},
@@ -935,6 +1057,11 @@ mod tests {
         assert_eq!(f["workdir"], "/w");
         assert_eq!(f["user"], "1000:1000");
         assert_eq!(f["hostname"], "h1");
+        assert_eq!(f["security"]["read_only_rootfs"], true);
+        assert_eq!(
+            f["devices"],
+            json!([{"host": "/dev/zero", "container": "/dev/podbag-zero", "access": "r"}])
+        );
         assert_eq!(f["tty"], true);
         assert_eq!(f["interactive"], true);
         assert_eq!(f["name"], "web");
@@ -1087,7 +1214,7 @@ mod tests {
     fn create_refuses_what_podbag_cannot_do() {
         let cases = [
             (
-                json!({"Devices": [{"PathOnHost": "/dev/fuse", "PathInContainer": "/dev/fuse", "CgroupPermissions": "rwm"}]}),
+                json!({"Devices": [{"PathOnHost": "dev/fuse", "PathInContainer": "/dev/fuse", "CgroupPermissions": "rwm"}]}),
                 ErrorKind::InvalidInput,
             ),
             (json!({"Binds": ["rel/path:/x"]}), ErrorKind::InvalidInput),
@@ -1100,7 +1227,6 @@ mod tests {
                 json!({"NetworkMode": "container:abc"}),
                 ErrorKind::InvalidInput,
             ),
-            (json!({"ReadonlyRootfs": true}), ErrorKind::InvalidInput),
             (json!({"PidMode": "host"}), ErrorKind::InvalidInput),
             (json!({"IpcMode": "host"}), ErrorKind::InvalidInput),
             (json!({"VolumesFrom": ["other"]}), ErrorKind::InvalidInput),

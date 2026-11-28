@@ -265,6 +265,11 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: CriCmd,
     },
+    /// Enroll a Podbag Swarm worker
+    Swarm {
+        #[command(subcommand)]
+        cmd: SwarmCmd,
+    },
     /// Manage the image store
     System {
         #[command(subcommand)]
@@ -502,6 +507,20 @@ pub enum CriCmd {
 pub enum CgroupDriverArg {
     Cgroupfs,
     Systemd,
+}
+
+#[derive(Subcommand)]
+pub enum SwarmCmd {
+    /// Enroll a worker using a trusted OpenSSH key and host key
+    WorkerAdd {
+        /// Name to display in docker node ls
+        name: String,
+        /// An OpenSSH host alias or user@host
+        destination: String,
+        /// Use this OpenSSH configuration file
+        #[arg(long)]
+        ssh_config: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -746,6 +765,15 @@ pub struct RunArgs {
     /// cgroup (inside the user namespace when rootless)
     #[arg(long)]
     pub privileged: bool,
+    /// Mount the container's root filesystem read-only
+    #[arg(long)]
+    pub read_only: bool,
+    /// Map a device as root on Linux (HOST[:CONTAINER][:rwm])
+    #[arg(long = "device", value_name = "DEVICE")]
+    pub devices: Vec<podbag::spec::Device>,
+    /// Select Linux GPUs as root (all, COUNT, device=ID, or driver=nvidia,SELECTION)
+    #[arg(long, value_name = "GPUS")]
+    pub gpus: Vec<podbag::gpu::Request>,
     /// Logging driver (json-file, syslog, journald)
     #[arg(long)]
     pub log_driver: Option<String>,

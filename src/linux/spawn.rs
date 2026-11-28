@@ -85,6 +85,18 @@ pub fn spawn(
     parent: Parent,
     before_start: &mut dyn FnMut(u32) -> Result<()>,
 ) -> Result<Spawned> {
+    spawn_with_gpu(spec, stdio, cgroup, userns, parent, before_start, None)
+}
+
+pub(crate) fn spawn_with_gpu(
+    spec: &ContainerSpec,
+    stdio: ContainerStdio,
+    cgroup: Option<std::os::fd::BorrowedFd<'_>>,
+    userns: UserNs,
+    parent: Parent,
+    before_start: &mut dyn FnMut(u32) -> Result<()>,
+    gpu: Option<&crate::gpu::nvidia::Setup>,
+) -> Result<Spawned> {
     // SAFETY: these calls have no preconditions.
     let (euid, egid) = unsafe { (libc::geteuid(), libc::getegid()) };
     let rootless = userns != UserNs::Host;
@@ -166,7 +178,16 @@ pub fn spawn(
     if ret == 0 {
         drop(sync_write);
         drop(status_read);
-        child_main(spec, rootless, sync_read, status_write, stdio, &joins, &nfs);
+        child_main(
+            spec,
+            rootless,
+            sync_read,
+            status_write,
+            stdio,
+            &joins,
+            &nfs,
+            gpu,
+        );
     }
     drop(nfs);
     drop(joins);

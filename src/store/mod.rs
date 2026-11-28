@@ -2487,25 +2487,26 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("container");
         std::fs::create_dir_all(dir.join("work")).unwrap();
-        let writers: Vec<_> = (0..2)
-            .map(|w| {
-                let busy = dir.join("work");
-                std::thread::spawn(move || {
+        let start = std::sync::Barrier::new(3);
+        std::thread::scope(|threads| {
+            for writer in 0..2 {
+                let file = dir.join("work").join(format!("late-{writer}"));
+                let start = &start;
+                threads.spawn(move || {
+                    std::fs::write(&file, b"").unwrap();
+                    start.wait();
                     let end = std::time::Instant::now() + std::time::Duration::from_millis(200);
-                    let mut n = 0u32;
                     while std::time::Instant::now() < end {
-                        let _ = std::fs::write(busy.join(format!("late-{w}-{n}")), b"");
-                        n += 1;
+                        if let Err(err) = std::fs::write(&file, b"") {
+                            assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+                            break;
+                        }
                     }
-                })
-            })
-            .collect();
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        let removed = remove_tree(&dir);
-        for w in writers {
-            w.join().unwrap();
-        }
-        removed.unwrap();
+                });
+            }
+            start.wait();
+            remove_tree(&dir).unwrap();
+        });
         assert!(!dir.exists());
     }
     use crate::ErrorKind;

@@ -1,6 +1,8 @@
 //! The swarm's files under `<data>/swarm` (a private directory):
 //!
-//! - `cluster.json`: the swarm and its one node; there only while the swarm is active.
+//! - `cluster.json`: the swarm's manager state, present on the manager only.
+//! - `workers/<id>.json`: the manager's registered workers and SSH endpoints.
+//! - `membership.json`: a worker's assignment to one manager.
 //! - `services/<id>.json`: each service's spec, the spec before it, and its update state.
 //! - `secrets/<id>.json` and `.data`, `configs/<id>.json` and `.data`: the data files are
 //!   0600 and never leave the store except into a task's files.
@@ -12,11 +14,11 @@ use crate::paths::Dirs;
 use crate::{Error, ErrorKind, Result};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// The swarm and its node.
+/// The swarm manager and its configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Cluster {
     pub id: String,
@@ -51,7 +53,7 @@ pub struct NodeRecord {
     pub spec: Value,
 }
 
-/// The join tokens. No node can join: they are shown because Docker shows them.
+/// Docker's join-token shape. Podbag worker enrollment authenticates over SSH.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tokens {
     pub worker: String,
@@ -101,6 +103,15 @@ pub struct ServiceRecord {
     /// The service's virtual address on each of its networks (root mode).
     #[serde(default)]
     pub vips: BTreeMap<String, String>,
+    /// Owners of replica slots, including slots reserved after a scale-down.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub worker_slots: BTreeMap<u64, String>,
+    /// Old owners that must confirm removal before any replacement starts.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub worker_releases: BTreeSet<String>,
+    /// A distributed service stays stopped while a disconnected worker is cleaned up.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub removing: bool,
 }
 
 impl ServiceRecord {
@@ -194,6 +205,15 @@ fn fail(path: &Path, e: std::io::Error) -> Error {
         &e,
         "check that the podbag data directory is writable",
     )
+}
+
+/// The worker accepts a new assignment only after its revoked revision. A
+/// deletion (the original boolean record) instead retires the service permanently.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum Retirement {
+    Deleted(bool),
+    Revoked(u64),
 }
 
 /// The swarm's directory.
@@ -326,6 +346,36 @@ impl Store {
         Store::write(&self.dir.join("cluster.json"), c)
     }
 
+    pub fn workers(&self) -> Result<Vec<super::remote::Worker>> {
+        Store::read_all(&self.dir.join("workers"))
+    }
+
+    pub fn write_worker(&self, node: &super::remote::Worker) -> Result<()> {
+        Store::write(&self.object_path("workers", &node.id, "json")?, node)
+    }
+
+    pub fn remove_worker(&self, id: &str) -> Result<()> {
+        Store::remove(&self.object_path("workers", id, "json")?)
+    }
+
+    pub fn membership(&self) -> Result<Option<super::remote::Membership>> {
+        Store::read(&self.dir.join("membership.json"))
+    }
+
+    pub fn write_membership(&self, node: &super::remote::Membership) -> Result<()> {
+        Store::write(&self.dir.join("membership.json"), node)
+    }
+
+    pub fn remove_membership(&self) -> Result<()> {
+        Store::remove(&self.dir.join("membership.json"))?;
+        let retired = self.dir.join("retired-services");
+        match std::fs::remove_dir_all(&retired) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(fail(&retired, error)),
+        }
+    }
+
     pub fn services(&self) -> Result<Vec<ServiceRecord>> {
         Store::read_all(&self.dir.join("services"))
     }
@@ -336,6 +386,40 @@ impl Store {
 
     pub fn remove_service(&self, id: &str) -> Result<()> {
         Store::remove(&self.object_path("services", id, "json")?)
+    }
+
+    /// Remember the removal so a delayed reconciliation cannot recreate its tasks.
+    pub fn retire_service(&self, id: &str) -> Result<()> {
+        Store::write(
+            &self.object_path("retired-services", id, "json")?,
+            &Retirement::Deleted(true),
+        )
+    }
+
+    pub fn service_retired(&self, id: &str) -> Result<bool> {
+        Ok(matches!(
+            self.retirement(id)?,
+            Some(Retirement::Deleted(true))
+        ))
+    }
+
+    fn retirement(&self, id: &str) -> Result<Option<Retirement>> {
+        Store::read(&self.object_path("retired-services", id, "json")?)
+    }
+
+    pub fn assignment_revoked(&self, id: &str, version: u64) -> Result<bool> {
+        Ok(matches!(self.retirement(id)?, Some(Retirement::Revoked(old)) if version <= old))
+    }
+
+    pub fn revoke_assignment(&self, id: &str, version: u64) -> Result<()> {
+        match self.retirement(id)? {
+            Some(Retirement::Deleted(true)) => Ok(()),
+            Some(Retirement::Revoked(old)) if version <= old => Ok(()),
+            _ => Store::write(
+                &self.object_path("retired-services", id, "json")?,
+                &Retirement::Revoked(version),
+            ),
+        }
     }
 
     pub fn objects(&self, kind: Kind) -> Result<Vec<FileObject>> {
@@ -471,6 +555,9 @@ mod tests {
             update_status: None,
             ports: vec![],
             vips: BTreeMap::new(),
+            worker_slots: BTreeMap::from([(1, id('b')), (3, id('c'))]),
+            worker_releases: Default::default(),
+            removing: false,
         };
         s.write_service(&service).unwrap();
         assert_eq!(s.services().unwrap(), std::slice::from_ref(&service));
